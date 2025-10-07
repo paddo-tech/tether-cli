@@ -1,0 +1,28 @@
+# Rust
+target/
+Cargo.lock
+*.rs.bk
+*.pdb
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tether local files
+.tether/
+
+# Build artifacts
+dist/
+*.dSYM/
+
+# Release binaries
+tether
+tether-cli
