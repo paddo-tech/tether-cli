@@ -12,6 +12,32 @@ impl GitBackend {
         Self { repo_path }
     }
 
+    /// Check if the repository has any commits
+    fn has_commits(&self) -> bool {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&self.repo_path)
+            .output();
+
+        match output {
+            Ok(out) => out.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Check if remote branch exists
+    fn remote_branch_exists(&self, branch: &str) -> bool {
+        let output = Command::new("git")
+            .args(["ls-remote", "--heads", "origin", branch])
+            .current_dir(&self.repo_path)
+            .output();
+
+        match output {
+            Ok(out) => out.status.success() && !out.stdout.is_empty(),
+            Err(_) => false,
+        }
+    }
+
     pub fn clone(url: &str, path: &Path) -> Result<Self> {
         // Use git CLI for cloning - it handles gh authentication automatically
         let output = Command::new("git")
@@ -45,14 +71,25 @@ impl GitBackend {
         let tree = repo.find_tree(oid)?;
 
         let sig = Signature::now(machine_id, "tether@local")?;
-        let parent = repo.head()?.peel_to_commit()?;
 
-        repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
+        // Check if this is the first commit
+        if self.has_commits() {
+            let parent = repo.head()?.peel_to_commit()?;
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
+        } else {
+            // Initial commit (no parent)
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
+        }
 
         Ok(())
     }
 
     pub fn pull(&self) -> Result<()> {
+        // Skip pull if remote branch doesn't exist (empty repository)
+        if !self.remote_branch_exists("main") {
+            return Ok(());
+        }
+
         // Use git CLI for pulling - it handles gh authentication automatically
         let output = Command::new("git")
             .args(["pull", "origin", "main"])
@@ -69,8 +106,15 @@ impl GitBackend {
 
     pub fn push(&self) -> Result<()> {
         // Use git CLI for pushing - it handles gh authentication automatically
+        // Use -u flag to set upstream tracking on first push
+        let args = if self.remote_branch_exists("main") {
+            vec!["push", "origin", "main"]
+        } else {
+            vec!["push", "-u", "origin", "main"]
+        };
+
         let output = Command::new("git")
-            .args(["push", "origin", "main"])
+            .args(&args)
             .current_dir(&self.repo_path)
             .output()?;
 
