@@ -295,102 +295,129 @@ impl Cli {
             }
         }
 
-        // Sync package manifests
+        // Sync package manifests using native tooling
         Output::info("Syncing package manifests...");
         let manifests_dir = sync_path.join("manifests");
         std::fs::create_dir_all(&manifests_dir)?;
 
-        // Homebrew
+        // Homebrew - use Brewfile
         if config.packages.brew.enabled {
             let brew = BrewManager::new();
             if brew.is_available().await {
-                Output::info("  Syncing Homebrew packages...");
-                let packages = brew.list_installed().await?;
-                let manifest = serde_json::to_string_pretty(&packages)?;
-                let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+                Output::info("  Syncing Homebrew packages (Brewfile)...");
 
-                if state
-                    .packages
-                    .get("brew")
-                    .map(|p| p.hash != hash)
-                    .unwrap_or(true)
-                {
-                    Output::info(&format!("    {} packages found", packages.len()));
-                    if !dry_run {
-                        std::fs::write(manifests_dir.join("brew.json"), manifest)?;
-                        use chrono::Utc;
-                        state.packages.insert(
-                            "brew".to_string(),
-                            crate::sync::state::PackageState {
-                                last_sync: Utc::now(),
-                                hash,
-                            },
-                        );
-                        changes_made = true;
+                match brew.export_manifest().await {
+                    Ok(manifest) => {
+                        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+
+                        if state
+                            .packages
+                            .get("brew")
+                            .map(|p| p.hash != hash)
+                            .unwrap_or(true)
+                        {
+                            let lines = manifest.lines().count();
+                            Output::info(&format!("    {} entries in Brewfile", lines));
+                            if !dry_run {
+                                std::fs::write(manifests_dir.join("Brewfile"), manifest)?;
+                                use chrono::Utc;
+                                state.packages.insert(
+                                    "brew".to_string(),
+                                    crate::sync::state::PackageState {
+                                        last_sync: Utc::now(),
+                                        hash,
+                                    },
+                                );
+                                changes_made = true;
+                            }
+                        } else {
+                            Output::info("    No changes");
+                        }
+                    }
+                    Err(e) => {
+                        Output::warning(&format!("Failed to export Homebrew manifest: {}", e));
                     }
                 }
             }
         }
 
-        // npm
+        // npm - use simple package list
         if config.packages.npm.enabled {
             let npm = NpmManager::new();
             if npm.is_available().await {
                 Output::info("  Syncing npm packages...");
-                let packages = npm.list_installed().await?;
-                let manifest = serde_json::to_string_pretty(&packages)?;
-                let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
 
-                if state
-                    .packages
-                    .get("npm")
-                    .map(|p| p.hash != hash)
-                    .unwrap_or(true)
-                {
-                    Output::info(&format!("    {} packages found", packages.len()));
-                    if !dry_run {
-                        std::fs::write(manifests_dir.join("npm.json"), manifest)?;
-                        use chrono::Utc;
-                        state.packages.insert(
-                            "npm".to_string(),
-                            crate::sync::state::PackageState {
-                                last_sync: Utc::now(),
-                                hash,
-                            },
-                        );
-                        changes_made = true;
+                match npm.export_manifest().await {
+                    Ok(manifest) => {
+                        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+
+                        if state
+                            .packages
+                            .get("npm")
+                            .map(|p| p.hash != hash)
+                            .unwrap_or(true)
+                        {
+                            let count = manifest.lines().filter(|l| !l.trim().is_empty()).count();
+                            Output::info(&format!("    {} packages", count));
+                            if !dry_run {
+                                std::fs::write(manifests_dir.join("npm.txt"), manifest)?;
+                                use chrono::Utc;
+                                state.packages.insert(
+                                    "npm".to_string(),
+                                    crate::sync::state::PackageState {
+                                        last_sync: Utc::now(),
+                                        hash,
+                                    },
+                                );
+                                changes_made = true;
+                            }
+                        } else {
+                            Output::info("    No changes");
+                        }
+                    }
+                    Err(e) => {
+                        Output::warning(&format!("Failed to export npm manifest: {}", e));
                     }
                 }
             }
         }
 
-        // pnpm
+        // pnpm - use simple package list
         if config.packages.pnpm.enabled {
             let pnpm = PnpmManager::new();
             if pnpm.is_available().await {
                 Output::info("  Syncing pnpm packages...");
-                let packages = pnpm.list_installed().await?;
-                let manifest = serde_json::to_string_pretty(&packages)?;
-                let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
 
-                if state
-                    .packages
-                    .get("pnpm")
-                    .map(|p| p.hash != hash)
-                    .unwrap_or(true)
-                {
-                    Output::info(&format!("    {} packages found", packages.len()));
-                    if !dry_run {
-                        std::fs::write(manifests_dir.join("pnpm.json"), manifest)?;
-                        use chrono::Utc;
-                        state.packages.insert(
-                            "pnpm".to_string(),
-                            crate::sync::state::PackageState {
-                                last_sync: Utc::now(),
-                                hash,
-                            },
-                        );
-                        changes_made = true;
+                match pnpm.export_manifest().await {
+                    Ok(manifest) => {
+                        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+
+                        if state
+                            .packages
+                            .get("pnpm")
+                            .map(|p| p.hash != hash)
+                            .unwrap_or(true)
+                        {
+                            let count = manifest.lines().filter(|l| !l.trim().is_empty()).count();
+                            Output::info(&format!("    {} packages", count));
+                            if !dry_run {
+                                std::fs::write(manifests_dir.join("pnpm.txt"), manifest)?;
+                                use chrono::Utc;
+                                state.packages.insert(
+                                    "pnpm".to_string(),
+                                    crate::sync::state::PackageState {
+                                        last_sync: Utc::now(),
+                                        hash,
+                                    },
+                                );
+                                changes_made = true;
+                            }
+                        } else {
+                            Output::info("    No changes");
+                        }
+                    }
+                    Err(e) => {
+                        Output::warning(&format!("Failed to export pnpm manifest: {}", e));
                     }
                 }
             }

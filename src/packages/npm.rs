@@ -82,4 +82,56 @@ impl PackageManager for NpmManager {
     fn name(&self) -> &str {
         "npm"
     }
+
+    async fn export_manifest(&self) -> Result<String> {
+        // Get list of installed packages
+        let packages = self.list_installed().await?;
+
+        // Create simple newline-delimited list of package names
+        // Format: package_name (no versions, let npm install latest)
+        let manifest = packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(manifest)
+    }
+
+    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
+        // Parse package names from manifest
+        let package_names: Vec<&str> = manifest_content
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        if package_names.is_empty() {
+            return Ok(()); // Nothing to install
+        }
+
+        // Get currently installed packages
+        let installed = self.list_installed().await?;
+        let installed_names: std::collections::HashSet<_> =
+            installed.iter().map(|p| p.name.as_str()).collect();
+
+        // Install missing packages
+        for name in package_names {
+            if !installed_names.contains(name) {
+                // Install the package
+                let output = Command::new("npm")
+                    .args(["install", "-g", name])
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Log warning but continue with other packages
+                    eprintln!("Warning: Failed to install {}: {}", name, stderr);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }

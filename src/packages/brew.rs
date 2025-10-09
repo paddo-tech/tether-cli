@@ -1,6 +1,7 @@
 use super::{PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
+use std::path::PathBuf;
 use tokio::process::Command;
 
 pub struct BrewManager;
@@ -20,6 +21,13 @@ impl BrewManager {
 
         Ok(String::from_utf8(output.stdout)?)
     }
+
+    /// Get a temporary file path for Brewfile operations
+    fn temp_brewfile_path() -> Result<PathBuf> {
+        let home =
+            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        Ok(home.join(".tether").join("Brewfile.tmp"))
+    }
 }
 
 impl Default for BrewManager {
@@ -37,28 +45,9 @@ impl PackageManager for BrewManager {
         for line in output.lines() {
             let name = line.trim();
             if !name.is_empty() {
-                // Get version for this package
-                let version = match self.run_brew(&["info", "--json=v2", name]).await {
-                    Ok(json_str) => {
-                        // Parse version from info
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                            data.get("formulae")
-                                .and_then(|f| f.get(0))
-                                .and_then(|p| p.get("installed"))
-                                .and_then(|i| i.get(0))
-                                .and_then(|v| v.get("version"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    Err(_) => None,
-                };
-
                 packages.push(PackageInfo {
                     name: name.to_string(),
-                    version,
+                    version: None, // Version not needed with Brewfile approach
                 });
             }
         }
@@ -77,5 +66,82 @@ impl PackageManager for BrewManager {
 
     fn name(&self) -> &str {
         "brew"
+    }
+
+    async fn export_manifest(&self) -> Result<String> {
+        // Use `brew bundle dump` to generate a Brewfile
+        let temp_path = Self::temp_brewfile_path()?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = temp_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // Remove existing temp file if it exists
+        if temp_path.exists() {
+            tokio::fs::remove_file(&temp_path).await?;
+        }
+
+        // Generate Brewfile
+        let output = Command::new("brew")
+            .args([
+                "bundle",
+                "dump",
+                "--file",
+                temp_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid path for Brewfile: {:?}", temp_path))?,
+            ])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("brew bundle dump failed: {}", stderr));
+        }
+
+        // Read the generated Brewfile
+        let content = tokio::fs::read_to_string(&temp_path).await?;
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        Ok(content)
+    }
+
+    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
+        // Write manifest to temporary Brewfile
+        let temp_path = Self::temp_brewfile_path()?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = temp_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        tokio::fs::write(&temp_path, manifest_content).await?;
+
+        // Use `brew bundle install` to install packages from Brewfile
+        let output = Command::new("brew")
+            .args([
+                "bundle",
+                "install",
+                "--file",
+                temp_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid path for Brewfile: {:?}", temp_path))?,
+                "--no-lock", // Don't create a Brewfile.lock.json
+            ])
+            .output()
+            .await?;
+
+        // Clean up temp file
+        let _ = tokio::fs::remove_file(&temp_path).await;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("brew bundle install failed: {}", stderr));
+        }
+
+        Ok(())
     }
 }
