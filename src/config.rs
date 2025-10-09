@@ -8,6 +8,7 @@ pub struct Config {
     pub backend: BackendConfig,
     pub packages: PackagesConfig,
     pub dotfiles: DotfilesConfig,
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +71,12 @@ pub struct DotfilesConfig {
     pub files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    pub encrypt_dotfiles: bool,
+    pub scan_secrets: bool,
+}
+
 impl Config {
     pub fn config_dir() -> Result<PathBuf> {
         let home =
@@ -130,6 +137,10 @@ impl Default for Config {
                     ".gitconfig".to_string(),
                     ".zprofile".to_string(),
                 ],
+            },
+            security: SecurityConfig {
+                encrypt_dotfiles: true,
+                scan_secrets: true,
             },
         }
     }

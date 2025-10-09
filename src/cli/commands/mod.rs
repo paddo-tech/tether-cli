@@ -188,6 +188,26 @@ impl Cli {
         config.save()?;
         Output::success("Configuration saved");
 
+        // Setup encryption if enabled
+        if config.security.encrypt_dotfiles {
+            Output::info("Setting up encryption for dotfiles...");
+
+            // Check if key already exists (from another machine via iCloud sync)
+            if crate::security::keychain::has_encryption_key() {
+                Output::success(
+                    "Encryption key found in iCloud Keychain (synced from another device)",
+                );
+            } else {
+                // Generate new encryption key
+                let key = crate::security::encryption::generate_key();
+
+                // Store in iCloud Keychain
+                crate::security::store_encryption_key(&key)?;
+                Output::success("Generated encryption key and stored in iCloud Keychain");
+                Output::info("This key will automatically sync to your other Macs");
+            }
+        }
+
         // Create initial state
         let state = SyncState::load()?;
         state.save()?;
@@ -255,17 +275,43 @@ impl Cli {
         }
         Output::success("Pulled latest changes");
 
-        // Sync dotfiles
-        Output::info("Syncing dotfiles...");
         let dotfiles_dir = sync_path.join("dotfiles");
         std::fs::create_dir_all(&dotfiles_dir)?;
+
+        // Decrypt dotfiles from sync repo (if encrypted)
+        if config.security.encrypt_dotfiles && !dry_run {
+            Output::info("Decrypting dotfiles from sync repository...");
+
+            let key = crate::security::get_encryption_key()?;
+
+            for file in &config.dotfiles.files {
+                let filename = file.trim_start_matches('.');
+                let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
+
+                if enc_file.exists() {
+                    let encrypted_content = std::fs::read(&enc_file)?;
+                    match crate::security::decrypt_file(&encrypted_content, &key) {
+                        Ok(plaintext) => {
+                            let local_file = home.join(file);
+                            std::fs::write(&local_file, plaintext)?;
+                            Output::info(&format!("  {} (decrypted)", file));
+                        }
+                        Err(e) => {
+                            Output::warning(&format!("  {} (failed to decrypt: {})", file, e));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sync dotfiles (local → Git)
+        Output::info("Syncing dotfiles...");
 
         let mut state = SyncState::load()?;
         let mut changes_made = false;
 
         for file in &config.dotfiles.files {
             let source = home.join(file);
-            let dest = dotfiles_dir.join(file.trim_start_matches('.'));
 
             if source.exists() {
                 if let Ok(content) = std::fs::read(&source) {
@@ -279,12 +325,58 @@ impl Cli {
                         .unwrap_or(true);
 
                     if file_changed {
-                        Output::info(&format!("  {} (changed)", file));
-                        if !dry_run {
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
+                        // Scan for secrets if enabled
+                        if config.security.scan_secrets {
+                            match crate::security::scan_for_secrets(&source) {
+                                Ok(findings) if !findings.is_empty() => {
+                                    Output::warning(&format!(
+                                        "  {} - Found {} potential secret(s)",
+                                        file,
+                                        findings.len()
+                                    ));
+                                    for finding in findings.iter().take(3) {
+                                        Output::warning(&format!(
+                                            "    Line {}: {}",
+                                            finding.line_number,
+                                            finding.secret_type.description()
+                                        ));
+                                    }
+                                    if findings.len() > 3 {
+                                        Output::warning(&format!(
+                                            "    ... and {} more",
+                                            findings.len() - 3
+                                        ));
+                                    }
+                                    Output::info("  Secrets will be encrypted before syncing");
+                                }
+                                _ => {}
                             }
-                            std::fs::copy(&source, &dest)?;
+                        }
+
+                        Output::info(&format!("  {} (changed)", file));
+
+                        if !dry_run {
+                            let filename = file.trim_start_matches('.');
+
+                            if config.security.encrypt_dotfiles {
+                                // Encrypt and save as .enc
+                                let key = crate::security::get_encryption_key()?;
+                                let encrypted = crate::security::encrypt_file(&content, &key)?;
+
+                                let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                std::fs::write(&dest, encrypted)?;
+                            } else {
+                                // Save as plaintext
+                                let dest = dotfiles_dir.join(filename);
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                std::fs::write(&dest, &content)?;
+                            }
+
                             state.update_file(file, hash);
                             changes_made = true;
                         }
