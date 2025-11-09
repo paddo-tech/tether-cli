@@ -9,6 +9,8 @@ pub struct Config {
     pub packages: PackagesConfig,
     pub dotfiles: DotfilesConfig,
     pub security: SecurityConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team: Option<TeamConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +79,28 @@ pub struct SecurityConfig {
     pub scan_secrets: bool,
 }
 
+/// Team sync configuration.
+///
+/// Team repositories are NOT encrypted by Tether for these reasons:
+/// - Multiple team members need access (key distribution is complex)
+/// - Team repos should only contain non-sensitive shared configs
+/// - Git access controls already protect the repository
+/// - Sensitive team data should use proper secrets management (1Password, Vault, etc.)
+///
+/// Secret scanning is performed when adding a team repository to warn about
+/// potential sensitive data that shouldn't be in team configs.
+///
+/// Access modes:
+/// - read_only: true - Pull team configs only (regular team members)
+/// - read_only: false - Can push updates to team repo (admins/contributors)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub auto_inject: bool,
+    pub read_only: bool,
+}
+
 impl Config {
     pub fn config_dir() -> Result<PathBuf> {
         let home =
@@ -86,6 +110,10 @@ impl Config {
 
     pub fn config_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("config.toml"))
+    }
+
+    pub fn team_sync_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("team-sync"))
     }
 
     pub fn load() -> Result<Self> {
@@ -142,6 +170,7 @@ impl Default for Config {
                 encrypt_dotfiles: true,
                 scan_secrets: true,
             },
+            team: None,
         }
     }
 }

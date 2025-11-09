@@ -67,6 +67,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Manage team sync
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -111,6 +117,26 @@ pub enum ConfigAction {
     Edit,
 }
 
+#[derive(Subcommand)]
+pub enum TeamAction {
+    /// Add team sync repository
+    Add {
+        /// Team repository URL
+        url: String,
+        /// Skip auto-injection of source lines
+        #[arg(long)]
+        no_auto_inject: bool,
+    },
+    /// Remove team sync
+    Remove,
+    /// Enable team sync
+    Enable,
+    /// Disable team sync
+    Disable,
+    /// Show team sync status
+    Status,
+}
+
 impl Cli {
     pub async fn run(&self) -> Result<()> {
         match &self.command {
@@ -122,6 +148,7 @@ impl Cli {
             Commands::Machines { action } => self.machines(action).await,
             Commands::Ignore { action } => self.ignore(action).await,
             Commands::Config { action } => self.config(action).await,
+            Commands::Team { action } => self.team(action).await,
         }
     }
 
@@ -267,13 +294,31 @@ impl Cli {
         let home =
             home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
-        // Pull latest changes
+        // Pull latest changes from personal repo
         Output::info("Pulling latest changes...");
         let git = GitBackend::open(&sync_path)?;
         if !dry_run {
             git.pull()?;
         }
         Output::success("Pulled latest changes");
+
+        // Pull from team repo if enabled
+        if let Some(team) = &config.team {
+            if team.enabled {
+                Output::info("Pulling team configs...");
+                let team_sync_dir = Config::team_sync_dir()?;
+
+                if team_sync_dir.exists() {
+                    if !dry_run {
+                        let team_git = GitBackend::open(&team_sync_dir)?;
+                        team_git.pull()?;
+                        Output::success("Team configs updated");
+                    }
+                } else {
+                    Output::warning("Team sync directory not found - run 'tether team add' again");
+                }
+            }
+        }
 
         let dotfiles_dir = sync_path.join("dotfiles");
         std::fs::create_dir_all(&dotfiles_dir)?;
@@ -533,6 +578,33 @@ impl Cli {
             Output::info("No changes to sync");
         }
 
+        // Check and push team repo changes (if write access enabled)
+        if !dry_run {
+            if let Some(team) = &config.team {
+                if team.enabled && !team.read_only {
+                    let team_sync_dir = Config::team_sync_dir()?;
+                    if team_sync_dir.exists() {
+                        let team_git = GitBackend::open(&team_sync_dir)?;
+
+                        // Check for uncommitted changes in team repo
+                        if team_git.has_changes()? {
+                            println!();
+                            Output::info("Detected changes in team repository");
+
+                            // Commit and push team changes
+                            Output::info("Committing team config changes...");
+                            team_git.commit("Update team configs", &state.machine_id)?;
+                            Output::success("Team changes committed");
+
+                            Output::info("Pushing team changes...");
+                            team_git.push()?;
+                            Output::success("Team changes pushed");
+                        }
+                    }
+                }
+            }
+        }
+
         Output::success("Sync complete!");
         Ok(())
     }
@@ -704,6 +776,393 @@ impl Cli {
         crate::cli::Output::info("Config...");
         // TODO: Implement config
         Ok(())
+    }
+
+    async fn team(&self, action: &TeamAction) -> Result<()> {
+        use crate::cli::{Output, Prompt};
+        use crate::config::{Config, TeamConfig};
+        use crate::sync::GitBackend;
+
+        match action {
+            TeamAction::Add {
+                url,
+                no_auto_inject,
+            } => {
+                // Load config
+                let mut config = Config::load()?;
+
+                if config.team.is_some() {
+                    Output::warning("Team sync is already configured");
+                    if !Prompt::confirm("Replace existing team configuration?", false)? {
+                        return Ok(());
+                    }
+                }
+
+                Output::info(&format!("Adding team sync: {}", url));
+
+                // Clone team repository
+                let team_sync_dir = Config::team_sync_dir()?;
+                if team_sync_dir.exists() {
+                    std::fs::remove_dir_all(&team_sync_dir)?;
+                }
+
+                Output::info("Cloning team repository...");
+                GitBackend::clone(url, &team_sync_dir)?;
+                Output::success("Team repository cloned successfully");
+
+                // Security check: Scan for secrets in team repo
+                Output::info("Scanning team configs for secrets...");
+                let dotfiles_dir = team_sync_dir.join("dotfiles");
+                let mut team_files = Vec::new();
+                let mut secrets_found = false;
+
+                if dotfiles_dir.exists() {
+                    for entry in std::fs::read_dir(&dotfiles_dir)? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_file() {
+                            if let Some(filename) = entry.file_name().to_str() {
+                                team_files.push(filename.to_string());
+
+                                // Scan for secrets
+                                let file_path = entry.path();
+                                if let Ok(findings) = crate::security::scan_for_secrets(&file_path) {
+                                    if !findings.is_empty() {
+                                        secrets_found = true;
+                                        Output::warning(&format!(
+                                            "  {} - Found {} potential secret(s)",
+                                            filename,
+                                            findings.len()
+                                        ));
+                                        for finding in findings.iter().take(2) {
+                                            Output::warning(&format!(
+                                                "    Line {}: {}",
+                                                finding.line_number,
+                                                finding.secret_type.description()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Warn if secrets found
+                if secrets_found {
+                    println!();
+                    Output::warning("⚠️  Potential secrets detected in team repository!");
+                    Output::warning("Team repositories should only contain non-sensitive shared configs.");
+                    Output::info("For sensitive data, use a secrets manager (1Password, Vault, etc.)");
+                    println!();
+
+                    if !Prompt::confirm("Continue anyway?", false)? {
+                        // Clean up
+                        std::fs::remove_dir_all(&team_sync_dir)?;
+                        return Ok(());
+                    }
+                }
+
+                if !team_files.is_empty() {
+                    println!();
+                    Output::info("Found team configs:");
+                    for file in &team_files {
+                        println!("  • {}", file);
+                    }
+                    println!();
+                }
+
+                // Detect write access to team repository
+                Output::info("Checking repository permissions...");
+                let team_git = GitBackend::open(&team_sync_dir)?;
+                let has_write = team_git.has_write_access().unwrap_or(false);
+
+                let read_only = if has_write {
+                    println!();
+                    Output::success("You have write access to this repository!");
+                    Output::info("As a team admin/contributor, you can push updates to team configs.");
+                    println!();
+
+                    !Prompt::confirm(
+                        "Enable write access? (No = read-only mode for regular team members)",
+                        true,
+                    )?
+                } else {
+                    println!();
+                    Output::info("Read-only access detected (regular team member mode)");
+                    println!();
+                    true
+                };
+
+                if read_only {
+                    Output::info("Team sync configured in read-only mode");
+                } else {
+                    Output::info("Team sync configured with write access - you can push updates");
+                }
+
+                // Ask about auto-injection
+                let auto_inject = if *no_auto_inject {
+                    false
+                } else if !team_files.is_empty() {
+                    Prompt::confirm("Auto-inject source lines to your personal configs?", true)?
+                } else {
+                    false
+                };
+
+                // Perform auto-injection if requested
+                if auto_inject {
+                    self.inject_team_sources(&team_files).await?;
+                } else if !team_files.is_empty() {
+                    println!();
+                    Output::info("To use team configs, add these lines to your dotfiles:");
+                    self.show_injection_instructions(&team_files);
+                }
+
+                // Save config
+                config.team = Some(TeamConfig {
+                    enabled: true,
+                    url: url.clone(),
+                    auto_inject,
+                    read_only,
+                });
+                config.save()?;
+
+                Output::success("Team sync added successfully!");
+                Ok(())
+            }
+
+            TeamAction::Remove => {
+                let mut config = Config::load()?;
+
+                if config.team.is_none() {
+                    Output::warning("Team sync is not configured");
+                    return Ok(());
+                }
+
+                if !Prompt::confirm("Remove team sync configuration?", false)? {
+                    return Ok(());
+                }
+
+                // Remove team sync directory
+                let team_sync_dir = Config::team_sync_dir()?;
+                if team_sync_dir.exists() {
+                    std::fs::remove_dir_all(&team_sync_dir)?;
+                }
+
+                config.team = None;
+                config.save()?;
+
+                Output::success("Team sync removed");
+                Output::info("Note: Source lines in your dotfiles were not removed automatically");
+                Ok(())
+            }
+
+            TeamAction::Enable => {
+                let mut config = Config::load()?;
+
+                match config.team.as_mut() {
+                    Some(team) => {
+                        if team.enabled {
+                            Output::info("Team sync is already enabled");
+                        } else {
+                            team.enabled = true;
+                            config.save()?;
+                            Output::success("Team sync enabled");
+                        }
+                    }
+                    None => {
+                        Output::error("Team sync is not configured. Run 'tether team add' first.");
+                    }
+                }
+                Ok(())
+            }
+
+            TeamAction::Disable => {
+                let mut config = Config::load()?;
+
+                match config.team.as_mut() {
+                    Some(team) => {
+                        if !team.enabled {
+                            Output::info("Team sync is already disabled");
+                        } else {
+                            team.enabled = false;
+                            config.save()?;
+                            Output::success("Team sync disabled");
+                        }
+                    }
+                    None => {
+                        Output::error("Team sync is not configured");
+                    }
+                }
+                Ok(())
+            }
+
+            TeamAction::Status => {
+                let config = Config::load()?;
+
+                println!();
+                match &config.team {
+                    Some(team) => {
+                        use comfy_table::{
+                            presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table,
+                        };
+
+                        let mut table = Table::new();
+                        table
+                            .load_preset(UTF8_FULL)
+                            .set_content_arrangement(ContentArrangement::Dynamic)
+                            .set_header(vec![
+                                Cell::new("Team Sync")
+                                    .add_attribute(Attribute::Bold)
+                                    .fg(Color::Cyan),
+                                Cell::new(""),
+                            ])
+                            .add_row(vec![
+                                Cell::new("Status"),
+                                if team.enabled {
+                                    Cell::new("● Enabled").fg(Color::Green)
+                                } else {
+                                    Cell::new("● Disabled").fg(Color::Yellow)
+                                },
+                            ])
+                            .add_row(vec![Cell::new("Repository"), Cell::new(&team.url)])
+                            .add_row(vec![
+                                Cell::new("Access Mode"),
+                                if team.read_only {
+                                    Cell::new("Read-only").fg(Color::Yellow)
+                                } else {
+                                    Cell::new("Read-write (Admin)").fg(Color::Green)
+                                },
+                            ])
+                            .add_row(vec![
+                                Cell::new("Auto-inject"),
+                                Cell::new(if team.auto_inject { "Yes" } else { "No" }),
+                            ]);
+
+                        // Show team files
+                        let team_sync_dir = Config::team_sync_dir()?;
+                        let dotfiles_dir = team_sync_dir.join("dotfiles");
+
+                        if dotfiles_dir.exists() {
+                            let mut count = 0;
+                            for entry in std::fs::read_dir(&dotfiles_dir)? {
+                                if entry?.file_type()?.is_file() {
+                                    count += 1;
+                                }
+                            }
+                            table.add_row(vec![
+                                Cell::new("Team files"),
+                                Cell::new(format!("{} files", count)),
+                            ]);
+                        }
+
+                        println!("{table}");
+                    }
+                    None => {
+                        Output::info("Team sync is not configured");
+                        Output::info("Run 'tether team add <url>' to add team sync");
+                    }
+                }
+                println!();
+                Ok(())
+            }
+        }
+    }
+
+    async fn inject_team_sources(&self, team_files: &[String]) -> Result<()> {
+        use crate::cli::Output;
+
+        let home =
+            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let team_sync_dir = Config::team_sync_dir()?;
+
+        for file in team_files {
+            // Determine the personal config file and source line
+            let (personal_file, source_line) = if file == "team.zshrc" {
+                (
+                    home.join(".zshrc"),
+                    format!(
+                        "[ -f {}/dotfiles/team.zshrc ] && source {}/dotfiles/team.zshrc",
+                        team_sync_dir.display(),
+                        team_sync_dir.display()
+                    ),
+                )
+            } else if file == "team.gitconfig" {
+                // For gitconfig, we use [include] section
+                let include_line = format!("[include]\n    path = {}/dotfiles/team.gitconfig", team_sync_dir.display());
+                (home.join(".gitconfig"), include_line)
+            } else if file.starts_with("team.") && (file.ends_with("rc") || file.ends_with("profile")) {
+                // Generic shell config
+                (
+                    home.join(&file.replace("team.", ".")),
+                    format!(
+                        "[ -f {}/dotfiles/{} ] && source {}/dotfiles/{}",
+                        team_sync_dir.display(),
+                        file,
+                        team_sync_dir.display(),
+                        file
+                    ),
+                )
+            } else {
+                // Skip files we don't know how to inject
+                continue;
+            };
+
+            // Check if file exists
+            if !personal_file.exists() {
+                Output::warning(&format!("  {} not found, skipping", personal_file.display()));
+                continue;
+            }
+
+            // Read current content
+            let content = std::fs::read_to_string(&personal_file)?;
+
+            // Check if already sourced
+            if content.contains(&source_line) || content.contains(&format!("source {}/dotfiles/{}", team_sync_dir.display(), file)) {
+                Output::info(&format!("  {} already sources team config", file.replace("team.", ".")));
+                continue;
+            }
+
+            // Add source line
+            let new_content = if file == "team.gitconfig" {
+                // For gitconfig, prepend the include section
+                format!("{}\n\n{}", source_line, content)
+            } else {
+                // For shell configs, add near the top (after any shebang)
+                if content.starts_with("#!") {
+                    let mut lines: Vec<&str> = content.lines().collect();
+                    lines.insert(1, "");
+                    lines.insert(2, &source_line);
+                    lines.join("\n")
+                } else {
+                    format!("{}\n\n{}", source_line, content)
+                }
+            };
+
+            std::fs::write(&personal_file, new_content)?;
+            Output::success(&format!("  Added source line to {}", file.replace("team.", ".")));
+        }
+
+        Ok(())
+    }
+
+    fn show_injection_instructions(&self, team_files: &[String]) {
+        let team_sync_dir = Config::team_sync_dir().unwrap();
+
+        for file in team_files {
+            if file == "team.zshrc" {
+                println!("  Add to ~/.zshrc:");
+                println!(
+                    "    [ -f {}/dotfiles/team.zshrc ] && source {}/dotfiles/team.zshrc",
+                    team_sync_dir.display(),
+                    team_sync_dir.display()
+                );
+            } else if file == "team.gitconfig" {
+                println!("  Add to ~/.gitconfig:");
+                println!("    [include]");
+                println!("        path = {}/dotfiles/team.gitconfig", team_sync_dir.display());
+            }
+        }
+        println!();
     }
 
     // Helper method for repository setup wizard

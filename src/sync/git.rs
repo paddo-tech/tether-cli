@@ -129,4 +129,44 @@ impl GitBackend {
     pub fn sync_path(&self) -> &Path {
         &self.repo_path
     }
+
+    /// Check if the current user has write access to the remote repository
+    pub fn has_write_access(&self) -> Result<bool> {
+        // Try a dry-run push to check write permissions
+        let output = Command::new("git")
+            .args(["push", "--dry-run", "origin", "HEAD"])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        // If dry-run succeeds or gives specific errors, we have write access
+        // If we get "permission denied" or "403", we don't have write access
+        if output.status.success() {
+            return Ok(true);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+
+        // Check for permission denied errors
+        if stderr.contains("permission denied")
+            || stderr.contains("403")
+            || stderr.contains("forbidden")
+            || stderr.contains("not permitted")
+            || stderr.contains("access denied") {
+            return Ok(false);
+        }
+
+        // If we get here, assume we have write access
+        // (other errors might be network issues, etc.)
+        Ok(true)
+    }
+
+    /// Check if there are uncommitted changes in the repository
+    pub fn has_changes(&self) -> Result<bool> {
+        let output = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        Ok(!output.stdout.is_empty())
+    }
 }
