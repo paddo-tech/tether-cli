@@ -257,3 +257,4 @@ For issues with the website:
 - **Live Site**: [tether-cli.com](https://tether-cli.com)
 - **Documentation**: [tether-cli.com/docs](https://tether-cli.com/docs)
 - **Security**: [tether-cli.com/security](https://tether-cli.com/security)
+
