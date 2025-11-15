@@ -1589,6 +1589,52 @@ impl Cli {
                     self.show_injection_instructions(&team_files);
                 }
 
+                // Discover and create symlinks for config directories
+                println!();
+                Output::info("Setting up symlinks for team configs...");
+                let symlinkable_dirs = crate::sync::discover_symlinkable_dirs(&team_sync_dir)?;
+
+                if symlinkable_dirs.is_empty() {
+                    Output::info("No symlinkable directories found (e.g., .claude, .config)");
+                } else {
+                    let mut manifest = crate::sync::TeamManifest::load()?;
+
+                    for dir in &symlinkable_dirs {
+                        Output::info(&format!(
+                            "Symlinking items from {} to {}",
+                            dir.team_path.display(),
+                            dir.target_base.display()
+                        ));
+
+                        let results = dir.create_symlinks(&mut manifest, false)?;
+
+                        for result in results {
+                            match result {
+                                crate::sync::team::SymlinkResult::Created(target) => {
+                                    Output::success(&format!("  ✓ {}", target.display()));
+                                }
+                                crate::sync::team::SymlinkResult::Conflict(target) => {
+                                    let team_source =
+                                        dir.team_path.join(target.file_name().unwrap());
+                                    let resolution =
+                                        crate::sync::resolve_conflict(&target, &team_source)?;
+                                    manifest.add_conflict(target.clone(), resolution);
+                                    Output::success(&format!(
+                                        "  ✓ {} (conflict resolved)",
+                                        target.display()
+                                    ));
+                                }
+                                crate::sync::team::SymlinkResult::Skipped(target) => {
+                                    Output::info(&format!("  ⊘ {} (skipped)", target.display()));
+                                }
+                            }
+                        }
+                    }
+
+                    manifest.save()?;
+                    Output::success("Symlinks created successfully");
+                }
+
                 // Save config
                 config.team = Some(TeamConfig {
                     enabled: true,
@@ -1598,6 +1644,7 @@ impl Cli {
                 });
                 config.save()?;
 
+                println!();
                 Output::success("Team sync added successfully!");
                 Ok(())
             }
@@ -1613,6 +1660,12 @@ impl Cli {
                 if !Prompt::confirm("Remove team sync configuration?", false)? {
                     return Ok(());
                 }
+
+                // Clean up symlinks first
+                Output::info("Removing symlinks...");
+                let mut manifest = crate::sync::TeamManifest::load()?;
+                manifest.cleanup()?;
+                Output::success("Symlinks removed");
 
                 // Remove team sync directory
                 let team_sync_dir = Config::team_sync_dir()?;
