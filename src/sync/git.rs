@@ -151,7 +151,8 @@ impl GitBackend {
             || stderr.contains("403")
             || stderr.contains("forbidden")
             || stderr.contains("not permitted")
-            || stderr.contains("access denied") {
+            || stderr.contains("access denied")
+        {
             return Ok(false);
         }
 
@@ -169,4 +170,103 @@ impl GitBackend {
 
         Ok(!output.stdout.is_empty())
     }
+}
+
+/// Git utility functions for project config syncing
+///
+/// Get the git remote URL for a repository
+pub fn get_remote_url(repo_path: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_str().unwrap(),
+            "config",
+            "--get",
+            "remote.origin.url",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "Failed to get remote URL (not a git repo or no remote?)"
+        ));
+    }
+
+    let url = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(url)
+}
+
+/// Normalize a git remote URL to a canonical form
+/// Examples:
+/// - git@github.com:user/repo.git -> github.com/user/repo
+/// - https://github.com/user/repo.git -> github.com/user/repo
+/// - https://github.com/user/repo -> github.com/user/repo
+pub fn normalize_remote_url(url: &str) -> String {
+    let mut normalized = url.to_string();
+
+    // Remove .git suffix
+    if normalized.ends_with(".git") {
+        normalized = normalized[..normalized.len() - 4].to_string();
+    }
+
+    // Convert SSH format (git@host:path) to URL format (host/path)
+    if normalized.starts_with("git@") {
+        // git@github.com:user/repo -> github.com/user/repo
+        normalized = normalized.strip_prefix("git@").unwrap().replace(':', "/");
+    } else if normalized.starts_with("https://") {
+        // https://github.com/user/repo -> github.com/user/repo
+        normalized = normalized.strip_prefix("https://").unwrap().to_string();
+    } else if normalized.starts_with("http://") {
+        // http://github.com/user/repo -> github.com/user/repo
+        normalized = normalized.strip_prefix("http://").unwrap().to_string();
+    }
+
+    normalized
+}
+
+/// Check if a file is gitignored in its repository
+pub fn is_gitignored(file_path: &Path) -> Result<bool> {
+    // Get the directory containing the file
+    let dir = file_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
+
+    let output = Command::new("git")
+        .args([
+            "-C",
+            dir.to_str().unwrap(),
+            "check-ignore",
+            file_path.to_str().unwrap(),
+        ])
+        .output()?;
+
+    // git check-ignore returns 0 if the file is ignored, 1 if not
+    Ok(output.status.success())
+}
+
+/// Find all git repositories under a given path (non-recursive, one level deep)
+pub fn find_git_repos(search_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut repos = Vec::new();
+
+    if !search_path.exists() {
+        return Ok(repos);
+    }
+
+    // Check if search_path itself is a git repo
+    if search_path.join(".git").exists() {
+        repos.push(search_path.to_path_buf());
+        return Ok(repos);
+    }
+
+    // Otherwise, search immediate subdirectories
+    for entry in std::fs::read_dir(search_path)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() && path.join(".git").exists() {
+            repos.push(path);
+        }
+    }
+
+    Ok(repos)
 }

@@ -1,6 +1,6 @@
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, Nonce,
+    Aes256Gcm,
 };
 use anyhow::{Context, Result};
 use rand::RngCore;
@@ -32,11 +32,10 @@ pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     // Generate random nonce
     let mut nonce_bytes = [0u8; NONCE_SIZE];
     OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
 
     // Encrypt
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt((&nonce_bytes).into(), plaintext)
         .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
 
     // Combine nonce + ciphertext
@@ -67,18 +66,19 @@ pub fn decrypt(encrypted_data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
 
     // Split nonce and ciphertext
     let (nonce_bytes, ciphertext) = encrypted_data.split_at(NONCE_SIZE);
-    let nonce = Nonce::from_slice(nonce_bytes);
 
     // Create cipher
     let cipher = Aes256Gcm::new_from_slice(key).context("Failed to create cipher from key")?;
 
     // Decrypt
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| {
-        anyhow::anyhow!(
+    let plaintext = cipher
+        .decrypt(nonce_bytes.into(), ciphertext)
+        .map_err(|e| {
+            anyhow::anyhow!(
             "Decryption failed: {}. The file may be corrupted or encrypted with a different key.",
             e
         )
-    })?;
+        })?;
 
     Ok(plaintext)
 }

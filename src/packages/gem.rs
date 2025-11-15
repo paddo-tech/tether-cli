@@ -1,0 +1,133 @@
+use super::{PackageInfo, PackageManager};
+use anyhow::Result;
+use async_trait::async_trait;
+use tokio::process::Command;
+
+pub struct GemManager;
+
+impl GemManager {
+    pub fn new() -> Self {
+        Self
+    }
+
+    async fn run_gem(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("gem").args(args).output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("gem command failed: {}", stderr));
+        }
+
+        Ok(String::from_utf8(output.stdout)?)
+    }
+}
+
+impl Default for GemManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PackageManager for GemManager {
+    async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
+        // List local gems (includes user-installed gems in ~/.gem)
+        let output = self.run_gem(&["list", "--local", "--no-versions"]).await?;
+
+        let mut packages = Vec::new();
+
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Skip system gems indicators
+            if line.starts_with("***") || line.contains("LOCAL GEMS") {
+                continue;
+            }
+
+            // Gem list format is just gem names, one per line
+            packages.push(PackageInfo {
+                name: line.to_string(),
+                version: None,
+            });
+        }
+
+        packages.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(packages)
+    }
+
+    async fn install(&self, package: &PackageInfo) -> Result<()> {
+        let pkg_spec = if let Some(version) = &package.version {
+            format!("{}:{}", package.name, version)
+        } else {
+            package.name.clone()
+        };
+
+        // Install to user directory (no sudo needed)
+        // This automatically installs to ~/.gem when user doesn't have system write access
+        self.run_gem(&["install", &pkg_spec, "--user-install"])
+            .await?;
+        Ok(())
+    }
+
+    async fn is_available(&self) -> bool {
+        which::which("gem").is_ok()
+    }
+
+    fn name(&self) -> &str {
+        "gem"
+    }
+
+    async fn export_manifest(&self) -> Result<String> {
+        // Get list of installed gems
+        let packages = self.list_installed().await?;
+
+        // Create simple newline-delimited list of gem names
+        let manifest = packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(manifest)
+    }
+
+    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
+        // Parse gem names from manifest
+        let gem_names: Vec<&str> = manifest_content
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        if gem_names.is_empty() {
+            return Ok(()); // Nothing to install
+        }
+
+        // Get currently installed gems
+        let installed = self.list_installed().await?;
+        let installed_names: std::collections::HashSet<_> =
+            installed.iter().map(|p| p.name.as_str()).collect();
+
+        // Install missing gems
+        for name in gem_names {
+            if !installed_names.contains(name) {
+                // Install the gem to user directory
+                let output = Command::new("gem")
+                    .args(["install", name, "--user-install"])
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Log warning but continue with other gems
+                    eprintln!("Warning: Failed to install {}: {}", name, stderr);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}

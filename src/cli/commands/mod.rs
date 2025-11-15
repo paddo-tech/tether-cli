@@ -1,3 +1,4 @@
+use crate::config::Config;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -278,9 +279,12 @@ impl Cli {
     async fn sync(&self, dry_run: bool, _force: bool) -> Result<()> {
         use crate::cli::Output;
         use crate::config::Config;
-        use crate::packages::{BrewManager, NpmManager, PackageManager, PnpmManager};
+        use crate::packages::{
+            BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+        };
         use crate::sync::{GitBackend, SyncEngine, SyncState};
         use sha2::{Digest, Sha256};
+        use std::path::PathBuf;
 
         if dry_run {
             Output::info("Running in dry-run mode...");
@@ -343,6 +347,166 @@ impl Cli {
                         }
                         Err(e) => {
                             Output::warning(&format!("  {} (failed to decrypt: {})", file, e));
+                        }
+                    }
+                }
+            }
+
+            // Decrypt global config directories from sync repo
+            let configs_dir = sync_path.join("configs");
+            if configs_dir.exists() {
+                Output::info("Decrypting global configs from sync repository...");
+
+                use walkdir::WalkDir;
+                for entry in WalkDir::new(&configs_dir).follow_links(false) {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+
+                    if entry.file_type().is_file() {
+                        let file_path = entry.path();
+                        let file_name = file_path.to_string_lossy();
+
+                        // Only process .enc files
+                        if file_name.ends_with(".enc") {
+                            // Get relative path from configs dir
+                            let rel_path = file_path.strip_prefix(&configs_dir).unwrap();
+                            let rel_path_str = rel_path.to_string_lossy();
+                            let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
+
+                            // Decrypt and write to home directory
+                            if let Ok(encrypted_content) = std::fs::read(file_path) {
+                                match crate::security::decrypt_file(&encrypted_content, &key) {
+                                    Ok(plaintext) => {
+                                        let local_file = home.join(rel_path_no_enc);
+                                        if let Some(parent) = local_file.parent() {
+                                            std::fs::create_dir_all(parent)?;
+                                        }
+                                        std::fs::write(&local_file, plaintext)?;
+                                        Output::info(&format!(
+                                            "  ~/{} (decrypted)",
+                                            rel_path_no_enc
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        Output::warning(&format!(
+                                            "  ~/{} (failed to decrypt: {})",
+                                            rel_path_no_enc, e
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Decrypt project-local configs from sync repo
+            if config.project_configs.enabled {
+                let projects_dir = sync_path.join("projects");
+                if projects_dir.exists() {
+                    Output::info("Decrypting project configs from sync repository...");
+
+                    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+                    use walkdir::WalkDir;
+
+                    // Build a map of normalized URLs to local repo paths
+                    let mut repo_map = std::collections::HashMap::new();
+                    for search_path_str in &config.project_configs.search_paths {
+                        let search_path = if let Some(stripped) = search_path_str.strip_prefix("~/")
+                        {
+                            home.join(stripped)
+                        } else {
+                            PathBuf::from(search_path_str)
+                        };
+
+                        if let Ok(repos) = find_git_repos(&search_path) {
+                            for repo_path in repos {
+                                if let Ok(remote_url) = get_remote_url(&repo_path) {
+                                    let normalized = normalize_remote_url(&remote_url);
+                                    repo_map.insert(normalized, repo_path);
+                                }
+                            }
+                        }
+                    }
+
+                    // Iterate through projects in sync repo
+                    for entry in WalkDir::new(&projects_dir)
+                        .follow_links(false)
+                        .min_depth(1)
+                        .max_depth(1)
+                    {
+                        let entry = match entry {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+
+                        if !entry.file_type().is_dir() {
+                            continue;
+                        }
+
+                        let project_dir = entry.path();
+                        let project_name = match project_dir.file_name() {
+                            Some(name) => name.to_string_lossy().to_string(),
+                            None => continue,
+                        };
+
+                        // Find matching local repo
+                        if let Some(local_repo_path) = repo_map.get(&project_name) {
+                            // Decrypt all files in this project directory
+                            for file_entry in WalkDir::new(project_dir).follow_links(false) {
+                                let file_entry = match file_entry {
+                                    Ok(e) => e,
+                                    Err(_) => continue,
+                                };
+
+                                if !file_entry.file_type().is_file() {
+                                    continue;
+                                }
+
+                                let enc_file = file_entry.path();
+                                let enc_file_name = enc_file.to_string_lossy();
+
+                                if enc_file_name.ends_with(".enc") {
+                                    // Get relative path from project dir
+                                    let rel_path = enc_file.strip_prefix(project_dir).unwrap();
+                                    let rel_path_str = rel_path.to_string_lossy();
+                                    let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
+
+                                    // Decrypt and write to local repo
+                                    if let Ok(encrypted_content) = std::fs::read(enc_file) {
+                                        match crate::security::decrypt_file(
+                                            &encrypted_content,
+                                            &key,
+                                        ) {
+                                            Ok(plaintext) => {
+                                                let local_file =
+                                                    local_repo_path.join(rel_path_no_enc);
+                                                if let Some(parent) = local_file.parent() {
+                                                    std::fs::create_dir_all(parent)?;
+                                                }
+                                                std::fs::write(&local_file, plaintext)?;
+                                                Output::info(&format!(
+                                                    "  {}: {} (decrypted)",
+                                                    project_name, rel_path_no_enc
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                Output::warning(&format!(
+                                                    "  {}: {} (failed to decrypt: {})",
+                                                    project_name, rel_path_no_enc, e
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            Output::warning(&format!(
+                                "  {} (no matching local repo found - skipping)",
+                                project_name
+                            ));
                         }
                     }
                 }
@@ -427,6 +591,282 @@ impl Cli {
                         }
                     } else {
                         Output::info(&format!("  {} (unchanged)", file));
+                    }
+                }
+            }
+        }
+
+        // Sync global config directories
+        if !config.dotfiles.dirs.is_empty() {
+            Output::info("Syncing global config directories...");
+
+            let configs_dir = sync_path.join("configs");
+            std::fs::create_dir_all(&configs_dir)?;
+
+            for dir_path in &config.dotfiles.dirs {
+                // Expand ~ to home directory
+                let expanded_path = if let Some(stripped) = dir_path.strip_prefix("~/") {
+                    home.join(stripped)
+                } else {
+                    PathBuf::from(dir_path)
+                };
+
+                if !expanded_path.exists() {
+                    Output::warning(&format!("  {} (not found, skipping)", dir_path));
+                    continue;
+                }
+
+                // Handle both files and directories
+                if expanded_path.is_file() {
+                    // Single file
+                    if let Ok(content) = std::fs::read(&expanded_path) {
+                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let file_changed = state
+                            .files
+                            .get(dir_path)
+                            .map(|f| f.hash != hash)
+                            .unwrap_or(true);
+
+                        if file_changed {
+                            Output::info(&format!("  {} (changed)", dir_path));
+
+                            if !dry_run {
+                                // Store with path relative to home
+                                let rel_path =
+                                    expanded_path.strip_prefix(&home).unwrap_or(&expanded_path);
+                                let dest = configs_dir.join(rel_path);
+
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+
+                                if config.security.encrypt_dotfiles {
+                                    let key = crate::security::get_encryption_key()?;
+                                    let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                    std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                                } else {
+                                    std::fs::write(&dest, &content)?;
+                                }
+
+                                state.update_file(dir_path, hash);
+                                changes_made = true;
+                            }
+                        } else {
+                            Output::info(&format!("  {} (unchanged)", dir_path));
+                        }
+                    }
+                } else if expanded_path.is_dir() {
+                    // Directory - recursively sync all files
+                    Output::info(&format!("  {} (directory)", dir_path));
+
+                    use walkdir::WalkDir;
+                    for entry in WalkDir::new(&expanded_path).follow_links(false) {
+                        let entry = match entry {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+
+                        if entry.file_type().is_file() {
+                            let file_path = entry.path();
+                            let rel_to_home = file_path.strip_prefix(&home).unwrap_or(file_path);
+                            let state_key = format!("~/{}", rel_to_home.display());
+
+                            if let Ok(content) = std::fs::read(file_path) {
+                                let hash = format!("{:x}", Sha256::digest(&content));
+                                let file_changed = state
+                                    .files
+                                    .get(&state_key)
+                                    .map(|f| f.hash != hash)
+                                    .unwrap_or(true);
+
+                                if file_changed && !dry_run {
+                                    let dest = configs_dir.join(rel_to_home);
+
+                                    if let Some(parent) = dest.parent() {
+                                        std::fs::create_dir_all(parent)?;
+                                    }
+
+                                    if config.security.encrypt_dotfiles {
+                                        let key = crate::security::get_encryption_key()?;
+                                        let encrypted =
+                                            crate::security::encrypt_file(&content, &key)?;
+                                        std::fs::write(
+                                            format!("{}.enc", dest.display()),
+                                            encrypted,
+                                        )?;
+                                    } else {
+                                        std::fs::write(&dest, &content)?;
+                                    }
+
+                                    state.update_file(&state_key, hash);
+                                    changes_made = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sync project-local configs (gitignored files in git repos)
+        if config.project_configs.enabled {
+            Output::info("Syncing project-local configs...");
+
+            use crate::sync::git::{
+                find_git_repos, get_remote_url, is_gitignored, normalize_remote_url,
+            };
+
+            let projects_dir = sync_path.join("projects");
+            std::fs::create_dir_all(&projects_dir)?;
+
+            for search_path_str in &config.project_configs.search_paths {
+                // Expand ~ to home directory
+                let search_path = if let Some(stripped) = search_path_str.strip_prefix("~/") {
+                    home.join(stripped)
+                } else {
+                    PathBuf::from(search_path_str)
+                };
+
+                if !search_path.exists() {
+                    continue;
+                }
+
+                // Find all git repos in this search path
+                let repos = match find_git_repos(&search_path) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+
+                for repo_path in repos {
+                    // Get remote URL
+                    let remote_url = match get_remote_url(&repo_path) {
+                        Ok(url) => url,
+                        Err(_) => continue, // Skip repos without remotes
+                    };
+
+                    let normalized_url = normalize_remote_url(&remote_url);
+
+                    // Search for files matching patterns
+                    use walkdir::WalkDir;
+                    for pattern in &config.project_configs.patterns {
+                        // Simple glob-like matching (supports * wildcard)
+                        for entry in WalkDir::new(&repo_path).follow_links(false).max_depth(5)
+                        // Limit depth to avoid deep recursion
+                        {
+                            let entry = match entry {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+
+                            if !entry.file_type().is_file() {
+                                continue;
+                            }
+
+                            let file_path = entry.path();
+                            let file_name = match file_path.file_name() {
+                                Some(name) => name.to_string_lossy(),
+                                None => continue,
+                            };
+
+                            // Check if file matches pattern (simple wildcard matching)
+                            let matches = if pattern.contains('*') {
+                                let pattern_parts: Vec<&str> = pattern.split('*').collect();
+                                if pattern_parts.len() == 2 {
+                                    file_name.starts_with(pattern_parts[0])
+                                        && file_name.ends_with(pattern_parts[1])
+                                } else {
+                                    false
+                                }
+                            } else {
+                                file_name == pattern.as_str()
+                            };
+
+                            if !matches {
+                                continue;
+                            }
+
+                            // Check if gitignored (if required)
+                            if config.project_configs.only_if_gitignored {
+                                match is_gitignored(file_path) {
+                                    Ok(true) => {} // File is gitignored, continue
+                                    _ => continue, // File not gitignored or error, skip
+                                }
+                            }
+
+                            // Read and hash the file
+                            if let Ok(content) = std::fs::read(file_path) {
+                                let hash = format!("{:x}", Sha256::digest(&content));
+
+                                // Create state key as project/file_path
+                                let rel_to_repo = file_path.strip_prefix(&repo_path).unwrap();
+                                let state_key =
+                                    format!("project:{}/{}", normalized_url, rel_to_repo.display());
+
+                                let file_changed = state
+                                    .files
+                                    .get(&state_key)
+                                    .map(|f| f.hash != hash)
+                                    .unwrap_or(true);
+
+                                if file_changed {
+                                    // Scan for secrets
+                                    if config.security.scan_secrets {
+                                        match crate::security::scan_for_secrets(file_path) {
+                                            Ok(findings) if !findings.is_empty() => {
+                                                Output::warning(&format!(
+                                                    "  {}: {} - Found {} potential secret(s)",
+                                                    normalized_url,
+                                                    rel_to_repo.display(),
+                                                    findings.len()
+                                                ));
+                                                for finding in findings.iter().take(2) {
+                                                    Output::warning(&format!(
+                                                        "    Line {}: {}",
+                                                        finding.line_number,
+                                                        finding.secret_type.description()
+                                                    ));
+                                                }
+                                                Output::info(
+                                                    "  Secrets will be encrypted before syncing",
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
+                                    Output::info(&format!(
+                                        "  {}: {} (changed)",
+                                        normalized_url,
+                                        rel_to_repo.display()
+                                    ));
+
+                                    if !dry_run {
+                                        // Store in projects/<normalized-url>/<relative-path>
+                                        let dest =
+                                            projects_dir.join(&normalized_url).join(rel_to_repo);
+
+                                        if let Some(parent) = dest.parent() {
+                                            std::fs::create_dir_all(parent)?;
+                                        }
+
+                                        if config.security.encrypt_dotfiles {
+                                            let key = crate::security::get_encryption_key()?;
+                                            let encrypted =
+                                                crate::security::encrypt_file(&content, &key)?;
+                                            std::fs::write(
+                                                format!("{}.enc", dest.display()),
+                                                encrypted,
+                                            )?;
+                                        } else {
+                                            std::fs::write(&dest, &content)?;
+                                        }
+
+                                        state.update_file(&state_key, hash);
+                                        changes_made = true;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -555,6 +995,88 @@ impl Cli {
                     }
                     Err(e) => {
                         Output::warning(&format!("Failed to export pnpm manifest: {}", e));
+                    }
+                }
+            }
+        }
+
+        // bun - use simple package list
+        if config.packages.bun.enabled {
+            let bun = BunManager::new();
+            if bun.is_available().await {
+                Output::info("  Syncing bun packages...");
+
+                match bun.export_manifest().await {
+                    Ok(manifest) => {
+                        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+
+                        if state
+                            .packages
+                            .get("bun")
+                            .map(|p| p.hash != hash)
+                            .unwrap_or(true)
+                        {
+                            let count = manifest.lines().filter(|l| !l.trim().is_empty()).count();
+                            Output::info(&format!("    {} packages", count));
+                            if !dry_run {
+                                std::fs::write(manifests_dir.join("bun.txt"), manifest)?;
+                                use chrono::Utc;
+                                state.packages.insert(
+                                    "bun".to_string(),
+                                    crate::sync::state::PackageState {
+                                        last_sync: Utc::now(),
+                                        hash,
+                                    },
+                                );
+                                changes_made = true;
+                            }
+                        } else {
+                            Output::info("    No changes");
+                        }
+                    }
+                    Err(e) => {
+                        Output::warning(&format!("Failed to export bun manifest: {}", e));
+                    }
+                }
+            }
+        }
+
+        // gem - use simple package list
+        if config.packages.gem.enabled {
+            let gem = GemManager::new();
+            if gem.is_available().await {
+                Output::info("  Syncing gem packages...");
+
+                match gem.export_manifest().await {
+                    Ok(manifest) => {
+                        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+
+                        if state
+                            .packages
+                            .get("gem")
+                            .map(|p| p.hash != hash)
+                            .unwrap_or(true)
+                        {
+                            let count = manifest.lines().filter(|l| !l.trim().is_empty()).count();
+                            Output::info(&format!("    {} packages", count));
+                            if !dry_run {
+                                std::fs::write(manifests_dir.join("gems.txt"), manifest)?;
+                                use chrono::Utc;
+                                state.packages.insert(
+                                    "gem".to_string(),
+                                    crate::sync::state::PackageState {
+                                        last_sync: Utc::now(),
+                                        hash,
+                                    },
+                                );
+                                changes_made = true;
+                            }
+                        } else {
+                            Output::info("    No changes");
+                        }
+                    }
+                    Err(e) => {
+                        Output::warning(&format!("Failed to export gem manifest: {}", e));
                     }
                 }
             }
@@ -772,10 +1294,153 @@ impl Cli {
         Ok(())
     }
 
-    async fn config(&self, _action: &ConfigAction) -> Result<()> {
-        crate::cli::Output::info("Config...");
-        // TODO: Implement config
-        Ok(())
+    async fn config(&self, action: &ConfigAction) -> Result<()> {
+        use crate::cli::Output;
+        use crate::config::Config;
+
+        match action {
+            ConfigAction::Get { key } => {
+                let config = Config::load()?;
+                let config_toml = toml::to_string_pretty(&config)?;
+                let value = toml::from_str::<toml::Value>(&config_toml)?;
+
+                // Parse nested key (e.g., "project_configs.enabled")
+                let keys: Vec<&str> = key.split('.').collect();
+                let mut current = &value;
+
+                for k in &keys {
+                    match current.get(k) {
+                        Some(v) => current = v,
+                        None => {
+                            Output::error(&format!("Key '{}' not found in config", key));
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Pretty print the value
+                match current {
+                    toml::Value::String(s) => println!("{}", s),
+                    toml::Value::Integer(i) => println!("{}", i),
+                    toml::Value::Float(f) => println!("{}", f),
+                    toml::Value::Boolean(b) => println!("{}", b),
+                    toml::Value::Array(arr) => {
+                        println!("[");
+                        for item in arr {
+                            println!("  {},", toml::to_string(item)?.trim());
+                        }
+                        println!("]");
+                    }
+                    toml::Value::Table(_) => {
+                        println!("{}", toml::to_string_pretty(current)?);
+                    }
+                    _ => println!("{:?}", current),
+                }
+
+                Ok(())
+            }
+
+            ConfigAction::Set { key, value } => {
+                let mut config = Config::load()?;
+                let mut config_toml = toml::to_string_pretty(&config)?;
+                let mut toml_value = toml::from_str::<toml::Value>(&config_toml)?;
+
+                // Parse nested key (e.g., "project_configs.enabled")
+                let keys: Vec<&str> = key.split('.').collect();
+
+                // Navigate to the parent of the target key
+                let mut current = &mut toml_value;
+                for k in &keys[..keys.len() - 1] {
+                    match current.get_mut(k) {
+                        Some(v) => current = v,
+                        None => {
+                            Output::error(&format!("Key path '{}' not found in config", key));
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Set the value
+                let last_key = keys[keys.len() - 1];
+                let table = match current.as_table_mut() {
+                    Some(t) => t,
+                    None => {
+                        Output::error(&format!("Cannot set value at '{}'", key));
+                        return Ok(());
+                    }
+                };
+
+                // Parse the value string into appropriate TOML type
+                let new_value: toml::Value = if value == "true" {
+                    toml::Value::Boolean(true)
+                } else if value == "false" {
+                    toml::Value::Boolean(false)
+                } else if let Ok(i) = value.parse::<i64>() {
+                    toml::Value::Integer(i)
+                } else if let Ok(f) = value.parse::<f64>() {
+                    toml::Value::Float(f)
+                } else if value.starts_with('[') && value.ends_with(']') {
+                    // Array value - parse as TOML
+                    match toml::from_str(value) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            Output::error(&format!("Failed to parse array: {}", e));
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    toml::Value::String(value.clone())
+                };
+
+                table.insert(last_key.to_string(), new_value);
+
+                // Convert back to config and save
+                config_toml = toml::to_string_pretty(&toml_value)?;
+                config = toml::from_str(&config_toml)?;
+                config.save()?;
+
+                Output::success(&format!("Set {} = {}", key, value));
+                Ok(())
+            }
+
+            ConfigAction::Edit => {
+                let config_path = Config::config_path()?;
+
+                // Get editor from environment or use default
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                    if cfg!(target_os = "macos") {
+                        "nano".to_string()
+                    } else {
+                        "vi".to_string()
+                    }
+                });
+
+                Output::info(&format!("Opening config in {}...", editor));
+                Output::info(&format!("File: {}", config_path.display()));
+
+                // Open editor
+                let status = std::process::Command::new(&editor)
+                    .arg(&config_path)
+                    .status()?;
+
+                if status.success() {
+                    // Validate the config by trying to load it
+                    match Config::load() {
+                        Ok(_) => {
+                            Output::success("Config updated successfully");
+                        }
+                        Err(e) => {
+                            Output::error(&format!("Config validation failed: {}", e));
+                            Output::warning("Your changes were saved but contain errors");
+                        }
+                    }
+                } else {
+                    Output::warning("Editor exited with error");
+                }
+
+                Ok(())
+            }
+        }
     }
 
     async fn team(&self, action: &TeamAction) -> Result<()> {
@@ -825,7 +1490,8 @@ impl Cli {
 
                                 // Scan for secrets
                                 let file_path = entry.path();
-                                if let Ok(findings) = crate::security::scan_for_secrets(&file_path) {
+                                if let Ok(findings) = crate::security::scan_for_secrets(&file_path)
+                                {
                                     if !findings.is_empty() {
                                         secrets_found = true;
                                         Output::warning(&format!(
@@ -851,8 +1517,12 @@ impl Cli {
                 if secrets_found {
                     println!();
                     Output::warning("⚠️  Potential secrets detected in team repository!");
-                    Output::warning("Team repositories should only contain non-sensitive shared configs.");
-                    Output::info("For sensitive data, use a secrets manager (1Password, Vault, etc.)");
+                    Output::warning(
+                        "Team repositories should only contain non-sensitive shared configs.",
+                    );
+                    Output::info(
+                        "For sensitive data, use a secrets manager (1Password, Vault, etc.)",
+                    );
                     println!();
 
                     if !Prompt::confirm("Continue anyway?", false)? {
@@ -879,7 +1549,9 @@ impl Cli {
                 let read_only = if has_write {
                     println!();
                     Output::success("You have write access to this repository!");
-                    Output::info("As a team admin/contributor, you can push updates to team configs.");
+                    Output::info(
+                        "As a team admin/contributor, you can push updates to team configs.",
+                    );
                     println!();
 
                     !Prompt::confirm(
@@ -1088,12 +1760,17 @@ impl Cli {
                 )
             } else if file == "team.gitconfig" {
                 // For gitconfig, we use [include] section
-                let include_line = format!("[include]\n    path = {}/dotfiles/team.gitconfig", team_sync_dir.display());
+                let include_line = format!(
+                    "[include]\n    path = {}/dotfiles/team.gitconfig",
+                    team_sync_dir.display()
+                );
                 (home.join(".gitconfig"), include_line)
-            } else if file.starts_with("team.") && (file.ends_with("rc") || file.ends_with("profile")) {
+            } else if file.starts_with("team.")
+                && (file.ends_with("rc") || file.ends_with("profile"))
+            {
                 // Generic shell config
                 (
-                    home.join(&file.replace("team.", ".")),
+                    home.join(file.replace("team.", ".")),
                     format!(
                         "[ -f {}/dotfiles/{} ] && source {}/dotfiles/{}",
                         team_sync_dir.display(),
@@ -1109,7 +1786,10 @@ impl Cli {
 
             // Check if file exists
             if !personal_file.exists() {
-                Output::warning(&format!("  {} not found, skipping", personal_file.display()));
+                Output::warning(&format!(
+                    "  {} not found, skipping",
+                    personal_file.display()
+                ));
                 continue;
             }
 
@@ -1117,8 +1797,17 @@ impl Cli {
             let content = std::fs::read_to_string(&personal_file)?;
 
             // Check if already sourced
-            if content.contains(&source_line) || content.contains(&format!("source {}/dotfiles/{}", team_sync_dir.display(), file)) {
-                Output::info(&format!("  {} already sources team config", file.replace("team.", ".")));
+            if content.contains(&source_line)
+                || content.contains(&format!(
+                    "source {}/dotfiles/{}",
+                    team_sync_dir.display(),
+                    file
+                ))
+            {
+                Output::info(&format!(
+                    "  {} already sources team config",
+                    file.replace("team.", ".")
+                ));
                 continue;
             }
 
@@ -1139,7 +1828,10 @@ impl Cli {
             };
 
             std::fs::write(&personal_file, new_content)?;
-            Output::success(&format!("  Added source line to {}", file.replace("team.", ".")));
+            Output::success(&format!(
+                "  Added source line to {}",
+                file.replace("team.", ".")
+            ));
         }
 
         Ok(())
@@ -1159,7 +1851,10 @@ impl Cli {
             } else if file == "team.gitconfig" {
                 println!("  Add to ~/.gitconfig:");
                 println!("    [include]");
-                println!("        path = {}/dotfiles/team.gitconfig", team_sync_dir.display());
+                println!(
+                    "        path = {}/dotfiles/team.gitconfig",
+                    team_sync_dir.display()
+                );
             }
         }
         println!();

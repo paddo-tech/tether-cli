@@ -11,6 +11,8 @@ pub struct Config {
     pub security: SecurityConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<TeamConfig>,
+    #[serde(default)]
+    pub project_configs: ProjectConfigSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +49,8 @@ pub struct PackagesConfig {
     pub brew: BrewConfig,
     pub npm: NpmConfig,
     pub pnpm: PnpmConfig,
+    pub bun: BunConfig,
+    pub gem: GemConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,8 +73,22 @@ pub struct PnpmConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BunConfig {
+    pub enabled: bool,
+    pub sync_versions: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GemConfig {
+    pub enabled: bool,
+    pub sync_versions: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DotfilesConfig {
     pub files: Vec<String>,
+    #[serde(default)]
+    pub dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +117,39 @@ pub struct TeamConfig {
     pub url: String,
     pub auto_inject: bool,
     pub read_only: bool,
+}
+
+/// Project-local config syncing.
+///
+/// Syncs gitignored config files from project directories (e.g., .env.local).
+/// Files are identified by git remote URL, so the same project on different
+/// machines (even in different paths) will sync correctly.
+///
+/// Safety features:
+/// - only_if_gitignored: Only sync files that are in .gitignore
+/// - Secret scanning: Warns about potential secrets before syncing
+/// - Encryption: All project configs are encrypted like dotfiles
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectConfigSettings {
+    pub enabled: bool,
+    pub search_paths: Vec<String>,
+    pub patterns: Vec<String>,
+    pub only_if_gitignored: bool,
+}
+
+impl Default for ProjectConfigSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            search_paths: vec!["~/Projects".to_string(), "~/Code".to_string()],
+            patterns: vec![
+                ".env.local".to_string(),
+                "appsettings.*.json".to_string(),
+                ".vscode/settings.json".to_string(),
+            ],
+            only_if_gitignored: true,
+        }
+    }
 }
 
 impl Config {
@@ -158,6 +209,14 @@ impl Default for Config {
                     enabled: true,
                     sync_versions: false,
                 },
+                bun: BunConfig {
+                    enabled: true,
+                    sync_versions: false,
+                },
+                gem: GemConfig {
+                    enabled: true,
+                    sync_versions: false,
+                },
             },
             dotfiles: DotfilesConfig {
                 files: vec![
@@ -165,12 +224,14 @@ impl Default for Config {
                     ".gitconfig".to_string(),
                     ".zprofile".to_string(),
                 ],
+                dirs: vec![],
             },
             security: SecurityConfig {
                 encrypt_dotfiles: true,
                 scan_secrets: true,
             },
             team: None,
+            project_configs: ProjectConfigSettings::default(),
         }
     }
 }
