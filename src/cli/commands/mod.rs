@@ -124,12 +124,25 @@ pub enum TeamAction {
     Add {
         /// Team repository URL
         url: String,
+        /// Custom team name (defaults to org/owner from URL)
+        #[arg(long)]
+        name: Option<String>,
         /// Skip auto-injection of source lines
         #[arg(long)]
         no_auto_inject: bool,
     },
+    /// Switch active team
+    Switch {
+        /// Team name to switch to
+        name: String,
+    },
+    /// List all teams
+    List,
     /// Remove team sync
-    Remove,
+    Remove {
+        /// Team name to remove (defaults to active team)
+        name: Option<String>,
+    },
     /// Enable team sync
     Enable,
     /// Disable team sync
@@ -1451,37 +1464,53 @@ impl Cli {
         match action {
             TeamAction::Add {
                 url,
+                name,
                 no_auto_inject,
             } => {
                 // Load config
                 let mut config = Config::load()?;
 
-                if config.team.is_some() {
-                    Output::warning("Team sync is already configured");
+                // Determine team name (custom or auto-extracted)
+                let team_name = name.clone().unwrap_or_else(|| {
+                    crate::sync::extract_team_name_from_url(url)
+                        .unwrap_or_else(|| "team".to_string())
+                });
+
+                // Initialize teams config if needed
+                if config.teams.is_none() {
+                    config.teams = Some(crate::config::TeamsConfig::default());
+                }
+
+                let teams = config.teams.as_mut().unwrap();
+
+                // Check if team already exists
+                if teams.teams.contains_key(&team_name) {
+                    Output::warning(&format!("Team '{}' already exists", team_name));
                     if !Prompt::confirm("Replace existing team configuration?", false)? {
                         return Ok(());
                     }
                 }
 
-                // Extract team name from URL
-                let team_name = crate::sync::extract_team_name_from_url(url)
-                    .unwrap_or_else(|| "team".to_string());
+                Output::info(&format!("Adding team: {} ({})", team_name, url));
 
-                Output::info(&format!("Adding team sync: {} ({})", team_name, url));
+                // Clone team repository to team-specific directory
+                let team_repo_dir = Config::team_repo_dir(&team_name)?;
+                if team_repo_dir.exists() {
+                    std::fs::remove_dir_all(&team_repo_dir)?;
+                }
 
-                // Clone team repository
-                let team_sync_dir = Config::team_sync_dir()?;
-                if team_sync_dir.exists() {
-                    std::fs::remove_dir_all(&team_sync_dir)?;
+                // Ensure parent directory exists
+                if let Some(parent) = team_repo_dir.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
 
                 Output::info("Cloning team repository...");
-                GitBackend::clone(url, &team_sync_dir)?;
+                GitBackend::clone(url, &team_repo_dir)?;
                 Output::success("Team repository cloned successfully");
 
                 // Security check: Scan for secrets in team repo
                 Output::info("Scanning team configs for secrets...");
-                let dotfiles_dir = team_sync_dir.join("dotfiles");
+                let dotfiles_dir = team_repo_dir.join("dotfiles");
                 let mut team_files = Vec::new();
                 let mut secrets_found = false;
 
@@ -1531,7 +1560,7 @@ impl Cli {
 
                     if !Prompt::confirm("Continue anyway?", false)? {
                         // Clean up
-                        std::fs::remove_dir_all(&team_sync_dir)?;
+                        std::fs::remove_dir_all(&team_repo_dir)?;
                         return Ok(());
                     }
                 }
@@ -1547,7 +1576,7 @@ impl Cli {
 
                 // Detect write access to team repository
                 Output::info("Checking repository permissions...");
-                let team_git = GitBackend::open(&team_sync_dir)?;
+                let team_git = GitBackend::open(&team_repo_dir)?;
                 let has_write = team_git.has_write_access().unwrap_or(false);
 
                 let read_only = if has_write {
@@ -1596,7 +1625,7 @@ impl Cli {
                 // Discover and create symlinks for config directories
                 println!();
                 Output::info("Setting up symlinks for team configs...");
-                let symlinkable_dirs = crate::sync::discover_symlinkable_dirs(&team_sync_dir)?;
+                let symlinkable_dirs = crate::sync::discover_symlinkable_dirs(&team_repo_dir)?;
 
                 if symlinkable_dirs.is_empty() {
                     Output::info("No symlinkable directories found (e.g., .claude, .config)");
@@ -1639,21 +1668,153 @@ impl Cli {
                     Output::success("Symlinks created successfully");
                 }
 
-                // Save config
-                config.team = Some(TeamConfig {
-                    enabled: true,
-                    url: url.clone(),
-                    auto_inject,
-                    read_only,
-                });
+                // Add team to config
+                let should_set_active = {
+                    let teams = config.teams.as_mut().unwrap();
+                    teams.teams.insert(
+                        team_name.clone(),
+                        TeamConfig {
+                            enabled: true,
+                            url: url.clone(),
+                            auto_inject,
+                            read_only,
+                        },
+                    );
+
+                    // Set as active team if it's the first or user confirms
+                    if teams.active.is_none()
+                        || Prompt::confirm(&format!("Set '{}' as active team?", team_name), true)?
+                    {
+                        teams.active = Some(team_name.clone());
+                        true
+                    } else {
+                        false
+                    }
+                };
+
                 config.save()?;
 
                 println!();
-                Output::success("Team sync added successfully!");
+                Output::success(&format!("Team '{}' added successfully!", team_name));
+                if should_set_active {
+                    Output::info("This team is now active");
+                }
                 Ok(())
             }
 
-            TeamAction::Remove => {
+            TeamAction::Switch { name } => {
+                let mut config = Config::load()?;
+
+                let teams = match config.teams.as_mut() {
+                    Some(t) => t,
+                    None => {
+                        Output::error("No teams configured. Run 'tether team add' first.");
+                        return Ok(());
+                    }
+                };
+
+                // Check if team exists
+                if !teams.teams.contains_key(name) {
+                    Output::error(&format!("Team '{}' not found", name));
+                    Output::info("Available teams:");
+                    for team_name in teams.teams.keys() {
+                        println!("  • {}", team_name);
+                    }
+                    return Ok(());
+                }
+
+                // If already active, nothing to do
+                if teams.active.as_ref() == Some(name) {
+                    Output::info(&format!("Team '{}' is already active", name));
+                    return Ok(());
+                }
+
+                Output::info(&format!("Switching to team '{}'...", name));
+
+                // Deactivate current team (remove symlinks)
+                if let Some(current) = &teams.active {
+                    Output::info(&format!("Deactivating team '{}'...", current));
+                    let mut manifest = crate::sync::TeamManifest::load()?;
+                    manifest.cleanup_team(Some(current))?;
+                    Output::success("Current team deactivated");
+                }
+
+                // Activate new team (create symlinks)
+                Output::info(&format!("Activating team '{}'...", name));
+                let team_repo_dir = Config::team_repo_dir(name)?;
+
+                if !team_repo_dir.exists() {
+                    Output::error(&format!(
+                        "Team repository not found at {}",
+                        team_repo_dir.display()
+                    ));
+                    Output::info("The team may need to be re-added.");
+                    return Ok(());
+                }
+
+                let symlinkable_dirs = crate::sync::discover_symlinkable_dirs(&team_repo_dir)?;
+                if !symlinkable_dirs.is_empty() {
+                    let mut manifest = crate::sync::TeamManifest::load()?;
+                    for dir in &symlinkable_dirs {
+                        let results = dir.create_symlinks(name, &mut manifest, false)?;
+                        for result in results {
+                            if let crate::sync::team::SymlinkResult::Created(target) = result {
+                                Output::success(&format!("  ✓ {}", target.display()));
+                            }
+                        }
+                    }
+                    manifest.save()?;
+                }
+
+                // Update active team
+                teams.active = Some(name.clone());
+                config.save()?;
+
+                println!();
+                Output::success(&format!("Switched to team '{}'", name));
+                Ok(())
+            }
+
+            TeamAction::List => {
+                let config = Config::load()?;
+
+                let teams = match &config.teams {
+                    Some(t) => t,
+                    None => {
+                        Output::info("No teams configured. Run 'tether team add' to add a team.");
+                        return Ok(());
+                    }
+                };
+
+                if teams.teams.is_empty() {
+                    Output::info("No teams configured. Run 'tether team add' to add a team.");
+                    return Ok(());
+                }
+
+                println!();
+                println!("Teams:");
+                for (name, team) in &teams.teams {
+                    let active_marker = if teams.active.as_ref() == Some(name) {
+                        " (active)"
+                    } else {
+                        ""
+                    };
+                    let status = if team.enabled { "enabled" } else { "disabled" };
+                    let access = if team.read_only {
+                        "read-only"
+                    } else {
+                        "read-write"
+                    };
+
+                    println!("  • {}{}", name, active_marker);
+                    println!("    URL: {}", team.url);
+                    println!("    Status: {}, Access: {}", status, access);
+                }
+                println!();
+                Ok(())
+            }
+
+            TeamAction::Remove { name: _ } => {
                 let mut config = Config::load()?;
 
                 if config.team.is_none() {
