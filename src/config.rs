@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,7 +11,9 @@ pub struct Config {
     pub dotfiles: DotfilesConfig,
     pub security: SecurityConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub team: Option<TeamConfig>,
+    pub team: Option<TeamConfig>, // Deprecated: kept for backwards compatibility
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub teams: Option<TeamsConfig>,
     #[serde(default)]
     pub project_configs: ProjectConfigSettings,
 }
@@ -119,6 +122,22 @@ pub struct TeamConfig {
     pub read_only: bool,
 }
 
+/// Multi-team sync configuration.
+///
+/// Supports multiple team repositories with easy switching between them.
+/// Only one team can be active at a time, but you can quickly switch between
+/// different teams (e.g., different clients, company vs open source).
+///
+/// Team names are automatically extracted from the Git URL's organization/owner
+/// (e.g., git@github.com:acme-corp/dotfiles.git → "acme-corp") but can be overridden.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TeamsConfig {
+    /// Currently active team (if any)
+    pub active: Option<String>,
+    /// Map of team name -> team configuration
+    pub teams: HashMap<String, TeamConfig>,
+}
+
 /// Project-local config syncing.
 ///
 /// Syncs gitignored config files from project directories (e.g., .env.local).
@@ -163,8 +182,27 @@ impl Config {
         Ok(Self::config_dir()?.join("config.toml"))
     }
 
+    /// Get team sync directory for a specific team (or legacy single team)
     pub fn team_sync_dir() -> Result<PathBuf> {
-        Ok(Self::config_dir()?.join("team-sync"))
+        Ok(Self::config_dir()?.join("team-sync")) // Legacy single-team path
+    }
+
+    /// Get team directory for a specific named team
+    pub fn team_dir(team_name: &str) -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("teams").join(team_name))
+    }
+
+    /// Get sync directory for a specific named team
+    pub fn team_repo_dir(team_name: &str) -> Result<PathBuf> {
+        Ok(Self::team_dir(team_name)?.join("sync"))
+    }
+
+    /// Get active team configuration
+    pub fn active_team(&self) -> Option<(String, &TeamConfig)> {
+        let teams = self.teams.as_ref()?;
+        let active_name = teams.active.as_ref()?;
+        let team_config = teams.teams.get(active_name)?;
+        Some((active_name.clone(), team_config))
     }
 
     pub fn load() -> Result<Self> {
@@ -231,6 +269,7 @@ impl Default for Config {
                 scan_secrets: true,
             },
             team: None,
+            teams: None,
             project_configs: ProjectConfigSettings::default(),
         }
     }

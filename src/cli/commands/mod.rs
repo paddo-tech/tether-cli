@@ -1463,7 +1463,11 @@ impl Cli {
                     }
                 }
 
-                Output::info(&format!("Adding team sync: {}", url));
+                // Extract team name from URL
+                let team_name = crate::sync::extract_team_name_from_url(url)
+                    .unwrap_or_else(|| "team".to_string());
+
+                Output::info(&format!("Adding team sync: {} ({})", team_name, url));
 
                 // Clone team repository
                 let team_sync_dir = Config::team_sync_dir()?;
@@ -1606,7 +1610,7 @@ impl Cli {
                             dir.target_base.display()
                         ));
 
-                        let results = dir.create_symlinks(&mut manifest, false)?;
+                        let results = dir.create_symlinks(&team_name, &mut manifest, false)?;
 
                         for result in results {
                             match result {
@@ -1618,7 +1622,7 @@ impl Cli {
                                         dir.team_path.join(target.file_name().unwrap());
                                     let resolution =
                                         crate::sync::resolve_conflict(&target, &team_source)?;
-                                    manifest.add_conflict(target.clone(), resolution);
+                                    manifest.add_conflict(&team_name, target.clone(), resolution);
                                     Output::success(&format!(
                                         "  ✓ {} (conflict resolved)",
                                         target.display()

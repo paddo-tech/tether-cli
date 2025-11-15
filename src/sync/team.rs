@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 /// Tracks team-synced symlinks and conflict resolutions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TeamManifest {
-    /// Symlinks created by team sync: target_path -> source_path
-    pub symlinks: HashMap<String, String>,
-    /// Conflict resolutions: target_path -> resolution
-    pub conflicts: HashMap<String, ConflictResolution>,
+    /// Symlinks created by team sync: team_name -> (target_path -> source_path)
+    pub symlinks: HashMap<String, HashMap<String, String>>,
+    /// Conflict resolutions: team_name -> (target_path -> resolution)
+    pub conflicts: HashMap<String, HashMap<String, ConflictResolution>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,46 +52,74 @@ impl TeamManifest {
         Ok(config_dir.join("team-manifest.json"))
     }
 
-    /// Add a symlink to the manifest
-    pub fn add_symlink(&mut self, target: PathBuf, source: PathBuf) {
-        self.symlinks.insert(
-            target.to_string_lossy().to_string(),
-            source.to_string_lossy().to_string(),
-        );
+    /// Add a symlink to the manifest for a specific team
+    pub fn add_symlink(&mut self, team_name: &str, target: PathBuf, source: PathBuf) {
+        self.symlinks
+            .entry(team_name.to_string())
+            .or_default()
+            .insert(
+                target.to_string_lossy().to_string(),
+                source.to_string_lossy().to_string(),
+            );
     }
 
-    /// Record a conflict resolution
-    pub fn add_conflict(&mut self, target: PathBuf, resolution: ConflictResolution) {
+    /// Record a conflict resolution for a specific team
+    pub fn add_conflict(
+        &mut self,
+        team_name: &str,
+        target: PathBuf,
+        resolution: ConflictResolution,
+    ) {
         self.conflicts
+            .entry(team_name.to_string())
+            .or_default()
             .insert(target.to_string_lossy().to_string(), resolution);
     }
 
     /// Remove all symlinks and clean up manifest
     pub fn cleanup(&mut self) -> Result<()> {
-        for target_str in self.symlinks.keys() {
-            let target = PathBuf::from(target_str);
-            if target.exists() && target.is_symlink() {
-                std::fs::remove_file(&target)
-                    .with_context(|| format!("Failed to remove symlink: {}", target_str))?;
-            }
-        }
+        self.cleanup_team(None)
+    }
 
-        // Also clean up renamed personal files if they still have .personal extension
-        for (target_str, resolution) in &self.conflicts {
-            if let ConflictResolution::PersonalRenamed = resolution {
-                let personal_path = PathBuf::from(format!("{}.personal", target_str));
-                if personal_path.exists() {
-                    // Don't auto-delete renamed personal files, just notify
-                    eprintln!(
-                        "Note: Renamed personal file still exists: {}",
-                        personal_path.display()
-                    );
+    /// Remove symlinks for a specific team (or all if team_name is None)
+    pub fn cleanup_team(&mut self, team_name: Option<&str>) -> Result<()> {
+        let teams_to_clean: Vec<String> = match team_name {
+            Some(name) => vec![name.to_string()],
+            None => self.symlinks.keys().cloned().collect(),
+        };
+
+        for team in &teams_to_clean {
+            if let Some(team_symlinks) = self.symlinks.get(team) {
+                for target_str in team_symlinks.keys() {
+                    let target = PathBuf::from(target_str);
+                    if target.exists() && target.is_symlink() {
+                        std::fs::remove_file(&target)
+                            .with_context(|| format!("Failed to remove symlink: {}", target_str))?;
+                    }
                 }
             }
+
+            // Clean up renamed personal files if they still have .personal extension
+            if let Some(team_conflicts) = self.conflicts.get(team) {
+                for (target_str, resolution) in team_conflicts {
+                    if let ConflictResolution::PersonalRenamed = resolution {
+                        let personal_path = PathBuf::from(format!("{}.personal", target_str));
+                        if personal_path.exists() {
+                            // Don't auto-delete renamed personal files, just notify
+                            eprintln!(
+                                "Note: Renamed personal file still exists: {}",
+                                personal_path.display()
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Remove team from manifest
+            self.symlinks.remove(team);
+            self.conflicts.remove(team);
         }
 
-        self.symlinks.clear();
-        self.conflicts.clear();
         self.save()?;
         Ok(())
     }
@@ -142,6 +170,7 @@ impl SymlinkableDir {
     /// Create symlinks for all items in this directory
     pub fn create_symlinks(
         &self,
+        team_name: &str,
         manifest: &mut TeamManifest,
         auto_resolve: bool,
     ) -> Result<Vec<SymlinkResult>> {
@@ -164,7 +193,11 @@ impl SymlinkableDir {
             if target_item.exists() && !target_item.is_symlink() {
                 if auto_resolve {
                     // Skip conflicts in auto mode
-                    manifest.add_conflict(target_item.clone(), ConflictResolution::PersonalWins);
+                    manifest.add_conflict(
+                        team_name,
+                        target_item.clone(),
+                        ConflictResolution::PersonalWins,
+                    );
                     results.push(SymlinkResult::Conflict(target_item));
                 } else {
                     // In interactive mode, this will be handled by caller
@@ -210,13 +243,37 @@ impl SymlinkableDir {
                     }
                 }
 
-                manifest.add_symlink(target_item.clone(), team_item);
+                manifest.add_symlink(team_name, target_item.clone(), team_item);
                 results.push(SymlinkResult::Created(target_item));
             }
         }
 
         Ok(results)
     }
+}
+
+/// Extract team name from Git URL
+/// Examples:
+/// - git@github.com:acme-corp/team-configs.git → "acme-corp"
+/// - https://github.com/company/dotfiles.git → "company"
+/// - git@gitlab.com:my-org/configs.git → "my-org"
+pub fn extract_team_name_from_url(url: &str) -> Option<String> {
+    // Try SSH format: git@host:org/repo.git
+    if let Some(after_colon) = url.split(':').nth(1) {
+        if let Some(org) = after_colon.split('/').next() {
+            return Some(org.to_string());
+        }
+    }
+
+    // Try HTTPS format: https://host/org/repo.git
+    if url.starts_with("http") {
+        let parts: Vec<&str> = url.split('/').collect();
+        if parts.len() >= 4 {
+            return Some(parts[parts.len() - 2].to_string());
+        }
+    }
+
+    None
 }
 
 /// Handle a conflict by prompting user
