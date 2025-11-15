@@ -1,0 +1,77 @@
+---
+const navItems = [
+  { name: 'Docs', href: '/docs' },
+  { name: 'Teams', href: '/teams' },
+  { name: 'Security', href: '/security' },
+  { name: 'GitHub', href: '#', external: false, comingSoon: true },
+];
+---
+
+<nav class="fixed top-0 left-0 right-0 z-50 backdrop-blur-md bg-background/80 border-b border-surface">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="flex items-center justify-between h-16">
+      <!-- Logo -->
+      <a href="/" class="flex items-center space-x-2 hover:opacity-80 transition-opacity">
+        <img src="/logo.svg" alt="Tether CLI" class="h-8" />
+      </a>
+
+      <!-- Desktop Nav -->
+      <div class="hidden md:flex items-center space-x-8">
+        {navItems.map((item) => (
+          <a
+            href={item.href}
+            class="text-muted hover:text-primary transition-colors font-mono text-sm"
+            target={item.external ? '_blank' : undefined}
+            rel={item.external ? 'noopener noreferrer' : undefined}
+            title={item.comingSoon ? 'Repository coming soon' : undefined}
+            onclick={item.comingSoon ? "event.preventDefault(); alert('Repository will be open sourced soon!');" : undefined}
+          >
+            {item.name}
+            {item.external && <span class="ml-1">↗</span>}
+            {item.comingSoon && <span class="ml-1 text-xs">(Soon)</span>}
+          </a>
+        ))}
+      </div>
+
+      <!-- Mobile Menu Button -->
+      <button
+        id="mobile-menu-button"
+        class="md:hidden p-2 text-muted hover:text-primary transition-colors"
+        aria-label="Toggle menu"
+      >
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- Mobile Menu -->
+  <div id="mobile-menu" class="hidden md:hidden border-t border-surface">
+    <div class="px-4 py-4 space-y-3">
+      {navItems.map((item) => (
+        <a
+          href={item.href}
+          class="block text-muted hover:text-primary transition-colors font-mono text-sm py-2"
+          target={item.external ? '_blank' : undefined}
+          rel={item.external ? 'noopener noreferrer' : undefined}
+          title={item.comingSoon ? 'Repository coming soon' : undefined}
+          onclick={item.comingSoon ? "event.preventDefault(); alert('Repository will be open sourced soon!');" : undefined}
+        >
+          {item.name}
+          {item.external && <span class="ml-1">↗</span>}
+          {item.comingSoon && <span class="ml-1 text-xs">(Soon)</span>}
+        </a>
+      ))}
+    </div>
+  </div>
+</nav>
+
+<script>
+  const button = document.getElementById('mobile-menu-button');
+  const menu = document.getElementById('mobile-menu');
+
+  button?.addEventListener('click', () => {
+    menu?.classList.toggle('hidden');
+  });
+</script>

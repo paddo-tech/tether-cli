@@ -1,0 +1,335 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Navbar from '../components/Navbar.astro';
+import Footer from '../components/Footer.astro';
+import AnimatedTerminal from '../components/AnimatedTerminal.astro';
+import FeatureCard from '../components/FeatureCard.astro';
+import GitHubStars from '../components/GitHubStars.astro';
+import InstallCommand from '../components/InstallCommand.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+
+const features = [
+  {
+    icon: '🔐',
+    title: 'End-to-End Encrypted',
+    description: 'AES-256-GCM encryption with keys stored in iCloud Keychain. Your dotfiles are encrypted before syncing to Git.',
+  },
+  {
+    icon: '🤖',
+    title: 'Automatic Sync',
+    description: 'Set it once, forget about it. Background daemon automatically syncs changes across all your Macs in real-time.',
+  },
+  {
+    icon: '👥',
+    title: 'Team Sync',
+    description: 'Share team configurations with automatic symlink management. Configs seamlessly sync to tool locations like ~/.claude/ for teams.',
+  },
+  {
+    icon: '📦',
+    title: 'Package Managers',
+    description: 'Syncs Homebrew (formulae, casks, taps), npm, and pnpm global packages. Never manually install again.',
+  },
+  {
+    icon: '🔍',
+    title: 'Secret Detection',
+    description: 'Automatically scans for API keys, tokens, and credentials before syncing. Prevents accidental leaks.',
+  },
+  {
+    icon: '⚡️',
+    title: 'Built in Rust',
+    description: 'Single binary, no dependencies. Fast, efficient, and reliable. <10MB size, <20MB memory usage.',
+  },
+];
+
+const comparisonData = [
+  { feature: 'Automatic Sync', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'End-to-End Encryption', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'Package Managers', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'Secret Detection', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'iCloud Keychain', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'Zero Config', tether: true, mackup: true, chezmoi: false, manual: false },
+];
+---
+
+<BaseLayout title="Tether CLI - Sync your development environment across Macs">
+  <Navbar />
+
+  <main class="pt-16">
+    <!-- Hero Section -->
+    <section class="relative overflow-hidden">
+      <div class="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-accent/10 pointer-events-none"></div>
+
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 lg:py-32">
+        <div class="grid lg:grid-cols-2 gap-12 items-center">
+          <!-- Left: Headline + CTA -->
+          <div class="space-y-8">
+            <div class="space-y-4">
+              <div class="flex flex-wrap gap-2">
+                <span class="px-3 py-1 bg-surface text-primary text-sm font-mono rounded-full border border-primary/30">
+                  Open Source
+                </span>
+                <span class="px-3 py-1 bg-surface text-success text-sm font-mono rounded-full border border-success/30">
+                  MIT License
+                </span>
+                <span class="px-3 py-1 bg-surface text-accent text-sm font-mono rounded-full border border-accent/30">
+                  Built in Rust
+                </span>
+              </div>
+
+              <h1 class="text-4xl sm:text-5xl lg:text-6xl font-bold font-mono leading-tight">
+                Stop copying configs between
+                <span class="gradient-text">Macs</span>
+              </h1>
+
+              <p class="text-xl text-muted leading-relaxed max-w-xl">
+                Open source tool that automatically syncs your shell configurations and packages across all your computers — encrypted and secure.
+              </p>
+            </div>
+
+            <div class="space-y-4">
+              <div class="flex flex-col sm:flex-row gap-4">
+                <!-- GitHub repo coming soon -->
+                <a
+                  href="#"
+                  class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-primary hover:bg-primary/90 text-background rounded-lg transition-all font-mono font-semibold cursor-not-allowed opacity-75"
+                  title="Repository will be open sourced soon"
+                  onclick="event.preventDefault(); alert('Repository will be open sourced soon!');"
+                >
+                  <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+                  </svg>
+                  <span>Star on GitHub (Coming Soon)</span>
+                </a>
+                <a
+                  href="/docs"
+                  class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-surface hover:bg-surface/80 text-text border border-surface rounded-lg transition-all font-mono"
+                >
+                  <span>Read Docs</span>
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                  </svg>
+                </a>
+              </div>
+
+              <InstallCommand command="brew install tether-cli" />
+            </div>
+          </div>
+
+          <!-- Right: Terminal Demo -->
+          <div class="lg:order-last">
+            <AnimatedTerminal />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features Grid -->
+    <section class="py-20 bg-gradient-to-b from-transparent to-surface/30">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-16">
+          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
+            Everything you need to sync your <span class="text-primary">dev environment</span>
+          </h2>
+          <p class="text-muted text-lg max-w-2xl mx-auto">
+            Tether combines automatic syncing, encryption, and package management into one seamless tool.
+          </p>
+        </div>
+
+        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {features.map((feature) => (
+            <FeatureCard {...feature} />
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- How It Works -->
+    <section class="py-20">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-16">
+          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
+            Simple setup, <span class="text-accent">automatic sync</span>
+          </h2>
+          <p class="text-muted text-lg">Three steps to synchronized bliss</p>
+        </div>
+
+        <div class="grid md:grid-cols-3 gap-8">
+          <div class="text-center space-y-4">
+            <div class="w-16 h-16 mx-auto bg-primary/10 rounded-full flex items-center justify-center border-2 border-primary">
+              <span class="text-2xl font-bold font-mono text-primary">1</span>
+            </div>
+            <h3 class="text-xl font-bold font-mono">Initialize</h3>
+            <CodeBlock code="tether init --repo git@github.com:you/dotfiles.git" copyable={false} />
+            <p class="text-muted">One-time setup with your private Git repository</p>
+          </div>
+
+          <div class="text-center space-y-4">
+            <div class="w-16 h-16 mx-auto bg-accent/10 rounded-full flex items-center justify-center border-2 border-accent">
+              <span class="text-2xl font-bold font-mono text-accent">2</span>
+            </div>
+            <h3 class="text-xl font-bold font-mono">Work Normally</h3>
+            <CodeBlock code="# Edit configs\nvim ~/.zshrc\n\n# Install packages\nbrew install ripgrep" copyable={false} />
+            <p class="text-muted">Make changes like you always do</p>
+          </div>
+
+          <div class="text-center space-y-4">
+            <div class="w-16 h-16 mx-auto bg-success/10 rounded-full flex items-center justify-center border-2 border-success">
+              <span class="text-2xl font-bold font-mono text-success">3</span>
+            </div>
+            <h3 class="text-xl font-bold font-mono">Auto-Sync</h3>
+            <CodeBlock code="# On your other Mac:\ntether status\n\n✓ Synced automatically\n✓ Everything up to date" copyable={false} />
+            <p class="text-muted">Changes sync automatically across machines</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Security Spotlight -->
+    <section class="py-20 bg-surface/30">
+      <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="bg-surface rounded-2xl p-8 lg:p-12 border border-primary/20">
+          <div class="grid lg:grid-cols-2 gap-8 items-center">
+            <div class="space-y-6">
+              <div class="inline-block px-4 py-1 bg-primary/10 text-primary text-sm font-mono rounded-full border border-primary/30">
+                Enterprise-Grade Security
+              </div>
+              <h2 class="text-3xl font-bold font-mono">
+                Your dotfiles are <span class="text-primary">personal</span>
+              </h2>
+              <p class="text-muted leading-relaxed">
+                Trust comes from transparency. Tether uses military-grade AES-256-GCM encryption with keys stored in iCloud Keychain. Automatic secret detection prevents accidental credential leaks.
+              </p>
+              <a
+                href="/security"
+                class="inline-flex items-center space-x-2 text-primary hover:text-accent transition-colors font-mono"
+              >
+                <span>Read full security architecture</span>
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 8l4 4m0 0l-4 4m4-4H3" />
+                </svg>
+              </a>
+            </div>
+
+            <div class="space-y-4">
+              <div class="bg-background p-4 rounded-lg border border-primary/10">
+                <div class="flex items-start space-x-3">
+                  <div class="text-2xl">🔐</div>
+                  <div>
+                    <h4 class="font-mono font-semibold mb-1">AES-256-GCM Encryption</h4>
+                    <p class="text-sm text-muted">Dotfiles encrypted before sync to Git</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bg-background p-4 rounded-lg border border-accent/10">
+                <div class="flex items-start space-x-3">
+                  <div class="text-2xl">🔑</div>
+                  <div>
+                    <h4 class="font-mono font-semibold mb-1">iCloud Keychain</h4>
+                    <p class="text-sm text-muted">Keys auto-sync via iCloud, never in Git</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bg-background p-4 rounded-lg border border-warning/10">
+                <div class="flex items-start space-x-3">
+                  <div class="text-2xl">🔍</div>
+                  <div>
+                    <h4 class="font-mono font-semibold mb-1">Secret Detection</h4>
+                    <p class="text-sm text-muted">Scans for API keys, tokens, credentials</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Comparison Table -->
+    <section class="py-20">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-12">
+          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
+            Why <span class="text-primary">Tether</span>?
+          </h2>
+          <p class="text-muted text-lg">Comparing dotfile sync solutions</p>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full bg-surface rounded-lg overflow-hidden border border-surface">
+            <thead class="bg-background border-b border-surface">
+              <tr>
+                <th class="px-6 py-4 text-left font-mono text-sm text-muted">Feature</th>
+                <th class="px-6 py-4 text-center font-mono text-sm text-primary">Tether</th>
+                <th class="px-6 py-4 text-center font-mono text-sm text-muted">mackup</th>
+                <th class="px-6 py-4 text-center font-mono text-sm text-muted">chezmoi</th>
+                <th class="px-6 py-4 text-center font-mono text-sm text-muted">Manual Git</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-surface">
+              {comparisonData.map((row) => (
+                <tr class="hover:bg-surface/50 transition-colors">
+                  <td class="px-6 py-4 font-mono text-sm">{row.feature}</td>
+                  <td class="px-6 py-4 text-center">
+                    {row.tether ? (
+                      <span class="text-success text-xl">✓</span>
+                    ) : (
+                      <span class="text-muted">—</span>
+                    )}
+                  </td>
+                  <td class="px-6 py-4 text-center">
+                    {row.mackup ? (
+                      <span class="text-success text-xl">✓</span>
+                    ) : (
+                      <span class="text-muted">—</span>
+                    )}
+                  </td>
+                  <td class="px-6 py-4 text-center">
+                    {row.chezmoi ? (
+                      <span class="text-success text-xl">✓</span>
+                    ) : (
+                      <span class="text-muted">—</span>
+                    )}
+                  </td>
+                  <td class="px-6 py-4 text-center">
+                    {row.manual ? (
+                      <span class="text-success text-xl">✓</span>
+                    ) : (
+                      <span class="text-muted">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Final CTA -->
+    <section class="py-20">
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        <div class="bg-gradient-to-br from-primary/20 to-accent/20 rounded-2xl p-12 border border-primary/30">
+          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
+            Ready to sync?
+          </h2>
+          <p class="text-muted text-lg mb-8 max-w-2xl mx-auto">
+            Join developers who've stopped manually copying configs. Open source, transparent, and free forever.
+          </p>
+
+          <div class="flex flex-col sm:flex-row gap-4 justify-center items-center">
+            <InstallCommand command="brew install tether-cli" label="Get Started" />
+            <!-- GitHub repo coming soon -->
+          </div>
+
+          <p class="text-sm text-muted mt-6 font-mono">
+            MIT Licensed • Made with ❤️ by the community
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <Footer />
+</BaseLayout>

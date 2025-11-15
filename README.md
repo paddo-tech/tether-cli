@@ -234,6 +234,14 @@ A: Yes! Share a sync repo to maintain consistent environments across your team. 
 **Q: What happens when I'm offline?**
 A: Changes are queued locally and synced when you're back online. Nothing is lost.
 
+## Repository Structure
+
+This is a monorepo containing:
+- **`/src`** - Tether CLI source code (Rust)
+- **`/website`** - Marketing website (Astro.js) at [tether-cli.com](https://tether-cli.com)
+
+See `/website/README.md` for website development instructions.
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) for details.

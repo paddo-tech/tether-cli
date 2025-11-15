@@ -1,0 +1,131 @@
+---
+interface Props {
+  commands?: Array<{ command: string; output?: string; delay?: number }>;
+}
+
+const { commands = [
+  {
+    command: 'tether init --repo git@github.com:user/dotfiles.git',
+    output: '✓ Encryption key generated and stored in Keychain\n✓ Synced 4 dotfiles (.zshrc, .gitconfig, .zprofile)\n✓ Synced 23 Homebrew packages\n✓ Daemon started successfully\n\nTether is now running! Your environment will sync automatically.',
+    delay: 1000,
+  },
+  {
+    command: 'tether status',
+    output: '✓ Daemon running (PID 12345)\n✓ Last sync: 2 seconds ago\n✓ Files tracked: 4\n✓ Machines: 2 (MacBook-Pro, MacBook-Air)\n\nEverything is in sync!',
+    delay: 3000,
+  },
+]} = Astro.props;
+
+const id = `terminal-${Math.random().toString(36).substr(2, 9)}`;
+---
+
+<div class="terminal-window bg-surface rounded-lg overflow-hidden border border-primary/20 shadow-lg terminal-glow">
+  <!-- Terminal Header -->
+  <div class="terminal-header flex items-center px-4 py-3 bg-background border-b border-primary/10">
+    <div class="flex space-x-2">
+      <div class="w-3 h-3 rounded-full bg-error/70"></div>
+      <div class="w-3 h-3 rounded-full bg-warning/70"></div>
+      <div class="w-3 h-3 rounded-full bg-success/70"></div>
+    </div>
+    <div class="flex-1 text-center">
+      <span class="text-muted text-sm font-mono">terminal</span>
+    </div>
+    <div class="w-16"></div>
+  </div>
+
+  <!-- Terminal Body -->
+  <div id={id} class="terminal-body p-6 font-mono text-sm min-h-[400px]">
+    <div class="terminal-prompt">
+      <span class="text-success">➜</span>
+      <span class="text-primary ml-2">~</span>
+      <span class="text-muted ml-2">$</span>
+      <span class="terminal-cursor ml-2">_</span>
+    </div>
+  </div>
+</div>
+
+<script define:vars={{ commands, id }}>
+  const terminalBody = document.getElementById(id);
+  if (!terminalBody) return;
+
+  let commandIndex = 0;
+
+  async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function typeText(text, container, speed = 30) {
+    for (let i = 0; i < text.length; i++) {
+      container.textContent += text[i];
+      await sleep(speed);
+    }
+  }
+
+  async function runCommand(cmd) {
+    // Create prompt line
+    const promptLine = document.createElement('div');
+    promptLine.className = 'flex items-center mb-2';
+    promptLine.innerHTML = `
+      <span class="text-success">➜</span>
+      <span class="text-primary ml-2">~</span>
+      <span class="text-muted ml-2">$</span>
+      <span class="ml-2 text-text"></span>
+    `;
+
+    terminalBody.appendChild(promptLine);
+
+    // Type the command
+    const commandSpan = promptLine.querySelector('span:last-child');
+    if (commandSpan) {
+      await typeText(cmd.command, commandSpan, 40);
+    }
+
+    await sleep(500);
+
+    // Show output
+    if (cmd.output) {
+      const outputDiv = document.createElement('div');
+      outputDiv.className = 'text-muted mb-4 whitespace-pre-wrap ml-4';
+      outputDiv.textContent = cmd.output;
+      terminalBody.appendChild(outputDiv);
+    }
+
+    await sleep(cmd.delay || 2000);
+  }
+
+  async function runAnimation() {
+    // Clear initial cursor
+    const initialPrompt = terminalBody.querySelector('.terminal-prompt');
+    if (initialPrompt) {
+      initialPrompt.remove();
+    }
+
+    for (const cmd of commands) {
+      await runCommand(cmd);
+      commandIndex++;
+    }
+
+    // Add final cursor
+    const finalPrompt = document.createElement('div');
+    finalPrompt.className = 'terminal-prompt flex items-center';
+    finalPrompt.innerHTML = `
+      <span class="text-success">➜</span>
+      <span class="text-primary ml-2">~</span>
+      <span class="text-muted ml-2">$</span>
+      <span class="terminal-cursor ml-2">_</span>
+    `;
+    terminalBody.appendChild(finalPrompt);
+  }
+
+  // Start animation when visible
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        runAnimation();
+        observer.disconnect();
+      }
+    });
+  });
+
+  observer.observe(terminalBody);
+</script>

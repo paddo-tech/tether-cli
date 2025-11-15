@@ -26,3 +26,9 @@ dist/
 # Release binaries
 tether
 tether-cli
+
+# Website
+website/node_modules/
+website/dist/
+website/.astro/
+website/bun.lockb

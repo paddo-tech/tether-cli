@@ -1,0 +1,99 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import CodeBlock from '../../components/CodeBlock.astro';
+---
+
+<DocsLayout
+  title="Documentation - Tether CLI"
+  description="Complete documentation for Tether CLI"
+>
+  <h1>Tether CLI Documentation</h1>
+
+  <p>
+    Welcome to the Tether CLI documentation! Tether is an open source tool that automatically syncs your development environment (dotfiles and packages) across multiple Macs with end-to-end encryption.
+  </p>
+
+  <h2>Quick Start</h2>
+
+  <p>Get up and running in under a minute:</p>
+
+  <CodeBlock code={`# Install via Homebrew
+brew install tether-cli
+
+# Initialize with your Git repository
+tether init --repo git@github.com:username/dotfiles.git
+
+# Done! Tether is now syncing automatically`} />
+
+  <h2>Key Features</h2>
+
+  <ul>
+    <li><strong>Automatic Syncing:</strong> Background daemon watches for changes and syncs in real-time</li>
+    <li><strong>End-to-End Encryption:</strong> AES-256-GCM encryption with keys in iCloud Keychain</li>
+    <li><strong>Package Manager Support:</strong> Syncs Homebrew, npm, and pnpm global packages</li>
+    <li><strong>Secret Detection:</strong> Prevents accidental syncing of API keys and credentials</li>
+    <li><strong>Git-Backed:</strong> Full version history and rollback capabilities</li>
+    <li><strong>Mac-Native:</strong> Optimized for macOS with system integrations</li>
+  </ul>
+
+  <h2>What Gets Synced?</h2>
+
+  <h3>Dotfiles (Encrypted)</h3>
+  <ul>
+    <li><code>.zshrc</code> - Shell configuration</li>
+    <li><code>.gitconfig</code> - Git settings</li>
+    <li><code>.zprofile</code> - Shell profile (optional)</li>
+    <li>Custom dotfiles you specify</li>
+  </ul>
+
+  <h3>Package Managers</h3>
+  <ul>
+    <li><strong>Homebrew:</strong> Formulae, casks, and taps (via Brewfile)</li>
+    <li><strong>npm:</strong> Global packages</li>
+    <li><strong>pnpm:</strong> Global packages</li>
+  </ul>
+
+  <h2>How It Works</h2>
+
+  <p>
+    Tether uses a Git repository as the sync backend. When you make changes to dotfiles or install packages,
+    the background daemon detects these changes, encrypts your dotfiles with AES-256-GCM, and pushes them
+    to your private Git repository. On your other machines, Tether pulls these changes and applies them automatically.
+  </p>
+
+  <p>
+    Encryption keys are stored securely in iCloud Keychain and automatically sync across your Macs.
+    Your dotfiles are stored as <code>.enc</code> files in Git, so even if someone gains access to your
+    repository, they cannot read your configurations without the encryption key.
+  </p>
+
+  <h2>Requirements</h2>
+
+  <ul>
+    <li><strong>Platform:</strong> macOS 11.0 (Big Sur) or later</li>
+    <li><strong>Shell:</strong> zsh (default on macOS)</li>
+    <li><strong>Git:</strong> Configured with GitHub, GitLab, or self-hosted Git server</li>
+    <li><strong>iCloud:</strong> Signed in for Keychain sync (for multi-machine setup)</li>
+  </ul>
+
+  <h2>Next Steps</h2>
+
+  <ul>
+    <li><a href="/docs/installation">Installation Guide</a> - Detailed installation instructions</li>
+    <li><a href="/docs/quick-start">Quick Start Tutorial</a> - Step-by-step setup guide</li>
+    <li><a href="/docs/commands">Command Reference</a> - All available commands</li>
+    <li><a href="/security">Security Architecture</a> - Deep dive into encryption and security</li>
+  </ul>
+
+  <h2>Getting Help</h2>
+
+  <p>
+    If you run into issues or have questions:
+  </p>
+
+  <ul>
+    <li><a href="#" onclick="event.preventDefault(); alert('Repository will be open sourced soon!');" title="Repository coming soon">Report an issue on GitHub (Coming Soon)</a></li>
+    <li><a href="#" onclick="event.preventDefault(); alert('Repository will be open sourced soon!');" title="Repository coming soon">Join discussions (Coming Soon)</a></li>
+    <li><a href="/docs/troubleshooting">Troubleshooting guide</a></li>
+  </ul>
+</DocsLayout>

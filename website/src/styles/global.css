@@ -1,0 +1,318 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Color Palette - Terminal/Developer Aesthetic */
+  --color-primary: #00d9ff;
+  --color-accent: #bd93f9;
+  --color-background: #0a0e14;
+  --color-surface: #1a1f29;
+  --color-text: #e6e6e6;
+  --color-muted: #8f9ba8;
+  --color-success: #7fd962;
+  --color-warning: #ffa500;
+  --color-error: #ff5555;
+
+  /* Typography */
+  --font-mono: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+
+  /* Spacing scale */
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --spacing-2xl: 3rem;
+  --spacing-3xl: 4rem;
+
+  /* Border radius */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+  --shadow-glow: 0 0 20px var(--color-primary);
+}
+
+/* Base styles */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-family: var(--font-sans);
+  background-color: var(--color-background);
+  color: var(--color-text);
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  line-height: 1.6;
+}
+
+code, pre {
+  font-family: var(--font-mono);
+}
+
+/* Custom utilities */
+@utility terminal-glow {
+  box-shadow: var(--shadow-glow);
+}
+
+@utility gradient-text {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-accent));
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Selection */
+::selection {
+  background-color: var(--color-primary);
+  color: var(--color-background);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Links */
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+
+a:hover {
+  color: var(--color-accent);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes typing {
+  from {
+    width: 0;
+  }
+  to {
+    width: 100%;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out;
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Component-specific styles */
+
+/* Terminal cursor blink */
+@keyframes blink {
+  0%, 50% {
+    opacity: 1;
+  }
+  50.1%, 100% {
+    opacity: 0;
+  }
+}
+
+.terminal-cursor {
+  animation: blink 1s step-end infinite;
+}
+
+.terminal-glow {
+  box-shadow: 0 0 30px rgba(0, 217, 255, 0.1);
+}
+
+.terminal-window:hover .terminal-glow {
+  box-shadow: 0 0 40px rgba(0, 217, 255, 0.2);
+}
+
+/* Install button */
+.install-button {
+  position: relative;
+}
+
+.install-button:hover {
+  transform: translateY(-2px);
+}
+
+.install-button:active {
+  transform: translateY(0);
+}
+
+/* Navbar shadow */
+nav {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+/* Code blocks */
+pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-muted) var(--color-surface);
+}
+
+code {
+  color: var(--color-text);
+  display: block;
+}
+
+/* Prose styles for documentation */
+.prose {
+  color: var(--color-text);
+}
+
+.prose h1 {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+  font-weight: 700;
+  font-size: 2.25rem;
+  margin-bottom: 1rem;
+}
+
+.prose h2 {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: 1.75rem;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--color-surface);
+  padding-bottom: 0.5rem;
+}
+
+.prose h3 {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+  font-weight: 600;
+  font-size: 1.25rem;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.prose p {
+  color: var(--color-muted);
+  line-height: 1.75;
+  margin-bottom: 1rem;
+}
+
+.prose code {
+  font-family: var(--font-mono);
+  background-color: var(--color-surface);
+  color: var(--color-primary);
+  padding: 0.125rem 0.375rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+}
+
+.prose pre {
+  background-color: var(--color-surface);
+  padding: 1rem;
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  margin: 1.5rem 0;
+}
+
+.prose pre code {
+  background-color: transparent;
+  padding: 0;
+  color: var(--color-text);
+}
+
+.prose a {
+  color: var(--color-primary);
+  text-decoration: none;
+  border-bottom: 1px solid var(--color-primary);
+}
+
+.prose a:hover {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+.prose ul, .prose ol {
+  color: var(--color-muted);
+  margin-left: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.prose li {
+  margin-bottom: 0.5rem;
+}
+
+.prose strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.prose blockquote {
+  border-left: 4px solid var(--color-primary);
+  padding-left: 1rem;
+  margin: 1.5rem 0;
+  color: var(--color-muted);
+  font-style: italic;
+}
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5rem 0;
+}
+
+.prose th {
+  background-color: var(--color-surface);
+  padding: 0.75rem;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  border: 1px solid var(--color-background);
+}
+
+.prose td {
+  padding: 0.75rem;
+  border: 1px solid var(--color-surface);
+}

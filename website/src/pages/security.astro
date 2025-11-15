@@ -1,0 +1,456 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Navbar from '../components/Navbar.astro';
+import Footer from '../components/Footer.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+---
+
+<BaseLayout
+  title="Security Architecture - Tether CLI"
+  description="Deep dive into Tether CLI's encryption, key management, and security architecture"
+>
+  <Navbar />
+
+  <main class="pt-16">
+    <!-- Hero -->
+    <section class="py-20 bg-gradient-to-br from-primary/10 to-accent/10">
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        <div class="inline-block px-4 py-1 bg-surface text-primary text-sm font-mono rounded-full border border-primary/30 mb-6">
+          Open Source & Transparent
+        </div>
+        <h1 class="text-4xl sm:text-5xl font-bold font-mono mb-6">
+          Security <span class="text-primary">Architecture</span>
+        </h1>
+        <p class="text-xl text-muted max-w-2xl mx-auto">
+          Don't trust us, verify the code. Complete transparency into how Tether protects your dotfiles.
+        </p>
+      </div>
+    </section>
+
+    <!-- Main Content -->
+    <section class="py-16">
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 space-y-16">
+
+        <!-- Overview -->
+        <div class="prose prose-invert max-w-none">
+          <h2 class="text-3xl font-bold font-mono mb-4 text-text">Security Philosophy</h2>
+          <p class="text-muted leading-relaxed">
+            Your dotfiles contain sensitive information about your development environment. Tether is built on the principle that
+            <strong class="text-text">you own your data</strong> and should have complete control over it. We achieve this through:
+          </p>
+          <ul class="text-muted space-y-2">
+            <li><strong class="text-text">End-to-end encryption</strong> - Files encrypted locally before syncing</li>
+            <li><strong class="text-text">Open source code</strong> - Every line of code is auditable</li>
+            <li><strong class="text-text">Your infrastructure</strong> - Uses your Git repo and iCloud Keychain</li>
+            <li><strong class="text-text">Zero trust</strong> - Tether never sees your data or keys</li>
+          </ul>
+        </div>
+
+        <!-- Encryption Details -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Encryption Implementation</h2>
+
+          <div class="bg-surface p-6 rounded-lg border border-primary/20">
+            <h3 class="text-xl font-mono font-semibold mb-3 text-text">AES-256-GCM</h3>
+            <p class="text-muted mb-4">
+              Tether uses <strong class="text-primary">AES-256-GCM</strong> (Galois/Counter Mode), an industry-standard
+              authenticated encryption algorithm that provides both confidentiality and integrity.
+            </p>
+
+            <ul class="space-y-2 text-muted">
+              <li><strong class="text-text">Algorithm:</strong> AES-256-GCM (Advanced Encryption Standard)</li>
+              <li><strong class="text-text">Key Size:</strong> 256 bits (32 bytes)</li>
+              <li><strong class="text-text">Nonce Size:</strong> 96 bits (12 bytes), randomly generated per operation</li>
+              <li><strong class="text-text">Authentication:</strong> Built-in tamper detection via authentication tag</li>
+            </ul>
+
+            <div class="mt-4 text-sm">
+              <span class="text-muted font-mono">
+                Source code will be available when repository is open sourced
+              </span>
+            </div>
+          </div>
+
+          <div class="bg-surface p-6 rounded-lg border border-accent/20">
+            <h3 class="text-xl font-mono font-semibold mb-3 text-text">Encryption Flow</h3>
+            <ol class="space-y-3 text-muted list-decimal list-inside">
+              <li>Dotfile changes detected (e.g., <code class="text-primary bg-background px-2 py-1 rounded text-sm">~/.zshrc</code>)</li>
+              <li>Generate random 96-bit nonce for this operation</li>
+              <li>Read file contents as plaintext</li>
+              <li>Encrypt using AES-256-GCM with key from Keychain + nonce</li>
+              <li>Prepend nonce to ciphertext (needed for decryption)</li>
+              <li>Save as <code class="text-primary bg-background px-2 py-1 rounded text-sm">.zshrc.enc</code> in Git repo</li>
+              <li>Commit and push to remote Git repository</li>
+            </ol>
+
+            <CodeBlock
+              code={`// Simplified encryption pseudocode
+fn encrypt_file(path: &Path, key: &[u8; 32]) -> Result<()> {
+    // Generate fresh random nonce
+    let nonce = random_nonce(); // 96 bits
+
+    // Read plaintext
+    let plaintext = read_file(path)?;
+
+    // Encrypt with AES-256-GCM
+    let ciphertext = aes_gcm_encrypt(&plaintext, key, &nonce)?;
+
+    // Prepend nonce (needed for decryption)
+    let encrypted_data = [nonce, ciphertext].concat();
+
+    // Write to .enc file in Git repo
+    write_encrypted(path, &encrypted_data)?;
+
+    Ok(())
+}`}
+              language="rust"
+            />
+
+            <div class="mt-4 text-sm">
+              <span class="text-muted font-mono">
+                Source code will be available when repository is open sourced
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Key Management -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Key Management</h2>
+
+          <div class="bg-surface p-6 rounded-lg border border-success/20">
+            <h3 class="text-xl font-mono font-semibold mb-3 text-text">iCloud Keychain Integration</h3>
+            <p class="text-muted mb-4">
+              Encryption keys are stored in <strong class="text-text">iCloud Keychain</strong>, Apple's secure credential storage system.
+              This provides automatic synchronization across your Macs without requiring manual key management.
+            </p>
+
+            <h4 class="font-mono font-semibold text-text mt-6 mb-2">First Machine (Key Generation)</h4>
+            <ol class="space-y-2 text-muted list-decimal list-inside">
+              <li>Run <code class="text-primary bg-background px-2 py-1 rounded text-sm">tether init</code></li>
+              <li>Generate cryptographically random 256-bit key</li>
+              <li>Store key in Keychain with service: <code class="text-primary bg-background px-2 py-1 rounded text-sm">com.tether-cli.encryption</code></li>
+              <li>Mark as synchronizable (syncs via iCloud)</li>
+              <li>Continue with dotfile sync</li>
+            </ol>
+
+            <h4 class="font-mono font-semibold text-text mt-6 mb-2">Additional Machines (Key Retrieval)</h4>
+            <ol class="space-y-2 text-muted list-decimal list-inside">
+              <li>Run <code class="text-primary bg-background px-2 py-1 rounded text-sm">tether init</code> on second Mac</li>
+              <li>Check iCloud Keychain for existing key</li>
+              <li>If found, use existing key (automatic sync via iCloud)</li>
+              <li>Decrypt dotfiles from Git using synced key</li>
+              <li>Ready to sync!</li>
+            </ol>
+
+            <CodeBlock
+              code={`// Simplified Keychain integration
+fn get_or_create_key() -> Result<[u8; 32]> {
+    let keychain = Keychain::default();
+
+    // Try to retrieve existing key from iCloud Keychain
+    if let Ok(key) = keychain.get("com.tether-cli.encryption") {
+        return Ok(key);
+    }
+
+    // No key found, generate new one
+    let new_key = generate_random_key();
+
+    // Store in Keychain with iCloud sync enabled
+    keychain.set(
+        "com.tether-cli.encryption",
+        &new_key,
+        KeychainAccess::AfterFirstUnlock,
+        true, // synchronizable via iCloud
+    )?;
+
+    Ok(new_key)
+}`}
+              language="rust"
+            />
+
+            <div class="mt-4 text-sm">
+              <span class="text-muted font-mono">
+                Source code will be available when repository is open sourced
+              </span>
+            </div>
+          </div>
+
+          <div class="bg-warning/10 border border-warning/30 p-4 rounded-lg">
+            <h4 class="font-mono font-semibold text-warning flex items-center mb-2">
+              <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              Important: Encryption Keys Never Touch Git
+            </h4>
+            <p class="text-muted text-sm">
+              Your encryption keys are <strong>never</strong> stored in Git, never transmitted to GitHub/GitLab,
+              and never leave your devices except via encrypted iCloud Keychain sync between your own Macs.
+            </p>
+          </div>
+        </div>
+
+        <!-- Secret Detection -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Secret Detection</h2>
+
+          <div class="bg-surface p-6 rounded-lg border border-warning/20">
+            <h3 class="text-xl font-mono font-semibold mb-3 text-text">Preventing Credential Leaks</h3>
+            <p class="text-muted mb-4">
+              Before syncing dotfiles, Tether scans for accidentally committed secrets using pattern matching.
+              If detected, it warns you and shows redacted versions of the secrets found.
+            </p>
+
+            <h4 class="font-mono font-semibold text-text mt-4 mb-2">Detected Secret Types</h4>
+            <ul class="space-y-1 text-muted">
+              <li>• AWS Access Keys (<code class="text-primary bg-background px-2 py-1 rounded text-sm">AKIA...</code>)</li>
+              <li>• GitHub Personal Access Tokens (<code class="text-primary bg-background px-2 py-1 rounded text-sm">ghp_...</code>, <code class="text-primary bg-background px-2 py-1 rounded text-sm">gho_...</code>)</li>
+              <li>• Generic API keys (patterns like <code class="text-primary bg-background px-2 py-1 rounded text-sm">API_KEY=...</code>)</li>
+              <li>• SSH/RSA private keys (<code class="text-primary bg-background px-2 py-1 rounded text-sm">-----BEGIN ... PRIVATE KEY-----</code>)</li>
+              <li>• Passwords in configs (<code class="text-primary bg-background px-2 py-1 rounded text-sm">password=...</code>)</li>
+              <li>• Database URLs with credentials</li>
+              <li>• Bearer tokens</li>
+              <li>• High-entropy strings (potential secrets)</li>
+            </ul>
+
+            <div class="mt-6 bg-background p-4 rounded border border-warning/10">
+              <div class="text-sm text-muted font-mono">
+                <div class="text-warning mb-2">⚠ Warning: Potential secrets detected in .zshrc</div>
+                <div class="ml-4 space-y-1">
+                  <div>Line 42: <code class="text-error">AWS_ACCESS_KEY_ID="AKIA****************ABCD"</code></div>
+                  <div>Line 43: <code class="text-error">AWS_SECRET_ACCESS_KEY="************************************"</code></div>
+                  <div>Line 67: <code class="text-error">GITHUB_TOKEN="ghp_****************************"</code></div>
+                </div>
+                <div class="mt-4 text-muted">
+                  Continue syncing? (y/N)
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4 text-sm">
+              <span class="text-muted font-mono">
+                Source code will be available when repository is open sourced
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Privacy Model -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Privacy Model</h2>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="bg-surface p-6 rounded-lg border border-success/20">
+              <h3 class="text-lg font-mono font-semibold mb-3 text-success flex items-center">
+                <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                You Own
+              </h3>
+              <ul class="space-y-2 text-muted text-sm">
+                <li>• Your Git repository (GitHub/GitLab/self-hosted)</li>
+                <li>• Your iCloud Keychain data</li>
+                <li>• Your encryption keys</li>
+                <li>• Your dotfiles (plaintext local, encrypted remote)</li>
+              </ul>
+            </div>
+
+            <div class="bg-surface p-6 rounded-lg border border-primary/20">
+              <h3 class="text-lg font-mono font-semibold mb-3 text-primary flex items-center">
+                <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                What's Private
+              </h3>
+              <ul class="space-y-2 text-muted text-sm">
+                <li>• Dotfile contents (encrypted in Git)</li>
+                <li>• Encryption keys (Keychain only)</li>
+                <li>• No telemetry or tracking</li>
+                <li>• No external services used</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="bg-primary/10 border border-primary/30 p-6 rounded-lg">
+            <h3 class="text-lg font-mono font-semibold mb-3 text-primary">Zero Knowledge Architecture</h3>
+            <p class="text-muted text-sm">
+              Tether operates on a <strong class="text-text">zero-knowledge principle</strong>. The application itself
+              never transmits your data to any servers we control. Everything stays between your devices, your Git repository,
+              and your iCloud Keychain. We literally cannot access your data even if we wanted to.
+            </p>
+          </div>
+        </div>
+
+        <!-- Threat Model -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Threat Model</h2>
+
+          <div class="space-y-4">
+            <div class="bg-surface p-4 rounded-lg border-l-4 border-success">
+              <h4 class="font-mono font-semibold text-text mb-2">✓ What Tether Protects Against</h4>
+              <ul class="text-muted text-sm space-y-1">
+                <li>• Unauthorized access to your Git repository (encrypted data)</li>
+                <li>• Man-in-the-middle attacks during Git sync</li>
+                <li>• Accidental credential exposure (secret detection)</li>
+                <li>• Data tampering (authenticated encryption)</li>
+              </ul>
+            </div>
+
+            <div class="bg-surface p-4 rounded-lg border-l-4 border-warning">
+              <h4 class="font-mono font-semibold text-text mb-2">⚠ What Tether Doesn't Protect Against</h4>
+              <ul class="text-muted text-sm space-y-1">
+                <li>• Compromised local machine (dotfiles are plaintext locally)</li>
+                <li>• Stolen iCloud credentials (attacker could access Keychain)</li>
+                <li>• Malicious Git server (could serve wrong encrypted data)</li>
+                <li>• Physical access to unlocked Mac</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Best Practices -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Security Best Practices</h2>
+
+          <div class="space-y-3">
+            <div class="bg-surface p-4 rounded-lg">
+              <h4 class="font-mono font-semibold text-text mb-2">1. Use a Private Git Repository</h4>
+              <p class="text-muted text-sm">
+                Always use a private repository. Even though dotfiles are encrypted, there's no reason to make the encrypted
+                data publicly accessible.
+              </p>
+            </div>
+
+            <div class="bg-surface p-4 rounded-lg">
+              <h4 class="font-mono font-semibold text-text mb-2">2. Enable 2FA on GitHub/GitLab</h4>
+              <p class="text-muted text-sm">
+                Protect your Git repository with two-factor authentication to prevent unauthorized access.
+              </p>
+            </div>
+
+            <div class="bg-surface p-4 rounded-lg">
+              <h4 class="font-mono font-semibold text-text mb-2">3. Secure Your iCloud Account</h4>
+              <p class="text-muted text-sm">
+                Use a strong password and enable two-factor authentication on your Apple ID. Your encryption keys sync via iCloud Keychain.
+              </p>
+            </div>
+
+            <div class="bg-surface p-4 rounded-lg">
+              <h4 class="font-mono font-semibold text-text mb-2">4. Review Secret Warnings</h4>
+              <p class="text-muted text-sm">
+                When Tether detects potential secrets, review them carefully. Consider using environment variables or
+                a dedicated secrets manager for sensitive credentials.
+              </p>
+            </div>
+
+            <div class="bg-surface p-4 rounded-lg">
+              <h4 class="font-mono font-semibold text-text mb-2">5. Enable FileVault</h4>
+              <p class="text-muted text-sm">
+                Enable full-disk encryption on your Mac. This protects your local plaintext dotfiles if your device is stolen.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Verification -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Verify the Code</h2>
+
+          <div class="bg-gradient-to-br from-primary/20 to-accent/20 p-8 rounded-lg border border-primary/30">
+            <h3 class="text-xl font-mono font-semibold mb-4 text-text">Don't Trust, Verify</h3>
+            <p class="text-muted mb-6">
+              Tether is fully open source. You can (and should!) review the security-critical code yourself:
+            </p>
+
+            <div class="grid md:grid-cols-2 gap-4">
+              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
+                <div class="font-mono font-semibold text-muted mb-1">encryption.rs</div>
+                <div class="text-sm text-muted">AES-256-GCM implementation</div>
+              </div>
+
+              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
+                <div class="font-mono font-semibold text-muted mb-1">keychain.rs</div>
+                <div class="text-sm text-muted">iCloud Keychain integration</div>
+              </div>
+
+              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
+                <div class="font-mono font-semibold text-muted mb-1">secret_detection.rs</div>
+                <div class="text-sm text-muted">Secret scanning patterns</div>
+              </div>
+
+              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
+                <div class="font-mono font-semibold text-muted mb-1">Cargo.toml</div>
+                <div class="text-sm text-muted">Dependencies and versions</div>
+              </div>
+            </div>
+
+            <div class="mt-6 text-center">
+              <p class="text-muted font-mono">
+                Repository will be open sourced soon
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reporting -->
+        <div class="space-y-6">
+          <h2 class="text-3xl font-bold font-mono text-text">Security Vulnerability Reporting</h2>
+
+          <div class="bg-surface p-6 rounded-lg border border-error/20">
+            <p class="text-muted mb-4">
+              If you discover a security vulnerability in Tether CLI, please report it responsibly:
+            </p>
+
+            <ol class="space-y-2 text-muted list-decimal list-inside">
+              <li><strong class="text-text">DO NOT</strong> open a public GitHub issue</li>
+              <li>Email security concerns to: <code class="text-primary bg-background px-2 py-1 rounded">security@tether-cli.com</code></li>
+              <li>Provide details: affected versions, reproduction steps, potential impact</li>
+              <li>Allow reasonable time for a fix before public disclosure</li>
+            </ol>
+
+            <p class="text-muted mt-4 text-sm">
+              We take security seriously and will respond to legitimate reports within 48 hours.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="py-16 bg-surface/30">
+      <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        <h2 class="text-3xl font-bold font-mono mb-4">
+          Security through <span class="text-primary">transparency</span>
+        </h2>
+        <p class="text-muted mb-8">
+          Every line of Tether's security code is open for review. Because your dotfiles deserve the best protection.
+        </p>
+        <div class="flex flex-col sm:flex-row gap-4 justify-center">
+          <a
+            href="#"
+            class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-primary hover:bg-primary/90 text-background rounded-lg transition-all font-mono font-semibold cursor-not-allowed opacity-75"
+            title="Repository will be open sourced soon"
+            onclick="event.preventDefault(); alert('Repository will be open sourced soon!');"
+          >
+            <span>Review the Code (Coming Soon)</span>
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+          </a>
+          <a
+            href="/docs"
+            class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-surface hover:bg-surface/80 text-text border border-surface rounded-lg transition-all font-mono"
+          >
+            <span>Read Documentation</span>
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+            </svg>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <Footer />
+</BaseLayout>

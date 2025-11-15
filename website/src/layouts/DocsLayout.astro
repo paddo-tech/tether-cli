@@ -1,0 +1,110 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import Navbar from '../components/Navbar.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description } = Astro.props;
+
+const docSections = [
+  {
+    title: 'Getting Started',
+    pages: [
+      { title: 'Introduction', href: '/docs' },
+      { title: 'Installation', href: '/docs/installation' },
+      { title: 'Quick Start', href: '/docs/quick-start' },
+    ],
+  },
+  {
+    title: 'Core Concepts',
+    pages: [
+      { title: 'How Tether Works', href: '/docs/how-it-works' },
+      { title: 'Encryption & Security', href: '/docs/encryption' },
+      { title: 'Git Backend', href: '/docs/git-backend' },
+    ],
+  },
+  {
+    title: 'Commands',
+    pages: [
+      { title: 'Overview', href: '/docs/commands' },
+      { title: 'tether init', href: '/docs/commands/init' },
+      { title: 'tether sync', href: '/docs/commands/sync' },
+      { title: 'tether status', href: '/docs/commands/status' },
+      { title: 'tether daemon', href: '/docs/commands/daemon' },
+    ],
+  },
+  {
+    title: 'Configuration',
+    pages: [
+      { title: 'config.toml', href: '/docs/config' },
+      { title: 'Ignore Patterns', href: '/docs/ignore' },
+    ],
+  },
+  {
+    title: 'Package Managers',
+    pages: [
+      { title: 'Homebrew', href: '/docs/package-managers/homebrew' },
+      { title: 'npm & pnpm', href: '/docs/package-managers/npm-pnpm' },
+    ],
+  },
+  {
+    title: 'Advanced',
+    pages: [
+      { title: 'Troubleshooting', href: '/docs/troubleshooting' },
+      { title: 'Contributing', href: '/docs/contributing' },
+    ],
+  },
+];
+
+const currentPath = Astro.url.pathname;
+---
+
+<BaseLayout title={title} description={description}>
+  <Navbar />
+
+  <div class="pt-16 min-h-screen">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div class="grid lg:grid-cols-4 gap-8">
+        <!-- Sidebar -->
+        <aside class="lg:col-span-1">
+          <nav class="sticky top-24 space-y-6">
+            {docSections.map((section) => (
+              <div>
+                <h3 class="font-mono font-semibold text-text mb-2">{section.title}</h3>
+                <ul class="space-y-1">
+                  {section.pages.map((page) => (
+                    <li>
+                      <a
+                        href={page.href}
+                        class={`block py-1 px-3 rounded text-sm transition-colors ${
+                          currentPath === page.href || currentPath === page.href + '/'
+                            ? 'bg-primary/10 text-primary font-medium'
+                            : 'text-muted hover:text-primary hover:bg-surface/50'
+                        }`}
+                      >
+                        {page.title}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="lg:col-span-3">
+          <article class="prose prose-invert max-w-none">
+            <slot />
+          </article>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <Footer />
+</BaseLayout>
