@@ -1,6 +1,12 @@
 use crate::config::Config;
+use crate::daemon::DaemonServer;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::fs::{self, OpenOptions};
+use std::io;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use tokio::time::{sleep, Duration};
 
 #[derive(Parser)]
 #[command(name = "tether")]
@@ -9,6 +15,23 @@ use clap::{Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+struct DaemonPaths {
+    dir: PathBuf,
+    pid: PathBuf,
+    log: PathBuf,
+}
+
+impl DaemonPaths {
+    fn new() -> Result<Self> {
+        let dir = Config::config_dir()?;
+        Ok(Self {
+            pid: dir.join("daemon.pid"),
+            log: dir.join("daemon.log"),
+            dir,
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -86,6 +109,9 @@ pub enum DaemonAction {
     Restart,
     /// View daemon logs
     Logs,
+    /// Internal daemon runner
+    #[command(hide = true)]
+    Run,
 }
 
 #[derive(Subcommand)]
@@ -278,8 +304,9 @@ impl Cli {
         // Start daemon if requested
         if !no_daemon {
             Output::info("Starting daemon...");
-            // TODO: Start daemon
-            Output::warning("Daemon support coming soon - run 'tether daemon start' manually");
+            if let Err(err) = self.daemon_start().await {
+                Output::warning(&format!("Failed to start daemon automatically: {}", err));
+            }
         }
 
         Output::success("Tether initialized successfully!");
@@ -1168,6 +1195,15 @@ impl Cli {
         println!();
 
         // Daemon table
+        let pid = Self::read_daemon_pid()?;
+        let (status_label, status_color) = match pid {
+            Some(pid) if Self::is_process_running(pid) => {
+                (format!("● Running (PID {pid})"), Color::Green)
+            }
+            Some(pid) => (format!("● Not running (stale PID {pid})"), Color::Yellow),
+            None => ("● Not running".to_string(), Color::Yellow),
+        };
+
         let mut daemon_table = Table::new();
         daemon_table
             .load_preset(UTF8_FULL)
@@ -1180,11 +1216,11 @@ impl Cli {
             ])
             .add_row(vec![
                 Cell::new("Status"),
-                Cell::new("● Not running").fg(Color::Yellow),
+                Cell::new(status_label).fg(status_color),
             ])
             .add_row(vec![
                 Cell::new("Info"),
-                Cell::new("Daemon support coming soon"),
+                Cell::new(format!("Log file: {}", Self::daemon_log_path()?.display())),
             ]);
         println!("{daemon_table}");
         println!();
@@ -1289,10 +1325,27 @@ impl Cli {
         Ok(())
     }
 
-    async fn daemon(&self, _action: &DaemonAction) -> Result<()> {
-        crate::cli::Output::info("Daemon...");
-        // TODO: Implement daemon control
-        Ok(())
+    async fn daemon(&self, action: &DaemonAction) -> Result<()> {
+        use crate::cli::Output;
+
+        match action {
+            DaemonAction::Start => {
+                Output::info("Starting daemon...");
+                self.daemon_start().await
+            }
+            DaemonAction::Stop => {
+                Output::info("Stopping daemon...");
+                self.daemon_stop().await
+            }
+            DaemonAction::Restart => {
+                Output::info("Restarting daemon...");
+                self.daemon_stop().await?;
+                sleep(Duration::from_millis(500)).await;
+                self.daemon_start().await
+            }
+            DaemonAction::Logs => self.daemon_logs().await,
+            DaemonAction::Run => self.daemon_run().await,
+        }
     }
 
     async fn machines(&self, _action: &MachineAction) -> Result<()> {
@@ -2076,6 +2129,168 @@ impl Cli {
             }
         }
         println!();
+    }
+
+    async fn daemon_start(&self) -> Result<()> {
+        use crate::cli::Output;
+
+        let paths = DaemonPaths::new()?;
+        fs::create_dir_all(&paths.dir)?;
+
+        if let Some(pid) = Self::read_daemon_pid()? {
+            if Self::is_process_running(pid) {
+                Output::info(&format!("Daemon already running (PID {pid})"));
+                return Ok(());
+            } else {
+                let _ = Self::cleanup_pid_file(Some(pid));
+            }
+        }
+
+        let exe = std::env::current_exe()?;
+
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&paths.log)?;
+        let stderr = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&paths.log)?;
+
+        let child = Command::new(exe)
+            .arg("daemon")
+            .arg("run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .spawn()?;
+
+        let pid = child.id();
+        fs::write(&paths.pid, pid.to_string())?;
+        Output::success(&format!("Daemon started (PID {pid})"));
+        Ok(())
+    }
+
+    async fn daemon_stop(&self) -> Result<()> {
+        use crate::cli::Output;
+
+        let paths = DaemonPaths::new()?;
+        let pid = match Self::read_daemon_pid()? {
+            Some(pid) => pid,
+            None => {
+                Output::info("Daemon is not running");
+                return Ok(());
+            }
+        };
+
+        if !Self::is_process_running(pid) {
+            Output::info("Daemon is not running");
+            let _ = Self::cleanup_pid_file(Some(pid));
+            return Ok(());
+        }
+
+        let signal_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if signal_result != 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::NotFound {
+                return Err(anyhow::anyhow!("Failed to stop daemon: {}", err));
+            }
+        }
+
+        for _ in 0..20 {
+            if !Self::is_process_running(pid) {
+                break;
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+
+        if Self::is_process_running(pid) {
+            return Err(anyhow::anyhow!(
+                "Daemon did not exit after signaling. Check logs: {}",
+                paths.log.display()
+            ));
+        }
+
+        Self::cleanup_pid_file(Some(pid))?;
+        Output::success("Daemon stopped");
+        Ok(())
+    }
+
+    async fn daemon_logs(&self) -> Result<()> {
+        use crate::cli::Output;
+
+        let log_path = Self::daemon_log_path()?;
+        if !log_path.exists() {
+            Output::info("No daemon logs yet");
+            return Ok(());
+        }
+
+        Output::info(&format!("Showing daemon logs ({})", log_path.display()));
+        let content = fs::read_to_string(&log_path)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(50);
+
+        for line in &lines[start..] {
+            println!("{line}");
+        }
+
+        Ok(())
+    }
+
+    async fn daemon_run(&self) -> Result<()> {
+        let mut server = DaemonServer::new();
+        let pid = std::process::id();
+        log::info!("Daemon process starting (PID {pid})");
+        let result = server.run().await;
+        if let Err(err) = Self::cleanup_pid_file(Some(pid)) {
+            log::warn!("Failed to clean up daemon pid file: {err}");
+        }
+        result
+    }
+
+    fn daemon_log_path() -> Result<PathBuf> {
+        Ok(DaemonPaths::new()?.log)
+    }
+
+    fn read_daemon_pid() -> Result<Option<u32>> {
+        let pid_path = DaemonPaths::new()?.pid;
+        if !pid_path.exists() {
+            return Ok(None);
+        }
+
+        let contents = fs::read_to_string(&pid_path)?;
+        match contents.trim().parse::<u32>() {
+            Ok(pid) if pid > 0 => Ok(Some(pid)),
+            _ => Ok(None),
+        }
+    }
+
+    fn is_process_running(pid: u32) -> bool {
+        unsafe {
+            if libc::kill(pid as libc::pid_t, 0) == 0 {
+                true
+            } else {
+                let err = io::Error::last_os_error();
+                err.kind() != io::ErrorKind::NotFound
+            }
+        }
+    }
+
+    fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
+        let paths = DaemonPaths::new()?;
+        if !paths.pid.exists() {
+            return Ok(());
+        }
+
+        let contents = fs::read_to_string(&paths.pid)?;
+        if expected_pid
+            .map(|pid| contents.trim() == pid.to_string())
+            .unwrap_or(true)
+        {
+            let _ = fs::remove_file(&paths.pid);
+        }
+
+        Ok(())
     }
 
     // Helper method for repository setup wizard

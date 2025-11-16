@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_github_token_detection() {
         let scanner = SecretScanner::new().unwrap();
-        let content = "GITHUB_TOKEN=ghp_1234567890123456789012345678901234";
+        let content = "GITHUB_TOKEN=ghp_123456789012345678901234567890123456";
         let findings = scanner.scan_content(content);
         assert!(!findings.is_empty());
     }
