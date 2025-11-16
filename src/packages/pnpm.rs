@@ -1,14 +1,8 @@
 use super::{PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde_json::Value;
 use tokio::process::Command;
-
-#[derive(Debug, Deserialize)]
-struct PnpmPackage {
-    name: Option<String>,
-    version: Option<String>,
-}
 
 pub struct PnpmManager;
 
@@ -42,17 +36,27 @@ impl PackageManager for PnpmManager {
             .run_pnpm(&["list", "-g", "--depth=0", "--json"])
             .await?;
 
-        let packages_data: Vec<PnpmPackage> = serde_json::from_str(&output)?;
-
+        let json: Value = serde_json::from_str(&output)?;
         let mut packages = Vec::new();
-        for pkg in packages_data {
-            if let Some(name) = pkg.name {
-                // Skip pnpm itself
-                if name != "pnpm" {
-                    packages.push(PackageInfo {
-                        name,
-                        version: pkg.version,
-                    });
+
+        if let Value::Array(entries) = json {
+            for entry in entries {
+                if let Some(deps) = entry.get("dependencies").and_then(Value::as_object) {
+                    for (name, dep_info) in deps {
+                        if name == "pnpm" {
+                            continue;
+                        }
+
+                        let version = dep_info
+                            .get("version")
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_string());
+
+                        packages.push(PackageInfo {
+                            name: name.to_string(),
+                            version,
+                        });
+                    }
                 }
             }
         }

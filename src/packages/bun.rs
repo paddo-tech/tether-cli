@@ -31,7 +31,18 @@ impl Default for BunManager {
 #[async_trait]
 impl PackageManager for BunManager {
     async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
-        let output = self.run_bun(&["pm", "ls", "-g"]).await?;
+        let output = match self.run_bun(&["pm", "ls", "-g"]).await {
+            Ok(out) => out,
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("No package.json was found") {
+                    // Bun hasn't created the global install metadata yet.
+                    // Treat this as "no global packages" instead of failing the sync.
+                    return Ok(Vec::new());
+                }
+                return Err(err);
+            }
+        };
 
         let mut packages = Vec::new();
 
