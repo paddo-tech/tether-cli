@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::daemon::DaemonServer;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use inquire::Select as InquireSelect;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
@@ -142,6 +143,8 @@ pub enum ConfigAction {
     Set { key: String, value: String },
     /// Open config in editor
     Edit,
+    /// Interactive UI for managing files, folders, and patterns
+    Dotfiles,
 }
 
 #[derive(Subcommand)]
@@ -1506,7 +1509,154 @@ impl Cli {
 
                 Ok(())
             }
+
+            ConfigAction::Dotfiles => self.config_manage_dotfiles().await,
         }
+    }
+
+    async fn config_manage_dotfiles(&self) -> Result<()> {
+        use crate::cli::{Output, Prompt};
+
+        let mut config = Config::load()?;
+        let mut cursor = 0usize;
+
+        loop {
+            Output::header("Dotfile Sync Manager");
+            Self::render_entry_table("Files", &config.dotfiles.files);
+            Self::render_entry_table("Folders", &config.dotfiles.dirs);
+            Self::render_entry_table("Project Patterns", &config.project_configs.patterns);
+
+            let options = vec!["Files", "Folders", "Project Patterns", "Done"];
+            let choice = Prompt::select(
+                "Choose a section to manage",
+                options.clone(),
+                cursor.min(options.len() - 1),
+            )?;
+            cursor = choice;
+
+            let changed = match choice {
+                0 => Some(Self::manage_entry_list(
+                    "Files",
+                    "file path (e.g., ~/.zshrc)",
+                    &mut config.dotfiles.files,
+                )?),
+                1 => Some(Self::manage_entry_list(
+                    "Folders",
+                    "folder path (e.g., ~/.claude)",
+                    &mut config.dotfiles.dirs,
+                )?),
+                2 => Some(Self::manage_entry_list(
+                    "Project Patterns",
+                    "pattern (e.g., .env.local)",
+                    &mut config.project_configs.patterns,
+                )?),
+                _ => None,
+            };
+
+            if let Some(should_save) = changed {
+                if should_save {
+                    config.save()?;
+                    Output::success("Configuration updated");
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn manage_entry_list(
+        title: &str,
+        prompt_label: &str,
+        entries: &mut Vec<String>,
+    ) -> Result<bool> {
+        use crate::cli::{Output, Prompt};
+
+        let mut changed = false;
+        loop {
+            println!();
+            Self::render_entry_table(title, entries);
+            let actions = vec!["Add", "Remove", "Back"];
+            let choice =
+                Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+
+            match choice {
+                0 => {
+                    let input = Prompt::input(&format!("Enter {}", prompt_label), None)?;
+                    let value = input.trim();
+                    if value.is_empty() {
+                        Output::warning("Value cannot be empty");
+                        continue;
+                    }
+                    if entries.iter().any(|item| item == value) {
+                        Output::warning("Already tracked");
+                        continue;
+                    }
+                    entries.push(value.to_string());
+                    Self::normalize_entries(entries);
+                    changed = true;
+                    Output::success(&format!("Added {}", value));
+                }
+                1 => {
+                    if entries.is_empty() {
+                        Output::info("Nothing to remove");
+                        continue;
+                    }
+
+                    let selection = InquireSelect::new(
+                        &format!("Select {} to remove", title.to_lowercase()),
+                        entries.clone(),
+                    )
+                    .prompt()?;
+
+                    entries.retain(|item| item != &selection);
+                    changed = true;
+                    Output::success(&format!("Removed {}", selection));
+                }
+                _ => break,
+            }
+        }
+
+        Ok(changed)
+    }
+
+    fn render_entry_table(title: &str, entries: &[String]) {
+        use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, Table};
+        use owo_colors::OwoColorize;
+
+        if entries.is_empty() {
+            println!("{}", format!("{}: (none)", title).bright_black());
+            return;
+        }
+
+        let mut table = Table::new();
+        table.load_preset(UTF8_FULL).set_header(vec![
+            Cell::new(format!("{} ({})", title, entries.len()))
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Entry")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+        ]);
+
+        for (idx, entry) in entries.iter().enumerate() {
+            table.add_row(vec![
+                Cell::new(format!("#{}", idx + 1)).fg(Color::Green),
+                Cell::new(entry),
+            ]);
+        }
+
+        println!("{table}");
+    }
+
+    fn normalize_entries(entries: &mut Vec<String>) {
+        entries.iter_mut().for_each(|entry| {
+            *entry = entry.trim().to_string();
+        });
+        entries.retain(|entry| !entry.is_empty());
+        entries.sort();
+        entries.dedup();
     }
 
     async fn team(&self, action: &TeamAction) -> Result<()> {
