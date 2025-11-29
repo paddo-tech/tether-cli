@@ -48,15 +48,17 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     let dotfiles_dir = sync_path.join("dotfiles");
     std::fs::create_dir_all(&dotfiles_dir)?;
 
-    // Decrypt dotfiles from sync repo (if encrypted)
+    let mut state = SyncState::load()?;
+
+    // Apply dotfiles from sync repo (if encrypted) - with conflict detection
+    // Interactive mode when run manually, non-interactive when run by daemon
+    let interactive = std::env::var("TETHER_DAEMON").is_err();
     if config.security.encrypt_dotfiles && !dry_run {
-        decrypt_from_repo(&config, &sync_path, &home)?;
+        decrypt_from_repo(&config, &sync_path, &home, &state, interactive)?;
     }
 
     // Sync dotfiles (local → Git)
     Output::info("Syncing dotfiles...");
-
-    let mut state = SyncState::load()?;
 
     // Sync individual dotfiles
     for file in &config.dotfiles.files {
@@ -175,11 +177,21 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     Ok(())
 }
 
-fn decrypt_from_repo(config: &Config, sync_path: &Path, home: &Path) -> Result<()> {
-    Output::info("Decrypting dotfiles from sync repository...");
+fn decrypt_from_repo(
+    config: &Config,
+    sync_path: &Path,
+    home: &Path,
+    state: &SyncState,
+    interactive: bool,
+) -> Result<()> {
+    use crate::sync::{detect_conflict, ConflictResolution, ConflictState};
+
+    Output::info("Applying dotfiles from sync repository...");
 
     let key = crate::security::get_encryption_key()?;
     let dotfiles_dir = sync_path.join("dotfiles");
+    let mut conflict_state = ConflictState::load().unwrap_or_default();
+    let mut new_conflicts = Vec::new();
 
     for file in &config.dotfiles.files {
         let filename = file.trim_start_matches('.');
@@ -190,14 +202,75 @@ fn decrypt_from_repo(config: &Config, sync_path: &Path, home: &Path) -> Result<(
             match crate::security::decrypt_file(&encrypted_content, &key) {
                 Ok(plaintext) => {
                     let local_file = home.join(file);
-                    std::fs::write(&local_file, plaintext)?;
-                    Output::info(&format!("  {} (decrypted)", file));
+                    let last_synced_hash = state.files.get(file).map(|f| f.hash.as_str());
+
+                    // Check for conflict
+                    if let Some(conflict) =
+                        detect_conflict(file, &local_file, &plaintext, last_synced_hash)
+                    {
+                        if interactive {
+                            // Interactive mode: prompt user
+                            conflict.show_diff()?;
+                            let resolution = conflict.prompt_resolution()?;
+
+                            match resolution {
+                                ConflictResolution::KeepLocal => {
+                                    Output::info(&format!("  {} (kept local)", file));
+                                }
+                                ConflictResolution::UseRemote => {
+                                    std::fs::write(&local_file, &plaintext)?;
+                                    Output::info(&format!("  {} (used remote)", file));
+                                    conflict_state.remove_conflict(file);
+                                }
+                                ConflictResolution::Merged => {
+                                    conflict.launch_merge_tool(&config.merge, home)?;
+                                    conflict_state.remove_conflict(file);
+                                }
+                                ConflictResolution::Skip => {
+                                    Output::info(&format!("  {} (skipped)", file));
+                                    new_conflicts.push((
+                                        file.clone(),
+                                        conflict.local_hash.clone(),
+                                        conflict.remote_hash.clone(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            // Non-interactive (daemon): save conflict for later
+                            Output::warning(&format!("  {} (conflict - skipped)", file));
+                            new_conflicts.push((
+                                file.clone(),
+                                conflict.local_hash.clone(),
+                                conflict.remote_hash.clone(),
+                            ));
+                        }
+                    } else {
+                        // No conflict - safe to overwrite
+                        std::fs::write(&local_file, plaintext)?;
+                        Output::info(&format!("  {} (applied)", file));
+                        conflict_state.remove_conflict(file);
+                    }
                 }
                 Err(e) => {
                     Output::warning(&format!("  {} (failed to decrypt: {})", file, e));
                 }
             }
         }
+    }
+
+    // Save any new conflicts
+    for (file, local_hash, remote_hash) in &new_conflicts {
+        conflict_state.add_conflict(file, local_hash, remote_hash);
+    }
+
+    if !new_conflicts.is_empty() {
+        conflict_state.save()?;
+        if !interactive {
+            // Send notification for daemon mode
+            crate::sync::notify_conflicts(new_conflicts.len()).ok();
+        }
+    } else {
+        conflict_state.save()?;
     }
 
     // Decrypt global config directories

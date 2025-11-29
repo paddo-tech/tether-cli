@@ -4,6 +4,7 @@ mod diff;
 mod ignore;
 mod init;
 mod machines;
+mod resolve;
 mod status;
 mod sync;
 mod team;
@@ -82,6 +83,12 @@ pub enum Commands {
     Team {
         #[command(subcommand)]
         action: TeamAction,
+    },
+
+    /// Resolve file conflicts
+    Resolve {
+        /// Specific file to resolve (resolves all if not specified)
+        file: Option<String>,
     },
 }
 
@@ -208,6 +215,7 @@ impl Cli {
                 TeamAction::Disable => team::disable().await,
                 TeamAction::Status => team::status().await,
             },
+            Commands::Resolve { file } => resolve::run(file.as_deref()).await,
         }
     }
 }

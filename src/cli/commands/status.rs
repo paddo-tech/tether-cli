@@ -1,6 +1,6 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::sync::SyncState;
+use crate::sync::{ConflictState, SyncState};
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 use owo_colors::OwoColorize;
@@ -49,6 +49,36 @@ pub async fn run() -> Result<()> {
         ]);
     println!("{daemon_table}");
     println!();
+
+    // Conflicts warning (prominent if any exist)
+    let conflict_state = ConflictState::load().unwrap_or_default();
+    if !conflict_state.conflicts.is_empty() {
+        let mut conflict_table = Table::new();
+        conflict_table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec![
+                Cell::new("⚠️  Conflicts")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Red),
+                Cell::new("Detected")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Red),
+            ]);
+
+        for conflict in &conflict_state.conflicts {
+            conflict_table.add_row(vec![
+                Cell::new(&conflict.file_path).fg(Color::Yellow),
+                Cell::new(conflict.detected_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+            ]);
+        }
+        println!("{conflict_table}");
+        println!(
+            "{}",
+            "Run 'tether resolve' to fix conflicts".yellow().bold()
+        );
+        println!();
+    }
 
     // Sync table
     let mut sync_table = Table::new();

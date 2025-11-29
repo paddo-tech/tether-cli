@@ -10,6 +10,8 @@ pub struct Config {
     pub packages: PackagesConfig,
     pub dotfiles: DotfilesConfig,
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub merge: MergeConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub team: Option<TeamConfig>, // Deprecated: kept for backwards compatibility
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +100,50 @@ pub struct DotfilesConfig {
 pub struct SecurityConfig {
     pub encrypt_dotfiles: bool,
     pub scan_secrets: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeConfig {
+    /// Command to launch for three-way merge (default: opendiff on macOS, vimdiff elsewhere)
+    #[serde(default = "default_merge_command")]
+    pub command: String,
+    /// Arguments for merge command. Use {local}, {remote}, {merged} placeholders.
+    #[serde(default = "default_merge_args")]
+    pub args: Vec<String>,
+}
+
+fn default_merge_command() -> String {
+    if cfg!(target_os = "macos") {
+        "opendiff".to_string()
+    } else {
+        "vimdiff".to_string()
+    }
+}
+
+fn default_merge_args() -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        vec![
+            "{local}".to_string(),
+            "{remote}".to_string(),
+            "-merge".to_string(),
+            "{merged}".to_string(),
+        ]
+    } else {
+        vec![
+            "{local}".to_string(),
+            "{remote}".to_string(),
+            "{merged}".to_string(),
+        ]
+    }
+}
+
+impl Default for MergeConfig {
+    fn default() -> Self {
+        Self {
+            command: default_merge_command(),
+            args: default_merge_args(),
+        }
+    }
 }
 
 /// Team sync configuration.
@@ -268,6 +314,7 @@ impl Default for Config {
                 encrypt_dotfiles: true,
                 scan_secrets: true,
             },
+            merge: MergeConfig::default(),
             team: None,
             teams: None,
             project_configs: ProjectConfigSettings::default(),

@@ -2,7 +2,9 @@ use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
 };
-use crate::sync::{GitBackend, SyncEngine, SyncState};
+use crate::sync::{
+    detect_conflict, notify_conflicts, ConflictState, GitBackend, SyncEngine, SyncState,
+};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -30,6 +32,9 @@ impl DaemonServer {
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        // Set env var so sync code knows we're in daemon mode (non-interactive)
+        std::env::set_var("TETHER_DAEMON", "1");
+
         log::info!("Daemon starting (pid {})", std::process::id());
         log::info!("Sync interval: {} seconds", self.sync_interval.as_secs());
 
@@ -126,11 +131,72 @@ impl DaemonServer {
         let dotfiles_dir = sync_path.join("dotfiles");
         std::fs::create_dir_all(&dotfiles_dir)?;
 
-        // Sync dotfiles
+        // Load state and conflict tracking
         let mut state = SyncState::load()?;
+        let mut conflict_state = ConflictState::load().unwrap_or_default();
+        let mut new_conflicts = Vec::new();
+
+        // Apply remote changes first (with conflict detection)
+        if config.security.encrypt_dotfiles {
+            let key = crate::security::get_encryption_key()?;
+            for file in &config.dotfiles.files {
+                let filename = file.trim_start_matches('.');
+                let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
+
+                if enc_file.exists() {
+                    if let Ok(encrypted_content) = std::fs::read(&enc_file) {
+                        if let Ok(plaintext) =
+                            crate::security::decrypt_file(&encrypted_content, &key)
+                        {
+                            let local_file = home.join(file);
+                            let last_synced_hash = state.files.get(file).map(|f| f.hash.as_str());
+
+                            if let Some(conflict) =
+                                detect_conflict(file, &local_file, &plaintext, last_synced_hash)
+                            {
+                                log::warn!("Conflict detected in {}", file);
+                                new_conflicts.push((
+                                    file.clone(),
+                                    conflict.local_hash,
+                                    conflict.remote_hash,
+                                ));
+                            } else if local_file.exists() {
+                                // No conflict, safe to apply remote
+                                std::fs::write(&local_file, plaintext)?;
+                                log::debug!("Applied remote changes to {}", file);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Save conflicts and notify
+        if !new_conflicts.is_empty() {
+            for (file, local_hash, remote_hash) in &new_conflicts {
+                conflict_state.add_conflict(file, local_hash, remote_hash);
+            }
+            conflict_state.save()?;
+            notify_conflicts(new_conflicts.len()).ok();
+            log::info!(
+                "{} conflicts detected, user notification sent",
+                new_conflicts.len()
+            );
+        }
+
+        // Now sync local changes to remote
         let mut changes_made = false;
 
         for file in &config.dotfiles.files {
+            // Skip files with conflicts
+            if conflict_state
+                .conflicts
+                .iter()
+                .any(|c| c.file_path == *file)
+            {
+                continue;
+            }
+
             let source = home.join(file);
             if source.exists() {
                 if let Ok(content) = std::fs::read(&source) {
