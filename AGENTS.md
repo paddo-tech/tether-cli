@@ -4,7 +4,7 @@
 
 ## Overview
 
-Rust CLI that syncs dotfiles and global packages across Macs via Git. Background daemon watches for changes.
+Rust CLI that syncs dotfiles and global packages across Macs via Git. Daemon runs periodic sync every 5 minutes.
 
 ## Commands
 
@@ -21,32 +21,36 @@ cargo fmt                # Format
 ```
 src/
 ├── cli/
-│   ├── commands/mod.rs  # All commands (init, sync, status, diff, daemon, machines, ignore, config, team)
+│   ├── commands/
+│   │   ├── mod.rs       # CLI parsing + dispatch
+│   │   ├── init.rs      # tether init
+│   │   ├── sync.rs      # tether sync
+│   │   ├── status.rs    # tether status
+│   │   ├── diff.rs      # tether diff
+│   │   ├── config.rs    # tether config
+│   │   ├── daemon.rs    # tether daemon
+│   │   ├── machines.rs  # tether machines
+│   │   ├── ignore.rs    # tether ignore
+│   │   └── team.rs      # tether team
 │   ├── output.rs        # Terminal formatting
 │   └── prompts.rs       # Interactive prompts
 ├── config.rs            # Config management
 ├── daemon/
-│   ├── server.rs        # Background process
-│   └── ipc.rs           # Unix socket IPC
+│   └── server.rs        # Background daemon (periodic sync)
 ├── github.rs            # GitHub repo creation via gh CLI
 ├── packages/
 │   ├── manager.rs       # PackageManager trait
-│   ├── brew.rs          # Homebrew
-│   ├── npm.rs           # npm globals
-│   ├── pnpm.rs          # pnpm globals
-│   ├── bun.rs           # Bun globals
-│   └── gem.rs           # Ruby gems
+│   ├── brew.rs, npm.rs, pnpm.rs, bun.rs, gem.rs
 ├── security/
 │   ├── encryption.rs    # AES-GCM encryption
 │   ├── keychain.rs      # macOS Keychain
-│   └── secrets.rs       # Secret detection/scanning
+│   └── secrets.rs       # Secret detection
 ├── sync/
-│   ├── engine.rs        # Core sync logic
+│   ├── engine.rs        # sync_path() helper
 │   ├── git.rs           # Git operations
-│   ├── conflict.rs      # Conflict resolution
 │   ├── state.rs         # State tracking
-│   └── team.rs          # Team sync (shared configs)
-└── watcher.rs           # File watching (notify crate)
+│   └── team.rs          # Team sync
+└── lib.rs
 ```
 
 ## Key Dependencies
@@ -54,7 +58,6 @@ src/
 - **clap** - CLI parsing
 - **tokio** - Async runtime
 - **git2** - Git operations
-- **notify** - File watching
 - **inquire** - Interactive prompts
 - **owo-colors** - Terminal colors
 - **aes-gcm** - Encryption
@@ -62,18 +65,9 @@ src/
 
 ## Data Layout
 
-`~/.tether/`:
-- `config.toml` - User config
-- `state.json` - Sync state
-- `sync/` - Git repo clone
-- `daemon.pid`, `daemon.log`
+`~/.tether/`: config.toml, state.json, sync/, daemon.pid, daemon.log, ignore
 
-Sync repo:
-- `dotfiles/` - Synced dotfiles
-- `configs/` - Config directories
-- `manifests/` - Package manifests (brew.json, npm.json, etc.)
-- `machines/` - Machine metadata
-- `projects/` - Project-local configs
+Sync repo: dotfiles/, configs/, manifests/, machines/, projects/
 
 ## Code Quality
 
@@ -81,10 +75,3 @@ Before completing work:
 1. `cargo clippy --all-targets -- -D warnings` (zero warnings)
 2. `cargo fmt --all`
 3. `cargo build --release`
-
-## Notes
-
-- macOS only (v1.0)
-- Uses Git as sync backend
-- Secret scanning prevents syncing credentials
-- Daemon uses launchd

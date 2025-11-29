@@ -40,8 +40,11 @@ impl GitBackend {
 
     pub fn clone(url: &str, path: &Path) -> Result<Self> {
         // Use git CLI for cloning - it handles gh authentication automatically
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
         let output = Command::new("git")
-            .args(["clone", url, path.to_str().unwrap()])
+            .args(["clone", url, path_str])
             .output()?;
 
         if !output.status.success() {
@@ -176,14 +179,11 @@ impl GitBackend {
 ///
 /// Get the git remote URL for a repository
 pub fn get_remote_url(repo_path: &Path) -> Result<String> {
+    let path_str = repo_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
     let output = Command::new("git")
-        .args([
-            "-C",
-            repo_path.to_str().unwrap(),
-            "config",
-            "--get",
-            "remote.origin.url",
-        ])
+        .args(["-C", path_str, "config", "--get", "remote.origin.url"])
         .output()?;
 
     if !output.status.success() {
@@ -205,20 +205,20 @@ pub fn normalize_remote_url(url: &str) -> String {
     let mut normalized = url.to_string();
 
     // Remove .git suffix
-    if normalized.ends_with(".git") {
-        normalized = normalized[..normalized.len() - 4].to_string();
+    if let Some(stripped) = normalized.strip_suffix(".git") {
+        normalized = stripped.to_string();
     }
 
     // Convert SSH format (git@host:path) to URL format (host/path)
-    if normalized.starts_with("git@") {
+    if let Some(rest) = normalized.strip_prefix("git@") {
         // git@github.com:user/repo -> github.com/user/repo
-        normalized = normalized.strip_prefix("git@").unwrap().replace(':', "/");
-    } else if normalized.starts_with("https://") {
+        normalized = rest.replace(':', "/");
+    } else if let Some(rest) = normalized.strip_prefix("https://") {
         // https://github.com/user/repo -> github.com/user/repo
-        normalized = normalized.strip_prefix("https://").unwrap().to_string();
-    } else if normalized.starts_with("http://") {
+        normalized = rest.to_string();
+    } else if let Some(rest) = normalized.strip_prefix("http://") {
         // http://github.com/user/repo -> github.com/user/repo
-        normalized = normalized.strip_prefix("http://").unwrap().to_string();
+        normalized = rest.to_string();
     }
 
     normalized
@@ -231,13 +231,15 @@ pub fn is_gitignored(file_path: &Path) -> Result<bool> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
 
+    let dir_str = dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Directory path contains invalid UTF-8"))?;
+    let file_str = file_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("File path contains invalid UTF-8"))?;
+
     let output = Command::new("git")
-        .args([
-            "-C",
-            dir.to_str().unwrap(),
-            "check-ignore",
-            file_path.to_str().unwrap(),
-        ])
+        .args(["-C", dir_str, "check-ignore", file_str])
         .output()?;
 
     // git check-ignore returns 0 if the file is ignored, 1 if not

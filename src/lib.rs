@@ -5,6 +5,5 @@ pub mod github;
 pub mod packages;
 pub mod security;
 pub mod sync;
-pub mod watcher;
 
 pub use config::Config;

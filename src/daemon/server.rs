@@ -1,41 +1,58 @@
+use crate::config::Config;
+use crate::packages::{BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager};
+use crate::sync::{GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 use std::time::Duration;
 use tokio::time::Interval;
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
+const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes
+
 pub struct DaemonServer {
-    heartbeat: Duration,
+    sync_interval: Duration,
 }
 
 impl DaemonServer {
     pub fn new() -> Self {
         Self {
-            heartbeat: Duration::from_secs(60),
+            sync_interval: Duration::from_secs(DEFAULT_SYNC_INTERVAL_SECS),
         }
     }
 
-    fn heartbeat_interval(&self) -> Interval {
-        tokio::time::interval(self.heartbeat)
+    fn sync_interval(&self) -> Interval {
+        tokio::time::interval(self.sync_interval)
     }
 
     pub async fn run(&mut self) -> Result<()> {
         log::info!("Daemon starting (pid {})", std::process::id());
+        log::info!(
+            "Sync interval: {} seconds",
+            self.sync_interval.as_secs()
+        );
 
         #[cfg(unix)]
         {
-            let mut heartbeat = self.heartbeat_interval();
+            let mut sync_timer = self.sync_interval();
             let mut sigterm = signal(SignalKind::terminate())?;
             let mut sighup = signal(SignalKind::hangup())?;
 
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
 
+            // Skip first tick (immediate)
+            sync_timer.tick().await;
+
             loop {
                 tokio::select! {
-                    _ = heartbeat.tick() => {
-                        log::debug!("Daemon heartbeat");
+                    _ = sync_timer.tick() => {
+                        log::info!("Running periodic sync...");
+                        if let Err(e) = self.run_sync().await {
+                            log::error!("Sync failed: {}", e);
+                        }
                     },
                     _ = &mut ctrl_c => {
                         log::info!("Received Ctrl+C, stopping daemon");
@@ -46,8 +63,10 @@ impl DaemonServer {
                         break;
                     },
                     _ = sighup.recv() => {
-                        log::info!("Received SIGHUP, reloading configuration");
-                        // Placeholder for future reload logic.
+                        log::info!("Received SIGHUP, running immediate sync");
+                        if let Err(e) = self.run_sync().await {
+                            log::error!("Sync failed: {}", e);
+                        }
                     },
                 };
             }
@@ -55,14 +74,20 @@ impl DaemonServer {
 
         #[cfg(not(unix))]
         {
-            let mut heartbeat = self.heartbeat_interval();
+            let mut sync_timer = self.sync_interval();
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
 
+            // Skip first tick (immediate)
+            sync_timer.tick().await;
+
             loop {
                 tokio::select! {
-                    _ = heartbeat.tick() => {
-                        log::debug!("Daemon heartbeat");
+                    _ = sync_timer.tick() => {
+                        log::info!("Running periodic sync...");
+                        if let Err(e) = self.run_sync().await {
+                            log::error!("Sync failed: {}", e);
+                        }
                     },
                     _ = &mut ctrl_c => {
                         log::info!("Received Ctrl+C, stopping daemon");
@@ -74,6 +99,190 @@ impl DaemonServer {
 
         log::info!("Daemon stopped");
         Ok(())
+    }
+
+    async fn run_sync(&self) -> Result<()> {
+        let config = Config::load()?;
+        let sync_path = SyncEngine::sync_path()?;
+        let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+
+        // Pull latest changes
+        log::debug!("Pulling latest changes...");
+        let git = GitBackend::open(&sync_path)?;
+        git.pull()?;
+
+        // Pull from team repo if enabled
+        if let Some(team) = &config.team {
+            if team.enabled {
+                let team_sync_dir = Config::team_sync_dir()?;
+                if team_sync_dir.exists() {
+                    let team_git = GitBackend::open(&team_sync_dir)?;
+                    team_git.pull()?;
+                    log::debug!("Team configs updated");
+                }
+            }
+        }
+
+        let dotfiles_dir = sync_path.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles_dir)?;
+
+        // Sync dotfiles
+        let mut state = SyncState::load()?;
+        let mut changes_made = false;
+
+        for file in &config.dotfiles.files {
+            let source = home.join(file);
+            if source.exists() {
+                if let Ok(content) = std::fs::read(&source) {
+                    let hash = format!("{:x}", Sha256::digest(&content));
+                    let file_changed = state
+                        .files
+                        .get(file)
+                        .map(|f| f.hash != hash)
+                        .unwrap_or(true);
+
+                    if file_changed {
+                        log::info!("File changed: {}", file);
+                        let filename = file.trim_start_matches('.');
+
+                        if config.security.encrypt_dotfiles {
+                            let key = crate::security::get_encryption_key()?;
+                            let encrypted = crate::security::encrypt_file(&content, &key)?;
+                            let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&dest, encrypted)?;
+                        } else {
+                            let dest = dotfiles_dir.join(filename);
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&dest, &content)?;
+                        }
+
+                        state.update_file(file, hash);
+                        changes_made = true;
+                    }
+                }
+            }
+        }
+
+        // Sync packages
+        changes_made |= self.sync_packages(&config, &mut state, &sync_path).await?;
+
+        // Commit and push if changes made
+        if changes_made {
+            log::info!("Committing changes...");
+            git.commit("Auto-sync from daemon", &state.machine_id)?;
+            git.push()?;
+            state.mark_synced();
+            state.save()?;
+            log::info!("Sync complete - changes pushed");
+        } else {
+            log::debug!("No changes to sync");
+        }
+
+        Ok(())
+    }
+
+    async fn sync_packages(
+        &self,
+        config: &Config,
+        state: &mut SyncState,
+        sync_path: &Path,
+    ) -> Result<bool> {
+        let manifests_dir = sync_path.join("manifests");
+        std::fs::create_dir_all(&manifests_dir)?;
+
+        let mut changes_made = false;
+
+        // Homebrew
+        if config.packages.brew.enabled {
+            let brew = BrewManager::new();
+            if brew.is_available().await {
+                if let Ok(manifest) = brew.export_manifest().await {
+                    let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+                    if state
+                        .packages
+                        .get("brew")
+                        .map(|p| p.hash != hash)
+                        .unwrap_or(true)
+                    {
+                        std::fs::write(manifests_dir.join("Brewfile"), &manifest)?;
+                        use chrono::Utc;
+                        state.packages.insert(
+                            "brew".to_string(),
+                            crate::sync::state::PackageState {
+                                last_sync: Utc::now(),
+                                hash,
+                            },
+                        );
+                        changes_made = true;
+                        log::info!("Brewfile updated");
+                    }
+                }
+            }
+        }
+
+        // npm
+        if config.packages.npm.enabled {
+            changes_made |= self.sync_package_manager(&NpmManager::new(), "npm", "npm.txt", state, &manifests_dir).await?;
+        }
+
+        // pnpm
+        if config.packages.pnpm.enabled {
+            changes_made |= self.sync_package_manager(&PnpmManager::new(), "pnpm", "pnpm.txt", state, &manifests_dir).await?;
+        }
+
+        // bun
+        if config.packages.bun.enabled {
+            changes_made |= self.sync_package_manager(&BunManager::new(), "bun", "bun.txt", state, &manifests_dir).await?;
+        }
+
+        // gem
+        if config.packages.gem.enabled {
+            changes_made |= self.sync_package_manager(&GemManager::new(), "gem", "gems.txt", state, &manifests_dir).await?;
+        }
+
+        Ok(changes_made)
+    }
+
+    async fn sync_package_manager<P: PackageManager>(
+        &self,
+        manager: &P,
+        name: &str,
+        filename: &str,
+        state: &mut SyncState,
+        manifests_dir: &Path,
+    ) -> Result<bool> {
+        if !manager.is_available().await {
+            return Ok(false);
+        }
+
+        if let Ok(manifest) = manager.export_manifest().await {
+            let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+            if state
+                .packages
+                .get(name)
+                .map(|p| p.hash != hash)
+                .unwrap_or(true)
+            {
+                std::fs::write(manifests_dir.join(filename), &manifest)?;
+                use chrono::Utc;
+                state.packages.insert(
+                    name.to_string(),
+                    crate::sync::state::PackageState {
+                        last_sync: Utc::now(),
+                        hash,
+                    },
+                );
+                log::info!("{} manifest updated", name);
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 }
 
