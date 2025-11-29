@@ -246,7 +246,7 @@ pub fn is_gitignored(file_path: &Path) -> Result<bool> {
     Ok(output.status.success())
 }
 
-/// Find all git repositories under a given path (non-recursive, one level deep)
+/// Find all git repositories under a given path (recursive, max 3 levels deep)
 pub fn find_git_repos(search_path: &Path) -> Result<Vec<PathBuf>> {
     let mut repos = Vec::new();
 
@@ -254,21 +254,41 @@ pub fn find_git_repos(search_path: &Path) -> Result<Vec<PathBuf>> {
         return Ok(repos);
     }
 
-    // Check if search_path itself is a git repo
-    if search_path.join(".git").exists() {
-        repos.push(search_path.to_path_buf());
-        return Ok(repos);
+    find_git_repos_recursive(search_path, &mut repos, 0, 3)?;
+    Ok(repos)
+}
+
+fn find_git_repos_recursive(
+    path: &Path,
+    repos: &mut Vec<PathBuf>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<()> {
+    if depth > max_depth {
+        return Ok(());
     }
 
-    // Otherwise, search immediate subdirectories
-    for entry in std::fs::read_dir(search_path)? {
-        let entry = entry?;
-        let path = entry.path();
+    // If this directory is a git repo, add it and don't recurse into it
+    if path.join(".git").exists() {
+        repos.push(path.to_path_buf());
+        return Ok(());
+    }
 
-        if path.is_dir() && path.join(".git").exists() {
-            repos.push(path);
+    // Otherwise, recurse into subdirectories
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                // Skip hidden directories and common non-project dirs
+                if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') || name == "node_modules" || name == "target" {
+                        continue;
+                    }
+                }
+                find_git_repos_recursive(&entry_path, repos, depth + 1, max_depth)?;
+            }
         }
     }
 
-    Ok(repos)
+    Ok(())
 }
