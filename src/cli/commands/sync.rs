@@ -245,9 +245,16 @@ fn decrypt_from_repo(
                             ));
                         }
                     } else {
-                        // No conflict - safe to overwrite
-                        std::fs::write(&local_file, plaintext)?;
-                        Output::info(&format!("  {} (applied)", file));
+                        // No conflict - check if file actually changed before writing
+                        let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                        let local_hash = std::fs::read(&local_file)
+                            .ok()
+                            .map(|c| format!("{:x}", Sha256::digest(&c)));
+
+                        if local_hash.as_ref() != Some(&remote_hash) {
+                            std::fs::write(&local_file, plaintext)?;
+                            Output::info(&format!("  {} (applied)", file));
+                        }
                         conflict_state.remove_conflict(file);
                     }
                 }
@@ -303,8 +310,15 @@ fn decrypt_from_repo(
                                 if let Some(parent) = local_file.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
-                                std::fs::write(&local_file, plaintext)?;
-                                Output::info(&format!("  ~/{} (decrypted)", rel_path_no_enc));
+                                // Skip write if content is unchanged
+                                let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                                let local_hash = std::fs::read(&local_file)
+                                    .ok()
+                                    .map(|c| format!("{:x}", Sha256::digest(&c)));
+                                if local_hash.as_ref() != Some(&remote_hash) {
+                                    std::fs::write(&local_file, plaintext)?;
+                                    Output::info(&format!("  ~/{} (decrypted)", rel_path_no_enc));
+                                }
                             }
                             Err(e) => {
                                 Output::warning(&format!(
@@ -409,11 +423,18 @@ fn decrypt_project_configs(
                                 if let Some(parent) = local_file.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
-                                std::fs::write(&local_file, plaintext)?;
-                                Output::info(&format!(
-                                    "  {}: {} (decrypted)",
-                                    project_name, rel_path_no_enc
-                                ));
+                                // Skip write if content is unchanged
+                                let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                                let local_hash = std::fs::read(&local_file)
+                                    .ok()
+                                    .map(|c| format!("{:x}", Sha256::digest(&c)));
+                                if local_hash.as_ref() != Some(&remote_hash) {
+                                    std::fs::write(&local_file, plaintext)?;
+                                    Output::info(&format!(
+                                        "  {}: {} (decrypted)",
+                                        project_name, rel_path_no_enc
+                                    ));
+                                }
                             }
                             Err(e) => {
                                 Output::warning(&format!(
