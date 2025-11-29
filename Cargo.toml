@@ -68,12 +68,10 @@ async-trait = "0.1"
 # System info
 hostname = "0.4"
 
-# Security - macOS Keychain integration
-security-framework = "2.9"
-
 # Encryption
 aes-gcm = "0.10"
 rand = "0.8"
+base64 = "0.22"
 
 # Secret detection
 regex = "1.10"
