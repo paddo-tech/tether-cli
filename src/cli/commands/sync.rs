@@ -874,90 +874,17 @@ async fn sync_package_manager<P: PackageManager>(
 
 /// Build machine state for cross-machine comparison
 async fn build_machine_state(
-    config: &Config,
+    _config: &Config,
     state: &SyncState,
-    sync_path: &Path,
+    _sync_path: &Path,
 ) -> Result<MachineState> {
     let mut machine_state = MachineState::new(&state.machine_id);
 
-    // Collect file hashes
+    // Collect file hashes (packages are in manifest files, no need to duplicate)
     for (path, file_state) in &state.files {
         machine_state
             .files
             .insert(path.clone(), file_state.hash.clone());
-    }
-
-    // Collect package lists
-    let manifests_dir = sync_path.join("manifests");
-
-    // Homebrew
-    if config.packages.brew.enabled {
-        let brewfile = manifests_dir.join("Brewfile");
-        if brewfile.exists() {
-            let content = std::fs::read_to_string(&brewfile)?;
-            let packages: Vec<String> = content
-                .lines()
-                .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-                .map(|l| l.to_string())
-                .collect();
-            machine_state.packages.insert("brew".to_string(), packages);
-        }
-    }
-
-    // npm
-    if config.packages.npm.enabled {
-        let npm_file = manifests_dir.join("npm.txt");
-        if npm_file.exists() {
-            let content = std::fs::read_to_string(&npm_file)?;
-            let packages: Vec<String> = content
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            machine_state.packages.insert("npm".to_string(), packages);
-        }
-    }
-
-    // pnpm
-    if config.packages.pnpm.enabled {
-        let pnpm_file = manifests_dir.join("pnpm.txt");
-        if pnpm_file.exists() {
-            let content = std::fs::read_to_string(&pnpm_file)?;
-            let packages: Vec<String> = content
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            machine_state.packages.insert("pnpm".to_string(), packages);
-        }
-    }
-
-    // bun
-    if config.packages.bun.enabled {
-        let bun_file = manifests_dir.join("bun.txt");
-        if bun_file.exists() {
-            let content = std::fs::read_to_string(&bun_file)?;
-            let packages: Vec<String> = content
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            machine_state.packages.insert("bun".to_string(), packages);
-        }
-    }
-
-    // gem
-    if config.packages.gem.enabled {
-        let gem_file = manifests_dir.join("gems.txt");
-        if gem_file.exists() {
-            let content = std::fs::read_to_string(&gem_file)?;
-            let packages: Vec<String> = content
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            machine_state.packages.insert("gem".to_string(), packages);
-        }
     }
 
     Ok(machine_state)

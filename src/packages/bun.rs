@@ -46,28 +46,48 @@ impl PackageManager for BunManager {
 
         let mut packages = Vec::new();
 
-        // Parse output - bun pm ls -g returns package names one per line
+        // Parse tree output from `bun pm ls -g`:
+        // /Users/paddo/.bun/install/global node_modules (535)
+        // └── @google/gemini-cli@0.18.4
         for line in output.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with("bun") {
+            if line.is_empty() {
                 continue;
             }
 
-            // Extract package name (may include version like "package@1.2.3")
-            let name = if let Some(idx) = line.find('@') {
-                if idx > 0 {
-                    line[..idx].to_string()
+            // Skip header line (contains "node_modules")
+            if line.contains("node_modules") {
+                continue;
+            }
+
+            // Remove tree prefixes (├── └── │)
+            let cleaned = line
+                .trim_start_matches("├──")
+                .trim_start_matches("└──")
+                .trim_start_matches("│")
+                .trim();
+
+            if cleaned.is_empty() {
+                continue;
+            }
+
+            // Parse package@version format
+            // Handle scoped packages like @google/gemini-cli@0.18.4
+            let (name, version) = if let Some(last_at) = cleaned.rfind('@') {
+                // Check it's not the @ in a scoped package name
+                if last_at > 0 && !cleaned[..last_at].ends_with('/') {
+                    (
+                        cleaned[..last_at].to_string(),
+                        Some(cleaned[last_at + 1..].to_string()),
+                    )
                 } else {
-                    continue;
+                    (cleaned.to_string(), None)
                 }
             } else {
-                line.to_string()
+                (cleaned.to_string(), None)
             };
 
-            packages.push(PackageInfo {
-                name,
-                version: None,
-            });
+            packages.push(PackageInfo { name, version });
         }
 
         packages.sort_by(|a, b| a.name.cmp(&b.name));
