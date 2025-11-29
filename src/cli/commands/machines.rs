@@ -69,9 +69,7 @@ pub async fn list() -> Result<()> {
             Cell::new("Last Sync")
                 .add_attribute(Attribute::Bold)
                 .fg(Color::Cyan),
-            Cell::new("")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
+            Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
         ]);
 
     for (name, info) in &machines {

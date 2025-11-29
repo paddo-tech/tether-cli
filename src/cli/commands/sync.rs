@@ -1,7 +1,9 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::packages::{BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager};
-use crate::sync::{GitBackend, SyncEngine, SyncState};
+use crate::packages::{
+    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+};
+use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -55,7 +57,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     Output::info("Syncing dotfiles...");
 
     let mut state = SyncState::load()?;
-    let mut changes_made = false;
 
     // Sync individual dotfiles
     for file in &config.dotfiles.files {
@@ -95,7 +96,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                         }
 
                         state.update_file(file, hash);
-                        changes_made = true;
                     }
                 } else {
                     Output::info(&format!("  {} (unchanged)", file));
@@ -106,33 +106,44 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Sync global config directories
     if !config.dotfiles.dirs.is_empty() {
-        changes_made |= sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
+        sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
     }
 
     // Sync project-local configs
     if config.project_configs.enabled {
-        changes_made |= sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
+        sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
     }
 
     // Sync package manifests
-    changes_made |= sync_packages(&config, &mut state, &sync_path, dry_run).await?;
+    sync_packages(&config, &mut state, &sync_path, dry_run).await?;
+
+    // Save machine state for cross-machine comparison
+    if !dry_run {
+        let machine_state = build_machine_state(&config, &state, &sync_path).await?;
+        machine_state.save_to_repo(&sync_path)?;
+    }
 
     // Commit and push changes
-    if changes_made && !dry_run {
-        Output::info("Committing changes...");
-        git.commit("Sync dotfiles and packages", &state.machine_id)?;
-        Output::success("Changes committed");
+    if !dry_run {
+        // Check if there are any changes (including machine state update)
+        let has_changes = git.has_changes()?;
 
-        Output::info("Pushing to remote...");
-        git.push()?;
-        Output::success("Changes pushed");
+        if has_changes {
+            Output::info("Committing changes...");
+            git.commit("Sync dotfiles and packages", &state.machine_id)?;
+            Output::success("Changes committed");
+
+            Output::info("Pushing to remote...");
+            git.push()?;
+            Output::success("Changes pushed");
+        } else {
+            Output::info("No changes to sync");
+        }
 
         state.mark_synced();
         state.save()?;
-    } else if dry_run {
-        Output::info("Dry-run complete - no changes made");
     } else {
-        Output::info("No changes to sync");
+        Output::info("Dry-run complete - no changes made");
     }
 
     // Check and push team repo changes (if write access enabled)
@@ -383,15 +394,13 @@ fn sync_directories(
     sync_path: &Path,
     home: &Path,
     dry_run: bool,
-) -> Result<bool> {
+) -> Result<()> {
     use walkdir::WalkDir;
 
     Output::info("Syncing global config directories...");
 
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
-
-    let mut changes_made = false;
 
     for dir_path in &config.dotfiles.dirs {
         let expanded_path = if let Some(stripped) = dir_path.strip_prefix("~/") {
@@ -434,7 +443,6 @@ fn sync_directories(
                         }
 
                         state.update_file(dir_path, hash);
-                        changes_made = true;
                     }
                 } else {
                     Output::info(&format!("  {} (unchanged)", dir_path));
@@ -478,7 +486,6 @@ fn sync_directories(
                             }
 
                             state.update_file(&state_key, hash);
-                            changes_made = true;
                         }
                     }
                 }
@@ -486,7 +493,7 @@ fn sync_directories(
         }
     }
 
-    Ok(changes_made)
+    Ok(())
 }
 
 fn sync_project_configs(
@@ -495,7 +502,7 @@ fn sync_project_configs(
     sync_path: &Path,
     home: &Path,
     dry_run: bool,
-) -> Result<bool> {
+) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, is_gitignored, normalize_remote_url};
     use walkdir::WalkDir;
 
@@ -503,8 +510,6 @@ fn sync_project_configs(
 
     let projects_dir = sync_path.join("projects");
     std::fs::create_dir_all(&projects_dir)?;
-
-    let mut changes_made = false;
 
     for search_path_str in &config.project_configs.search_paths {
         let search_path = if let Some(stripped) = search_path_str.strip_prefix("~/") {
@@ -629,7 +634,6 @@ fn sync_project_configs(
                                 }
 
                                 state.update_file(&state_key, hash);
-                                changes_made = true;
                             }
                         }
                     }
@@ -638,7 +642,7 @@ fn sync_project_configs(
         }
     }
 
-    Ok(changes_made)
+    Ok(())
 }
 
 async fn sync_packages(
@@ -646,12 +650,10 @@ async fn sync_packages(
     state: &mut SyncState,
     sync_path: &Path,
     dry_run: bool,
-) -> Result<bool> {
+) -> Result<()> {
     Output::info("Syncing package manifests...");
     let manifests_dir = sync_path.join("manifests");
     std::fs::create_dir_all(&manifests_dir)?;
-
-    let mut changes_made = false;
 
     // Homebrew
     if config.packages.brew.enabled {
@@ -681,7 +683,6 @@ async fn sync_packages(
                                     hash,
                                 },
                             );
-                            changes_made = true;
                         }
                     } else {
                         Output::info("    No changes");
@@ -696,25 +697,57 @@ async fn sync_packages(
 
     // npm
     if config.packages.npm.enabled {
-        changes_made |= sync_package_manager(&NpmManager::new(), "npm", "npm.txt", state, &manifests_dir, dry_run).await?;
+        sync_package_manager(
+            &NpmManager::new(),
+            "npm",
+            "npm.txt",
+            state,
+            &manifests_dir,
+            dry_run,
+        )
+        .await?;
     }
 
     // pnpm
     if config.packages.pnpm.enabled {
-        changes_made |= sync_package_manager(&PnpmManager::new(), "pnpm", "pnpm.txt", state, &manifests_dir, dry_run).await?;
+        sync_package_manager(
+            &PnpmManager::new(),
+            "pnpm",
+            "pnpm.txt",
+            state,
+            &manifests_dir,
+            dry_run,
+        )
+        .await?;
     }
 
     // bun
     if config.packages.bun.enabled {
-        changes_made |= sync_package_manager(&BunManager::new(), "bun", "bun.txt", state, &manifests_dir, dry_run).await?;
+        sync_package_manager(
+            &BunManager::new(),
+            "bun",
+            "bun.txt",
+            state,
+            &manifests_dir,
+            dry_run,
+        )
+        .await?;
     }
 
     // gem
     if config.packages.gem.enabled {
-        changes_made |= sync_package_manager(&GemManager::new(), "gem", "gems.txt", state, &manifests_dir, dry_run).await?;
+        sync_package_manager(
+            &GemManager::new(),
+            "gem",
+            "gems.txt",
+            state,
+            &manifests_dir,
+            dry_run,
+        )
+        .await?;
     }
 
-    Ok(changes_made)
+    Ok(())
 }
 
 async fn sync_package_manager<P: PackageManager>(
@@ -724,9 +757,9 @@ async fn sync_package_manager<P: PackageManager>(
     state: &mut SyncState,
     manifests_dir: &Path,
     dry_run: bool,
-) -> Result<bool> {
+) -> Result<()> {
     if !manager.is_available().await {
-        return Ok(false);
+        return Ok(());
     }
 
     Output::info(&format!("  Syncing {} packages...", name));
@@ -753,7 +786,6 @@ async fn sync_package_manager<P: PackageManager>(
                             hash,
                         },
                     );
-                    return Ok(true);
                 }
             } else {
                 Output::info("    No changes");
@@ -764,5 +796,96 @@ async fn sync_package_manager<P: PackageManager>(
         }
     }
 
-    Ok(false)
+    Ok(())
+}
+
+/// Build machine state for cross-machine comparison
+async fn build_machine_state(
+    config: &Config,
+    state: &SyncState,
+    sync_path: &Path,
+) -> Result<MachineState> {
+    let mut machine_state = MachineState::new(&state.machine_id);
+
+    // Collect file hashes
+    for (path, file_state) in &state.files {
+        machine_state
+            .files
+            .insert(path.clone(), file_state.hash.clone());
+    }
+
+    // Collect package lists
+    let manifests_dir = sync_path.join("manifests");
+
+    // Homebrew
+    if config.packages.brew.enabled {
+        let brewfile = manifests_dir.join("Brewfile");
+        if brewfile.exists() {
+            let content = std::fs::read_to_string(&brewfile)?;
+            let packages: Vec<String> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                .map(|l| l.to_string())
+                .collect();
+            machine_state.packages.insert("brew".to_string(), packages);
+        }
+    }
+
+    // npm
+    if config.packages.npm.enabled {
+        let npm_file = manifests_dir.join("npm.txt");
+        if npm_file.exists() {
+            let content = std::fs::read_to_string(&npm_file)?;
+            let packages: Vec<String> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            machine_state.packages.insert("npm".to_string(), packages);
+        }
+    }
+
+    // pnpm
+    if config.packages.pnpm.enabled {
+        let pnpm_file = manifests_dir.join("pnpm.txt");
+        if pnpm_file.exists() {
+            let content = std::fs::read_to_string(&pnpm_file)?;
+            let packages: Vec<String> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            machine_state.packages.insert("pnpm".to_string(), packages);
+        }
+    }
+
+    // bun
+    if config.packages.bun.enabled {
+        let bun_file = manifests_dir.join("bun.txt");
+        if bun_file.exists() {
+            let content = std::fs::read_to_string(&bun_file)?;
+            let packages: Vec<String> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            machine_state.packages.insert("bun".to_string(), packages);
+        }
+    }
+
+    // gem
+    if config.packages.gem.enabled {
+        let gem_file = manifests_dir.join("gems.txt");
+        if gem_file.exists() {
+            let content = std::fs::read_to_string(&gem_file)?;
+            let packages: Vec<String> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            machine_state.packages.insert("gem".to_string(), packages);
+        }
+    }
+
+    Ok(machine_state)
 }

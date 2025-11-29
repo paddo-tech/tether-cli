@@ -1,5 +1,7 @@
 use crate::config::Config;
-use crate::packages::{BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager};
+use crate::packages::{
+    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+};
 use crate::sync::{GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -29,10 +31,7 @@ impl DaemonServer {
 
     pub async fn run(&mut self) -> Result<()> {
         log::info!("Daemon starting (pid {})", std::process::id());
-        log::info!(
-            "Sync interval: {} seconds",
-            self.sync_interval.as_secs()
-        );
+        log::info!("Sync interval: {} seconds", self.sync_interval.as_secs());
 
         #[cfg(unix)]
         {
@@ -104,7 +103,8 @@ impl DaemonServer {
     async fn run_sync(&self) -> Result<()> {
         let config = Config::load()?;
         let sync_path = SyncEngine::sync_path()?;
-        let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let home =
+            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
         // Pull latest changes
         log::debug!("Pulling latest changes...");
@@ -227,22 +227,36 @@ impl DaemonServer {
 
         // npm
         if config.packages.npm.enabled {
-            changes_made |= self.sync_package_manager(&NpmManager::new(), "npm", "npm.txt", state, &manifests_dir).await?;
+            changes_made |= self
+                .sync_package_manager(&NpmManager::new(), "npm", "npm.txt", state, &manifests_dir)
+                .await?;
         }
 
         // pnpm
         if config.packages.pnpm.enabled {
-            changes_made |= self.sync_package_manager(&PnpmManager::new(), "pnpm", "pnpm.txt", state, &manifests_dir).await?;
+            changes_made |= self
+                .sync_package_manager(
+                    &PnpmManager::new(),
+                    "pnpm",
+                    "pnpm.txt",
+                    state,
+                    &manifests_dir,
+                )
+                .await?;
         }
 
         // bun
         if config.packages.bun.enabled {
-            changes_made |= self.sync_package_manager(&BunManager::new(), "bun", "bun.txt", state, &manifests_dir).await?;
+            changes_made |= self
+                .sync_package_manager(&BunManager::new(), "bun", "bun.txt", state, &manifests_dir)
+                .await?;
         }
 
         // gem
         if config.packages.gem.enabled {
-            changes_made |= self.sync_package_manager(&GemManager::new(), "gem", "gems.txt", state, &manifests_dir).await?;
+            changes_made |= self
+                .sync_package_manager(&GemManager::new(), "gem", "gems.txt", state, &manifests_dir)
+                .await?;
         }
 
         Ok(changes_made)

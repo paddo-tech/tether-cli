@@ -25,6 +25,83 @@ pub struct PackageState {
     pub hash: String,
 }
 
+/// Machine state stored in sync repo for cross-machine comparison
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MachineState {
+    pub machine_id: String,
+    pub hostname: String,
+    pub last_sync: DateTime<Utc>,
+    #[serde(default)]
+    pub os_version: String,
+    /// File paths and their hashes
+    pub files: HashMap<String, String>,
+    /// Package manager -> list of packages
+    pub packages: HashMap<String, Vec<String>>,
+}
+
+impl MachineState {
+    pub fn new(machine_id: &str) -> Self {
+        let hostname = hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        Self {
+            machine_id: machine_id.to_string(),
+            hostname,
+            last_sync: Utc::now(),
+            os_version: String::new(),
+            files: HashMap::new(),
+            packages: HashMap::new(),
+        }
+    }
+
+    /// Load machine state from sync repo
+    pub fn load_from_repo(sync_path: &std::path::Path, machine_id: &str) -> Result<Option<Self>> {
+        let path = sync_path
+            .join("machines")
+            .join(format!("{}.json", machine_id));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
+    }
+
+    /// Save machine state to sync repo
+    pub fn save_to_repo(&self, sync_path: &std::path::Path) -> Result<()> {
+        let machines_dir = sync_path.join("machines");
+        std::fs::create_dir_all(&machines_dir)?;
+
+        let path = machines_dir.join(format!("{}.json", self.machine_id));
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// List all machines in sync repo
+    pub fn list_all(sync_path: &std::path::Path) -> Result<Vec<Self>> {
+        let machines_dir = sync_path.join("machines");
+        if !machines_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut machines = Vec::new();
+        for entry in std::fs::read_dir(&machines_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(state) = serde_json::from_str::<MachineState>(&content) {
+                        machines.push(state);
+                    }
+                }
+            }
+        }
+        Ok(machines)
+    }
+}
+
 impl SyncState {
     pub fn state_path() -> Result<PathBuf> {
         let home =

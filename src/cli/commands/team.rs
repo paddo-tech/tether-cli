@@ -8,11 +8,9 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
     let mut config = Config::load()?;
 
     // Determine team name (custom or auto-extracted)
-    let team_name = name
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            crate::sync::extract_team_name_from_url(url).unwrap_or_else(|| "team".to_string())
-        });
+    let team_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
+        crate::sync::extract_team_name_from_url(url).unwrap_or_else(|| "team".to_string())
+    });
 
     // Initialize teams config if needed
     if config.teams.is_none() {
@@ -510,7 +508,10 @@ async fn inject_team_sources(team_files: &[String]) -> Result<()> {
         };
 
         if !personal_file.exists() {
-            Output::warning(&format!("  {} not found, skipping", personal_file.display()));
+            Output::warning(&format!(
+                "  {} not found, skipping",
+                personal_file.display()
+            ));
             continue;
         }
 

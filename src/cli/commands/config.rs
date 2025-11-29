@@ -202,8 +202,7 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
         println!();
         render_entry_table(title, entries);
         let actions = vec!["Add", "Remove", "Back"];
-        let choice =
-            Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+        let choice = Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
 
         match choice {
             0 => {

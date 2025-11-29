@@ -1,11 +1,11 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::sync::{GitBackend, SyncEngine, SyncState};
+use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn format_diff_line(symbol: &str, status: &str, pkg: &str) -> String {
     match status {
@@ -39,18 +39,27 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
 
     if let Some(target_machine) = machine {
         // Compare with specific machine
-        let machines_dir = sync_path.join("machines");
-        let machine_file = machines_dir.join(format!("{}.json", target_machine));
+        match MachineState::load_from_repo(&sync_path, target_machine)? {
+            Some(other_machine) => {
+                // Build current machine state for comparison
+                let current_state = build_current_machine_state(&config, &state, &home)?;
+                show_machine_diff(&current_state, &other_machine)?;
+            }
+            None => {
+                Output::error(&format!("Machine '{}' not found", target_machine));
+                Output::info("Use 'tether machines list' to see available machines");
 
-        if !machine_file.exists() {
-            Output::error(&format!("Machine '{}' not found", target_machine));
-            Output::info("Use 'tether machines list' to see available machines");
-            return Ok(());
+                // List available machines
+                let machines = MachineState::list_all(&sync_path)?;
+                if !machines.is_empty() {
+                    println!();
+                    Output::info("Available machines:");
+                    for m in machines {
+                        println!("  • {}", m.machine_id);
+                    }
+                }
+            }
         }
-
-        Output::info(&format!("Comparing with machine: {}", target_machine));
-        // TODO: Load machine state and compare
-        Output::warning("Machine comparison not yet implemented");
     } else {
         // Compare local vs sync repo
         show_dotfile_diff(&config, &state, &sync_path, &home)?;
@@ -97,14 +106,26 @@ fn show_dotfile_diff(
                     .unwrap_or(true);
 
                 if is_different {
-                    diffs.push((file.clone(), "modified".to_string(), "local changes".to_string()));
+                    diffs.push((
+                        file.clone(),
+                        "modified".to_string(),
+                        "local changes".to_string(),
+                    ));
                 }
             }
             (true, false) => {
-                diffs.push((file.clone(), "local only".to_string(), "not in sync repo".to_string()));
+                diffs.push((
+                    file.clone(),
+                    "local only".to_string(),
+                    "not in sync repo".to_string(),
+                ));
             }
             (false, true) => {
-                diffs.push((file.clone(), "remote only".to_string(), "missing locally".to_string()));
+                diffs.push((
+                    file.clone(),
+                    "remote only".to_string(),
+                    "missing locally".to_string(),
+                ));
             }
             (false, false) => {
                 // Neither exists - skip
@@ -198,8 +219,10 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 let remote_manifest = std::fs::read_to_string(&npm_path)?;
                 let local_manifest = npm.export_manifest().await?;
 
-                let remote_packages: Vec<_> = remote_manifest.lines().filter(|l| !l.is_empty()).collect();
-                let local_packages: Vec<_> = local_manifest.lines().filter(|l| !l.is_empty()).collect();
+                let remote_packages: Vec<_> =
+                    remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+                let local_packages: Vec<_> =
+                    local_manifest.lines().filter(|l| !l.is_empty()).collect();
 
                 let diff = diff_package_lists(&remote_packages, &local_packages);
                 if !diff.is_empty() {
@@ -228,8 +251,10 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 let remote_manifest = std::fs::read_to_string(&pnpm_path)?;
                 let local_manifest = pnpm.export_manifest().await?;
 
-                let remote_packages: Vec<_> = remote_manifest.lines().filter(|l| !l.is_empty()).collect();
-                let local_packages: Vec<_> = local_manifest.lines().filter(|l| !l.is_empty()).collect();
+                let remote_packages: Vec<_> =
+                    remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+                let local_packages: Vec<_> =
+                    local_manifest.lines().filter(|l| !l.is_empty()).collect();
 
                 let diff = diff_package_lists(&remote_packages, &local_packages);
                 if !diff.is_empty() {
@@ -265,7 +290,11 @@ fn parse_brewfile(content: &str) -> HashMap<String, String> {
             continue;
         }
         // Parse lines like: brew "package" or cask "package" or tap "org/repo"
-        if let Some(rest) = line.strip_prefix("brew ").or_else(|| line.strip_prefix("cask ")).or_else(|| line.strip_prefix("tap ")) {
+        if let Some(rest) = line
+            .strip_prefix("brew ")
+            .or_else(|| line.strip_prefix("cask "))
+            .or_else(|| line.strip_prefix("tap "))
+        {
             let pkg = rest.trim_matches('"').trim_matches('\'');
             let pkg_type = if line.starts_with("cask") {
                 "cask"
@@ -280,7 +309,10 @@ fn parse_brewfile(content: &str) -> HashMap<String, String> {
     packages
 }
 
-fn diff_packages(remote: &HashMap<String, String>, local: &HashMap<String, String>) -> Vec<(String, String)> {
+fn diff_packages(
+    remote: &HashMap<String, String>,
+    local: &HashMap<String, String>,
+) -> Vec<(String, String)> {
     let mut diff = Vec::new();
 
     // Packages in local but not in remote (added locally)
@@ -318,4 +350,133 @@ fn diff_package_lists(remote: &[&str], local: &[&str]) -> Vec<(String, String)> 
 
     diff.sort_by(|a, b| a.0.cmp(&b.0));
     diff
+}
+
+fn build_current_machine_state(
+    config: &Config,
+    state: &SyncState,
+    home: &std::path::Path,
+) -> Result<MachineState> {
+    let mut machine = MachineState::new(&state.machine_id);
+
+    // Collect file hashes
+    for file in &config.dotfiles.files {
+        let path = home.join(file);
+        if path.exists() {
+            let content = std::fs::read(&path)?;
+            let hash = format!("{:x}", sha2::Sha256::digest(&content));
+            machine.files.insert(file.clone(), hash);
+        }
+    }
+
+    // Collect packages from state
+    for (manager, pkg_state) in &state.packages {
+        machine
+            .packages
+            .insert(manager.clone(), vec![pkg_state.hash.clone()]);
+    }
+
+    Ok(machine)
+}
+
+fn show_machine_diff(current: &MachineState, other: &MachineState) -> Result<()> {
+    println!(
+        "Comparing {} ({}) vs {} ({})",
+        current.machine_id.cyan(),
+        current.hostname.dimmed(),
+        other.machine_id.cyan(),
+        other.hostname.dimmed()
+    );
+    println!();
+
+    // File differences
+    let current_files: HashSet<_> = current.files.keys().collect();
+    let other_files: HashSet<_> = other.files.keys().collect();
+
+    let mut file_diffs = Vec::new();
+
+    for file in current_files.difference(&other_files) {
+        file_diffs.push(((*file).clone(), "only on this machine".to_string()));
+    }
+    for file in other_files.difference(&current_files) {
+        file_diffs.push(((*file).clone(), "only on other machine".to_string()));
+    }
+    for file in current_files.intersection(&other_files) {
+        if current.files.get(*file) != other.files.get(*file) {
+            file_diffs.push(((*file).clone(), "content differs".to_string()));
+        }
+    }
+
+    if file_diffs.is_empty() {
+        println!("{}", "📁 Dotfiles: Identical ✓".green());
+    } else {
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec![
+                Cell::new("📁 Dotfiles")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("Difference")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+            ]);
+
+        for (file, diff) in &file_diffs {
+            let color = match diff.as_str() {
+                "only on this machine" => Color::Green,
+                "only on other machine" => Color::Red,
+                _ => Color::Yellow,
+            };
+            table.add_row(vec![Cell::new(file), Cell::new(diff).fg(color)]);
+        }
+        println!("{table}");
+    }
+    println!();
+
+    // Package differences
+    let current_pkgs: HashSet<_> = current.packages.keys().collect();
+    let other_pkgs: HashSet<_> = other.packages.keys().collect();
+    let all_managers: HashSet<_> = current_pkgs.union(&other_pkgs).collect();
+
+    let mut has_pkg_diff = false;
+
+    for manager in all_managers {
+        let current_list: HashSet<_> = current
+            .packages
+            .get(*manager)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        let other_list: HashSet<_> = other
+            .packages
+            .get(*manager)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+
+        let mut diffs = Vec::new();
+        for pkg in current_list.difference(&other_list) {
+            diffs.push(((*pkg).clone(), "added".to_string()));
+        }
+        for pkg in other_list.difference(&current_list) {
+            diffs.push(((*pkg).clone(), "removed".to_string()));
+        }
+
+        if !diffs.is_empty() {
+            has_pkg_diff = true;
+            println!("{}", format!("📦 {}:", manager).bright_cyan().bold());
+            for (pkg, status) in diffs {
+                let symbol = if status == "added" { "+" } else { "-" };
+                println!("{}", format_diff_line(symbol, &status, &pkg));
+            }
+            println!();
+        }
+    }
+
+    if !has_pkg_diff {
+        println!("{}", "📦 Packages: Identical ✓".green());
+        println!();
+    }
+
+    Ok(())
 }

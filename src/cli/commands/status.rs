@@ -24,9 +24,7 @@ pub async fn run() -> Result<()> {
     // Daemon table
     let pid = read_daemon_pid()?;
     let (status_label, status_color) = match pid {
-        Some(pid) if is_process_running(pid) => {
-            (format!("● Running (PID {pid})"), Color::Green)
-        }
+        Some(pid) if is_process_running(pid) => (format!("● Running (PID {pid})"), Color::Green),
         Some(pid) => (format!("● Not running (stale PID {pid})"), Color::Yellow),
         None => ("● Not running".to_string(), Color::Yellow),
     };
