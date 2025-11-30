@@ -122,7 +122,7 @@ impl PackageManager for BrewManager {
 
         // Use `brew bundle install` to install packages from Brewfile
         // --no-upgrade: don't upgrade existing packages (faster, less disruptive)
-        let output = Command::new("brew")
+        let status = Command::new("brew")
             .args([
                 "bundle",
                 "install",
@@ -134,7 +134,7 @@ impl PackageManager for BrewManager {
             ])
             .env("HOMEBREW_NO_AUTO_UPDATE", "1")
             .env("NONINTERACTIVE", "1")
-            .output()
+            .status()
             .await?;
 
         // Clean up temp file
@@ -142,11 +142,8 @@ impl PackageManager for BrewManager {
 
         // brew bundle may return non-zero even if most packages installed
         // (e.g., one cask failed). Log but don't fail.
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.trim().is_empty() {
-                eprintln!("Warning: brew bundle had issues: {}", stderr);
-            }
+        if !status.success() {
+            eprintln!("Warning: brew bundle had issues (exit code: {})", status);
         }
 
         Ok(())
