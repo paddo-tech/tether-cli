@@ -343,12 +343,17 @@ impl Default for Config {
             },
             dotfiles: DotfilesConfig {
                 files: vec![
+                    // Shell configs - don't create on machines that don't have them
                     DotfileEntry::WithOptions {
                         path: ".zshrc".to_string(),
                         create_if_missing: false,
                     },
                     DotfileEntry::WithOptions {
                         path: ".zprofile".to_string(),
+                        create_if_missing: false,
+                    },
+                    DotfileEntry::WithOptions {
+                        path: ".zshenv".to_string(),
                         create_if_missing: false,
                     },
                     DotfileEntry::WithOptions {
@@ -359,6 +364,11 @@ impl Default for Config {
                         path: ".bash_profile".to_string(),
                         create_if_missing: false,
                     },
+                    DotfileEntry::WithOptions {
+                        path: ".profile".to_string(),
+                        create_if_missing: false,
+                    },
+                    // Common configs - create on all machines
                     DotfileEntry::Simple(".gitconfig".to_string()),
                     DotfileEntry::Simple(".tether/config.toml".to_string()),
                 ],
