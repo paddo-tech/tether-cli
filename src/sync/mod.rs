@@ -1,6 +1,7 @@
 pub mod conflict;
 pub mod engine;
 pub mod git;
+pub mod packages;
 pub mod state;
 pub mod team;
 
@@ -10,6 +11,7 @@ pub use conflict::{
 };
 pub use engine::SyncEngine;
 pub use git::GitBackend;
+pub use packages::{import_packages, sync_packages};
 pub use state::{MachineState, SyncState};
 pub use team::{
     discover_symlinkable_dirs, extract_team_name_from_url, resolve_conflict, TeamManifest,

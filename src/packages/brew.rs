@@ -4,6 +4,63 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use tokio::process::Command;
 
+/// Structured representation of Brewfile contents
+#[derive(Debug, Clone, Default)]
+pub struct BrewfilePackages {
+    pub taps: Vec<String>,
+    pub formulae: Vec<String>,
+    pub casks: Vec<String>,
+}
+
+impl BrewfilePackages {
+    /// Parse a Brewfile string into structured package lists
+    pub fn parse(content: &str) -> Self {
+        let mut packages = Self::default();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Extract the quoted package name
+            if let Some(name) = line.split('"').nth(1) {
+                if line.starts_with("tap ") {
+                    packages.taps.push(name.to_string());
+                } else if line.starts_with("brew ") {
+                    packages.formulae.push(name.to_string());
+                } else if line.starts_with("cask ") {
+                    packages.casks.push(name.to_string());
+                }
+            }
+        }
+
+        // Sort for deterministic output
+        packages.taps.sort();
+        packages.formulae.sort();
+        packages.casks.sort();
+
+        packages
+    }
+
+    /// Generate a Brewfile string from structured package lists
+    pub fn generate(&self) -> String {
+        let mut lines = Vec::new();
+
+        for tap in &self.taps {
+            lines.push(format!("tap \"{}\"", tap));
+        }
+        for formula in &self.formulae {
+            lines.push(format!("brew \"{}\"", formula));
+        }
+        for cask in &self.casks {
+            lines.push(format!("cask \"{}\"", cask));
+        }
+
+        lines.join("\n") + "\n"
+    }
+}
+
 pub struct BrewManager;
 
 impl BrewManager {
@@ -27,6 +84,26 @@ impl BrewManager {
         let home =
             home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
         Ok(home.join(".tether").join("Brewfile.tmp"))
+    }
+
+    /// List installed casks
+    pub async fn list_installed_casks(&self) -> Result<Vec<String>> {
+        let output = self.run_brew(&["list", "--cask", "-1"]).await?;
+        Ok(output
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
+    }
+
+    /// List installed taps
+    pub async fn list_taps(&self) -> Result<Vec<String>> {
+        let output = self.run_brew(&["tap"]).await?;
+        Ok(output
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
     }
 }
 
@@ -87,6 +164,7 @@ impl PackageManager for BrewManager {
             .args([
                 "bundle",
                 "dump",
+                "--no-vscode",
                 "--file",
                 temp_path
                     .to_str()
@@ -122,6 +200,7 @@ impl PackageManager for BrewManager {
 
         // Use `brew bundle install` to install packages from Brewfile
         // --no-upgrade: don't upgrade existing packages (faster, less disruptive)
+        // Stream output to terminal so user can see progress and any errors
         let status = Command::new("brew")
             .args([
                 "bundle",
@@ -134,6 +213,8 @@ impl PackageManager for BrewManager {
             ])
             .env("HOMEBREW_NO_AUTO_UPDATE", "1")
             .env("NONINTERACTIVE", "1")
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
             .status()
             .await?;
 

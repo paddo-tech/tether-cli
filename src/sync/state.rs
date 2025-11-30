@@ -35,8 +35,13 @@ pub struct MachineState {
     pub os_version: String,
     /// File paths and their hashes
     pub files: HashMap<String, String>,
-    /// Package manager -> list of packages
+    /// Package manager -> list of installed packages
+    /// Keys: brew_formulae, brew_casks, brew_taps, npm, pnpm, bun, gem
     pub packages: HashMap<String, Vec<String>>,
+    /// Package manager -> list of packages explicitly removed on this machine
+    /// These won't be reinstalled from the union manifest
+    #[serde(default)]
+    pub removed_packages: HashMap<String, Vec<String>>,
 }
 
 impl MachineState {
@@ -53,6 +58,7 @@ impl MachineState {
             os_version: String::new(),
             files: HashMap::new(),
             packages: HashMap::new(),
+            removed_packages: HashMap::new(),
         }
     }
 
@@ -99,6 +105,34 @@ impl MachineState {
             }
         }
         Ok(machines)
+    }
+
+    /// Compute the union of packages across all machine states
+    /// Returns a HashMap where each key is a package manager and value is all packages
+    /// installed on ANY machine
+    pub fn compute_union_packages(machines: &[Self]) -> HashMap<String, Vec<String>> {
+        use std::collections::HashSet;
+
+        let mut union: HashMap<String, HashSet<String>> = HashMap::new();
+
+        for machine in machines {
+            for (manager, packages) in &machine.packages {
+                let set = union.entry(manager.clone()).or_default();
+                for pkg in packages {
+                    set.insert(pkg.clone());
+                }
+            }
+        }
+
+        // Convert HashSet back to sorted Vec for deterministic output
+        union
+            .into_iter()
+            .map(|(k, v)| {
+                let mut sorted: Vec<_> = v.into_iter().collect();
+                sorted.sort();
+                (k, sorted)
+            })
+            .collect()
     }
 }
 

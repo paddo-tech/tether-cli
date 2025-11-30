@@ -1,11 +1,12 @@
 use crate::cli::{Output, Prompt};
 use crate::config::Config;
-use crate::packages::{
-    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+use crate::packages::{BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager};
+use crate::sync::{
+    import_packages, sync_packages, GitBackend, MachineState, SyncEngine, SyncState,
 };
-use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
@@ -119,17 +120,22 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
     }
 
-    // Import packages from manifests (install missing packages)
+    // Build machine state first (to know what's installed locally + respect removed_packages)
+    let mut machine_state = build_machine_state(&config, &state, &sync_path).await?;
+
+    // Import packages from manifests (install missing packages, respecting removed_packages)
     if !dry_run {
-        import_packages(&config, &sync_path).await?;
+        import_packages(&config, &sync_path, &machine_state).await?;
+
+        // Rebuild machine state after import to capture newly installed packages
+        machine_state = build_machine_state(&config, &state, &sync_path).await?;
     }
 
-    // Export package manifests (save current packages)
-    sync_packages(&config, &mut state, &sync_path, dry_run).await?;
+    // Export package manifests using union of all machine states
+    sync_packages(&config, &mut state, &sync_path, &machine_state, dry_run).await?;
 
     // Save machine state for cross-machine comparison
     if !dry_run {
-        let machine_state = build_machine_state(&config, &state, &sync_path).await?;
         machine_state.save_to_repo(&sync_path)?;
     }
 
@@ -662,259 +668,140 @@ fn sync_project_configs(
     Ok(())
 }
 
-async fn sync_packages(
-    config: &Config,
-    state: &mut SyncState,
-    sync_path: &Path,
-    dry_run: bool,
-) -> Result<()> {
-    let manifests_dir = sync_path.join("manifests");
-    std::fs::create_dir_all(&manifests_dir)?;
-
-    // Homebrew
-    if config.packages.brew.enabled {
-        let brew = BrewManager::new();
-        if brew.is_available().await {
-            if let Ok(manifest) = brew.export_manifest().await {
-                let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
-                let manifest_path = manifests_dir.join("Brewfile");
-
-                // Compare against file on disk, not state (file may have changed from pull)
-                let file_hash = std::fs::read(&manifest_path)
-                    .ok()
-                    .map(|c| format!("{:x}", Sha256::digest(&c)));
-                let changed = file_hash.as_ref() != Some(&hash);
-
-                if changed && !dry_run {
-                    std::fs::write(&manifest_path, manifest)?;
-                    use chrono::Utc;
-                    state.packages.insert(
-                        "brew".to_string(),
-                        crate::sync::state::PackageState {
-                            last_sync: Utc::now(),
-                            hash,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    // npm
-    if config.packages.npm.enabled {
-        sync_package_manager(
-            &NpmManager::new(),
-            "npm",
-            "npm.txt",
-            state,
-            &manifests_dir,
-            dry_run,
-        )
-        .await?;
-    }
-
-    // pnpm
-    if config.packages.pnpm.enabled {
-        sync_package_manager(
-            &PnpmManager::new(),
-            "pnpm",
-            "pnpm.txt",
-            state,
-            &manifests_dir,
-            dry_run,
-        )
-        .await?;
-    }
-
-    // bun
-    if config.packages.bun.enabled {
-        sync_package_manager(
-            &BunManager::new(),
-            "bun",
-            "bun.txt",
-            state,
-            &manifests_dir,
-            dry_run,
-        )
-        .await?;
-    }
-
-    // gem
-    if config.packages.gem.enabled {
-        sync_package_manager(
-            &GemManager::new(),
-            "gem",
-            "gems.txt",
-            state,
-            &manifests_dir,
-            dry_run,
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-async fn sync_package_manager<P: PackageManager>(
-    manager: &P,
-    name: &str,
-    filename: &str,
-    state: &mut SyncState,
-    manifests_dir: &Path,
-    dry_run: bool,
-) -> Result<()> {
-    if !manager.is_available().await {
-        return Ok(());
-    }
-
-    if let Ok(manifest) = manager.export_manifest().await {
-        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
-        let manifest_path = manifests_dir.join(filename);
-
-        // Compare against file on disk, not state (file may have changed from pull)
-        let file_hash = std::fs::read(&manifest_path)
-            .ok()
-            .map(|c| format!("{:x}", Sha256::digest(&c)));
-        let changed = file_hash.as_ref() != Some(&hash);
-
-        if changed && !dry_run {
-            std::fs::write(&manifest_path, manifest)?;
-            use chrono::Utc;
-            state.packages.insert(
-                name.to_string(),
-                crate::sync::state::PackageState {
-                    last_sync: Utc::now(),
-                    hash,
-                },
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Import packages from manifests (install missing packages from other machines)
-async fn import_packages(config: &Config, sync_path: &Path) -> Result<()> {
-    let manifests_dir = sync_path.join("manifests");
-    if !manifests_dir.exists() {
-        return Ok(());
-    }
-
-    let remove_unlisted = config.packages.remove_unlisted;
-
-    // Homebrew
-    if config.packages.brew.enabled {
-        let brewfile = manifests_dir.join("Brewfile");
-        if brewfile.exists() {
-            let brew = BrewManager::new();
-            if brew.is_available().await {
-                if let Ok(manifest) = std::fs::read_to_string(&brewfile) {
-                    if let Err(e) = brew.import_manifest(&manifest).await {
-                        Output::warning(&format!("Failed to import Brewfile: {}", e));
-                    }
-                    if remove_unlisted {
-                        if let Err(e) = brew.remove_unlisted(&manifest).await {
-                            Output::warning(&format!(
-                                "Failed to remove unlisted brew packages: {}",
-                                e
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // npm
-    if config.packages.npm.enabled {
-        import_package_manager(
-            &NpmManager::new(),
-            &manifests_dir.join("npm.txt"),
-            remove_unlisted,
-        )
-        .await;
-    }
-
-    // pnpm
-    if config.packages.pnpm.enabled {
-        import_package_manager(
-            &PnpmManager::new(),
-            &manifests_dir.join("pnpm.txt"),
-            remove_unlisted,
-        )
-        .await;
-    }
-
-    // bun
-    if config.packages.bun.enabled {
-        import_package_manager(
-            &BunManager::new(),
-            &manifests_dir.join("bun.txt"),
-            remove_unlisted,
-        )
-        .await;
-    }
-
-    // gem
-    if config.packages.gem.enabled {
-        import_package_manager(
-            &GemManager::new(),
-            &manifests_dir.join("gems.txt"),
-            remove_unlisted,
-        )
-        .await;
-    }
-
-    Ok(())
-}
-
-async fn import_package_manager<P: PackageManager>(
-    manager: &P,
-    manifest_path: &Path,
-    remove_unlisted: bool,
-) {
-    if !manifest_path.exists() {
-        return;
-    }
-
-    if !manager.is_available().await {
-        return;
-    }
-
-    if let Ok(manifest) = std::fs::read_to_string(manifest_path) {
-        if let Err(e) = manager.import_manifest(&manifest).await {
-            Output::warning(&format!(
-                "Failed to import {}: {}",
-                manifest_path.display(),
-                e
-            ));
-        }
-        if remove_unlisted {
-            if let Err(e) = manager.remove_unlisted(&manifest).await {
-                Output::warning(&format!(
-                    "Failed to remove unlisted from {}: {}",
-                    manifest_path.display(),
-                    e
-                ));
-            }
-        }
-    }
-}
-
 /// Build machine state for cross-machine comparison
 async fn build_machine_state(
-    _config: &Config,
+    config: &Config,
     state: &SyncState,
-    _sync_path: &Path,
+    sync_path: &Path,
 ) -> Result<MachineState> {
-    let mut machine_state = MachineState::new(&state.machine_id);
+    // Load existing machine state to preserve removed_packages
+    let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
+        .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Collect file hashes (packages are in manifest files, no need to duplicate)
+    // Update last_sync time
+    machine_state.last_sync = chrono::Utc::now();
+
+    // Collect file hashes
+    machine_state.files.clear();
     for (path, file_state) in &state.files {
         machine_state
             .files
             .insert(path.clone(), file_state.hash.clone());
     }
 
+    // Populate packages from local system
+    let previous_packages = machine_state.packages.clone();
+    machine_state.packages.clear();
+
+    // Homebrew
+    if config.packages.brew.enabled {
+        let brew = BrewManager::new();
+        if brew.is_available().await {
+            // Get formulae
+            if let Ok(formulae) = brew.list_installed().await {
+                machine_state.packages.insert(
+                    "brew_formulae".to_string(),
+                    formulae.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+            // Get casks
+            if let Ok(casks) = brew.list_installed_casks().await {
+                machine_state
+                    .packages
+                    .insert("brew_casks".to_string(), casks);
+            }
+            // Get taps
+            if let Ok(taps) = brew.list_taps().await {
+                machine_state.packages.insert("brew_taps".to_string(), taps);
+            }
+        }
+    }
+
+    // npm
+    if config.packages.npm.enabled {
+        let npm = NpmManager::new();
+        if npm.is_available().await {
+            if let Ok(packages) = npm.list_installed().await {
+                machine_state.packages.insert(
+                    "npm".to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // pnpm
+    if config.packages.pnpm.enabled {
+        let pnpm = PnpmManager::new();
+        if pnpm.is_available().await {
+            if let Ok(packages) = pnpm.list_installed().await {
+                machine_state.packages.insert(
+                    "pnpm".to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // bun
+    if config.packages.bun.enabled {
+        let bun = BunManager::new();
+        if bun.is_available().await {
+            if let Ok(packages) = bun.list_installed().await {
+                machine_state.packages.insert(
+                    "bun".to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // gem
+    if config.packages.gem.enabled {
+        let gem = GemManager::new();
+        if gem.is_available().await {
+            if let Ok(packages) = gem.list_installed().await {
+                machine_state.packages.insert(
+                    "gem".to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // Detect removed packages: packages that were in previous state but not installed now
+    detect_removed_packages(&mut machine_state, &previous_packages);
+
     Ok(machine_state)
+}
+
+/// Detect packages that were removed since the last sync and track them
+fn detect_removed_packages(
+    machine_state: &mut MachineState,
+    previous_packages: &std::collections::HashMap<String, Vec<String>>,
+) {
+    for (manager, prev_pkgs) in previous_packages {
+        let current_pkgs: HashSet<_> = machine_state
+            .packages
+            .get(manager)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+
+        let removed_set = machine_state
+            .removed_packages
+            .entry(manager.clone())
+            .or_default();
+
+        for pkg in prev_pkgs {
+            if !current_pkgs.contains(pkg) {
+                // Package was in previous state but not installed now - track as removed
+                if !removed_set.contains(pkg) {
+                    removed_set.push(pkg.clone());
+                }
+            }
+        }
+
+        // Clean up: if a package is now installed, remove it from removed_packages
+        removed_set.retain(|pkg| !current_pkgs.contains(pkg));
+    }
 }
