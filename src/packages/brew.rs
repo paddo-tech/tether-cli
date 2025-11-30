@@ -146,6 +146,12 @@ impl PackageManager for BrewManager {
     }
 
     async fn update_all(&self) -> Result<()> {
+        // Check if there are any packages to update
+        let packages = self.list_installed().await?;
+        if packages.is_empty() {
+            return Ok(());
+        }
+
         // Update Homebrew itself and upgrade all packages
         Command::new("brew").args(["update"]).output().await?;
 

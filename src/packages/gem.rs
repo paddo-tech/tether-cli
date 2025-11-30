@@ -132,6 +132,11 @@ impl PackageManager for GemManager {
     }
 
     async fn update_all(&self) -> Result<()> {
+        let packages = self.list_installed().await?;
+        if packages.is_empty() {
+            return Ok(());
+        }
+
         let output = Command::new("gem")
             .args(["update", "--user-install"])
             .output()

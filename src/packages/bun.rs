@@ -165,6 +165,11 @@ impl PackageManager for BunManager {
     }
 
     async fn update_all(&self) -> Result<()> {
+        let packages = self.list_installed().await?;
+        if packages.is_empty() {
+            return Ok(());
+        }
+
         let output = Command::new("bun").args(["update", "-g"]).output().await?;
 
         if !output.status.success() {

@@ -136,6 +136,11 @@ impl PackageManager for NpmManager {
     }
 
     async fn update_all(&self) -> Result<()> {
+        let packages = self.list_installed().await?;
+        if packages.is_empty() {
+            return Ok(());
+        }
+
         let output = Command::new("npm").args(["update", "-g"]).output().await?;
 
         if !output.status.success() {
