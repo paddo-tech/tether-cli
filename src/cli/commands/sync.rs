@@ -798,6 +798,8 @@ async fn import_packages(config: &Config, sync_path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    let remove_unlisted = config.packages.remove_unlisted;
+
     // Homebrew
     if config.packages.brew.enabled {
         let brewfile = manifests_dir.join("Brewfile");
@@ -808,6 +810,14 @@ async fn import_packages(config: &Config, sync_path: &Path) -> Result<()> {
                     if let Err(e) = brew.import_manifest(&manifest).await {
                         Output::warning(&format!("Failed to import Brewfile: {}", e));
                     }
+                    if remove_unlisted {
+                        if let Err(e) = brew.remove_unlisted(&manifest).await {
+                            Output::warning(&format!(
+                                "Failed to remove unlisted brew packages: {}",
+                                e
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -815,28 +825,52 @@ async fn import_packages(config: &Config, sync_path: &Path) -> Result<()> {
 
     // npm
     if config.packages.npm.enabled {
-        import_package_manager(&NpmManager::new(), &manifests_dir.join("npm.txt")).await;
+        import_package_manager(
+            &NpmManager::new(),
+            &manifests_dir.join("npm.txt"),
+            remove_unlisted,
+        )
+        .await;
     }
 
     // pnpm
     if config.packages.pnpm.enabled {
-        import_package_manager(&PnpmManager::new(), &manifests_dir.join("pnpm.txt")).await;
+        import_package_manager(
+            &PnpmManager::new(),
+            &manifests_dir.join("pnpm.txt"),
+            remove_unlisted,
+        )
+        .await;
     }
 
     // bun
     if config.packages.bun.enabled {
-        import_package_manager(&BunManager::new(), &manifests_dir.join("bun.txt")).await;
+        import_package_manager(
+            &BunManager::new(),
+            &manifests_dir.join("bun.txt"),
+            remove_unlisted,
+        )
+        .await;
     }
 
     // gem
     if config.packages.gem.enabled {
-        import_package_manager(&GemManager::new(), &manifests_dir.join("gems.txt")).await;
+        import_package_manager(
+            &GemManager::new(),
+            &manifests_dir.join("gems.txt"),
+            remove_unlisted,
+        )
+        .await;
     }
 
     Ok(())
 }
 
-async fn import_package_manager<P: PackageManager>(manager: &P, manifest_path: &Path) {
+async fn import_package_manager<P: PackageManager>(
+    manager: &P,
+    manifest_path: &Path,
+    remove_unlisted: bool,
+) {
     if !manifest_path.exists() {
         return;
     }
@@ -852,6 +886,15 @@ async fn import_package_manager<P: PackageManager>(manager: &P, manifest_path: &
                 manifest_path.display(),
                 e
             ));
+        }
+        if remove_unlisted {
+            if let Err(e) = manager.remove_unlisted(&manifest).await {
+                Output::warning(&format!(
+                    "Failed to remove unlisted from {}: {}",
+                    manifest_path.display(),
+                    e
+                ));
+            }
         }
     }
 }

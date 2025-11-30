@@ -164,6 +164,36 @@ impl PackageManager for BunManager {
         Ok(())
     }
 
+    async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
+        let desired: std::collections::HashSet<&str> = manifest_content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        if desired.is_empty() {
+            return Ok(());
+        }
+
+        let installed = self.list_installed().await?;
+
+        for pkg in installed {
+            if !desired.contains(pkg.name.as_str()) {
+                let output = Command::new("bun")
+                    .args(["remove", "-g", &pkg.name])
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {

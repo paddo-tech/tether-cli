@@ -145,6 +145,46 @@ impl PackageManager for BrewManager {
         Ok(())
     }
 
+    async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
+        // Parse manifest to get desired packages
+        let desired: std::collections::HashSet<&str> = manifest_content
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                // Parse Brewfile format: brew "package" or cask "package"
+                if line.starts_with("brew \"") || line.starts_with("cask \"") {
+                    line.split('"').nth(1)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if desired.is_empty() {
+            return Ok(());
+        }
+
+        // Get installed packages
+        let installed = self.list_installed().await?;
+
+        // Remove packages not in manifest
+        for pkg in installed {
+            if !desired.contains(pkg.name.as_str()) {
+                let output = Command::new("brew")
+                    .args(["uninstall", &pkg.name])
+                    .output()
+                    .await?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn update_all(&self) -> Result<()> {
         // Check if there are any packages to update
         let packages = self.list_installed().await?;

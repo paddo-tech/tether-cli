@@ -51,6 +51,8 @@ pub enum BackendType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagesConfig {
+    #[serde(default)]
+    pub remove_unlisted: bool,
     pub brew: BrewConfig,
     pub npm: NpmConfig,
     pub pnpm: PnpmConfig,
@@ -280,6 +282,7 @@ impl Default for Config {
                 url: String::new(),
             },
             packages: PackagesConfig {
+                remove_unlisted: false,
                 brew: BrewConfig {
                     enabled: true,
                     sync_casks: true,
