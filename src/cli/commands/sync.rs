@@ -58,11 +58,22 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     let mut state = SyncState::load()?;
 
+    // Load machine state early to get ignored lists for decrypt phase
+    let machine_state_for_decrypt =
+        MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
+
     // Apply dotfiles from sync repo (if encrypted) - with conflict detection
     // Interactive mode when run manually, non-interactive when run by daemon
     let interactive = std::env::var("TETHER_DAEMON").is_err();
     if config.security.encrypt_dotfiles && !dry_run {
-        decrypt_from_repo(&config, &sync_path, &home, &state, interactive)?;
+        decrypt_from_repo(
+            &config,
+            &sync_path,
+            &home,
+            &state,
+            &machine_state_for_decrypt,
+            interactive,
+        )?;
     }
 
     // Sync dotfiles (local → Git)
@@ -179,6 +190,7 @@ fn decrypt_from_repo(
     sync_path: &Path,
     home: &Path,
     state: &SyncState,
+    machine_state: &MachineState,
     interactive: bool,
 ) -> Result<()> {
     use crate::sync::{detect_conflict, ConflictResolution, ConflictState};
@@ -189,6 +201,11 @@ fn decrypt_from_repo(
     let mut new_conflicts = Vec::new();
 
     for file in &config.dotfiles.files {
+        // Skip if this dotfile is ignored on this machine
+        if machine_state.ignored_dotfiles.contains(file) {
+            continue;
+        }
+
         let filename = file.trim_start_matches('.');
         let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
 
@@ -322,7 +339,7 @@ fn decrypt_from_repo(
 
     // Decrypt project-local configs
     if config.project_configs.enabled {
-        decrypt_project_configs(config, sync_path, home, &key)?;
+        decrypt_project_configs(config, sync_path, home, machine_state, &key)?;
     }
 
     Ok(())
@@ -332,6 +349,7 @@ fn decrypt_project_configs(
     config: &Config,
     sync_path: &Path,
     home: &Path,
+    machine_state: &MachineState,
     key: &[u8],
 ) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
@@ -400,6 +418,15 @@ fn decrypt_project_configs(
                         .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {}", e))?;
                     let rel_path_str = rel_path.to_string_lossy();
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
+
+                    // Skip if this project config is ignored on this machine
+                    if let Some(ignored_paths) =
+                        machine_state.ignored_project_configs.get(&project_name)
+                    {
+                        if ignored_paths.contains(&rel_path_no_enc.to_string()) {
+                            continue;
+                        }
+                    }
 
                     if let Ok(encrypted_content) = std::fs::read(enc_file) {
                         match crate::security::decrypt_file(&encrypted_content, key) {
@@ -557,7 +584,9 @@ fn sync_project_configs(
     home: &Path,
     dry_run: bool,
 ) -> Result<()> {
-    use crate::sync::git::{find_git_repos, get_remote_url, is_gitignored, normalize_remote_url};
+    use crate::sync::git::{
+        find_git_repos, get_remote_url, is_gitignored, normalize_remote_url, should_skip_dir,
+    };
     use walkdir::WalkDir;
 
     let projects_dir = sync_path.join("projects");
@@ -588,7 +617,18 @@ fn sync_project_configs(
             let normalized_url = normalize_remote_url(&remote_url);
 
             for pattern in &config.project_configs.patterns {
-                for entry in WalkDir::new(&repo_path).follow_links(false).max_depth(5) {
+                let walker = WalkDir::new(&repo_path)
+                    .follow_links(false)
+                    .max_depth(5)
+                    .into_iter()
+                    .filter_entry(|e| {
+                        e.file_type().is_file()
+                            || e.file_name()
+                                .to_str()
+                                .map(|n| !should_skip_dir(n))
+                                .unwrap_or(true)
+                    });
+                for entry in walker {
                     let entry = match entry {
                         Ok(e) => e,
                         Err(_) => continue,
@@ -771,6 +811,35 @@ async fn build_machine_state(
 
     // Detect removed packages: packages that were in previous state but not installed now
     detect_removed_packages(&mut machine_state, &previous_packages);
+
+    // Populate dotfiles list from config (files that exist locally)
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    machine_state.dotfiles.clear();
+    for file in &config.dotfiles.files {
+        if home.join(file).exists() {
+            machine_state.dotfiles.push(file.clone());
+        }
+    }
+    machine_state.dotfiles.sort();
+
+    // Populate project_configs from state (tracked project files)
+    machine_state.project_configs.clear();
+    for key in state.files.keys() {
+        if let Some(rest) = key.strip_prefix("project:") {
+            if let Some((project_key, rel_path)) = rest.split_once('/') {
+                machine_state
+                    .project_configs
+                    .entry(project_key.to_string())
+                    .or_default()
+                    .push(rel_path.to_string());
+            }
+        }
+    }
+    // Sort for deterministic output
+    for paths in machine_state.project_configs.values_mut() {
+        paths.sort();
+        paths.dedup();
+    }
 
     Ok(machine_state)
 }

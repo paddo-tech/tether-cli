@@ -151,35 +151,67 @@ pub async fn dotfiles() -> Result<()> {
     let mut cursor = 0usize;
 
     loop {
-        Output::header("Dotfile Sync Manager");
+        Output::header("Sync Configuration");
+
+        // Section 1: Home directory dotfiles
+        println!();
+        Output::subheader("Home Directory (~/)");
         render_entry_table("Files", &config.dotfiles.files);
         render_entry_table("Folders", &config.dotfiles.dirs);
-        render_entry_table("Project Patterns", &config.project_configs.patterns);
 
-        let options = vec!["Files", "Folders", "Project Patterns", "Done"];
-        let choice = Prompt::select(
-            "Choose a section to manage",
-            options.clone(),
-            cursor.min(options.len() - 1),
-        )?;
+        // Section 2: Project configs
+        println!();
+        let status = if config.project_configs.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        Output::subheader(&format!("Project Configs ({})", status));
+        render_entry_table("Search Paths", &config.project_configs.search_paths);
+        render_entry_table("File Patterns", &config.project_configs.patterns);
+
+        let options = vec![
+            "Dotfiles",
+            "Dotfile Folders",
+            "Project Search Paths",
+            "Project File Patterns",
+            "Toggle Project Scanning",
+            "Done",
+        ];
+        let choice = Prompt::select("Select section", options.clone(), cursor.min(options.len() - 1))?;
         cursor = choice;
 
         let changed = match choice {
             0 => Some(manage_entry_list(
-                "Files",
-                "file path (e.g., ~/.zshrc)",
+                "Dotfiles",
+                "file path (e.g., .zshrc)",
                 &mut config.dotfiles.files,
             )?),
             1 => Some(manage_entry_list(
-                "Folders",
-                "folder path (e.g., ~/.claude)",
+                "Dotfile Folders",
+                "folder path (e.g., .config/nvim)",
                 &mut config.dotfiles.dirs,
             )?),
             2 => Some(manage_entry_list(
-                "Project Patterns",
+                "Project Search Paths",
+                "path (e.g., ~/Projects)",
+                &mut config.project_configs.search_paths,
+            )?),
+            3 => Some(manage_entry_list(
+                "Project File Patterns",
                 "pattern (e.g., .env.local)",
                 &mut config.project_configs.patterns,
             )?),
+            4 => {
+                config.project_configs.enabled = !config.project_configs.enabled;
+                let state = if config.project_configs.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                Output::success(&format!("Project config scanning {}", state));
+                Some(true)
+            }
             _ => None,
         };
 

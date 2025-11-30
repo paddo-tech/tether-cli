@@ -247,6 +247,49 @@ pub fn is_gitignored(file_path: &Path) -> Result<bool> {
 }
 
 /// Find all git repositories under a given path (recursive, max 3 levels deep)
+/// Directories to skip when scanning for git repos or project files.
+/// These are typically build artifacts, dependencies, or caches.
+pub fn should_skip_dir(name: &str) -> bool {
+    // Hidden directories
+    if name.starts_with('.') {
+        return true;
+    }
+
+    matches!(
+        name,
+        // Node.js
+        "node_modules"
+            | "bower_components"
+            // Rust
+            | "target"
+            // Python
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+            | "env"
+            | ".eggs"
+            | "*.egg-info"
+            // .NET
+            | "bin"
+            | "obj"
+            | "packages"
+            // Java/Kotlin
+            | "build"
+            | "out"
+            // Go
+            | "vendor"
+            // Ruby
+            | "bundle"
+            // General
+            | "dist"
+            | "coverage"
+            | "tmp"
+            | "temp"
+            | "cache"
+            | ".cache"
+    )
+}
+
 pub fn find_git_repos(search_path: &Path) -> Result<Vec<PathBuf>> {
     let mut repos = Vec::new();
 
@@ -279,9 +322,8 @@ fn find_git_repos_recursive(
         for entry in entries.flatten() {
             let entry_path = entry.path();
             if entry_path.is_dir() {
-                // Skip hidden directories and common non-project dirs
                 if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.') || name == "node_modules" || name == "target" {
+                    if should_skip_dir(name) {
                         continue;
                     }
                 }

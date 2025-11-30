@@ -42,6 +42,25 @@ pub struct MachineState {
     /// These won't be reinstalled from the union manifest
     #[serde(default)]
     pub removed_packages: HashMap<String, Vec<String>>,
+    /// Dotfiles present on this machine (e.g., ".zshrc", ".gitconfig")
+    #[serde(default)]
+    pub dotfiles: Vec<String>,
+    /// Dotfiles ignored on this machine (won't be overwritten during sync)
+    #[serde(default)]
+    pub ignored_dotfiles: Vec<String>,
+    /// Project configs present on this machine (project_key -> list of relative paths)
+    /// project_key is normalized git remote URL (e.g., "github.com/user/repo")
+    #[serde(default)]
+    pub project_configs: HashMap<String, Vec<String>>,
+    /// Project configs ignored on this machine (project_key -> list of relative paths)
+    #[serde(default)]
+    pub ignored_project_configs: HashMap<String, Vec<String>>,
+}
+
+impl Default for MachineState {
+    fn default() -> Self {
+        Self::new("unknown")
+    }
 }
 
 impl MachineState {
@@ -59,6 +78,10 @@ impl MachineState {
             files: HashMap::new(),
             packages: HashMap::new(),
             removed_packages: HashMap::new(),
+            dotfiles: Vec::new(),
+            ignored_dotfiles: Vec::new(),
+            project_configs: HashMap::new(),
+            ignored_project_configs: HashMap::new(),
         }
     }
 

@@ -1,7 +1,8 @@
 use crate::cli::Output;
 use crate::config::Config;
 use crate::packages::{
-    BrewManager, BrewfilePackages, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+    normalize_formula_name, BrewManager, BrewfilePackages, BunManager, GemManager, NpmManager,
+    PackageManager, PnpmManager,
 };
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
@@ -120,27 +121,28 @@ async fn import_brew(manifests_dir: &Path, machine_state: &MachineState) {
     brew_packages.casks.retain(|p| !removed_casks.contains(p));
     brew_packages.taps.retain(|p| !removed_taps.contains(p));
 
-    // Calculate missing packages
+    // Calculate missing packages (normalize formula names for comparison)
     let local_formulae: HashSet<_> = machine_state
         .packages
         .get("brew_formulae")
-        .map(|v| v.iter().cloned().collect())
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
     let local_casks: HashSet<_> = machine_state
         .packages
         .get("brew_casks")
-        .map(|v| v.iter().cloned().collect())
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
         .unwrap_or_default();
 
+    // Compare using normalized names (strip tap prefix like "oven-sh/bun/bun" -> "bun")
     let missing_formulae: Vec<_> = brew_packages
         .formulae
         .iter()
-        .filter(|p| !local_formulae.contains(*p))
+        .filter(|p| !local_formulae.contains(normalize_formula_name(p)))
         .collect();
     let missing_casks: Vec<_> = brew_packages
         .casks
         .iter()
-        .filter(|p| !local_casks.contains(*p))
+        .filter(|p| !local_casks.contains(p.as_str()))
         .collect();
 
     let total_missing = missing_formulae.len() + missing_casks.len();
@@ -148,12 +150,15 @@ async fn import_brew(manifests_dir: &Path, machine_state: &MachineState) {
         return;
     }
 
-    Output::info(&format!(
-        "Installing {} brew package{} ({} formulae, {} casks)...",
+    let missing_names: Vec<_> = missing_formulae
+        .iter()
+        .chain(missing_casks.iter())
+        .map(|s| s.as_str())
+        .collect();
+    Output::info(&format!("Installing {} brew package{}: {}",
         total_missing,
         if total_missing == 1 { "" } else { "s" },
-        missing_formulae.len(),
-        missing_casks.len()
+        missing_names.join(", ")
     ));
     if !missing_casks.is_empty() {
         Output::info("Casks may prompt for your password");

@@ -23,6 +23,10 @@ impl Output {
         println!("\n{}\n", message.bright_cyan().bold());
     }
 
+    pub fn subheader(message: &str) {
+        println!("{}", message.bright_white().bold());
+    }
+
     pub fn step(step_num: usize, total: usize, message: &str) {
         println!(
             "{} {}",

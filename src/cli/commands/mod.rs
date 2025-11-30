@@ -126,12 +126,28 @@ pub enum MachineAction {
 
 #[derive(Subcommand)]
 pub enum IgnoreAction {
-    /// Add ignore pattern
+    /// Add secret scanning ignore pattern
     Add { pattern: String },
-    /// List ignore patterns
+    /// List secret scanning ignore patterns
     List,
-    /// Remove ignore pattern
+    /// Remove secret scanning ignore pattern
     Remove { pattern: String },
+    /// Ignore a dotfile on this machine (won't be overwritten during sync)
+    Dotfile { file: String },
+    /// Ignore a project config on this machine
+    Project {
+        /// Project identifier (repo name or path)
+        project: String,
+        /// Config file path relative to project root
+        path: String,
+    },
+    /// List files ignored on this machine
+    SyncList,
+    /// Unignore a file on this machine
+    SyncRemove {
+        /// File to unignore (dotfile name or "project:path")
+        file: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -202,6 +218,12 @@ impl Cli {
                 IgnoreAction::Add { pattern } => ignore::add(pattern).await,
                 IgnoreAction::List => ignore::list().await,
                 IgnoreAction::Remove { pattern } => ignore::remove(pattern).await,
+                IgnoreAction::Dotfile { file } => ignore::ignore_dotfile(file).await,
+                IgnoreAction::Project { project, path } => {
+                    ignore::ignore_project(project, path).await
+                }
+                IgnoreAction::SyncList => ignore::sync_list().await,
+                IgnoreAction::SyncRemove { file } => ignore::sync_remove(file).await,
             },
             Commands::Config { action } => match action {
                 ConfigAction::Get { key } => config::get(key).await,

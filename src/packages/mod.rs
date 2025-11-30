@@ -5,7 +5,7 @@ pub mod manager;
 pub mod npm;
 pub mod pnpm;
 
-pub use brew::{BrewManager, BrewfilePackages};
+pub use brew::{normalize_formula_name, BrewManager, BrewfilePackages};
 pub use bun::BunManager;
 pub use gem::GemManager;
 pub use manager::{PackageInfo, PackageManager};

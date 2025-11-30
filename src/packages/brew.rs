@@ -12,6 +12,13 @@ pub struct BrewfilePackages {
     pub casks: Vec<String>,
 }
 
+/// Normalize a brew formula name by stripping tap prefix.
+/// e.g., "oven-sh/bun/bun" -> "bun", "git" -> "git"
+pub fn normalize_formula_name(name: &str) -> &str {
+    // Format is "tap/repo/formula" - we want just the formula part
+    name.rsplit('/').next().unwrap_or(name)
+}
+
 impl BrewfilePackages {
     /// Parse a Brewfile string into structured package lists
     pub fn parse(content: &str) -> Self {
