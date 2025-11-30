@@ -677,15 +677,16 @@ async fn sync_packages(
         if brew.is_available().await {
             if let Ok(manifest) = brew.export_manifest().await {
                 let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+                let manifest_path = manifests_dir.join("Brewfile");
 
-                let changed = state
-                    .packages
-                    .get("brew")
-                    .map(|p| p.hash != hash)
-                    .unwrap_or(true);
+                // Compare against file on disk, not state (file may have changed from pull)
+                let file_hash = std::fs::read(&manifest_path)
+                    .ok()
+                    .map(|c| format!("{:x}", Sha256::digest(&c)));
+                let changed = file_hash.as_ref() != Some(&hash);
 
                 if changed && !dry_run {
-                    std::fs::write(manifests_dir.join("Brewfile"), manifest)?;
+                    std::fs::write(&manifest_path, manifest)?;
                     use chrono::Utc;
                     state.packages.insert(
                         "brew".to_string(),
@@ -768,15 +769,16 @@ async fn sync_package_manager<P: PackageManager>(
 
     if let Ok(manifest) = manager.export_manifest().await {
         let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+        let manifest_path = manifests_dir.join(filename);
 
-        let changed = state
-            .packages
-            .get(name)
-            .map(|p| p.hash != hash)
-            .unwrap_or(true);
+        // Compare against file on disk, not state (file may have changed from pull)
+        let file_hash = std::fs::read(&manifest_path)
+            .ok()
+            .map(|c| format!("{:x}", Sha256::digest(&c)));
+        let changed = file_hash.as_ref() != Some(&hash);
 
         if changed && !dry_run {
-            std::fs::write(manifests_dir.join(filename), manifest)?;
+            std::fs::write(&manifest_path, manifest)?;
             use chrono::Utc;
             state.packages.insert(
                 name.to_string(),
