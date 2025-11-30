@@ -144,4 +144,18 @@ impl PackageManager for BrewManager {
 
         Ok(())
     }
+
+    async fn update_all(&self) -> Result<()> {
+        // Update Homebrew itself and upgrade all packages
+        Command::new("brew").args(["update"]).output().await?;
+
+        let output = Command::new("brew").args(["upgrade"]).output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("brew upgrade failed: {}", stderr));
+        }
+
+        Ok(())
+    }
 }

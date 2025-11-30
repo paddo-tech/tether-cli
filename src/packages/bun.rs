@@ -163,4 +163,15 @@ impl PackageManager for BunManager {
 
         Ok(())
     }
+
+    async fn update_all(&self) -> Result<()> {
+        let output = Command::new("bun").args(["update", "-g"]).output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("bun update failed: {}", stderr));
+        }
+
+        Ok(())
+    }
 }

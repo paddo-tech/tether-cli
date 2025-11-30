@@ -6,6 +6,7 @@ use crate::sync::{
     detect_conflict, notify_conflicts, ConflictState, GitBackend, SyncEngine, SyncState,
 };
 use anyhow::Result;
+use chrono::{Local, Timelike};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Duration;
@@ -15,15 +16,18 @@ use tokio::time::Interval;
 use tokio::signal::unix::{signal, SignalKind};
 
 const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes
+const UPDATE_HOUR: u32 = 2; // 2am local time
 
 pub struct DaemonServer {
     sync_interval: Duration,
+    last_update_date: Option<chrono::NaiveDate>,
 }
 
 impl DaemonServer {
     pub fn new() -> Self {
         Self {
             sync_interval: Duration::from_secs(DEFAULT_SYNC_INTERVAL_SECS),
+            last_update_date: None,
         }
     }
 
@@ -56,6 +60,13 @@ impl DaemonServer {
                         log::info!("Running periodic sync...");
                         if let Err(e) = self.run_sync().await {
                             log::error!("Sync failed: {}", e);
+                        }
+                        // Check if we should run daily package updates
+                        if self.should_run_update() {
+                            log::info!("Running daily package update...");
+                            if let Err(e) = self.run_package_updates().await {
+                                log::error!("Package update failed: {}", e);
+                            }
                         }
                     },
                     _ = &mut ctrl_c => {
@@ -91,6 +102,13 @@ impl DaemonServer {
                         log::info!("Running periodic sync...");
                         if let Err(e) = self.run_sync().await {
                             log::error!("Sync failed: {}", e);
+                        }
+                        // Check if we should run daily package updates
+                        if self.should_run_update() {
+                            log::info!("Running daily package update...");
+                            if let Err(e) = self.run_package_updates().await {
+                                log::error!("Package update failed: {}", e);
+                            }
                         }
                     },
                     _ = &mut ctrl_c => {
@@ -363,6 +381,85 @@ impl DaemonServer {
         }
 
         Ok(false)
+    }
+
+    /// Check if we should run daily package updates (2am local, once per day)
+    fn should_run_update(&mut self) -> bool {
+        let now = Local::now();
+        let today = now.date_naive();
+        let current_hour = now.hour();
+
+        // Only run at the update hour (2am)
+        if current_hour != UPDATE_HOUR {
+            return false;
+        }
+
+        // Only run once per day
+        if self.last_update_date == Some(today) {
+            return false;
+        }
+
+        // Mark as run for today
+        self.last_update_date = Some(today);
+        true
+    }
+
+    /// Update all enabled package managers
+    async fn run_package_updates(&self) -> Result<()> {
+        let config = Config::load()?;
+
+        if config.packages.brew.enabled {
+            let brew = BrewManager::new();
+            if brew.is_available().await {
+                log::info!("Updating Homebrew packages...");
+                if let Err(e) = brew.update_all().await {
+                    log::error!("Homebrew update failed: {}", e);
+                }
+            }
+        }
+
+        if config.packages.npm.enabled {
+            let npm = NpmManager::new();
+            if npm.is_available().await {
+                log::info!("Updating npm packages...");
+                if let Err(e) = npm.update_all().await {
+                    log::error!("npm update failed: {}", e);
+                }
+            }
+        }
+
+        if config.packages.pnpm.enabled {
+            let pnpm = PnpmManager::new();
+            if pnpm.is_available().await {
+                log::info!("Updating pnpm packages...");
+                if let Err(e) = pnpm.update_all().await {
+                    log::error!("pnpm update failed: {}", e);
+                }
+            }
+        }
+
+        if config.packages.bun.enabled {
+            let bun = BunManager::new();
+            if bun.is_available().await {
+                log::info!("Updating bun packages...");
+                if let Err(e) = bun.update_all().await {
+                    log::error!("bun update failed: {}", e);
+                }
+            }
+        }
+
+        if config.packages.gem.enabled {
+            let gem = GemManager::new();
+            if gem.is_available().await {
+                log::info!("Updating Ruby gems...");
+                if let Err(e) = gem.update_all().await {
+                    log::error!("gem update failed: {}", e);
+                }
+            }
+        }
+
+        log::info!("Package updates complete");
+        Ok(())
     }
 }
 

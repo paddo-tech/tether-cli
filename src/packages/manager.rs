@@ -30,6 +30,9 @@ pub trait PackageManager: Send + Sync {
     /// The manifest_content is the content that was previously exported
     async fn import_manifest(&self, manifest_content: &str) -> Result<()>;
 
+    /// Update all installed packages to latest versions
+    async fn update_all(&self) -> Result<()>;
+
     /// Compute a hash of the current manifest for change detection
     async fn compute_manifest_hash(&self) -> Result<String> {
         let manifest = self.export_manifest().await?;
