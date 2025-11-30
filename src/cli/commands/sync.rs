@@ -14,7 +14,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         Output::info("Dry-run mode");
     }
 
-    let config = Config::load()?;
+    let mut config = Config::load()?;
 
     // Ensure encryption key is unlocked if encryption is enabled
     if config.security.encrypt_dotfiles && !crate::security::is_unlocked() {
@@ -118,6 +118,23 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+
+    // Auto-discover directories sourced from shell configs and add to config
+    if !dry_run {
+        let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
+        let mut config_changed = false;
+        for dir in discovered {
+            if !config.dotfiles.dirs.contains(&dir) {
+                Output::info(&format!("Auto-discovered sourced directory: {}", dir));
+                config.dotfiles.dirs.push(dir);
+                config_changed = true;
+            }
+        }
+        if config_changed {
+            config.dotfiles.dirs.sort();
+            config.save()?;
         }
     }
 

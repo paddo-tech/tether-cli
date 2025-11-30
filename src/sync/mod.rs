@@ -1,4 +1,5 @@
 pub mod conflict;
+pub mod discovery;
 pub mod engine;
 pub mod git;
 pub mod packages;
@@ -9,6 +10,7 @@ pub use conflict::{
     detect_conflict, notify_conflict, notify_conflicts, ConflictResolution, ConflictState,
     FileConflict, PendingConflict,
 };
+pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;
 pub use git::GitBackend;
 pub use packages::{import_packages, sync_packages};
