@@ -1,24 +1,15 @@
 use crate::cli::{Output, Prompt};
-use crate::sync::{GitBackend, SyncEngine, SyncState};
+use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
+use chrono::Local;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 use owo_colors::OwoColorize;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct MachineInfo {
-    machine_id: String,
-    hostname: String,
-    last_sync: String,
-    #[serde(default)]
-    os_version: String,
-}
 
 pub async fn list() -> Result<()> {
     let sync_path = SyncEngine::sync_path()?;
-    let machines_dir = sync_path.join("machines");
+    let machines = MachineState::list_all(&sync_path)?;
 
-    if !machines_dir.exists() {
+    if machines.is_empty() {
         Output::info("No machines synced yet");
         return Ok(());
     }
@@ -26,33 +17,8 @@ pub async fn list() -> Result<()> {
     let state = SyncState::load()?;
     let current_machine = &state.machine_id;
 
-    let mut machines: Vec<(String, MachineInfo)> = Vec::new();
-
-    for entry in std::fs::read_dir(&machines_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(info) = serde_json::from_str::<MachineInfo>(&content) {
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    machines.push((name, info));
-                }
-            }
-        }
-    }
-
-    if machines.is_empty() {
-        Output::info("No machines synced yet");
-        return Ok(());
-    }
-
     println!();
-    println!("{}", "🖥️  Synced Machines".bright_cyan().bold());
+    println!("{}", "Synced Machines".bright_cyan().bold());
     println!();
 
     let mut table = Table::new();
@@ -72,18 +38,19 @@ pub async fn list() -> Result<()> {
             Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
         ]);
 
-    for (name, info) in &machines {
-        let is_current = &info.machine_id == current_machine;
+    for machine in &machines {
+        let is_current = &machine.machine_id == current_machine;
         let marker = if is_current { "(this machine)" } else { "" };
+        let local_time = machine.last_sync.with_timezone(&Local);
 
         table.add_row(vec![
             if is_current {
-                Cell::new(name.clone()).fg(Color::Green)
+                Cell::new(&machine.machine_id).fg(Color::Green)
             } else {
-                Cell::new(name.clone())
+                Cell::new(&machine.machine_id)
             },
-            Cell::new(&info.hostname),
-            Cell::new(&info.last_sync),
+            Cell::new(&machine.hostname),
+            Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
             Cell::new(marker).fg(Color::Green),
         ]);
     }
@@ -112,12 +79,13 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     }
 
     // Read and update the machine info
-    let content = std::fs::read_to_string(&old_file)?;
-    let mut info: MachineInfo = serde_json::from_str(&content)?;
-    info.machine_id = new.to_string();
+    let mut machine = MachineState::load_from_repo(&sync_path, old)?
+        .ok_or_else(|| anyhow::anyhow!("Machine not found"))?;
+    machine.machine_id = new.to_string();
 
     // Write to new file
-    std::fs::write(&new_file, serde_json::to_string_pretty(&info)?)?;
+    let content = serde_json::to_string_pretty(&machine)?;
+    std::fs::write(&new_file, content)?;
 
     // Remove old file
     std::fs::remove_file(&old_file)?;

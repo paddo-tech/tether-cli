@@ -2,6 +2,7 @@ use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{ConflictState, SyncState};
 use anyhow::Result;
+use chrono::Local;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
@@ -67,9 +68,10 @@ pub async fn run() -> Result<()> {
             ]);
 
         for conflict in &conflict_state.conflicts {
+            let local_time = conflict.detected_at.with_timezone(&Local);
             conflict_table.add_row(vec![
                 Cell::new(&conflict.file_path).fg(Color::Yellow),
-                Cell::new(conflict.detected_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+                Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
             ]);
         }
         println!("{conflict_table}");
@@ -93,7 +95,14 @@ pub async fn run() -> Result<()> {
         ])
         .add_row(vec![
             Cell::new("Last Sync"),
-            Cell::new(state.last_sync.format("%Y-%m-%d %H:%M:%S").to_string()).fg(Color::Green),
+            Cell::new(
+                state
+                    .last_sync
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            )
+            .fg(Color::Green),
         ])
         .add_row(vec![Cell::new("Machine ID"), Cell::new(&state.machine_id)])
         .add_row(vec![Cell::new("Backend"), Cell::new(&config.backend.url)]);
@@ -131,6 +140,7 @@ pub async fn run() -> Result<()> {
                 Cell::new(
                     file_state
                         .last_modified
+                        .with_timezone(&Local)
                         .format("%Y-%m-%d %H:%M:%S")
                         .to_string(),
                 ),
@@ -161,7 +171,13 @@ pub async fn run() -> Result<()> {
         for (manager, pkg_state) in &state.packages {
             packages_table.add_row(vec![
                 Cell::new(format!("✓ {}", manager)).fg(Color::Green),
-                Cell::new(pkg_state.last_sync.format("%Y-%m-%d %H:%M:%S").to_string()),
+                Cell::new(
+                    pkg_state
+                        .last_sync
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                ),
             ]);
         }
         println!("{packages_table}");
