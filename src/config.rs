@@ -370,7 +370,7 @@ impl Default for Config {
                     },
                     // Common configs - create on all machines
                     DotfileEntry::Simple(".gitconfig".to_string()),
-                    DotfileEntry::Simple(".tether/config.toml".to_string()),
+                    // Note: .tether/config.toml is always synced (hardcoded in sync logic)
                 ],
                 dirs: vec![],
             },

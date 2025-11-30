@@ -58,6 +58,14 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     let dotfiles_dir = sync_path.join("dotfiles");
     std::fs::create_dir_all(&dotfiles_dir)?;
 
+    // Always sync tether config first (hardcoded, not dependent on config)
+    // This ensures config changes from other machines are applied before using config
+    if config.security.encrypt_dotfiles && !dry_run {
+        if let Some(new_config) = sync_tether_config(&sync_path, &home)? {
+            config = new_config;
+        }
+    }
+
     let mut state = SyncState::load()?;
 
     // Load machine state early to get ignored lists for decrypt phase
@@ -168,6 +176,11 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     // Save machine state for cross-machine comparison
     if !dry_run {
         machine_state.save_to_repo(&sync_path)?;
+    }
+
+    // Always export tether config (hardcoded, not dependent on config file list)
+    if config.security.encrypt_dotfiles && !dry_run {
+        export_tether_config(&sync_path, &home, &mut state)?;
     }
 
     // Commit and push changes
@@ -487,6 +500,102 @@ fn decrypt_project_configs(
                 project_name
             ));
         }
+    }
+
+    Ok(())
+}
+
+/// Sync tether config from remote (always, independent of config file list)
+/// Only applies remote if local config hasn't changed since last sync (to avoid overwriting local edits)
+/// Returns Some(config) if remote config was applied, None otherwise
+fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
+    let enc_file = sync_path.join("dotfiles/tether/config.toml.enc");
+
+    if !enc_file.exists() {
+        return Ok(None);
+    }
+
+    let key = crate::security::get_encryption_key()?;
+    let encrypted_content = std::fs::read(&enc_file)?;
+
+    match crate::security::decrypt_file(&encrypted_content, &key) {
+        Ok(plaintext) => {
+            let local_config_path = home.join(".tether/config.toml");
+            let local_content = std::fs::read(&local_config_path).ok();
+
+            let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+            let local_hash = local_content
+                .as_ref()
+                .map(|c| format!("{:x}", Sha256::digest(c)));
+
+            // Check if local has changed since last sync
+            let state = SyncState::load().ok();
+            let last_synced_hash = state
+                .as_ref()
+                .and_then(|s| s.files.get(".tether/config.toml"))
+                .map(|f| f.hash.as_str());
+
+            let local_changed = local_hash.as_deref() != last_synced_hash;
+            let remote_changed = Some(remote_hash.as_str()) != last_synced_hash;
+
+            // Only apply remote if:
+            // - Local hasn't changed (safe to overwrite) OR local doesn't exist yet
+            // - AND remote has changed OR local doesn't exist yet
+            let should_apply = (!local_changed || local_content.is_none())
+                && (remote_changed || local_content.is_none());
+
+            if should_apply {
+                // Apply remote config
+                if let Some(parent) = local_config_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&local_config_path, &plaintext)?;
+
+                // Reload config
+                let new_config = Config::load()?;
+                return Ok(Some(new_config));
+            }
+            // If local changed, local wins - it will be exported later
+        }
+        Err(e) => {
+            Output::warning(&format!("Failed to decrypt tether config: {}", e));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Export tether config to sync repo (always, independent of config file list)
+fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) -> Result<()> {
+    let config_path = home.join(".tether/config.toml");
+
+    if !config_path.exists() {
+        return Ok(());
+    }
+
+    let content = std::fs::read(&config_path)?;
+    let hash = format!("{:x}", Sha256::digest(&content));
+
+    let dest_dir = sync_path.join("dotfiles/tether");
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let dest = dest_dir.join("config.toml.enc");
+
+    // Check if file on disk differs
+    let file_hash = std::fs::read(&dest)
+        .ok()
+        .and_then(|enc| {
+            let key = crate::security::get_encryption_key().ok()?;
+            crate::security::decrypt_file(&enc, &key)
+                .ok()
+                .map(|plain| format!("{:x}", Sha256::digest(&plain)))
+        });
+
+    if file_hash.as_ref() != Some(&hash) {
+        let key = crate::security::get_encryption_key()?;
+        let encrypted = crate::security::encrypt_file(&content, &key)?;
+        std::fs::write(&dest, encrypted)?;
+        state.update_file(".tether/config.toml", hash);
     }
 
     Ok(())
