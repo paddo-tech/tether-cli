@@ -1,5 +1,5 @@
 use anyhow::Result;
-use inquire::{Confirm, Password, Select, Text};
+use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
 
 pub struct Prompt;
 
@@ -28,6 +28,9 @@ impl Prompt {
     }
 
     pub fn password(message: &str) -> Result<String> {
-        Ok(Password::new(message).without_confirmation().prompt()?)
+        Ok(Password::new(message)
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .without_confirmation()
+            .prompt()?)
     }
 }

@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 
 pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     if dry_run {
-        Output::info("Running in dry-run mode...");
-    } else {
-        Output::info("Starting sync...");
+        Output::info("Dry-run mode");
     }
 
     let config = Config::load()?;
@@ -25,33 +23,28 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             ));
         }
 
-        Output::info("Encryption key locked. Enter passphrase to unlock:");
+        Output::info("Enter passphrase:");
         let passphrase = Prompt::password("Passphrase")?;
         crate::security::unlock_with_passphrase(&passphrase)?;
-        Output::success("Key unlocked");
     }
     let sync_path = SyncEngine::sync_path()?;
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
     // Pull latest changes from personal repo
-    Output::info("Pulling latest changes...");
     let git = GitBackend::open(&sync_path)?;
     if !dry_run {
         git.pull()?;
     }
-    Output::success("Pulled latest changes");
 
     // Pull from team repo if enabled
     if let Some(team) = &config.team {
         if team.enabled {
-            Output::info("Pulling team configs...");
             let team_sync_dir = Config::team_sync_dir()?;
 
             if team_sync_dir.exists() {
                 if !dry_run {
                     let team_git = GitBackend::open(&team_sync_dir)?;
                     team_git.pull()?;
-                    Output::success("Team configs updated");
                 }
             } else {
                 Output::warning("Team sync directory not found - run 'tether team add' again");
@@ -72,7 +65,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     }
 
     // Sync dotfiles (local → Git)
-    Output::info("Syncing dotfiles...");
 
     // Sync individual dotfiles
     for file in &config.dotfiles.files {
@@ -90,7 +82,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
                 if file_changed {
                     scan_and_warn_secrets(&config, &source, file);
-                    Output::info(&format!("  {} (changed)", file));
 
                     if !dry_run {
                         let filename = file.trim_start_matches('.');
@@ -113,8 +104,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
                         state.update_file(file, hash);
                     }
-                } else {
-                    Output::info(&format!("  {} (unchanged)", file));
                 }
             }
         }
@@ -145,21 +134,12 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         let has_changes = git.has_changes()?;
 
         if has_changes {
-            Output::info("Committing changes...");
             git.commit("Sync dotfiles and packages", &state.machine_id)?;
-            Output::success("Changes committed");
-
-            Output::info("Pushing to remote...");
             git.push()?;
-            Output::success("Changes pushed");
-        } else {
-            Output::info("No changes to sync");
         }
 
         state.mark_synced();
         state.save()?;
-    } else {
-        Output::info("Dry-run complete - no changes made");
     }
 
     // Check and push team repo changes (if write access enabled)
@@ -171,23 +151,15 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                     let team_git = GitBackend::open(&team_sync_dir)?;
 
                     if team_git.has_changes()? {
-                        println!();
-                        Output::info("Detected changes in team repository");
-
-                        Output::info("Committing team config changes...");
                         team_git.commit("Update team configs", &state.machine_id)?;
-                        Output::success("Team changes committed");
-
-                        Output::info("Pushing team changes...");
                         team_git.push()?;
-                        Output::success("Team changes pushed");
                     }
                 }
             }
         }
     }
 
-    Output::success("Sync complete!");
+    Output::success("Synced");
     Ok(())
 }
 
@@ -199,8 +171,6 @@ fn decrypt_from_repo(
     interactive: bool,
 ) -> Result<()> {
     use crate::sync::{detect_conflict, ConflictResolution, ConflictState};
-
-    Output::info("Applying dotfiles from sync repository...");
 
     let key = crate::security::get_encryption_key()?;
     let dotfiles_dir = sync_path.join("dotfiles");
@@ -228,12 +198,9 @@ fn decrypt_from_repo(
                             let resolution = conflict.prompt_resolution()?;
 
                             match resolution {
-                                ConflictResolution::KeepLocal => {
-                                    Output::info(&format!("  {} (kept local)", file));
-                                }
+                                ConflictResolution::KeepLocal => {}
                                 ConflictResolution::UseRemote => {
                                     std::fs::write(&local_file, &plaintext)?;
-                                    Output::info(&format!("  {} (used remote)", file));
                                     conflict_state.remove_conflict(file);
                                 }
                                 ConflictResolution::Merged => {
@@ -241,7 +208,6 @@ fn decrypt_from_repo(
                                     conflict_state.remove_conflict(file);
                                 }
                                 ConflictResolution::Skip => {
-                                    Output::info(&format!("  {} (skipped)", file));
                                     new_conflicts.push((
                                         file.clone(),
                                         conflict.local_hash.clone(),
@@ -267,7 +233,6 @@ fn decrypt_from_repo(
 
                         if local_hash.as_ref() != Some(&remote_hash) {
                             std::fs::write(&local_file, plaintext)?;
-                            Output::info(&format!("  {} (applied)", file));
                         }
                         conflict_state.remove_conflict(file);
                     }
@@ -297,8 +262,6 @@ fn decrypt_from_repo(
     // Decrypt global config directories
     let configs_dir = sync_path.join("configs");
     if configs_dir.exists() {
-        Output::info("Decrypting global configs from sync repository...");
-
         use walkdir::WalkDir;
         for entry in WalkDir::new(&configs_dir).follow_links(false) {
             let entry = match entry {
@@ -331,7 +294,6 @@ fn decrypt_from_repo(
                                     .map(|c| format!("{:x}", Sha256::digest(&c)));
                                 if local_hash.as_ref() != Some(&remote_hash) {
                                     std::fs::write(&local_file, plaintext)?;
-                                    Output::info(&format!("  ~/{} (decrypted)", rel_path_no_enc));
                                 }
                             }
                             Err(e) => {
@@ -368,8 +330,6 @@ fn decrypt_project_configs(
     if !projects_dir.exists() {
         return Ok(());
     }
-
-    Output::info("Decrypting project configs from sync repository...");
 
     let mut repo_map = std::collections::HashMap::new();
     for search_path_str in &config.project_configs.search_paths {
@@ -444,10 +404,6 @@ fn decrypt_project_configs(
                                     .map(|c| format!("{:x}", Sha256::digest(&c)));
                                 if local_hash.as_ref() != Some(&remote_hash) {
                                     std::fs::write(&local_file, plaintext)?;
-                                    Output::info(&format!(
-                                        "  {}: {} (decrypted)",
-                                        project_name, rel_path_no_enc
-                                    ));
                                 }
                             }
                             Err(e) => {
@@ -476,21 +432,10 @@ fn scan_and_warn_secrets(config: &Config, source: &Path, file: &str) {
         if let Ok(findings) = crate::security::scan_for_secrets(source) {
             if !findings.is_empty() {
                 Output::warning(&format!(
-                    "  {} - Found {} potential secret(s)",
+                    "{} has {} secret(s) - will be encrypted",
                     file,
                     findings.len()
                 ));
-                for finding in findings.iter().take(3) {
-                    Output::warning(&format!(
-                        "    Line {}: {}",
-                        finding.line_number,
-                        finding.secret_type.description()
-                    ));
-                }
-                if findings.len() > 3 {
-                    Output::warning(&format!("    ... and {} more", findings.len() - 3));
-                }
-                Output::info("  Secrets will be encrypted before syncing");
             }
         }
     }
@@ -504,8 +449,6 @@ fn sync_directories(
     dry_run: bool,
 ) -> Result<()> {
     use walkdir::WalkDir;
-
-    Output::info("Syncing global config directories...");
 
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
@@ -531,34 +474,26 @@ fn sync_directories(
                     .map(|f| f.hash != hash)
                     .unwrap_or(true);
 
-                if file_changed {
-                    Output::info(&format!("  {} (changed)", dir_path));
+                if file_changed && !dry_run {
+                    let rel_path = expanded_path.strip_prefix(home).unwrap_or(&expanded_path);
+                    let dest = configs_dir.join(rel_path);
 
-                    if !dry_run {
-                        let rel_path = expanded_path.strip_prefix(home).unwrap_or(&expanded_path);
-                        let dest = configs_dir.join(rel_path);
-
-                        if let Some(parent) = dest.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-
-                        if config.security.encrypt_dotfiles {
-                            let key = crate::security::get_encryption_key()?;
-                            let encrypted = crate::security::encrypt_file(&content, &key)?;
-                            std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
-                        } else {
-                            std::fs::write(&dest, &content)?;
-                        }
-
-                        state.update_file(dir_path, hash);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent)?;
                     }
-                } else {
-                    Output::info(&format!("  {} (unchanged)", dir_path));
+
+                    if config.security.encrypt_dotfiles {
+                        let key = crate::security::get_encryption_key()?;
+                        let encrypted = crate::security::encrypt_file(&content, &key)?;
+                        std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                    } else {
+                        std::fs::write(&dest, &content)?;
+                    }
+
+                    state.update_file(dir_path, hash);
                 }
             }
         } else if expanded_path.is_dir() {
-            Output::info(&format!("  {} (directory)", dir_path));
-
             for entry in WalkDir::new(&expanded_path).follow_links(false) {
                 let entry = match entry {
                     Ok(e) => e,
@@ -613,8 +548,6 @@ fn sync_project_configs(
 ) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, is_gitignored, normalize_remote_url};
     use walkdir::WalkDir;
-
-    Output::info("Syncing project-local configs...");
 
     let projects_dir = sync_path.join("projects");
     std::fs::create_dir_all(&projects_dir)?;
@@ -698,51 +631,22 @@ fn sync_project_configs(
                             .map(|f| f.hash != hash)
                             .unwrap_or(true);
 
-                        if file_changed {
-                            if config.security.scan_secrets {
-                                if let Ok(findings) = crate::security::scan_for_secrets(file_path) {
-                                    if !findings.is_empty() {
-                                        Output::warning(&format!(
-                                            "  {}: {} - Found {} potential secret(s)",
-                                            normalized_url,
-                                            rel_to_repo.display(),
-                                            findings.len()
-                                        ));
-                                        for finding in findings.iter().take(2) {
-                                            Output::warning(&format!(
-                                                "    Line {}: {}",
-                                                finding.line_number,
-                                                finding.secret_type.description()
-                                            ));
-                                        }
-                                        Output::info("  Secrets will be encrypted before syncing");
-                                    }
-                                }
+                        if file_changed && !dry_run {
+                            let dest = projects_dir.join(&normalized_url).join(rel_to_repo);
+
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent)?;
                             }
 
-                            Output::info(&format!(
-                                "  {}: {} (changed)",
-                                normalized_url,
-                                rel_to_repo.display()
-                            ));
-
-                            if !dry_run {
-                                let dest = projects_dir.join(&normalized_url).join(rel_to_repo);
-
-                                if let Some(parent) = dest.parent() {
-                                    std::fs::create_dir_all(parent)?;
-                                }
-
-                                if config.security.encrypt_dotfiles {
-                                    let key = crate::security::get_encryption_key()?;
-                                    let encrypted = crate::security::encrypt_file(&content, &key)?;
-                                    std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
-                                } else {
-                                    std::fs::write(&dest, &content)?;
-                                }
-
-                                state.update_file(&state_key, hash);
+                            if config.security.encrypt_dotfiles {
+                                let key = crate::security::get_encryption_key()?;
+                                let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                            } else {
+                                std::fs::write(&dest, &content)?;
                             }
+
+                            state.update_file(&state_key, hash);
                         }
                     }
                 }
@@ -759,7 +663,6 @@ async fn sync_packages(
     sync_path: &Path,
     dry_run: bool,
 ) -> Result<()> {
-    Output::info("Syncing package manifests...");
     let manifests_dir = sync_path.join("manifests");
     std::fs::create_dir_all(&manifests_dir)?;
 
@@ -767,37 +670,25 @@ async fn sync_packages(
     if config.packages.brew.enabled {
         let brew = BrewManager::new();
         if brew.is_available().await {
-            Output::info("  Syncing Homebrew packages (Brewfile)...");
+            if let Ok(manifest) = brew.export_manifest().await {
+                let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
 
-            match brew.export_manifest().await {
-                Ok(manifest) => {
-                    let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+                let changed = state
+                    .packages
+                    .get("brew")
+                    .map(|p| p.hash != hash)
+                    .unwrap_or(true);
 
-                    if state
-                        .packages
-                        .get("brew")
-                        .map(|p| p.hash != hash)
-                        .unwrap_or(true)
-                    {
-                        let lines = manifest.lines().count();
-                        Output::info(&format!("    {} entries in Brewfile", lines));
-                        if !dry_run {
-                            std::fs::write(manifests_dir.join("Brewfile"), manifest)?;
-                            use chrono::Utc;
-                            state.packages.insert(
-                                "brew".to_string(),
-                                crate::sync::state::PackageState {
-                                    last_sync: Utc::now(),
-                                    hash,
-                                },
-                            );
-                        }
-                    } else {
-                        Output::info("    No changes");
-                    }
-                }
-                Err(e) => {
-                    Output::warning(&format!("Failed to export Homebrew manifest: {}", e));
+                if changed && !dry_run {
+                    std::fs::write(manifests_dir.join("Brewfile"), manifest)?;
+                    use chrono::Utc;
+                    state.packages.insert(
+                        "brew".to_string(),
+                        crate::sync::state::PackageState {
+                            last_sync: Utc::now(),
+                            hash,
+                        },
+                    );
                 }
             }
         }
@@ -870,37 +761,25 @@ async fn sync_package_manager<P: PackageManager>(
         return Ok(());
     }
 
-    Output::info(&format!("  Syncing {} packages...", name));
+    if let Ok(manifest) = manager.export_manifest().await {
+        let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
 
-    match manager.export_manifest().await {
-        Ok(manifest) => {
-            let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+        let changed = state
+            .packages
+            .get(name)
+            .map(|p| p.hash != hash)
+            .unwrap_or(true);
 
-            if state
-                .packages
-                .get(name)
-                .map(|p| p.hash != hash)
-                .unwrap_or(true)
-            {
-                let count = manifest.lines().filter(|l| !l.trim().is_empty()).count();
-                Output::info(&format!("    {} packages", count));
-                if !dry_run {
-                    std::fs::write(manifests_dir.join(filename), manifest)?;
-                    use chrono::Utc;
-                    state.packages.insert(
-                        name.to_string(),
-                        crate::sync::state::PackageState {
-                            last_sync: Utc::now(),
-                            hash,
-                        },
-                    );
-                }
-            } else {
-                Output::info("    No changes");
-            }
-        }
-        Err(e) => {
-            Output::warning(&format!("Failed to export {} manifest: {}", name, e));
+        if changed && !dry_run {
+            std::fs::write(manifests_dir.join(filename), manifest)?;
+            use chrono::Utc;
+            state.packages.insert(
+                name.to_string(),
+                crate::sync::state::PackageState {
+                    last_sync: Utc::now(),
+                    hash,
+                },
+            );
         }
     }
 

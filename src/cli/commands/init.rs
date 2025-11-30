@@ -7,13 +7,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 
 pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
-    Output::header("🔗 Welcome to Tether!");
+    Output::header("Welcome to Tether!");
     println!(
         "{}",
-        "Sync your development environment across all your Macs".bright_black()
+        "Sync your dev environment across machines".bright_black()
     );
     println!();
-    Output::info("Initializing Tether...");
 
     // Check if already initialized
     let config_path = Config::config_path()?;
@@ -40,43 +39,30 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
     // Create .tether directory
     let tether_dir = Config::config_dir()?;
     std::fs::create_dir_all(&tether_dir)?;
-    Output::success(&format!("Created directory: {}", tether_dir.display()));
 
     // Clone or pull repository
     let sync_path = SyncEngine::sync_path()?;
 
     if sync_path.exists() {
-        Output::info("Sync directory already exists, pulling latest changes...");
         let git = GitBackend::open(&sync_path)?;
         git.pull()?;
-        Output::success("Pulled latest changes");
     } else {
-        Output::info("Cloning repository...");
         GitBackend::clone(&repo_url, &sync_path)?;
-        Output::success("Repository cloned successfully");
     }
 
     // Create default config
     let mut config = Config::default();
     config.backend.url = repo_url;
     config.save()?;
-    Output::success("Configuration saved");
 
     // Setup encryption if enabled
     if config.security.encrypt_dotfiles {
-        Output::info("Setting up encryption for dotfiles...");
-
         if crate::security::has_encryption_key() {
-            Output::success("Encrypted key found (synced from another device)");
-            Output::info("Enter your passphrase to unlock:");
-
+            Output::info("Encrypted key found. Enter passphrase:");
             let passphrase = Prompt::password("Passphrase")?;
             crate::security::unlock_with_passphrase(&passphrase)?;
-            Output::success("Key unlocked and cached");
         } else {
-            Output::info("Creating new encryption key...");
-            Output::info("Choose a passphrase to protect your key.");
-            Output::info("You'll need this passphrase on each new machine.");
+            Output::info("Creating encryption key. Choose a passphrase (min 8 chars).");
             println!();
 
             let passphrase = Prompt::password("Passphrase")?;
@@ -92,52 +78,32 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
 
             let key = crate::security::encryption::generate_key();
             crate::security::store_encryption_key_with_passphrase(&key, &passphrase)?;
-
-            // Cache key locally
             crate::security::unlock_with_passphrase(&passphrase)?;
-
-            Output::success("Encryption key created and stored in sync repo");
-            Output::info("The encrypted key will sync to your other Macs via git");
         }
     }
 
     // Create initial state
     let state = SyncState::load()?;
     state.save()?;
-    Output::success(&format!(
-        "Initialized with machine ID: {}",
-        state.machine_id
-    ));
 
-    // Create manifests directory in sync repo
-    let manifests_dir = sync_path.join("manifests");
-    std::fs::create_dir_all(&manifests_dir)?;
-
-    // Create dotfiles directory in sync repo
-    let dotfiles_dir = sync_path.join("dotfiles");
-    std::fs::create_dir_all(&dotfiles_dir)?;
-
-    // Create machines directory in sync repo
-    let machines_dir = sync_path.join("machines");
-    std::fs::create_dir_all(&machines_dir)?;
-
-    Output::success("Sync repository structure created");
+    // Create sync repo structure
+    std::fs::create_dir_all(sync_path.join("manifests"))?;
+    std::fs::create_dir_all(sync_path.join("dotfiles"))?;
+    std::fs::create_dir_all(sync_path.join("machines"))?;
 
     // Initial sync
-    Output::info("Performing initial sync...");
     super::sync::run(false, false).await?;
 
     // Start daemon if requested
     if !no_daemon {
-        Output::info("Starting daemon...");
         if let Err(err) = super::daemon::start().await {
-            Output::warning(&format!("Failed to start daemon automatically: {}", err));
+            Output::warning(&format!("Failed to start daemon: {}", err));
         }
     }
 
-    Output::success("Tether initialized successfully!");
-    Output::info(&format!("Config: {}", config_path.display()));
-    Output::info(&format!("Sync directory: {}", sync_path.display()));
+    Output::success("Initialized!");
+    println!("  Config: {}", config_path.display());
+    println!("  Sync:   {}", sync_path.display());
 
     Ok(())
 }

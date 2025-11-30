@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "tether")]
-#[command(about = "Sync your development environment across multiple Macs", long_about = None)]
+#[command(about = "Sync your dev environment across machines", long_about = None)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
