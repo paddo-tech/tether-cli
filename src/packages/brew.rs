@@ -121,15 +121,19 @@ impl PackageManager for BrewManager {
         tokio::fs::write(&temp_path, manifest_content).await?;
 
         // Use `brew bundle install` to install packages from Brewfile
+        // --no-upgrade: don't upgrade existing packages (faster, less disruptive)
         let output = Command::new("brew")
             .args([
                 "bundle",
                 "install",
+                "--no-upgrade",
                 "--file",
                 temp_path
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("Invalid path for Brewfile: {:?}", temp_path))?,
             ])
+            .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+            .env("NONINTERACTIVE", "1")
             .output()
             .await?;
 
