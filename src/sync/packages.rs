@@ -155,7 +155,8 @@ async fn import_brew(manifests_dir: &Path, machine_state: &MachineState) {
         .chain(missing_casks.iter())
         .map(|s| s.as_str())
         .collect();
-    Output::info(&format!("Installing {} brew package{}: {}",
+    Output::info(&format!(
+        "Installing {} brew package{}: {}",
         total_missing,
         if total_missing == 1 { "" } else { "s" },
         missing_names.join(", ")

@@ -9,6 +9,7 @@ mod status;
 mod sync;
 mod team;
 mod unlock;
+mod upgrade;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -97,6 +98,9 @@ pub enum Commands {
 
     /// Clear cached encryption key
     Lock,
+
+    /// Upgrade all installed packages
+    Upgrade,
 }
 
 #[derive(Subcommand)]
@@ -247,6 +251,7 @@ impl Cli {
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
+            Commands::Upgrade => upgrade::run().await,
         }
     }
 }

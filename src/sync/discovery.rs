@@ -43,15 +43,14 @@ fn parse_sourced_dirs(content: &str, home: &Path) -> Vec<PathBuf> {
     // - [ -f ~/.fzf.zsh ] && source ~/.fzf.zsh (single file, skip)
 
     // Match glob patterns like ~/.config/zsh/*.zsh or $HOME/.config/zsh/*.zsh
-    let glob_pattern = Regex::new(
-        r#"(?:source|\.)\s+["']?((?:~|\$HOME)/[^\s"'*]+)/\*\.[a-z]+"#
-    ).unwrap();
+    let glob_pattern =
+        Regex::new(r#"(?:source|\.)\s+["']?((?:~|\$HOME)/[^\s"'*]+)/\*\.[a-z]+"#).unwrap();
 
     // Match for loops: for x in ~/.config/zsh/*.zsh or ~/.config/zsh/*.zsh(N)
     // The (N) is a zsh glob qualifier
-    let for_loop_pattern = Regex::new(
-        r#"for\s+\w+\s+in\s+["']?((?:~|\$HOME)/[^\s"'*(]+)/\*\.[a-z]+(?:\([A-Z]+\))?"#
-    ).unwrap();
+    let for_loop_pattern =
+        Regex::new(r#"for\s+\w+\s+in\s+["']?((?:~|\$HOME)/[^\s"'*(]+)/\*\.[a-z]+(?:\([A-Z]+\))?"#)
+            .unwrap();
 
     for cap in glob_pattern.captures_iter(content) {
         if let Some(dir_match) = cap.get(1) {

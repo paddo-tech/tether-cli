@@ -178,7 +178,11 @@ pub async fn dotfiles() -> Result<()> {
             "Toggle Project Scanning",
             "Done",
         ];
-        let choice = Prompt::select("Select section", options.clone(), cursor.min(options.len() - 1))?;
+        let choice = Prompt::select(
+            "Select section",
+            options.clone(),
+            cursor.min(options.len() - 1),
+        )?;
         cursor = choice;
 
         let changed = match choice {

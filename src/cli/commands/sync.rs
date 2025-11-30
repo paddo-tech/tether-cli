@@ -1,6 +1,8 @@
 use crate::cli::{Output, Prompt};
 use crate::config::Config;
-use crate::packages::{BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager};
+use crate::packages::{
+    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+};
 use crate::sync::{
     import_packages, sync_packages, GitBackend, MachineState, SyncEngine, SyncState,
 };
