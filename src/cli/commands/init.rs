@@ -66,13 +66,38 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
     if config.security.encrypt_dotfiles {
         Output::info("Setting up encryption for dotfiles...");
 
-        if crate::security::keychain::has_encryption_key() {
-            Output::success("Encryption key found in iCloud Keychain (synced from another device)");
+        if crate::security::has_encryption_key() {
+            Output::success("Encrypted key found (synced from another device)");
+            Output::info("Enter your passphrase to unlock:");
+
+            let passphrase = Prompt::password("Passphrase")?;
+            crate::security::unlock_with_passphrase(&passphrase)?;
+            Output::success("Key unlocked and cached");
         } else {
+            Output::info("Creating new encryption key...");
+            Output::info("Choose a passphrase to protect your key.");
+            Output::info("You'll need this passphrase on each new machine.");
+            println!();
+
+            let passphrase = Prompt::password("Passphrase")?;
+            let confirm = Prompt::password("Confirm passphrase")?;
+
+            if passphrase != confirm {
+                return Err(anyhow::anyhow!("Passphrases do not match"));
+            }
+
+            if passphrase.len() < 8 {
+                return Err(anyhow::anyhow!("Passphrase must be at least 8 characters"));
+            }
+
             let key = crate::security::encryption::generate_key();
-            crate::security::store_encryption_key(&key)?;
-            Output::success("Generated encryption key and stored in iCloud Keychain");
-            Output::info("This key will automatically sync to your other Macs");
+            crate::security::store_encryption_key_with_passphrase(&key, &passphrase)?;
+
+            // Cache key locally
+            crate::security::unlock_with_passphrase(&passphrase)?;
+
+            Output::success("Encryption key created and stored in sync repo");
+            Output::info("The encrypted key will sync to your other Macs via git");
         }
     }
 

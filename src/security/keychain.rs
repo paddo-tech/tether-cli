@@ -1,234 +1,189 @@
+use age::secrecy::Secret;
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
 
-const SERVICE_NAME: &str = "com.tether-cli";
-const ACCOUNT_NAME: &str = "encryption-key";
+const ENCRYPTED_KEY_FILENAME: &str = "encryption.key.age";
 
-/// Get the path to the key file in iCloud Drive (syncs automatically)
-fn icloud_key_path() -> Option<PathBuf> {
-    let home = home::home_dir()?;
-    let icloud_path = home
-        .join("Library/Mobile Documents/com~apple~CloudDocs")
-        .join(".tether-key");
-
-    // Only use if iCloud Drive exists
-    if icloud_path.parent()?.exists() {
-        Some(icloud_path)
-    } else {
-        None
-    }
+/// Get the path to the encrypted key in the sync repo
+fn encrypted_key_path() -> Result<PathBuf> {
+    let sync_path = crate::sync::SyncEngine::sync_path()?;
+    Ok(sync_path.join(ENCRYPTED_KEY_FILENAME))
 }
 
-/// Get the local key file path (fallback)
-fn local_key_path() -> Result<PathBuf> {
+/// Get the path to the cached decrypted key (local only, not synced)
+fn cached_key_path() -> Result<PathBuf> {
     let home = home::home_dir().context("Could not find home directory")?;
-    Ok(home.join(".tether").join("encryption.key"))
+    Ok(home.join(".tether").join("key.cache"))
 }
 
-/// Store the encryption key
-/// Stores in iCloud Drive if available, otherwise local file + keychain
-pub fn store_encryption_key(key: &[u8]) -> Result<()> {
-    let encoded = STANDARD.encode(key);
+/// Store the encryption key encrypted with a passphrase
+/// The encrypted key is stored in the sync repo (syncs via git)
+pub fn store_encryption_key_with_passphrase(key: &[u8], passphrase: &str) -> Result<()> {
+    let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
 
-    // Try iCloud Drive first (syncs automatically between Macs)
-    if let Some(icloud_path) = icloud_key_path() {
-        fs::write(&icloud_path, &encoded)
-            .context("Failed to write key to iCloud Drive")?;
+    let mut encrypted = vec![];
+    let mut writer = encryptor
+        .wrap_output(&mut encrypted)
+        .map_err(|e| anyhow::anyhow!("Failed to create encryptor: {}", e))?;
+    writer.write_all(key)?;
+    writer
+        .finish()
+        .map_err(|e| anyhow::anyhow!("Failed to finish encryption: {}", e))?;
 
-        // Also store in local keychain as backup
-        let _ = store_in_keychain(&encoded);
+    let path = encrypted_key_path()?;
+    fs::write(&path, &encrypted).context("Failed to write encrypted key")?;
 
-        return Ok(());
-    }
+    Ok(())
+}
 
-    // Fallback: store locally and in keychain
-    let local_path = local_key_path()?;
-    if let Some(parent) = local_path.parent() {
+/// Cache the decrypted key locally for the session
+/// This avoids prompting for passphrase on every operation
+fn cache_key(key: &[u8]) -> Result<()> {
+    let path = cached_key_path()?;
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&local_path, &encoded)
-        .context("Failed to write key to local file")?;
-
-    // Also store in keychain
-    store_in_keychain(&encoded)?;
-
+    fs::write(&path, key)?;
     Ok(())
 }
 
-fn store_in_keychain(encoded: &str) -> Result<()> {
-    // Delete existing entry first
-    let _ = Command::new("security")
-        .args([
-            "delete-generic-password",
-            "-a", ACCOUNT_NAME,
-            "-s", SERVICE_NAME,
-        ])
-        .output();
-
-    let output = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-a", ACCOUNT_NAME,
-            "-s", SERVICE_NAME,
-            "-w", encoded,
-            "-U",
-        ])
-        .output()
-        .context("Failed to run security command")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("Failed to store key in Keychain: {}", stderr));
+/// Clear the cached key
+pub fn clear_cached_key() -> Result<()> {
+    let path = cached_key_path()?;
+    if path.exists() {
+        fs::remove_file(&path)?;
     }
-
     Ok(())
 }
 
-/// Retrieve the encryption key
-/// Tries iCloud Drive first, then local file, then keychain
+/// Get the encryption key, prompting for passphrase if needed
+/// First checks cache, then decrypts from sync repo
 pub fn get_encryption_key() -> Result<Vec<u8>> {
-    // Try iCloud Drive first
-    if let Some(icloud_path) = icloud_key_path() {
-        if icloud_path.exists() {
-            let encoded = fs::read_to_string(&icloud_path)
-                .context("Failed to read key from iCloud Drive")?;
-            if let Ok(key) = STANDARD.decode(encoded.trim()) {
-                return Ok(key);
+    // Try cached key first
+    if let Ok(path) = cached_key_path() {
+        if path.exists() {
+            if let Ok(key) = fs::read(&path) {
+                if key.len() == crate::security::encryption::KEY_SIZE {
+                    return Ok(key);
+                }
             }
         }
     }
 
-    // Try local file
-    if let Ok(local_path) = local_key_path() {
-        if local_path.exists() {
-            let encoded = fs::read_to_string(&local_path)
-                .context("Failed to read key from local file")?;
-            if let Ok(key) = STANDARD.decode(encoded.trim()) {
-                return Ok(key);
-            }
-        }
-    }
-
-    // Try keychain (for backwards compatibility)
-    get_from_keychain()
+    // No cache - need to decrypt with passphrase
+    Err(anyhow::anyhow!(
+        "Encryption key not cached. Run 'tether unlock' to decrypt with passphrase."
+    ))
 }
 
-fn get_from_keychain() -> Result<Vec<u8>> {
-    let output = Command::new("security")
-        .args([
-            "find-generic-password",
-            "-a", ACCOUNT_NAME,
-            "-s", SERVICE_NAME,
-            "-w",
-        ])
-        .output()
-        .context("Failed to run security command")?;
-
-    if !output.status.success() {
+/// Decrypt and cache the key using a passphrase
+pub fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
+    let path = encrypted_key_path()?;
+    if !path.exists() {
         return Err(anyhow::anyhow!(
-            "Encryption key not found. Run 'tether init' first."
+            "No encrypted key found. Run 'tether init' first."
         ));
     }
 
-    let stored = String::from_utf8(output.stdout)
-        .context("Invalid UTF-8")?
-        .trim()
-        .to_string();
+    let encrypted = fs::read(&path).context("Failed to read encrypted key")?;
 
-    // Try base64
-    if let Ok(key) = STANDARD.decode(&stored) {
-        return Ok(key);
+    let decryptor = match age::Decryptor::new(&encrypted[..])
+        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?
+    {
+        age::Decryptor::Passphrase(d) => d,
+        _ => return Err(anyhow::anyhow!("Key file not encrypted with passphrase")),
+    };
+
+    let mut key = vec![];
+    let mut reader = decryptor
+        .decrypt(&Secret::new(passphrase.to_owned()), None)
+        .map_err(|_| anyhow::anyhow!("Wrong passphrase"))?;
+    reader.read_to_end(&mut key)?;
+
+    if key.len() != crate::security::encryption::KEY_SIZE {
+        return Err(anyhow::anyhow!("Decrypted key has wrong size"));
     }
 
-    // Try hex (old format)
-    if stored.len() == 64 && stored.chars().all(|c| c.is_ascii_hexdigit()) {
-        if let Ok(key) = hex::decode(&stored) {
-            return Ok(key);
-        }
-    }
+    // Cache for future use
+    cache_key(&key)?;
 
-    Err(anyhow::anyhow!("Failed to decode encryption key"))
+    Ok(key)
 }
 
-/// Check if an encryption key exists
+/// Check if an encrypted key exists in the sync repo
 pub fn has_encryption_key() -> bool {
-    // Check iCloud Drive
-    if let Some(icloud_path) = icloud_key_path() {
-        if icloud_path.exists() {
-            return true;
-        }
-    }
-
-    // Check local file
-    if let Ok(local_path) = local_key_path() {
-        if local_path.exists() {
-            return true;
-        }
-    }
-
-    // Check keychain
-    Command::new("security")
-        .args([
-            "find-generic-password",
-            "-a", ACCOUNT_NAME,
-            "-s", SERVICE_NAME,
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    encrypted_key_path().map(|p| p.exists()).unwrap_or(false)
 }
 
-/// Delete the encryption key
+/// Check if the key is currently unlocked (cached)
+pub fn is_unlocked() -> bool {
+    cached_key_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Delete the encryption key (both encrypted and cached)
 pub fn delete_encryption_key() -> Result<()> {
-    // Delete from iCloud Drive
-    if let Some(icloud_path) = icloud_key_path() {
-        let _ = fs::remove_file(&icloud_path);
+    if let Ok(path) = encrypted_key_path() {
+        let _ = fs::remove_file(&path);
     }
-
-    // Delete local file
-    if let Ok(local_path) = local_key_path() {
-        let _ = fs::remove_file(&local_path);
+    if let Ok(path) = cached_key_path() {
+        let _ = fs::remove_file(&path);
     }
-
-    // Delete from keychain
-    let _ = Command::new("security")
-        .args([
-            "delete-generic-password",
-            "-a", ACCOUNT_NAME,
-            "-s", SERVICE_NAME,
-        ])
-        .output();
-
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     #[test]
-    #[ignore] // This test requires macOS Keychain access
-    fn test_store_and_retrieve_key() {
-        let test_key = b"test_encryption_key_32_bytes!!!";
+    fn test_encrypt_decrypt_with_passphrase() {
+        let key = crate::security::encryption::generate_key();
+        let passphrase = "test-passphrase-123";
 
-        // Clean up any existing test key
-        let _ = delete_encryption_key();
+        // Encrypt
+        let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
+        let mut encrypted = vec![];
+        let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
+        writer.write_all(&key).unwrap();
+        writer.finish().unwrap();
 
-        // Store key
-        store_encryption_key(test_key).unwrap();
+        // Decrypt
+        let decryptor = match age::Decryptor::new(&encrypted[..]).unwrap() {
+            age::Decryptor::Passphrase(d) => d,
+            _ => panic!("Expected passphrase decryptor"),
+        };
+        let mut decrypted = vec![];
+        let mut reader = decryptor
+            .decrypt(&Secret::new(passphrase.to_owned()), None)
+            .unwrap();
+        reader.read_to_end(&mut decrypted).unwrap();
 
-        // Retrieve key
-        let retrieved = get_encryption_key().unwrap();
-        assert_eq!(retrieved, test_key);
+        assert_eq!(decrypted, key);
+    }
 
-        // Check existence
-        assert!(has_encryption_key());
+    #[test]
+    fn test_wrong_passphrase_fails() {
+        let key = crate::security::encryption::generate_key();
+        let passphrase = "correct";
+        let wrong_passphrase = "wrong";
 
-        // Clean up
-        delete_encryption_key().unwrap();
-        assert!(!has_encryption_key());
+        // Encrypt
+        let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
+        let mut encrypted = vec![];
+        let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
+        writer.write_all(&key).unwrap();
+        writer.finish().unwrap();
+
+        // Decrypt with wrong passphrase
+        let decryptor = match age::Decryptor::new(&encrypted[..]).unwrap() {
+            age::Decryptor::Passphrase(d) => d,
+            _ => panic!("Expected passphrase decryptor"),
+        };
+        let result = decryptor.decrypt(&Secret::new(wrong_passphrase.to_owned()), None);
+
+        assert!(result.is_err());
     }
 }

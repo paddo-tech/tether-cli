@@ -4,6 +4,7 @@ interface Props {
   language?: string;
   showLineNumbers?: boolean;
   copyable?: boolean;
+  stretch?: boolean;
 }
 
 const {
@@ -11,6 +12,7 @@ const {
   language = 'bash',
   showLineNumbers = false,
   copyable = true,
+  stretch = false,
 } = Astro.props;
 
 const lines = code.trim().split('\n');
@@ -39,7 +41,14 @@ const id = `code-${Math.random().toString(36).substr(2, 9)}`;
     <pre
       id={id}
       class="p-4 overflow-x-auto text-sm font-mono"
-    ><code class="language-{language}">{showLineNumbers ? lines.map((line, i) => `${String(i + 1).padStart(2, ' ')} ${line}`).join('\n') : code.trim()}</code></pre>
+    ><code class="language-{language}">{showLineNumbers ? lines.map((line, i) => `${String(i + 1).padStart(2, ' ')} ${line}`).join('\n') : lines.map((line) => {
+      const trimmed = line.trim();
+      const isNotCommand = trimmed.startsWith('#') || trimmed.startsWith('✓') || trimmed.startsWith('ℹ') ||
+        trimmed.startsWith('├') || trimmed.startsWith('└') || trimmed.startsWith('│') ||
+        trimmed.startsWith('→') || trimmed === '' || /^[A-Za-z]/.test(trimmed) === false;
+      return isNotCommand ? line : `$ ${line}`;
+    }).join('\n')}
+<span class="text-muted">$</span> <span class="inline-block w-2 h-4 bg-primary animate-pulse align-middle"></span></code></pre>
   </div>
 </div>
 

@@ -72,6 +72,7 @@ hostname = "0.4"
 aes-gcm = "0.10"
 rand = "0.8"
 base64 = "0.22"
+age = "0.10"
 
 # Secret detection
 regex = "1.10"

@@ -41,7 +41,7 @@ import CodeBlock from '../components/CodeBlock.astro';
           <ul class="text-muted space-y-2">
             <li><strong class="text-text">End-to-end encryption</strong> - Files encrypted locally before syncing</li>
             <li><strong class="text-text">Open source code</strong> - Every line of code is auditable</li>
-            <li><strong class="text-text">Your infrastructure</strong> - Uses your Git repo and iCloud Keychain</li>
+            <li><strong class="text-text">Your infrastructure</strong> - Uses your Git repo, keys protected by passphrase</li>
             <li><strong class="text-text">Zero trust</strong> - Tether never sees your data or keys</li>
           </ul>
         </div>
@@ -77,7 +77,7 @@ import CodeBlock from '../components/CodeBlock.astro';
               <li>Dotfile changes detected (e.g., <code class="text-primary bg-background px-2 py-1 rounded text-sm">~/.zshrc</code>)</li>
               <li>Generate random 96-bit nonce for this operation</li>
               <li>Read file contents as plaintext</li>
-              <li>Encrypt using AES-256-GCM with key from Keychain + nonce</li>
+              <li>Encrypt using AES-256-GCM with cached key + nonce</li>
               <li>Prepend nonce to ciphertext (needed for decryption)</li>
               <li>Save as <code class="text-primary bg-background px-2 py-1 rounded text-sm">.zshrc.enc</code> in Git repo</li>
               <li>Commit and push to remote Git repository</li>
@@ -119,52 +119,45 @@ fn encrypt_file(path: &Path, key: &[u8; 32]) -> Result<()> {
           <h2 class="text-3xl font-bold font-mono text-text">Key Management</h2>
 
           <div class="bg-surface p-6 rounded-lg border border-success/20">
-            <h3 class="text-xl font-mono font-semibold mb-3 text-text">iCloud Keychain Integration</h3>
+            <h3 class="text-xl font-mono font-semibold mb-3 text-text">Passphrase-Based Key Encryption</h3>
             <p class="text-muted mb-4">
-              Encryption keys are stored in <strong class="text-text">iCloud Keychain</strong>, Apple's secure credential storage system.
-              This provides automatic synchronization across your Macs without requiring manual key management.
+              Encryption keys are protected using <strong class="text-text">age encryption</strong> with your passphrase.
+              The encrypted key syncs via Git, allowing cross-platform access from any machine.
             </p>
 
             <h4 class="font-mono font-semibold text-text mt-6 mb-2">First Machine (Key Generation)</h4>
             <ol class="space-y-2 text-muted list-decimal list-inside">
               <li>Run <code class="text-primary bg-background px-2 py-1 rounded text-sm">tether init</code></li>
               <li>Generate cryptographically random 256-bit key</li>
-              <li>Store key in Keychain with service: <code class="text-primary bg-background px-2 py-1 rounded text-sm">com.tether-cli.encryption</code></li>
-              <li>Mark as synchronizable (syncs via iCloud)</li>
-              <li>Continue with dotfile sync</li>
+              <li>Prompt for passphrase (min 8 characters)</li>
+              <li>Encrypt key with passphrase using <code class="text-primary bg-background px-2 py-1 rounded text-sm">age</code></li>
+              <li>Store encrypted key in sync repo as <code class="text-primary bg-background px-2 py-1 rounded text-sm">encryption.key.age</code></li>
+              <li>Cache decrypted key locally for session</li>
             </ol>
 
             <h4 class="font-mono font-semibold text-text mt-6 mb-2">Additional Machines (Key Retrieval)</h4>
             <ol class="space-y-2 text-muted list-decimal list-inside">
-              <li>Run <code class="text-primary bg-background px-2 py-1 rounded text-sm">tether init</code> on second Mac</li>
-              <li>Check iCloud Keychain for existing key</li>
-              <li>If found, use existing key (automatic sync via iCloud)</li>
-              <li>Decrypt dotfiles from Git using synced key</li>
-              <li>Ready to sync!</li>
+              <li>Clone sync repo (contains <code class="text-primary bg-background px-2 py-1 rounded text-sm">encryption.key.age</code>)</li>
+              <li>Run <code class="text-primary bg-background px-2 py-1 rounded text-sm">tether unlock</code></li>
+              <li>Enter passphrase to decrypt key</li>
+              <li>Key cached locally for future operations</li>
+              <li>Decrypt dotfiles from Git using key</li>
             </ol>
 
             <CodeBlock
-              code={`// Simplified Keychain integration
-fn get_or_create_key() -> Result<[u8; 32]> {
-    let keychain = Keychain::default();
+              code={`// Passphrase-based key management
+fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
+    // Read encrypted key from sync repo
+    let encrypted = fs::read("encryption.key.age")?;
 
-    // Try to retrieve existing key from iCloud Keychain
-    if let Ok(key) = keychain.get("com.tether-cli.encryption") {
-        return Ok(key);
-    }
+    // Decrypt using age with passphrase
+    let decryptor = age::Decryptor::new(&encrypted)?;
+    let key = decryptor.decrypt(passphrase)?;
 
-    // No key found, generate new one
-    let new_key = generate_random_key();
+    // Cache locally for session
+    cache_key(&key)?;
 
-    // Store in Keychain with iCloud sync enabled
-    keychain.set(
-        "com.tether-cli.encryption",
-        &new_key,
-        KeychainAccess::AfterFirstUnlock,
-        true, // synchronizable via iCloud
-    )?;
-
-    Ok(new_key)
+    Ok(key)
 }`}
               language="rust"
             />
@@ -176,16 +169,16 @@ fn get_or_create_key() -> Result<[u8; 32]> {
             </div>
           </div>
 
-          <div class="bg-warning/10 border border-warning/30 p-4 rounded-lg">
-            <h4 class="font-mono font-semibold text-warning flex items-center mb-2">
+          <div class="bg-success/10 border border-success/30 p-4 rounded-lg">
+            <h4 class="font-mono font-semibold text-success flex items-center mb-2">
               <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              Important: Encryption Keys Never Touch Git
+              Cross-Platform Compatible
             </h4>
             <p class="text-muted text-sm">
-              Your encryption keys are <strong>never</strong> stored in Git, never transmitted to GitHub/GitLab,
-              and never leave your devices except via encrypted iCloud Keychain sync between your own Macs.
+              The passphrase-based approach works on any platform — macOS, Linux, or Windows.
+              Your encrypted key travels with your sync repo, protected by your passphrase.
             </p>
           </div>
         </div>
@@ -249,7 +242,7 @@ fn get_or_create_key() -> Result<[u8; 32]> {
               </h3>
               <ul class="space-y-2 text-muted text-sm">
                 <li>• Your Git repository (GitHub/GitLab/self-hosted)</li>
-                <li>• Your iCloud Keychain data</li>
+                <li>• Your passphrase (never stored)</li>
                 <li>• Your encryption keys</li>
                 <li>• Your dotfiles (plaintext local, encrypted remote)</li>
               </ul>
@@ -264,7 +257,7 @@ fn get_or_create_key() -> Result<[u8; 32]> {
               </h3>
               <ul class="space-y-2 text-muted text-sm">
                 <li>• Dotfile contents (encrypted in Git)</li>
-                <li>• Encryption keys (Keychain only)</li>
+                <li>• Encryption keys (passphrase-protected)</li>
                 <li>• No telemetry or tracking</li>
                 <li>• No external services used</li>
               </ul>
@@ -275,8 +268,8 @@ fn get_or_create_key() -> Result<[u8; 32]> {
             <h3 class="text-lg font-mono font-semibold mb-3 text-primary">Zero Knowledge Architecture</h3>
             <p class="text-muted text-sm">
               Tether operates on a <strong class="text-text">zero-knowledge principle</strong>. The application itself
-              never transmits your data to any servers we control. Everything stays between your devices, your Git repository,
-              and your iCloud Keychain. We literally cannot access your data even if we wanted to.
+              never transmits your data to any servers we control. Everything stays between your devices and your Git repository.
+              We literally cannot access your data even if we wanted to.
             </p>
           </div>
         </div>
@@ -300,7 +293,7 @@ fn get_or_create_key() -> Result<[u8; 32]> {
               <h4 class="font-mono font-semibold text-text mb-2">⚠ What Tether Doesn't Protect Against</h4>
               <ul class="text-muted text-sm space-y-1">
                 <li>• Compromised local machine (dotfiles are plaintext locally)</li>
-                <li>• Stolen iCloud credentials (attacker could access Keychain)</li>
+                <li>• Weak passphrase (brute-force attack on encrypted key)</li>
                 <li>• Malicious Git server (could serve wrong encrypted data)</li>
                 <li>• Physical access to unlocked Mac</li>
               </ul>
@@ -329,9 +322,9 @@ fn get_or_create_key() -> Result<[u8; 32]> {
             </div>
 
             <div class="bg-surface p-4 rounded-lg">
-              <h4 class="font-mono font-semibold text-text mb-2">3. Secure Your iCloud Account</h4>
+              <h4 class="font-mono font-semibold text-text mb-2">3. Use a Strong Passphrase</h4>
               <p class="text-muted text-sm">
-                Use a strong password and enable two-factor authentication on your Apple ID. Your encryption keys sync via iCloud Keychain.
+                Choose a strong, unique passphrase for your encryption key. This protects your dotfiles even if your Git repository is compromised.
               </p>
             </div>
 

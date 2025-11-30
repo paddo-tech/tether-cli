@@ -8,6 +8,7 @@ mod resolve;
 mod status;
 mod sync;
 mod team;
+mod unlock;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -90,6 +91,12 @@ pub enum Commands {
         /// Specific file to resolve (resolves all if not specified)
         file: Option<String>,
     },
+
+    /// Unlock encryption key with passphrase
+    Unlock,
+
+    /// Clear cached encryption key
+    Lock,
 }
 
 #[derive(Subcommand)]
@@ -216,6 +223,8 @@ impl Cli {
                 TeamAction::Status => team::status().await,
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,
+            Commands::Unlock => unlock::run().await,
+            Commands::Lock => unlock::lock().await,
         }
     }
 }

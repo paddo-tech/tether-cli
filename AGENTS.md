@@ -4,7 +4,7 @@
 
 ## Overview
 
-Rust CLI that syncs dotfiles and global packages across Macs via Git. Daemon runs periodic sync every 5 minutes.
+Rust CLI that syncs dotfiles and global packages across machines via Git. Daemon runs periodic sync every 5 minutes.
 
 ## Commands
 
@@ -43,7 +43,7 @@ src/
 │   ├── brew.rs, npm.rs, pnpm.rs, bun.rs, gem.rs
 ├── security/
 │   ├── encryption.rs    # AES-GCM encryption
-│   ├── keychain.rs      # macOS Keychain
+│   ├── keychain.rs      # Key management (passphrase-based)
 │   └── secrets.rs       # Secret detection
 ├── sync/
 │   ├── engine.rs        # sync_path() helper
@@ -61,7 +61,7 @@ src/
 - **inquire** - Interactive prompts
 - **owo-colors** - Terminal colors
 - **aes-gcm** - Encryption
-- **security-framework** - macOS Keychain
+- **age** - Passphrase-based key encryption
 
 ## Data Layout
 

@@ -1,4 +1,4 @@
-use crate::cli::Output;
+use crate::cli::{Output, Prompt};
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
@@ -16,6 +16,20 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     }
 
     let config = Config::load()?;
+
+    // Ensure encryption key is unlocked if encryption is enabled
+    if config.security.encrypt_dotfiles && !crate::security::is_unlocked() {
+        if !crate::security::has_encryption_key() {
+            return Err(anyhow::anyhow!(
+                "No encryption key found. Run 'tether init' first."
+            ));
+        }
+
+        Output::info("Encryption key locked. Enter passphrase to unlock:");
+        let passphrase = Prompt::password("Passphrase")?;
+        crate::security::unlock_with_passphrase(&passphrase)?;
+        Output::success("Key unlocked");
+    }
     let sync_path = SyncEngine::sync_path()?;
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 

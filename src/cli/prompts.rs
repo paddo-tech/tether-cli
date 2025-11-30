@@ -1,5 +1,5 @@
 use anyhow::Result;
-use inquire::{Confirm, Select, Text};
+use inquire::{Confirm, Password, Select, Text};
 
 pub struct Prompt;
 
@@ -25,5 +25,9 @@ impl Prompt {
 
         // Find the index of the selected option
         Ok(options.iter().position(|&x| x == selection).unwrap_or(0))
+    }
+
+    pub fn password(message: &str) -> Result<String> {
+        Ok(Password::new(message).without_confirmation().prompt()?)
     }
 }
