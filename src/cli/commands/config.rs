@@ -1,5 +1,5 @@
 use crate::cli::{Output, Prompt};
-use crate::config::Config;
+use crate::config::{Config, DotfileEntry};
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, Table};
 use inquire::Select as InquireSelect;
@@ -156,7 +156,7 @@ pub async fn dotfiles() -> Result<()> {
         // Section 1: Home directory dotfiles
         println!();
         Output::subheader("Home Directory (~/)");
-        render_entry_table("Files", &config.dotfiles.files);
+        render_dotfile_table("Files", &config.dotfiles.files);
         render_entry_table("Folders", &config.dotfiles.dirs);
 
         // Section 2: Project configs
@@ -186,7 +186,7 @@ pub async fn dotfiles() -> Result<()> {
         cursor = choice;
 
         let changed = match choice {
-            0 => Some(manage_entry_list(
+            0 => Some(manage_dotfile_list(
                 "Dotfiles",
                 "file path (e.g., .zshrc)",
                 &mut config.dotfiles.files,
@@ -308,6 +308,47 @@ fn render_entry_table(title: &str, entries: &[String]) {
     println!("{table}");
 }
 
+fn render_dotfile_table(title: &str, entries: &[DotfileEntry]) {
+    use owo_colors::OwoColorize;
+
+    if entries.is_empty() {
+        println!("{}", format!("{}: (none)", title).bright_black());
+        return;
+    }
+
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL).set_header(vec![
+        Cell::new(format!("{} ({})", title, entries.len()))
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Path")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Create if Missing")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+    ]);
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let create_flag = if entry.create_if_missing() {
+            "yes"
+        } else {
+            "no"
+        };
+        table.add_row(vec![
+            Cell::new(format!("#{}", idx + 1)).fg(Color::Green),
+            Cell::new(entry.path()),
+            Cell::new(create_flag).fg(if entry.create_if_missing() {
+                Color::Green
+            } else {
+                Color::Yellow
+            }),
+        ]);
+    }
+
+    println!("{table}");
+}
+
 fn normalize_entries(entries: &mut Vec<String>) {
     entries.iter_mut().for_each(|entry| {
         *entry = entry.trim().to_string();
@@ -315,4 +356,86 @@ fn normalize_entries(entries: &mut Vec<String>) {
     entries.retain(|entry| !entry.is_empty());
     entries.sort();
     entries.dedup();
+}
+
+fn manage_dotfile_list(
+    title: &str,
+    prompt_label: &str,
+    entries: &mut Vec<DotfileEntry>,
+) -> Result<bool> {
+    let mut changed = false;
+    loop {
+        println!();
+        render_dotfile_table(title, entries);
+        let actions = vec!["Add", "Remove", "Toggle create_if_missing", "Back"];
+        let choice = Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+
+        match choice {
+            0 => {
+                let input = Prompt::input(&format!("Enter {}", prompt_label), None)?;
+                let value = input.trim();
+                if value.is_empty() {
+                    Output::warning("Value cannot be empty");
+                    continue;
+                }
+                if entries.iter().any(|e| e.path() == value) {
+                    Output::warning("Already tracked");
+                    continue;
+                }
+                let create = Prompt::confirm("Create if missing on other machines?", true)?;
+                if create {
+                    entries.push(DotfileEntry::Simple(value.to_string()));
+                } else {
+                    entries.push(DotfileEntry::WithOptions {
+                        path: value.to_string(),
+                        create_if_missing: false,
+                    });
+                }
+                entries.sort_by(|a, b| a.path().cmp(b.path()));
+                changed = true;
+                Output::success(&format!("Added {}", value));
+            }
+            1 => {
+                if entries.is_empty() {
+                    Output::info("Nothing to remove");
+                    continue;
+                }
+
+                let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
+                let selection =
+                    InquireSelect::new(&format!("Select {} to remove", title.to_lowercase()), paths)
+                        .prompt()?;
+
+                entries.retain(|e| e.path() != selection);
+                changed = true;
+                Output::success(&format!("Removed {}", selection));
+            }
+            2 => {
+                if entries.is_empty() {
+                    Output::info("Nothing to toggle");
+                    continue;
+                }
+
+                let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
+                let selection =
+                    InquireSelect::new("Select file to toggle create_if_missing", paths).prompt()?;
+
+                if let Some(entry) = entries.iter_mut().find(|e| e.path() == selection) {
+                    let new_value = !entry.create_if_missing();
+                    *entry = DotfileEntry::WithOptions {
+                        path: selection.clone(),
+                        create_if_missing: new_value,
+                    };
+                    changed = true;
+                    Output::success(&format!(
+                        "{}: create_if_missing = {}",
+                        selection, new_value
+                    ));
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Ok(changed)
 }

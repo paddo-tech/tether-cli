@@ -79,7 +79,8 @@ fn show_dotfile_diff(
 
     let mut diffs: Vec<(String, String, String)> = Vec::new(); // (file, status, details)
 
-    for file in &config.dotfiles.files {
+    for entry in &config.dotfiles.files {
+        let file = entry.path();
         let local_path = home.join(file);
         let filename = file.trim_start_matches('.');
 
@@ -107,7 +108,7 @@ fn show_dotfile_diff(
 
                 if is_different {
                     diffs.push((
-                        file.clone(),
+                        file.to_string(),
                         "modified".to_string(),
                         "local changes".to_string(),
                     ));
@@ -115,14 +116,14 @@ fn show_dotfile_diff(
             }
             (true, false) => {
                 diffs.push((
-                    file.clone(),
+                    file.to_string(),
                     "local only".to_string(),
                     "not in sync repo".to_string(),
                 ));
             }
             (false, true) => {
                 diffs.push((
-                    file.clone(),
+                    file.to_string(),
                     "remote only".to_string(),
                     "missing locally".to_string(),
                 ));
@@ -360,12 +361,13 @@ fn build_current_machine_state(
     let mut machine = MachineState::new(&state.machine_id);
 
     // Collect file hashes
-    for file in &config.dotfiles.files {
+    for entry in &config.dotfiles.files {
+        let file = entry.path();
         let path = home.join(file);
         if path.exists() {
             let content = std::fs::read(&path)?;
             let hash = format!("{:x}", sha2::Sha256::digest(&content));
-            machine.files.insert(file.clone(), hash);
+            machine.files.insert(file.to_string(), hash);
         }
     }
 

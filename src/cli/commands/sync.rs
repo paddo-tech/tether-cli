@@ -81,7 +81,8 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     // Sync dotfiles (local → Git)
 
     // Sync individual dotfiles
-    for file in &config.dotfiles.files {
+    for entry in &config.dotfiles.files {
+        let file = entry.path();
         let source = home.join(file);
 
         if source.exists() {
@@ -116,7 +117,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                             std::fs::write(&dest, &content)?;
                         }
 
-                        state.update_file(file, hash);
+                        state.update_file(file, hash.clone());
                     }
                 }
             }
@@ -219,9 +220,10 @@ fn decrypt_from_repo(
     let mut conflict_state = ConflictState::load().unwrap_or_default();
     let mut new_conflicts = Vec::new();
 
-    for file in &config.dotfiles.files {
+    for entry in &config.dotfiles.files {
+        let file = entry.path();
         // Skip if this dotfile is ignored on this machine
-        if machine_state.ignored_dotfiles.contains(file) {
+        if machine_state.ignored_dotfiles.iter().any(|f| f == file) {
             continue;
         }
 
@@ -233,6 +235,12 @@ fn decrypt_from_repo(
             match crate::security::decrypt_file(&encrypted_content, &key) {
                 Ok(plaintext) => {
                     let local_file = home.join(file);
+
+                    // Skip if file doesn't exist and create_if_missing is false
+                    if !local_file.exists() && !entry.create_if_missing() {
+                        continue;
+                    }
+
                     let last_synced_hash = state.files.get(file).map(|f| f.hash.as_str());
 
                     // Check for conflict
@@ -256,7 +264,7 @@ fn decrypt_from_repo(
                                 }
                                 ConflictResolution::Skip => {
                                     new_conflicts.push((
-                                        file.clone(),
+                                        file.to_string(),
                                         conflict.local_hash.clone(),
                                         conflict.remote_hash.clone(),
                                     ));
@@ -266,7 +274,7 @@ fn decrypt_from_repo(
                             // Non-interactive (daemon): save conflict for later
                             Output::warning(&format!("  {} (conflict - skipped)", file));
                             new_conflicts.push((
-                                file.clone(),
+                                file.to_string(),
                                 conflict.local_hash.clone(),
                                 conflict.remote_hash.clone(),
                             ));
@@ -834,9 +842,10 @@ async fn build_machine_state(
     // Populate dotfiles list from config (files that exist locally)
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     machine_state.dotfiles.clear();
-    for file in &config.dotfiles.files {
+    for entry in &config.dotfiles.files {
+        let file = entry.path();
         if home.join(file).exists() {
-            machine_state.dotfiles.push(file.clone());
+            machine_state.dotfiles.push(file.to_string());
         }
     }
     machine_state.dotfiles.sort();

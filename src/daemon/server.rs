@@ -157,7 +157,8 @@ impl DaemonServer {
         // Apply remote changes first (with conflict detection)
         if config.security.encrypt_dotfiles {
             let key = crate::security::get_encryption_key()?;
-            for file in &config.dotfiles.files {
+            for entry in &config.dotfiles.files {
+                let file = entry.path();
                 let filename = file.trim_start_matches('.');
                 let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
 
@@ -167,6 +168,12 @@ impl DaemonServer {
                             crate::security::decrypt_file(&encrypted_content, &key)
                         {
                             let local_file = home.join(file);
+
+                            // Skip if file doesn't exist and create_if_missing is false
+                            if !local_file.exists() && !entry.create_if_missing() {
+                                continue;
+                            }
+
                             let last_synced_hash = state.files.get(file).map(|f| f.hash.as_str());
 
                             if let Some(conflict) =
@@ -174,12 +181,15 @@ impl DaemonServer {
                             {
                                 log::warn!("Conflict detected in {}", file);
                                 new_conflicts.push((
-                                    file.clone(),
+                                    file.to_string(),
                                     conflict.local_hash,
                                     conflict.remote_hash,
                                 ));
-                            } else if local_file.exists() {
-                                // No conflict, safe to apply remote
+                            } else {
+                                // No conflict, safe to apply remote (create parent dirs if needed)
+                                if let Some(parent) = local_file.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
                                 std::fs::write(&local_file, plaintext)?;
                                 log::debug!("Applied remote changes to {}", file);
                             }
@@ -205,12 +215,13 @@ impl DaemonServer {
         // Now sync local changes to remote
         let mut changes_made = false;
 
-        for file in &config.dotfiles.files {
+        for entry in &config.dotfiles.files {
+            let file = entry.path();
             // Skip files with conflicts
             if conflict_state
                 .conflicts
                 .iter()
-                .any(|c| c.file_path == *file)
+                .any(|c| c.file_path == file)
             {
                 continue;
             }
@@ -245,7 +256,7 @@ impl DaemonServer {
                             std::fs::write(&dest, &content)?;
                         }
 
-                        state.update_file(file, hash);
+                        state.update_file(file, hash.clone());
                         changes_made = true;
                     }
                 }

@@ -91,9 +91,45 @@ pub struct GemConfig {
     pub sync_versions: bool,
 }
 
+/// A dotfile entry - either a simple string path or an object with options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DotfileEntry {
+    /// Simple string path (create_if_missing defaults to true)
+    Simple(String),
+    /// Object with explicit options
+    WithOptions {
+        path: String,
+        #[serde(default = "default_create_if_missing")]
+        create_if_missing: bool,
+    },
+}
+
+fn default_create_if_missing() -> bool {
+    true
+}
+
+impl DotfileEntry {
+    pub fn path(&self) -> &str {
+        match self {
+            DotfileEntry::Simple(p) => p,
+            DotfileEntry::WithOptions { path, .. } => path,
+        }
+    }
+
+    pub fn create_if_missing(&self) -> bool {
+        match self {
+            DotfileEntry::Simple(_) => true,
+            DotfileEntry::WithOptions {
+                create_if_missing, ..
+            } => *create_if_missing,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DotfilesConfig {
-    pub files: Vec<String>,
+    pub files: Vec<DotfileEntry>,
     #[serde(default)]
     pub dirs: Vec<String>,
 }
@@ -307,9 +343,24 @@ impl Default for Config {
             },
             dotfiles: DotfilesConfig {
                 files: vec![
-                    ".zshrc".to_string(),
-                    ".gitconfig".to_string(),
-                    ".zprofile".to_string(),
+                    DotfileEntry::WithOptions {
+                        path: ".zshrc".to_string(),
+                        create_if_missing: false,
+                    },
+                    DotfileEntry::WithOptions {
+                        path: ".zprofile".to_string(),
+                        create_if_missing: false,
+                    },
+                    DotfileEntry::WithOptions {
+                        path: ".bashrc".to_string(),
+                        create_if_missing: false,
+                    },
+                    DotfileEntry::WithOptions {
+                        path: ".bash_profile".to_string(),
+                        create_if_missing: false,
+                    },
+                    DotfileEntry::Simple(".gitconfig".to_string()),
+                    DotfileEntry::Simple(".tether/config.toml".to_string()),
                 ],
                 dirs: vec![],
             },

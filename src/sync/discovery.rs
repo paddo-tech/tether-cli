@@ -1,14 +1,15 @@
+use crate::config::DotfileEntry;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Discover directories that should be synced based on shell config files.
 /// Parses .zshrc, .bashrc, etc. for `source` or `.` commands that reference directories.
-pub fn discover_sourced_dirs(home: &Path, dotfiles: &[String]) -> Vec<String> {
+pub fn discover_sourced_dirs(home: &Path, dotfiles: &[DotfileEntry]) -> Vec<String> {
     let mut discovered = HashSet::new();
 
-    for dotfile in dotfiles {
-        let path = home.join(dotfile);
+    for entry in dotfiles {
+        let path = home.join(entry.path());
         if !path.exists() {
             continue;
         }
