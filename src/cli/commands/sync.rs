@@ -119,7 +119,12 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
     }
 
-    // Sync package manifests
+    // Import packages from manifests (install missing packages)
+    if !dry_run {
+        import_packages(&config, &sync_path).await?;
+    }
+
+    // Export package manifests (save current packages)
     sync_packages(&config, &mut state, &sync_path, dry_run).await?;
 
     // Save machine state for cross-machine comparison
@@ -784,6 +789,71 @@ async fn sync_package_manager<P: PackageManager>(
     }
 
     Ok(())
+}
+
+/// Import packages from manifests (install missing packages from other machines)
+async fn import_packages(config: &Config, sync_path: &Path) -> Result<()> {
+    let manifests_dir = sync_path.join("manifests");
+    if !manifests_dir.exists() {
+        return Ok(());
+    }
+
+    // Homebrew
+    if config.packages.brew.enabled {
+        let brewfile = manifests_dir.join("Brewfile");
+        if brewfile.exists() {
+            let brew = BrewManager::new();
+            if brew.is_available().await {
+                if let Ok(manifest) = std::fs::read_to_string(&brewfile) {
+                    if let Err(e) = brew.import_manifest(&manifest).await {
+                        Output::warning(&format!("Failed to import Brewfile: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    // npm
+    if config.packages.npm.enabled {
+        import_package_manager(&NpmManager::new(), &manifests_dir.join("npm.txt")).await;
+    }
+
+    // pnpm
+    if config.packages.pnpm.enabled {
+        import_package_manager(&PnpmManager::new(), &manifests_dir.join("pnpm.txt")).await;
+    }
+
+    // bun
+    if config.packages.bun.enabled {
+        import_package_manager(&BunManager::new(), &manifests_dir.join("bun.txt")).await;
+    }
+
+    // gem
+    if config.packages.gem.enabled {
+        import_package_manager(&GemManager::new(), &manifests_dir.join("gems.txt")).await;
+    }
+
+    Ok(())
+}
+
+async fn import_package_manager<P: PackageManager>(manager: &P, manifest_path: &Path) {
+    if !manifest_path.exists() {
+        return;
+    }
+
+    if !manager.is_available().await {
+        return;
+    }
+
+    if let Ok(manifest) = std::fs::read_to_string(manifest_path) {
+        if let Err(e) = manager.import_manifest(&manifest).await {
+            Output::warning(&format!(
+                "Failed to import {}: {}",
+                manifest_path.display(),
+                e
+            ));
+        }
+    }
 }
 
 /// Build machine state for cross-machine comparison
