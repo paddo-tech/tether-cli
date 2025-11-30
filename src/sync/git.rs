@@ -93,9 +93,9 @@ impl GitBackend {
             return Ok(());
         }
 
-        // Use git CLI for pulling - it handles gh authentication automatically
+        // Use git CLI for pulling - rebase to handle divergent branches cleanly
         let output = Command::new("git")
-            .args(["pull", "origin", "main"])
+            .args(["pull", "--rebase", "origin", "main"])
             .current_dir(&self.repo_path)
             .output()?;
 
