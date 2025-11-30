@@ -136,9 +136,13 @@ impl PackageManager for BrewManager {
         // Clean up temp file
         let _ = tokio::fs::remove_file(&temp_path).await;
 
+        // brew bundle may return non-zero even if most packages installed
+        // (e.g., one cask failed). Log but don't fail.
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("brew bundle install failed: {}", stderr));
+            if !stderr.trim().is_empty() {
+                eprintln!("Warning: brew bundle had issues: {}", stderr);
+            }
         }
 
         Ok(())
