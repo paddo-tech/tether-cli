@@ -418,28 +418,46 @@ fn decrypt_project_configs(
         }
     }
 
-    for entry in WalkDir::new(&projects_dir)
-        .follow_links(false)
-        .min_depth(1)
-        .max_depth(1)
-    {
+    // Find all unique project names from encrypted files
+    let mut projects_in_sync: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for entry in WalkDir::new(&projects_dir).follow_links(false) {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
         };
 
-        if !entry.file_type().is_dir() {
+        if !entry.file_type().is_file() {
             continue;
         }
 
-        let project_dir = entry.path();
-        let project_name = match project_dir.file_name() {
-            Some(name) => name.to_string_lossy().to_string(),
-            None => continue,
-        };
+        let file_path = entry.path();
+        if !file_path.to_string_lossy().ends_with(".enc") {
+            continue;
+        }
 
-        if let Some(local_repo_path) = repo_map.get(&project_name) {
-            for file_entry in WalkDir::new(project_dir).follow_links(false) {
+        // Extract project name from path: projects/host/user/repo/file.enc
+        if let Ok(rel_to_projects) = file_path.strip_prefix(&projects_dir) {
+            let components: Vec<_> = rel_to_projects.components().collect();
+            if components.len() >= 4 {
+                let project_name = format!(
+                    "{}/{}/{}",
+                    components[0].as_os_str().to_string_lossy(),
+                    components[1].as_os_str().to_string_lossy(),
+                    components[2].as_os_str().to_string_lossy()
+                );
+                projects_in_sync.insert(project_name);
+            }
+        }
+    }
+
+    // Process each project
+    for project_name in &projects_in_sync {
+        let project_dir = projects_dir.join(project_name);
+
+        if let Some(local_repo_path) = repo_map.get(project_name) {
+            // Process files for this project
+            for file_entry in WalkDir::new(&project_dir).follow_links(false) {
                 let file_entry = match file_entry {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -453,15 +471,16 @@ fn decrypt_project_configs(
                 let enc_file_name = enc_file.to_string_lossy();
 
                 if enc_file_name.ends_with(".enc") {
-                    let rel_path = enc_file
-                        .strip_prefix(project_dir)
-                        .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {}", e))?;
+                    let rel_path = match enc_file.strip_prefix(&project_dir) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
                     let rel_path_str = rel_path.to_string_lossy();
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
 
                     // Skip if this project config is ignored on this machine
                     if let Some(ignored_paths) =
-                        machine_state.ignored_project_configs.get(&project_name)
+                        machine_state.ignored_project_configs.get(project_name)
                     {
                         if ignored_paths.contains(&rel_path_no_enc.to_string()) {
                             continue;
@@ -496,7 +515,7 @@ fn decrypt_project_configs(
             }
         } else {
             Output::warning(&format!(
-                "  {} (no matching local repo found - skipping)",
+                "Project config skipped: {} (repo not found in search paths)",
                 project_name
             ));
         }
