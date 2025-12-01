@@ -183,3 +183,135 @@ fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
 
     Ok(())
 }
+
+const LAUNCHD_LABEL: &str = "com.tether.daemon";
+
+fn launchd_plist_path() -> Result<PathBuf> {
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    Ok(home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{LAUNCHD_LABEL}.plist")))
+}
+
+fn generate_plist() -> Result<String> {
+    let exe = std::env::current_exe()?;
+    let paths = DaemonPaths::new()?;
+
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{}</string>
+    <key>StandardErrorPath</key>
+    <string>{}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
+"#,
+        exe.display(),
+        paths.log.display(),
+        paths.log.display()
+    ))
+}
+
+pub async fn install() -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err(anyhow::anyhow!(
+            "Launchd is only available on macOS. Use 'tether daemon start' instead."
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = launchd_plist_path()?;
+
+        // Stop existing daemon if running via manual start
+        if let Some(pid) = read_daemon_pid()? {
+            if is_process_running(pid) {
+                Output::info("Stopping existing daemon...");
+                stop().await?;
+            }
+        }
+
+        // Unload if already loaded
+        let _ = Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(&plist_path)
+            .output();
+
+        // Create LaunchAgents directory if needed
+        if let Some(parent) = plist_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Write plist
+        let plist = generate_plist()?;
+        fs::write(&plist_path, plist)?;
+
+        // Load the service
+        let output = Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&plist_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to load launchd service: {}", stderr));
+        }
+
+        Output::success("Launchd service installed");
+        Output::info("Daemon will now start automatically on login and restart if it exits");
+        Ok(())
+    }
+}
+
+pub async fn uninstall() -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err(anyhow::anyhow!("Launchd is only available on macOS"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = launchd_plist_path()?;
+
+        if !plist_path.exists() {
+            Output::info("Launchd service is not installed");
+            return Ok(());
+        }
+
+        // Unload the service
+        let output = Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(&plist_path)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Output::warning(&format!("launchctl unload warning: {}", stderr));
+        }
+
+        // Remove the plist file
+        fs::remove_file(&plist_path)?;
+
+        Output::success("Launchd service uninstalled");
+        Ok(())
+    }
+}

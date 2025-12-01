@@ -8,8 +8,8 @@ use crate::sync::{
 use anyhow::Result;
 use chrono::{Local, Timelike};
 use sha2::{Digest, Sha256};
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tokio::time::Interval;
 
 #[cfg(unix)]
@@ -21,18 +21,39 @@ const UPDATE_HOUR: u32 = 2; // 2am local time
 pub struct DaemonServer {
     sync_interval: Duration,
     last_update_date: Option<chrono::NaiveDate>,
+    binary_path: PathBuf,
+    binary_mtime: Option<SystemTime>,
 }
 
 impl DaemonServer {
     pub fn new() -> Self {
+        let binary_path = std::env::current_exe().unwrap_or_default();
+        let binary_mtime = std::fs::metadata(&binary_path)
+            .and_then(|m| m.modified())
+            .ok();
+
         Self {
             sync_interval: Duration::from_secs(DEFAULT_SYNC_INTERVAL_SECS),
             last_update_date: None,
+            binary_path,
+            binary_mtime,
         }
     }
 
     fn sync_interval(&self) -> Interval {
         tokio::time::interval(self.sync_interval)
+    }
+
+    /// Check if the binary has been updated since daemon started
+    fn binary_updated(&self) -> bool {
+        let current_mtime = std::fs::metadata(&self.binary_path)
+            .and_then(|m| m.modified())
+            .ok();
+
+        match (self.binary_mtime, current_mtime) {
+            (Some(start), Some(current)) => current > start,
+            _ => false,
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -57,6 +78,12 @@ impl DaemonServer {
             loop {
                 tokio::select! {
                     _ = sync_timer.tick() => {
+                        // Check for binary update before doing work
+                        if self.binary_updated() {
+                            log::info!("Binary updated, exiting for restart");
+                            break;
+                        }
+
                         log::info!("Running periodic sync...");
                         if let Err(e) = self.run_sync().await {
                             log::error!("Sync failed: {}", e);
@@ -66,6 +93,11 @@ impl DaemonServer {
                             log::info!("Running daily package update...");
                             if let Err(e) = self.run_package_updates().await {
                                 log::error!("Package update failed: {}", e);
+                            }
+                            // Re-check after upgrades (tether itself may have been updated)
+                            if self.binary_updated() {
+                                log::info!("Binary updated during package upgrade, exiting for restart");
+                                break;
                             }
                         }
                     },
@@ -99,6 +131,12 @@ impl DaemonServer {
             loop {
                 tokio::select! {
                     _ = sync_timer.tick() => {
+                        // Check for binary update before doing work
+                        if self.binary_updated() {
+                            log::info!("Binary updated, exiting for restart");
+                            break;
+                        }
+
                         log::info!("Running periodic sync...");
                         if let Err(e) = self.run_sync().await {
                             log::error!("Sync failed: {}", e);
@@ -108,6 +146,11 @@ impl DaemonServer {
                             log::info!("Running daily package update...");
                             if let Err(e) = self.run_package_updates().await {
                                 log::error!("Package update failed: {}", e);
+                            }
+                            // Re-check after upgrades (tether itself may have been updated)
+                            if self.binary_updated() {
+                                log::info!("Binary updated during package upgrade, exiting for restart");
+                                break;
                             }
                         }
                     },

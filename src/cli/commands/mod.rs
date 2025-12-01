@@ -113,6 +113,10 @@ pub enum DaemonAction {
     Restart,
     /// View daemon logs
     Logs,
+    /// Install launchd service (auto-start on login)
+    Install,
+    /// Uninstall launchd service
+    Uninstall,
     /// Internal daemon runner
     #[command(hide = true)]
     Run,
@@ -211,6 +215,8 @@ impl Cli {
                 DaemonAction::Stop => daemon::stop().await,
                 DaemonAction::Restart => daemon::restart().await,
                 DaemonAction::Logs => daemon::logs().await,
+                DaemonAction::Install => daemon::install().await,
+                DaemonAction::Uninstall => daemon::uninstall().await,
                 DaemonAction::Run => daemon::run_daemon().await,
             },
             Commands::Machines { action } => match action {
