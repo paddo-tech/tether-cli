@@ -10,6 +10,10 @@ pub struct SyncState {
     pub last_sync: DateTime<Utc>,
     pub files: HashMap<String, FileState>,
     pub packages: HashMap<String, PackageState>,
+    #[serde(default)]
+    pub last_upgrade: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_upgrade_with_updates: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +197,8 @@ impl SyncState {
             last_sync: Utc::now(),
             files: HashMap::new(),
             packages: HashMap::new(),
+            last_upgrade: None,
+            last_upgrade_with_updates: None,
         }
     }
 

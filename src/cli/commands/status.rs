@@ -104,6 +104,24 @@ pub async fn run() -> Result<()> {
             )
             .fg(Color::Green),
         ])
+        .add_row(vec![
+            Cell::new("Last Upgrade"),
+            Cell::new(
+                state
+                    .last_upgrade
+                    .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "Never".to_string()),
+            ),
+        ])
+        .add_row(vec![
+            Cell::new("Last Upgrade (with updates)"),
+            Cell::new(
+                state
+                    .last_upgrade_with_updates
+                    .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "Never".to_string()),
+            ),
+        ])
         .add_row(vec![Cell::new("Machine ID"), Cell::new(&state.machine_id)])
         .add_row(vec![Cell::new("Backend"), Cell::new(&config.backend.url)]);
     println!("{sync_table}");
