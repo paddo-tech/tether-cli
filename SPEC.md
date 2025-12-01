@@ -201,6 +201,10 @@ Control the background daemon:
 - `tether daemon stop` - Stop daemon
 - `tether daemon restart` - Restart daemon
 - `tether daemon logs` - View daemon logs
+- `tether daemon install` - Install launchd service (auto-start on login, auto-restart)
+- `tether daemon uninstall` - Remove launchd service
+
+The daemon automatically detects when the tether binary is updated (e.g., via `brew upgrade`) and exits gracefully. When installed as a launchd service, it will automatically restart with the new version.
 
 #### `tether rollback`
 Rollback to a previous sync state:

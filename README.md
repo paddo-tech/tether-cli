@@ -19,7 +19,7 @@ Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, et
 - 🔍 **Secret detection** - Automatic scanning for API keys, tokens, and credentials
 - 🔑 **iCloud Keychain** - Encryption keys sync automatically across your Macs
 - 📦 **Package manager support** - Syncs Homebrew (Brewfiles), npm, and pnpm global packages
-- 🔄 **Automatic syncing** - Background daemon keeps everything in sync (coming soon)
+- 🔄 **Automatic syncing** - Background daemon keeps everything in sync
 - 🗂️ **Dotfile management** - Encrypted shell configs synced across machines
 - 🌳 **Git-backed** - Uses private Git repo for versioning and history
 - 🔒 **Privacy-focused** - Encrypted data in Git, keys in iCloud Keychain
@@ -176,9 +176,9 @@ Built with Rust for performance, reliability, and single-binary distribution.
 - ✅ Secret detection (API keys, tokens, etc.)
 - ✅ iCloud Keychain integration for key management
 - ✅ Git backend (GitHub, GitLab, self-hosted)
+- ✅ Background daemon with launchd integration
 
 **In Progress:**
-- [ ] Background daemon for automatic syncing
 - [ ] Enhanced conflict resolution
 - [ ] Machine-specific overrides
 - [ ] Rollback support
