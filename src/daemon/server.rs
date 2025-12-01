@@ -418,13 +418,20 @@ impl DaemonServer {
     /// Update all enabled package managers
     async fn run_package_updates(&self) -> Result<()> {
         let config = Config::load()?;
+        let mut any_actual_updates = false;
 
         if config.packages.brew.enabled {
             let brew = BrewManager::new();
             if brew.is_available().await {
                 log::info!("Updating Homebrew packages...");
+                let hash_before = brew.compute_manifest_hash().await.ok();
                 if let Err(e) = brew.update_all().await {
                     log::error!("Homebrew update failed: {}", e);
+                } else {
+                    let hash_after = brew.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
                 }
             }
         }
@@ -433,8 +440,14 @@ impl DaemonServer {
             let npm = NpmManager::new();
             if npm.is_available().await {
                 log::info!("Updating npm packages...");
+                let hash_before = npm.compute_manifest_hash().await.ok();
                 if let Err(e) = npm.update_all().await {
                     log::error!("npm update failed: {}", e);
+                } else {
+                    let hash_after = npm.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
                 }
             }
         }
@@ -443,8 +456,14 @@ impl DaemonServer {
             let pnpm = PnpmManager::new();
             if pnpm.is_available().await {
                 log::info!("Updating pnpm packages...");
+                let hash_before = pnpm.compute_manifest_hash().await.ok();
                 if let Err(e) = pnpm.update_all().await {
                     log::error!("pnpm update failed: {}", e);
+                } else {
+                    let hash_after = pnpm.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
                 }
             }
         }
@@ -453,8 +472,14 @@ impl DaemonServer {
             let bun = BunManager::new();
             if bun.is_available().await {
                 log::info!("Updating bun packages...");
+                let hash_before = bun.compute_manifest_hash().await.ok();
                 if let Err(e) = bun.update_all().await {
                     log::error!("bun update failed: {}", e);
+                } else {
+                    let hash_after = bun.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
                 }
             }
         }
@@ -463,13 +488,30 @@ impl DaemonServer {
             let gem = GemManager::new();
             if gem.is_available().await {
                 log::info!("Updating Ruby gems...");
+                let hash_before = gem.compute_manifest_hash().await.ok();
                 if let Err(e) = gem.update_all().await {
                     log::error!("gem update failed: {}", e);
+                } else {
+                    let hash_after = gem.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
                 }
             }
         }
 
-        log::info!("Package updates complete");
+        // Update state
+        let mut state = SyncState::load()?;
+        let now = chrono::Utc::now();
+        state.last_upgrade = Some(now);
+        if any_actual_updates {
+            state.last_upgrade_with_updates = Some(now);
+            log::info!("Package updates complete (changes detected)");
+        } else {
+            log::info!("Package updates complete (no changes)");
+        }
+        state.save()?;
+
         Ok(())
     }
 }
