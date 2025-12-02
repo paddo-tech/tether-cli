@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod conflict;
 pub mod discovery;
 pub mod engine;
@@ -6,6 +7,10 @@ pub mod packages;
 pub mod state;
 pub mod team;
 
+pub use backup::{
+    backup_file, backups_dir, create_backup_dir, list_backup_files, list_backups,
+    prune_old_backups, restore_file,
+};
 pub use conflict::{
     detect_conflict, notify_conflict, notify_conflicts, ConflictResolution, ConflictState,
     FileConflict, PendingConflict,

@@ -237,6 +237,13 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
+    // Prune old backups
+    if let Ok(pruned) = crate::sync::prune_old_backups() {
+        if pruned > 0 {
+            log::debug!("Pruned {} old backup(s)", pruned);
+        }
+    }
+
     Output::success("Synced");
     Ok(())
 }
@@ -249,12 +256,17 @@ fn decrypt_from_repo(
     machine_state: &MachineState,
     interactive: bool,
 ) -> Result<()> {
-    use crate::sync::{detect_conflict, ConflictResolution, ConflictState};
+    use crate::sync::{
+        backup_file, create_backup_dir, detect_conflict, ConflictResolution, ConflictState,
+    };
 
     let key = crate::security::get_encryption_key()?;
     let dotfiles_dir = sync_path.join("dotfiles");
     let mut conflict_state = ConflictState::load().unwrap_or_default();
     let mut new_conflicts = Vec::new();
+
+    // Create backup directory for this sync (lazily - only if needed)
+    let mut backup_dir: Option<PathBuf> = None;
 
     for entry in &config.dotfiles.files {
         let file = entry.path();
@@ -291,6 +303,18 @@ fn decrypt_from_repo(
                             match resolution {
                                 ConflictResolution::KeepLocal => {}
                                 ConflictResolution::UseRemote => {
+                                    // Backup before overwriting
+                                    if local_file.exists() {
+                                        if backup_dir.is_none() {
+                                            backup_dir = Some(create_backup_dir()?);
+                                        }
+                                        backup_file(
+                                            backup_dir.as_ref().unwrap(),
+                                            "dotfiles",
+                                            file,
+                                            &local_file,
+                                        )?;
+                                    }
                                     std::fs::write(&local_file, &plaintext)?;
                                     conflict_state.remove_conflict(file);
                                 }
@@ -325,6 +349,18 @@ fn decrypt_from_repo(
                         // Only write if local unchanged from last sync AND remote differs
                         let local_unchanged = local_hash.as_deref() == last_synced_hash;
                         if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
+                            // Backup before overwriting
+                            if local_file.exists() {
+                                if backup_dir.is_none() {
+                                    backup_dir = Some(create_backup_dir()?);
+                                }
+                                backup_file(
+                                    backup_dir.as_ref().unwrap(),
+                                    "dotfiles",
+                                    file,
+                                    &local_file,
+                                )?;
+                            }
                             std::fs::write(&local_file, plaintext)?;
                         }
                         conflict_state.remove_conflict(file);
@@ -424,12 +460,16 @@ fn decrypt_project_configs(
     key: &[u8],
 ) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+    use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
 
     let projects_dir = sync_path.join("projects");
     if !projects_dir.exists() {
         return Ok(());
     }
+
+    // Lazy backup dir creation
+    let mut backup_dir: Option<PathBuf> = None;
 
     let mut repo_map = std::collections::HashMap::new();
     for search_path_str in &config.project_configs.search_paths {
@@ -549,6 +589,20 @@ fn decrypt_project_configs(
                                             project_name, rel_path_no_enc
                                         ));
                                     } else {
+                                        // Backup before overwriting
+                                        if local_file.exists() {
+                                            if backup_dir.is_none() {
+                                                backup_dir = Some(create_backup_dir()?);
+                                            }
+                                            let backup_path =
+                                                format!("{}/{}", project_name, rel_path_no_enc);
+                                            backup_file(
+                                                backup_dir.as_ref().unwrap(),
+                                                "projects",
+                                                &backup_path,
+                                                &local_file,
+                                            )?;
+                                        }
                                         // Local unchanged or doesn't exist - safe to write remote
                                         if let Some(parent) = local_file.parent() {
                                             std::fs::create_dir_all(parent)?;

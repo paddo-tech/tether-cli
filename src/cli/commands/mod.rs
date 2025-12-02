@@ -5,6 +5,7 @@ mod ignore;
 mod init;
 mod machines;
 mod resolve;
+mod restore;
 mod status;
 mod sync;
 mod team;
@@ -101,6 +102,12 @@ pub enum Commands {
 
     /// Upgrade all installed packages
     Upgrade,
+
+    /// Restore files from backup
+    Restore {
+        #[command(subcommand)]
+        action: RestoreAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -168,6 +175,20 @@ pub enum ConfigAction {
     Edit,
     /// Interactive UI for managing files, folders, and patterns
     Dotfiles,
+}
+
+#[derive(Subcommand)]
+pub enum RestoreAction {
+    /// List available backups
+    List,
+    /// Restore a file from backup (interactive if no args)
+    File {
+        /// Backup timestamp (e.g., 2024-01-15T10-30-00)
+        #[arg(long)]
+        from: Option<String>,
+        /// File to restore (e.g., dotfiles/.zshrc)
+        file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -258,6 +279,12 @@ impl Cli {
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade => upgrade::run().await,
+            Commands::Restore { action } => match action {
+                RestoreAction::List => restore::list_cmd().await,
+                RestoreAction::File { from, file } => {
+                    restore::run(from.as_deref(), file.as_deref()).await
+                }
+            },
         }
     }
 }
