@@ -11,17 +11,45 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
 
     // Check if already initialized
     let config_path = Config::config_path()?;
-    if config_path.exists() {
-        Output::warning("Tether is already initialized");
-        let overwrite = Prompt::confirm("Do you want to reinitialize?", false)?;
-        if !overwrite {
+    let already_initialized = config_path.exists();
+
+    if already_initialized {
+        Output::info("Tether is already initialized");
+
+        // Sync first to ensure we don't lose any data
+        Output::info("Running sync to preserve your data...");
+        if let Err(e) = super::sync::run(false, false).await {
+            Output::warning(&format!("Sync failed: {}", e));
+            if !Prompt::confirm(
+                "Continue with reinit anyway? (may lose unsynced changes)",
+                false,
+            )? {
+                return Ok(());
+            }
+        }
+
+        if !Prompt::confirm("Reinitialize? (your config will be preserved)", false)? {
             return Ok(());
         }
     }
 
-    // Get repository URL
+    // Load existing config or create new one
+    let mut config = if already_initialized {
+        Config::load().unwrap_or_default()
+    } else {
+        Config::default()
+    };
+
+    // Get repository URL (use existing if reinitializing, unless explicitly provided)
     let repo_url = if let Some(url) = repo {
         url.to_string()
+    } else if already_initialized && !config.backend.url.is_empty() {
+        Output::dim(&format!("  Current repo: {}", config.backend.url));
+        if Prompt::confirm("Keep current repository?", true)? {
+            config.backend.url.clone()
+        } else {
+            setup_repository().await?
+        }
     } else {
         setup_repository().await?
     };
@@ -45,8 +73,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
         GitBackend::clone(&repo_url, &sync_path)?;
     }
 
-    // Create default config
-    let mut config = Config::default();
+    // Update and save config (preserves existing settings)
     config.backend.url = repo_url;
     config.save()?;
 
