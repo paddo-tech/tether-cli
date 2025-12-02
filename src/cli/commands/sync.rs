@@ -522,16 +522,39 @@ fn decrypt_project_configs(
                         match crate::security::decrypt_file(&encrypted_content, key) {
                             Ok(plaintext) => {
                                 let local_file = local_repo_path.join(rel_path_no_enc);
-                                if let Some(parent) = local_file.parent() {
-                                    std::fs::create_dir_all(parent)?;
-                                }
-                                // Skip write if content is unchanged
+                                let state_key =
+                                    format!("project:{}/{}", project_name, rel_path_no_enc);
+
                                 let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
-                                let local_hash = std::fs::read(&local_file)
-                                    .ok()
-                                    .map(|c| format!("{:x}", Sha256::digest(&c)));
+                                let local_content = std::fs::read(&local_file).ok();
+                                let local_hash = local_content
+                                    .as_ref()
+                                    .map(|c| format!("{:x}", Sha256::digest(c)));
+
+                                // Check if local has changed since last sync
+                                let state = SyncState::load().ok();
+                                let last_synced_hash = state
+                                    .as_ref()
+                                    .and_then(|s| s.files.get(&state_key))
+                                    .map(|f| f.hash.clone());
+
+                                let local_modified =
+                                    local_hash.is_some() && local_hash != last_synced_hash;
+
                                 if local_hash.as_ref() != Some(&remote_hash) {
-                                    std::fs::write(&local_file, plaintext)?;
+                                    if local_modified {
+                                        // Local has changes not yet synced - don't overwrite
+                                        Output::warning(&format!(
+                                            "  {}: {} (local changes preserved, run sync to push)",
+                                            project_name, rel_path_no_enc
+                                        ));
+                                    } else {
+                                        // Local unchanged or doesn't exist - safe to write remote
+                                        if let Some(parent) = local_file.parent() {
+                                            std::fs::create_dir_all(parent)?;
+                                        }
+                                        std::fs::write(&local_file, plaintext)?;
+                                    }
                                 }
                             }
                             Err(e) => {
