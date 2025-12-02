@@ -273,7 +273,10 @@ pub async fn install() -> Result<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Failed to load launchd service: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "Failed to load launchd service: {}",
+                stderr
+            ));
         }
 
         Output::success("Launchd service installed");

@@ -125,6 +125,38 @@ impl DotfileEntry {
             } => *create_if_missing,
         }
     }
+
+    /// Validates the path is safe (no path traversal, not absolute)
+    pub fn is_safe_path(&self) -> bool {
+        is_safe_dotfile_path(self.path())
+    }
+}
+
+/// Validates a dotfile path is safe from path traversal attacks.
+/// Rejects absolute paths and paths containing `..` components.
+/// Allows `~` prefix (home-relative paths) as these are expanded safely.
+pub fn is_safe_dotfile_path(path: &str) -> bool {
+    // Strip leading ~/ for validation (it's expanded to home dir)
+    let path_to_check = path.strip_prefix("~/").unwrap_or(path);
+
+    // Reject absolute paths
+    if path_to_check.starts_with('/') {
+        return false;
+    }
+
+    // Reject paths with .. components
+    for component in path_to_check.split('/') {
+        if component == ".." {
+            return false;
+        }
+    }
+
+    // Reject empty paths
+    if path_to_check.is_empty() {
+        return false;
+    }
+
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +204,55 @@ fn default_merge_args() -> Vec<String> {
             "{remote}".to_string(),
             "{merged}".to_string(),
         ]
+    }
+}
+
+/// Allowed merge tool commands (security: prevents arbitrary command execution via synced config)
+const ALLOWED_MERGE_TOOLS: &[&str] = &[
+    "opendiff",
+    "vimdiff",
+    "nvim",
+    "vim",
+    "gvimdiff",
+    "meld",
+    "kdiff3",
+    "diffmerge",
+    "p4merge",
+    "araxis",
+    "bc",
+    "bc3",
+    "bc4",
+    "beyondcompare",
+    "deltawalker",
+    "diffuse",
+    "ecmerge",
+    "emerge",
+    "examdiff",
+    "guiffy",
+    "gvim",
+    "idea",
+    "intellij",
+    "code",
+    "vscode",
+    "sublime",
+    "subl",
+    "tkdiff",
+    "tortoisemerge",
+    "winmerge",
+    "xxdiff",
+];
+
+impl MergeConfig {
+    /// Validates the merge tool command is in the allowlist
+    pub fn is_valid_command(&self) -> bool {
+        // Extract base command name (without path)
+        let cmd = self
+            .command
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.command)
+            .to_lowercase();
+        ALLOWED_MERGE_TOOLS.contains(&cmd.as_str())
     }
 }
 
@@ -296,13 +377,9 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        let dir = Self::config_dir()?;
-        std::fs::create_dir_all(&dir)?;
-
         let path = Self::config_path()?;
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        crate::sync::atomic_write(&path, content.as_bytes())
     }
 }
 

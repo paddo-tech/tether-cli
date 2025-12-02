@@ -4,6 +4,9 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 const ENCRYPTED_KEY_FILENAME: &str = "encryption.key.age";
 
 /// Get the path to the encrypted key in the sync repo
@@ -43,9 +46,32 @@ pub fn store_encryption_key_with_passphrase(key: &[u8], passphrase: &str) -> Res
 fn cache_key(key: &[u8]) -> Result<()> {
     let path = cached_key_path()?;
     if let Some(parent) = path.parent() {
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(parent)?;
+            // Set directory permissions to 0o700
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
         fs::create_dir_all(parent)?;
     }
+
+    // Write key with secure permissions (0o600 on Unix)
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        file.write_all(key)?;
+    }
+    #[cfg(not(unix))]
     fs::write(&path, key)?;
+
     Ok(())
 }
 

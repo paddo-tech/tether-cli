@@ -4,13 +4,49 @@ use crate::sync::GitBackend;
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
 
+/// Validate team name contains only safe characters for filesystem paths
+fn is_valid_team_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !name.starts_with('-')
+        && !name.starts_with('_')
+}
+
+/// Sanitize a team name by replacing unsafe characters
+fn sanitize_team_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect::<String>()
+        .trim_start_matches(['-', '_'])
+        .to_string()
+}
+
 pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<()> {
     let mut config = Config::load()?;
 
     // Determine team name (custom or auto-extracted)
-    let team_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
+    let raw_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
         crate::sync::extract_team_name_from_url(url).unwrap_or_else(|| "team".to_string())
     });
+
+    // Validate and sanitize team name
+    let team_name = if is_valid_team_name(&raw_name) {
+        raw_name
+    } else {
+        let sanitized = sanitize_team_name(&raw_name);
+        if sanitized.is_empty() {
+            anyhow::bail!("Invalid team name: must contain alphanumeric characters");
+        }
+        Output::warning(&format!(
+            "Team name '{}' sanitized to '{}'",
+            raw_name, sanitized
+        ));
+        sanitized
+    };
 
     // Initialize teams config if needed
     if config.teams.is_none() {
@@ -132,11 +168,32 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
         Output::info("Team sync configured with write access - you can push updates");
     }
 
-    // Ask about auto-injection
+    // Ask about auto-injection with content preview
     let auto_inject = if no_auto_inject {
         false
     } else if !team_files.is_empty() {
-        Prompt::confirm("Auto-inject source lines to your personal configs?", true)?
+        // Show preview of team config contents (security: let user review before sourcing)
+        println!();
+        Output::warning("⚠️  Team configs will be sourced into your shell. Review contents:");
+        for file in &team_files {
+            let team_file_path = team_repo_dir.join("dotfiles").join(file);
+            if let Ok(content) = std::fs::read_to_string(&team_file_path) {
+                println!();
+                println!("  {}:", file);
+                println!("  {}", "─".repeat(50));
+                // Show first 20 lines or all if shorter
+                let lines: Vec<&str> = content.lines().take(20).collect();
+                for line in &lines {
+                    println!("  {}", line);
+                }
+                if content.lines().count() > 20 {
+                    println!("  ... ({} more lines)", content.lines().count() - 20);
+                }
+                println!("  {}", "─".repeat(50));
+            }
+        }
+        println!();
+        Prompt::confirm("Auto-inject source lines to your personal configs?", false)?
     } else {
         false
     };

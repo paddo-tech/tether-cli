@@ -42,8 +42,8 @@ impl TeamManifest {
         let path = Self::manifest_path()?;
         let content =
             serde_json::to_string_pretty(self).context("Failed to serialize team manifest")?;
-        std::fs::write(&path, content).context("Failed to write team manifest")?;
-        Ok(())
+        crate::sync::atomic_write(&path, content.as_bytes())
+            .context("Failed to write team manifest")
     }
 
     /// Get manifest file path
@@ -187,6 +187,37 @@ impl SymlinkableDir {
             let entry = entry?;
             let team_item = entry.path();
             let item_name = entry.file_name();
+
+            // Security: validate item name doesn't contain path traversal
+            let item_name_str = item_name.to_string_lossy();
+            if item_name_str.contains("..") || item_name_str.starts_with('/') {
+                continue; // Skip unsafe paths
+            }
+
+            // Security: if team_item is a symlink, verify it points within the team repo
+            if team_item.is_symlink() {
+                if let Ok(link_target) = std::fs::read_link(&team_item) {
+                    // Resolve the symlink target relative to team_path
+                    let resolved = if link_target.is_absolute() {
+                        link_target
+                    } else {
+                        self.team_path.join(&link_target)
+                    };
+                    // Canonicalize and check it's within team_path
+                    if let Ok(canonical) = resolved.canonicalize() {
+                        if let Ok(team_canonical) = self.team_path.canonicalize() {
+                            if !canonical.starts_with(&team_canonical) {
+                                // Symlink points outside team repo - skip it
+                                continue;
+                            }
+                        }
+                    } else {
+                        // Can't resolve symlink - skip for safety
+                        continue;
+                    }
+                }
+            }
+
             let target_item = self.target_base.join(&item_name);
 
             // Check if target already exists

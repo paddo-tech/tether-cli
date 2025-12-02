@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{is_safe_dotfile_path, Config};
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
 };
@@ -9,14 +9,25 @@ use anyhow::Result;
 use chrono::{Local, Timelike};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::time::Interval;
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
 const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes
 const UPDATE_HOUR: u32 = 2; // 2am local time
+
+/// Thread-safe flag indicating daemon mode (avoids unsafe std::env::set_var in async)
+static DAEMON_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Check if running in daemon mode
+pub fn is_daemon_mode() -> bool {
+    DAEMON_MODE.load(Ordering::Relaxed)
+}
 
 pub struct DaemonServer {
     sync_interval: Duration,
@@ -57,8 +68,8 @@ impl DaemonServer {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        // Set env var so sync code knows we're in daemon mode (non-interactive)
-        std::env::set_var("TETHER_DAEMON", "1");
+        // Set daemon mode flag (thread-safe alternative to env var)
+        DAEMON_MODE.store(true, Ordering::Relaxed);
 
         log::info!("Daemon starting (pid {})", std::process::id());
         log::info!("Sync interval: {} seconds", self.sync_interval.as_secs());
@@ -202,6 +213,13 @@ impl DaemonServer {
             let key = crate::security::get_encryption_key()?;
             for entry in &config.dotfiles.files {
                 let file = entry.path();
+
+                // Security: validate path to prevent traversal attacks
+                if !is_safe_dotfile_path(file) {
+                    log::warn!("Skipping unsafe dotfile path: {}", file);
+                    continue;
+                }
+
                 let filename = file.trim_start_matches('.');
                 let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
 
@@ -233,7 +251,7 @@ impl DaemonServer {
                                 if let Some(parent) = local_file.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
-                                std::fs::write(&local_file, plaintext)?;
+                                write_file_secure(&local_file, &plaintext)?;
                                 log::debug!("Applied remote changes to {}", file);
                             }
                         }
@@ -260,12 +278,15 @@ impl DaemonServer {
 
         for entry in &config.dotfiles.files {
             let file = entry.path();
+
+            // Security: validate path to prevent traversal attacks
+            if !is_safe_dotfile_path(file) {
+                log::warn!("Skipping unsafe dotfile path: {}", file);
+                continue;
+            }
+
             // Skip files with conflicts
-            if conflict_state
-                .conflicts
-                .iter()
-                .any(|c| c.file_path == file)
-            {
+            if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
                 continue;
             }
 
@@ -562,5 +583,26 @@ impl DaemonServer {
 impl Default for DaemonServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Write file with secure permissions (0o600 on Unix)
+fn write_file_secure(path: &Path, contents: &[u8]) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        std::io::Write::write_all(&mut file, contents)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)?;
+        Ok(())
     }
 }

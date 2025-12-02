@@ -117,6 +117,15 @@ impl FileConflict {
         use std::process::Command;
         use tempfile::NamedTempFile;
 
+        // Validate merge tool is in allowlist (security: prevents command injection via synced config)
+        if !config.is_valid_command() {
+            return Err(anyhow::anyhow!(
+                "Merge tool '{}' is not in the allowed list. \
+                 Edit ~/.tether/config.toml to use a supported merge tool.",
+                config.command
+            ));
+        }
+
         // Create temp files for local and remote versions
         let mut local_temp = NamedTempFile::new()?;
         let mut remote_temp = NamedTempFile::new()?;
@@ -291,8 +300,7 @@ impl ConflictState {
     pub fn save(&self) -> Result<()> {
         let path = Self::path()?;
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        crate::sync::atomic_write(&path, content.as_bytes())
     }
 
     pub fn add_conflict(&mut self, file_path: &str, local_hash: &str, remote_hash: &str) {
@@ -315,13 +323,22 @@ impl ConflictState {
     }
 }
 
+/// Escape a string for safe use in AppleScript
+fn escape_applescript(s: &str) -> String {
+    // Remove any control characters and limit length for safety
+    let sanitized: String = s.chars().filter(|c| !c.is_control()).take(100).collect();
+    // Escape backslashes first, then quotes
+    sanitized.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Send macOS notification about conflict
 pub fn notify_conflict(file_path: &str) -> Result<()> {
     use std::process::Command;
 
+    let safe_path = escape_applescript(file_path);
     let script = format!(
         r#"display notification "Conflict detected in {}" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
-        file_path.replace('"', "\\\"")
+        safe_path
     );
 
     Command::new("osascript").args(["-e", &script]).output()?;
@@ -333,6 +350,7 @@ pub fn notify_conflict(file_path: &str) -> Result<()> {
 pub fn notify_conflicts(count: usize) -> Result<()> {
     use std::process::Command;
 
+    // count is a usize, no escaping needed
     let script = format!(
         r#"display notification "{} file conflicts detected" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
         count

@@ -89,6 +89,49 @@ impl MachineState {
         }
     }
 
+    /// Maximum allowed items in deserialized collections (DoS protection)
+    const MAX_PACKAGES_PER_MANAGER: usize = 10_000;
+    const MAX_FILES: usize = 50_000;
+
+    /// Validate package name is safe for shell usage
+    fn is_safe_package_name(name: &str) -> bool {
+        // Reject empty, too long, or names with shell metacharacters
+        !name.is_empty()
+            && name.len() <= 256
+            && !name.contains([';', '&', '|', '$', '`', '\'', '"', '\\', '\n', '\r'])
+    }
+
+    /// Validate and sanitize machine state after deserialization
+    fn validate(&mut self) -> Result<()> {
+        // Limit files
+        if self.files.len() > Self::MAX_FILES {
+            anyhow::bail!(
+                "Machine state contains too many files ({})",
+                self.files.len()
+            );
+        }
+
+        // Validate and limit packages
+        for (manager, packages) in &mut self.packages {
+            if packages.len() > Self::MAX_PACKAGES_PER_MANAGER {
+                anyhow::bail!(
+                    "Machine state contains too many {} packages ({})",
+                    manager,
+                    packages.len()
+                );
+            }
+            // Filter out unsafe package names
+            packages.retain(|p| Self::is_safe_package_name(p));
+        }
+
+        // Validate removed_packages
+        for packages in self.removed_packages.values_mut() {
+            packages.retain(|p| Self::is_safe_package_name(p));
+        }
+
+        Ok(())
+    }
+
     /// Load machine state from sync repo
     pub fn load_from_repo(sync_path: &std::path::Path, machine_id: &str) -> Result<Option<Self>> {
         let path = sync_path
@@ -98,18 +141,17 @@ impl MachineState {
             return Ok(None);
         }
         let content = std::fs::read_to_string(path)?;
-        Ok(Some(serde_json::from_str(&content)?))
+        let mut state: Self = serde_json::from_str(&content)?;
+        state.validate()?;
+        Ok(Some(state))
     }
 
     /// Save machine state to sync repo
     pub fn save_to_repo(&self, sync_path: &std::path::Path) -> Result<()> {
         let machines_dir = sync_path.join("machines");
-        std::fs::create_dir_all(&machines_dir)?;
-
         let path = machines_dir.join(format!("{}.json", self.machine_id));
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        crate::sync::atomic_write(&path, content.as_bytes())
     }
 
     /// List all machines in sync repo
@@ -125,8 +167,11 @@ impl MachineState {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(state) = serde_json::from_str::<MachineState>(&content) {
-                        machines.push(state);
+                    if let Ok(mut state) = serde_json::from_str::<MachineState>(&content) {
+                        // Skip invalid machine states
+                        if state.validate().is_ok() {
+                            machines.push(state);
+                        }
                     }
                 }
             }
@@ -181,14 +226,8 @@ impl SyncState {
 
     pub fn save(&self) -> Result<()> {
         let path = Self::state_path()?;
-        let dir = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
-        std::fs::create_dir_all(dir)?;
-
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        crate::sync::atomic_write(&path, content.as_bytes())
     }
 
     fn new() -> Self {

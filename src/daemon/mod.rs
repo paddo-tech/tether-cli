@@ -1,3 +1,3 @@
 pub mod server;
 
-pub use server::DaemonServer;
+pub use server::{is_daemon_mode, DaemonServer};

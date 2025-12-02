@@ -402,9 +402,11 @@ fn manage_dotfile_list(
                 }
 
                 let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
-                let selection =
-                    InquireSelect::new(&format!("Select {} to remove", title.to_lowercase()), paths)
-                        .prompt()?;
+                let selection = InquireSelect::new(
+                    &format!("Select {} to remove", title.to_lowercase()),
+                    paths,
+                )
+                .prompt()?;
 
                 entries.retain(|e| e.path() != selection);
                 changed = true;
@@ -418,7 +420,8 @@ fn manage_dotfile_list(
 
                 let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
                 let selection =
-                    InquireSelect::new("Select file to toggle create_if_missing", paths).prompt()?;
+                    InquireSelect::new("Select file to toggle create_if_missing", paths)
+                        .prompt()?;
 
                 if let Some(entry) = entries.iter_mut().find(|e| e.path() == selection) {
                     let new_value = !entry.create_if_missing();
@@ -427,10 +430,7 @@ fn manage_dotfile_list(
                         create_if_missing: new_value,
                     };
                     changed = true;
-                    Output::success(&format!(
-                        "{}: create_if_missing = {}",
-                        selection, new_value
-                    ));
+                    Output::success(&format!("{}: create_if_missing = {}", selection, new_value));
                 }
             }
             _ => break,

@@ -1,99 +1,405 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
-import CodeBlock from '../../components/CodeBlock.astro';
+import Code from '../../components/Code.astro';
 ---
 
 <DocsLayout
   title="Documentation - Tether CLI"
   description="Complete documentation for Tether CLI"
 >
-  <h1>Tether CLI Documentation</h1>
+  <!-- Introduction -->
+  <section id="introduction">
+    <h1>Tether CLI Documentation</h1>
+    <p>
+      Tether is an open source tool that automatically syncs your development environment—dotfiles and packages—across multiple machines with end-to-end encryption.
+    </p>
+    <h3>Key Features</h3>
+    <ul>
+      <li><strong>Automatic Sync</strong> — Background daemon watches for changes and syncs in real-time</li>
+      <li><strong>End-to-End Encryption</strong> — AES-256-GCM encryption with passphrase-protected keys</li>
+      <li><strong>Package Manager Support</strong> — Syncs Homebrew, npm, pnpm, bun, and gem packages</li>
+      <li><strong>Secret Detection</strong> — Prevents accidental syncing of API keys and credentials</li>
+      <li><strong>Git-Backed</strong> — Full version history and rollback capabilities</li>
+      <li><strong>Team Sync</strong> — Share configurations across teams with symlink management</li>
+    </ul>
+  </section>
 
-  <p>
-    Welcome to the Tether CLI documentation! Tether is an open source tool that automatically syncs your development environment (dotfiles and packages) across multiple Macs with end-to-end encryption.
-  </p>
+  <hr class="my-12 border-surface" />
 
-  <h2>Quick Start</h2>
+  <!-- Installation -->
+  <section id="installation">
+    <h2>Installation</h2>
+    <h3>Homebrew (recommended)</h3>
+    <Code code={`brew tap paddo-tech/tap
+brew install tether-cli`} />
+    <h3>Requirements</h3>
+    <ul>
+      <li><strong>Platform:</strong> macOS (Linux coming soon)</li>
+      <li><strong>Shell:</strong> zsh or bash</li>
+      <li><strong>Git:</strong> Configured with GitHub, GitLab, or self-hosted Git server</li>
+    </ul>
+  </section>
 
-  <p>Get up and running in under a minute:</p>
+  <hr class="my-12 border-surface" />
 
-  <CodeBlock code={`# Install via Homebrew
-brew install tether-cli
+  <!-- Quick Start -->
+  <section id="quick-start">
+    <h2>Quick Start</h2>
+    <p>Get up and running in under a minute:</p>
+    <h3>1. Initialize</h3>
+    <Code code="tether init" />
+    <p>Follow the prompts to configure your Git repository and encryption passphrase.</p>
+    <h3>2. Verify Setup</h3>
+    <Code code="tether status" />
+    <p>You should see the daemon running and your synced files listed.</p>
+    <h3>3. On Another Machine</h3>
+    <Code code={`brew tap paddo-tech/tap && brew install tether-cli
+tether init --repo git@github.com:username/dotfiles.git`} />
+    <p>Enter the same passphrase. Your configs sync automatically.</p>
+  </section>
 
-# Initialize with your Git repository
-tether init --repo git@github.com:username/dotfiles.git
+  <hr class="my-12 border-surface" />
 
-# Done! Tether is now syncing automatically`} />
+  <!-- How It Works -->
+  <section id="how-it-works">
+    <h2>How It Works</h2>
+    <h3>Architecture</h3>
+    <p>
+      Tether uses a Git repository as the sync backend. When you make changes to dotfiles or install packages, the background daemon detects these changes, encrypts your dotfiles with AES-256-GCM, and pushes them to your private Git repository.
+    </p>
+    <p>
+      On your other machines, Tether pulls these changes and applies them automatically.
+    </p>
+    <h3>Sync Flow</h3>
+    <ol>
+      <li>Daemon detects file changes (every 5 minutes or manual <code>tether sync</code>)</li>
+      <li>Secret scanner checks for credentials</li>
+      <li>Files are encrypted (if enabled)</li>
+      <li>Changes committed and pushed to Git</li>
+      <li>Other machines pull and decrypt</li>
+    </ol>
+    <h3>Data Layout</h3>
+    <p>Local Tether data lives in <code>~/.tether/</code>:</p>
+    <Code code={`~/.tether/
+├── config.toml      # Configuration
+├── state.json       # Sync state (hashes, timestamps)
+├── sync/            # Git repository clone
+├── daemon.pid       # Daemon process ID
+├── daemon.log       # Daemon logs
+└── ignore           # Secret scanning patterns`} />
+    <p>The sync repository structure:</p>
+    <Code code={`sync/
+├── dotfiles/        # Encrypted dotfiles
+├── configs/         # Config directories
+├── projects/        # Project-local configs
+├── manifests/       # Package manifests
+└── machines/        # Per-machine state`} />
+  </section>
 
-  <h2>Key Features</h2>
+  <hr class="my-12 border-surface" />
 
-  <ul>
-    <li><strong>Automatic Syncing:</strong> Background daemon watches for changes and syncs in real-time</li>
-    <li><strong>End-to-End Encryption:</strong> AES-256-GCM encryption with keys in iCloud Keychain</li>
-    <li><strong>Package Manager Support:</strong> Syncs Homebrew, npm, and pnpm global packages</li>
-    <li><strong>Secret Detection:</strong> Prevents accidental syncing of API keys and credentials</li>
-    <li><strong>Git-Backed:</strong> Full version history and rollback capabilities</li>
-    <li><strong>Mac-Native:</strong> Optimized for macOS with system integrations</li>
-  </ul>
+  <!-- Commands -->
+  <section id="commands">
+    <h2>Commands</h2>
 
-  <h2>What Gets Synced?</h2>
+    <h3 id="cmd-init">tether init</h3>
+    <p>Initialize Tether on this machine.</p>
+    <Code code="tether init [--repo <URL>] [--no-daemon]" />
+    <ul>
+      <li><code>--repo &lt;URL&gt;</code> — Git repository URL (interactive if omitted)</li>
+      <li><code>--no-daemon</code> — Don't start daemon after init</li>
+    </ul>
 
-  <h3>Dotfiles (Encrypted)</h3>
-  <ul>
-    <li><code>.zshrc</code> - Shell configuration</li>
-    <li><code>.gitconfig</code> - Git settings</li>
-    <li><code>.zprofile</code> - Shell profile (optional)</li>
-    <li>Custom dotfiles you specify</li>
-  </ul>
+    <h3 id="cmd-sync">tether sync</h3>
+    <p>Manually trigger a sync.</p>
+    <Code code="tether sync [--dry-run] [--force]" />
+    <ul>
+      <li><code>--dry-run</code> — Show what would be synced</li>
+      <li><code>--force</code> — Skip conflict prompts</li>
+    </ul>
 
-  <h3>Package Managers</h3>
-  <ul>
-    <li><strong>Homebrew:</strong> Formulae, casks, and taps (via Brewfile)</li>
-    <li><strong>npm:</strong> Global packages</li>
-    <li><strong>pnpm:</strong> Global packages</li>
-  </ul>
+    <h3 id="cmd-status">tether status</h3>
+    <p>Show current sync status, daemon state, and synced files.</p>
+    <Code code="tether status" />
 
-  <h2>How It Works</h2>
+    <h3 id="cmd-diff">tether diff</h3>
+    <p>Show differences between machines.</p>
+    <Code code="tether diff [--machine <NAME>]" />
+    <ul>
+      <li><code>--machine &lt;NAME&gt;</code> — Compare with specific machine</li>
+    </ul>
 
-  <p>
-    Tether uses a Git repository as the sync backend. When you make changes to dotfiles or install packages,
-    the background daemon detects these changes, encrypts your dotfiles with AES-256-GCM, and pushes them
-    to your private Git repository. On your other machines, Tether pulls these changes and applies them automatically.
-  </p>
+    <h3 id="cmd-daemon">tether daemon</h3>
+    <p>Control the background daemon.</p>
+    <Code code="tether daemon <start|stop|restart|logs|install|uninstall>" />
+    <ul>
+      <li><code>start</code> — Start the daemon</li>
+      <li><code>stop</code> — Stop the daemon</li>
+      <li><code>restart</code> — Restart the daemon</li>
+      <li><code>logs</code> — View last 50 log lines</li>
+      <li><code>install</code> — Install launchd service (auto-start on login)</li>
+      <li><code>uninstall</code> — Remove launchd service</li>
+    </ul>
 
-  <p>
-    Encryption keys are stored securely in iCloud Keychain and automatically sync across your Macs.
-    Your dotfiles are stored as <code>.enc</code> files in Git, so even if someone gains access to your
-    repository, they cannot read your configurations without the encryption key.
-  </p>
+    <h3 id="cmd-machines">tether machines</h3>
+    <p>Manage machines in sync network.</p>
+    <Code code="tether machines <list|rename|remove>" />
+    <ul>
+      <li><code>list</code> — List all machines</li>
+      <li><code>rename &lt;OLD&gt; &lt;NEW&gt;</code> — Rename a machine</li>
+      <li><code>remove &lt;NAME&gt;</code> — Remove a machine</li>
+    </ul>
 
-  <h2>Requirements</h2>
+    <h3 id="cmd-ignore">tether ignore</h3>
+    <p>Manage ignore patterns and per-machine exclusions.</p>
+    <Code code={`# Secret scanning patterns
+tether ignore add <PATTERN>
+tether ignore list
+tether ignore remove <PATTERN>
 
-  <ul>
-    <li><strong>Platform:</strong> macOS 11.0 (Big Sur) or later</li>
-    <li><strong>Shell:</strong> zsh (default on macOS)</li>
-    <li><strong>Git:</strong> Configured with GitHub, GitLab, or self-hosted Git server</li>
-    <li><strong>iCloud:</strong> Signed in for Keychain sync (for multi-machine setup)</li>
-  </ul>
+# Per-machine file exclusions
+tether ignore dotfile <FILE>
+tether ignore project <PROJECT> <PATH>
+tether ignore sync-list
+tether ignore sync-remove <FILE>`} />
 
-  <h2>Next Steps</h2>
+    <h3 id="cmd-config">tether config</h3>
+    <p>Manage configuration.</p>
+    <Code code={`tether config get <KEY>
+tether config set <KEY> <VALUE>
+tether config edit
+tether config dotfiles`} />
+    <ul>
+      <li><code>get &lt;KEY&gt;</code> — Get config value (supports nested keys like <code>packages.brew.enabled</code>)</li>
+      <li><code>set &lt;KEY&gt; &lt;VALUE&gt;</code> — Set config value</li>
+      <li><code>edit</code> — Open config in editor</li>
+      <li><code>dotfiles</code> — Interactive UI for managing synced files</li>
+    </ul>
 
-  <ul>
-    <li><a href="/docs/installation">Installation Guide</a> - Detailed installation instructions</li>
-    <li><a href="/docs/quick-start">Quick Start Tutorial</a> - Step-by-step setup guide</li>
-    <li><a href="/docs/commands">Command Reference</a> - All available commands</li>
-    <li><a href="/security">Security Architecture</a> - Deep dive into encryption and security</li>
-  </ul>
+    <h3 id="cmd-team">tether team</h3>
+    <p>Manage team sync repositories.</p>
+    <Code code={`tether team add <URL> [--name <NAME>] [--no-auto-inject]
+tether team switch <NAME>
+tether team list
+tether team remove [NAME]
+tether team enable
+tether team disable
+tether team status`} />
 
-  <h2>Getting Help</h2>
+    <h3 id="cmd-resolve">tether resolve</h3>
+    <p>Resolve file conflicts.</p>
+    <Code code="tether resolve [FILE]" />
+    <p>Interactive resolution: keep local, use remote, merge, or skip.</p>
 
-  <p>
-    If you run into issues or have questions:
-  </p>
+    <h3 id="cmd-unlock">tether unlock</h3>
+    <p>Unlock encryption key with passphrase.</p>
+    <Code code="tether unlock" />
 
-  <ul>
-    <li><a href="#" onclick="event.preventDefault(); alert('Repository will be open sourced soon!');" title="Repository coming soon">Report an issue on GitHub (Coming Soon)</a></li>
-    <li><a href="#" onclick="event.preventDefault(); alert('Repository will be open sourced soon!');" title="Repository coming soon">Join discussions (Coming Soon)</a></li>
-    <li><a href="/docs/troubleshooting">Troubleshooting guide</a></li>
-  </ul>
+    <h3 id="cmd-lock">tether lock</h3>
+    <p>Clear cached encryption key.</p>
+    <Code code="tether lock" />
+
+    <h3 id="cmd-upgrade">tether upgrade</h3>
+    <p>Upgrade all installed packages across enabled package managers.</p>
+    <Code code="tether upgrade" />
+  </section>
+
+  <hr class="my-12 border-surface" />
+
+  <!-- Configuration -->
+  <section id="configuration">
+    <h2>Configuration</h2>
+    <p>Configuration lives at <code>~/.tether/config.toml</code>:</p>
+    <Code code={`[backend]
+url = "git@github.com:username/dotfiles.git"
+
+[security]
+encrypt_dotfiles = true
+scan_secrets = true
+
+[dotfiles]
+files = [".zshrc", ".gitconfig", ".vimrc"]
+dirs = [".config/nvim", ".ssh/config"]
+
+[project_configs]
+enabled = true
+search_paths = ["~/Projects", "~/Work"]
+patterns = [".env.local", ".claude/settings.json"]
+
+[packages.brew]
+enabled = true
+
+[packages.npm]
+enabled = true
+
+[packages.pnpm]
+enabled = false
+
+[packages.bun]
+enabled = false
+
+[packages.gem]
+enabled = false`} />
+
+    <h3>Key Configuration Options</h3>
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-surface">
+          <th class="text-left py-2 pr-4">Key</th>
+          <th class="text-left py-2">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">backend.url</td>
+          <td class="py-2">Git repository URL</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">security.encrypt_dotfiles</td>
+          <td class="py-2">Enable AES-256-GCM encryption</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">security.scan_secrets</td>
+          <td class="py-2">Enable secret detection before sync</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">dotfiles.files</td>
+          <td class="py-2">List of individual dotfiles to sync</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">dotfiles.dirs</td>
+          <td class="py-2">List of directories to sync</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">project_configs.enabled</td>
+          <td class="py-2">Sync project-local configs</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">packages.*.enabled</td>
+          <td class="py-2">Enable specific package manager sync</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="my-12 border-surface" />
+
+  <!-- Package Managers -->
+  <section id="package-managers">
+    <h2>Package Managers</h2>
+    <p>Tether syncs global packages across machines. Enable managers in config:</p>
+    <Code code={`tether config set packages.brew.enabled true
+tether config set packages.npm.enabled true`} />
+
+    <h3>Homebrew</h3>
+    <p>Syncs formulae, casks, and taps via Brewfile format.</p>
+    <Code code={`# Manifest: manifests/Brewfile
+tap "homebrew/cask"
+brew "ripgrep"
+brew "fd"
+cask "visual-studio-code"`} />
+
+    <h3>npm</h3>
+    <p>Syncs global npm packages.</p>
+    <Code code={`# Manifest: manifests/npm.txt
+typescript
+eslint
+prettier`} />
+
+    <h3>pnpm / bun / gem</h3>
+    <p>Same format as npm—one package per line.</p>
+  </section>
+
+  <hr class="my-12 border-surface" />
+
+  <!-- Encryption -->
+  <section id="encryption">
+    <h2>Encryption & Security</h2>
+
+    <h3>How Encryption Works</h3>
+    <ol>
+      <li>On first init, a random 256-bit key is generated</li>
+      <li>Key is encrypted with your passphrase using <code>age</code></li>
+      <li>Encrypted key is stored in the Git repo (safe to share)</li>
+      <li>Dotfiles are encrypted with AES-256-GCM before commit</li>
+      <li>On other machines, enter passphrase to decrypt the key</li>
+    </ol>
+
+    <h3>Secret Detection</h3>
+    <p>Before syncing, Tether scans for common secret patterns:</p>
+    <ul>
+      <li>AWS credentials (<code>AKIA...</code>)</li>
+      <li>GitHub tokens (<code>ghp_...</code>, <code>gho_...</code>)</li>
+      <li>Generic patterns (<code>API_KEY=</code>, <code>password=</code>)</li>
+    </ul>
+    <p>Add ignore patterns for false positives:</p>
+    <Code code="tether ignore add 'EXAMPLE_KEY='" />
+
+    <h3>Unlocking</h3>
+    <p>If the daemon can't decrypt (key not cached), run:</p>
+    <Code code="tether unlock" />
+    <p>To clear the cached key:</p>
+    <Code code="tether lock" />
+  </section>
+
+  <hr class="my-12 border-surface" />
+
+  <!-- Team Sync -->
+  <section id="team-sync">
+    <h2>Team Sync</h2>
+    <p>Share configurations across a team with a separate repository.</p>
+
+    <h3>Setup</h3>
+    <Code code="tether team add git@github.com:org/team-dotfiles.git --name myteam" />
+    <p>This clones the team repo and creates symlinks to team config files.</p>
+
+    <h3>How It Works</h3>
+    <ul>
+      <li>Team configs are symlinked to their target locations</li>
+      <li>If you have write access, your changes sync back</li>
+      <li>Read-only access means you receive updates only</li>
+      <li>Auto-inject adds <code>source</code> lines to your personal dotfiles (optional)</li>
+    </ul>
+
+    <h3>Managing Teams</h3>
+    <Code code={`tether team list          # Show all teams
+tether team switch other   # Switch active team
+tether team disable        # Disable without removing
+tether team remove         # Remove team completely`} />
+  </section>
+
+  <hr class="my-12 border-surface" />
+
+  <!-- Troubleshooting -->
+  <section id="troubleshooting">
+    <h2>Troubleshooting</h2>
+
+    <h3>Daemon not running</h3>
+    <Code code={`tether daemon start
+tether daemon logs`} />
+
+    <h3>Sync conflicts</h3>
+    <Code code="tether resolve" />
+    <p>Or force one direction:</p>
+    <Code code="tether sync --force" />
+
+    <h3>Encryption issues</h3>
+    <Code code={`# Unlock with passphrase
+tether unlock
+
+# Check if key exists
+ls ~/.tether/sync/.tether-key.age`} />
+
+    <h3>"Secret detected" blocking sync</h3>
+    <p>Either remove the secret or add an ignore pattern:</p>
+    <Code code="tether ignore add 'MY_SAFE_PATTERN='" />
+
+    <h3>Reset everything</h3>
+    <Code code={`tether daemon stop
+rm -rf ~/.tether
+tether init`} />
+
+    <h3>View full logs</h3>
+    <Code code="cat ~/.tether/daemon.log" />
+  </section>
 </DocsLayout>

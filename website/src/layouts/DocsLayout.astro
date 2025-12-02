@@ -14,48 +14,36 @@ const docSections = [
   {
     title: 'Getting Started',
     pages: [
-      { title: 'Introduction', href: '/docs' },
-      { title: 'Installation', href: '/docs/installation' },
-      { title: 'Quick Start', href: '/docs/quick-start' },
+      { title: 'Introduction', href: '#introduction' },
+      { title: 'Installation', href: '#installation' },
+      { title: 'Quick Start', href: '#quick-start' },
     ],
   },
   {
     title: 'Core Concepts',
     pages: [
-      { title: 'How Tether Works', href: '/docs/how-it-works' },
-      { title: 'Encryption & Security', href: '/docs/encryption' },
-      { title: 'Git Backend', href: '/docs/git-backend' },
+      { title: 'How It Works', href: '#how-it-works' },
+      { title: 'Encryption', href: '#encryption' },
     ],
   },
   {
     title: 'Commands',
     pages: [
-      { title: 'Overview', href: '/docs/commands' },
-      { title: 'tether init', href: '/docs/commands/init' },
-      { title: 'tether sync', href: '/docs/commands/sync' },
-      { title: 'tether status', href: '/docs/commands/status' },
-      { title: 'tether daemon', href: '/docs/commands/daemon' },
+      { title: 'All Commands', href: '#commands' },
     ],
   },
   {
-    title: 'Configuration',
+    title: 'Features',
     pages: [
-      { title: 'config.toml', href: '/docs/config' },
-      { title: 'Ignore Patterns', href: '/docs/ignore' },
+      { title: 'Configuration', href: '#configuration' },
+      { title: 'Package Managers', href: '#package-managers' },
+      { title: 'Team Sync', href: '#team-sync' },
     ],
   },
   {
-    title: 'Package Managers',
+    title: 'Help',
     pages: [
-      { title: 'Homebrew', href: '/docs/package-managers/homebrew' },
-      { title: 'npm & pnpm', href: '/docs/package-managers/npm-pnpm' },
-    ],
-  },
-  {
-    title: 'Advanced',
-    pages: [
-      { title: 'Troubleshooting', href: '/docs/troubleshooting' },
-      { title: 'Contributing', href: '/docs/contributing' },
+      { title: 'Troubleshooting', href: '#troubleshooting' },
     ],
   },
 ];
@@ -65,6 +53,9 @@ const currentPath = Astro.url.pathname;
 
 <BaseLayout title={title} description={description}>
   <Navbar />
+  <style>
+    html { scroll-behavior: smooth; }
+  </style>
 
   <div class="pt-16 min-h-screen">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -80,11 +71,7 @@ const currentPath = Astro.url.pathname;
                     <li>
                       <a
                         href={page.href}
-                        class={`block py-1 px-3 rounded text-sm transition-colors ${
-                          currentPath === page.href || currentPath === page.href + '/'
-                            ? 'bg-primary/10 text-primary font-medium'
-                            : 'text-muted hover:text-primary hover:bg-surface/50'
-                        }`}
+                        class="block py-1 px-3 rounded text-sm transition-colors text-muted hover:text-primary hover:bg-surface/50"
                       >
                         {page.title}
                       </a>

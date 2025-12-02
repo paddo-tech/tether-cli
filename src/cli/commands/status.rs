@@ -109,7 +109,11 @@ pub async fn run() -> Result<()> {
             Cell::new(
                 state
                     .last_upgrade
-                    .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                    .map(|t| {
+                        t.with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string()
+                    })
                     .unwrap_or_else(|| "Never".to_string()),
             ),
         ])
@@ -118,7 +122,11 @@ pub async fn run() -> Result<()> {
             Cell::new(
                 state
                     .last_upgrade_with_updates
-                    .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                    .map(|t| {
+                        t.with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string()
+                    })
                     .unwrap_or_else(|| "Never".to_string()),
             ),
         ])
