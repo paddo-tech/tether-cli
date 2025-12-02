@@ -75,3 +75,19 @@ Before completing work:
 1. `cargo clippy --all-targets -- -D warnings` (zero warnings)
 2. `cargo fmt --all`
 3. `cargo build --release`
+
+## Releasing
+
+Homebrew tap: `paddo-tech/homebrew-tap`
+
+Push a tag to trigger auto-update of the formula:
+
+```bash
+git tag v0.1.0-beta.2 && git push origin v0.1.0-beta.2
+```
+
+Users install via:
+```bash
+brew tap paddo-tech/tap
+brew install tether
+```
