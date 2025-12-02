@@ -1,6 +1,6 @@
 # Tether CLI
 
-> Sync your development environment across multiple Macs automatically.
+> Sync your development environment across multiple machines automatically.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
@@ -9,7 +9,7 @@
 
 ## What is Tether?
 
-Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, etc.) and globally installed packages across all your Mac computers. Install a package or update your config on one machine, and it's immediately available everywhere.
+Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, etc.) and globally installed packages across all your machines. Install a package or update your config on one machine, and it's immediately available everywhere.
 
 **All your dotfiles are encrypted** before syncing to Git using AES-256-GCM encryption. Your secrets stay secret, even in your private Git repository.
 
@@ -17,12 +17,12 @@ Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, et
 
 - 🔐 **End-to-end encryption** - Dotfiles encrypted with AES-256-GCM before syncing
 - 🔍 **Secret detection** - Automatic scanning for API keys, tokens, and credentials
-- 🔑 **iCloud Keychain** - Encryption keys sync automatically across your Macs
+- 🔑 **Passphrase-based encryption** - Derive keys from a passphrase you remember
 - 📦 **Package manager support** - Syncs Homebrew (Brewfiles), npm, and pnpm global packages
 - 🔄 **Automatic syncing** - Background daemon keeps everything in sync
 - 🗂️ **Dotfile management** - Encrypted shell configs synced across machines
 - 🌳 **Git-backed** - Uses private Git repo for versioning and history
-- 🔒 **Privacy-focused** - Encrypted data in Git, keys in iCloud Keychain
+- 🔒 **Privacy-focused** - Encrypted data in Git, keys derived from passphrase
 
 ## Quick Start
 
@@ -38,11 +38,11 @@ tether init --repo git@github.com:username/tether-sync.git
 
 ## Use Cases
 
-### Scenario 1: Multiple Macs
-You have a MacBook Pro for work and a MacBook Air for personal use. Install a CLI tool on one machine, and it's automatically installed on the other.
+### Scenario 1: Multiple Machines
+You have a laptop for work and a desktop at home. Install a CLI tool on one machine, and it's automatically installed on the other.
 
 ### Scenario 2: New Machine Setup
-Got a new Mac? Run `tether init` and all your dotfiles and packages are restored in minutes.
+Got a new machine? Run `tether init` and all your dotfiles and packages are restored in minutes.
 
 ### Scenario 3: Team Standardization
 Share a sync repo across your team to maintain consistent development environments.
@@ -58,7 +58,7 @@ Share a sync repo across your team to maintain consistent development environmen
 **How it works:**
 - Local: Dotfiles stored as plaintext in `~/` (so your shell can read them)
 - Git: Dotfiles stored encrypted as `.enc` files
-- Encryption key: Stored securely in iCloud Keychain, syncs across your Macs
+- Encryption key: Derived from your passphrase using age encryption
 
 ### Packages (Plaintext)
 - **Homebrew** - Synced via Brewfile (standard Homebrew format)
@@ -104,27 +104,27 @@ Tether automatically scans your dotfiles for sensitive data before syncing:
 When secrets are detected, Tether warns you and shows what was found (redacted). Your secrets are then safely encrypted before syncing.
 
 ### 🔑 Key Management
-Encryption keys are stored in **iCloud Keychain**:
-- **First machine:** Generates a new encryption key automatically
-- **Subsequent machines:** Finds the key already synced via iCloud
-- **Zero configuration:** Works transparently across all your Macs
-- **Secure:** Keys never stored in Git, only in Apple's encrypted Keychain
+Encryption keys are derived from a **passphrase**:
+- **First machine:** Enter a passphrase to generate your encryption key
+- **Subsequent machines:** Enter the same passphrase to unlock
+- **Portable:** Works on any machine - no platform-specific keychain needed
+- **Secure:** Keys derived using age encryption, never stored in Git
 
 ### 🔒 Privacy
 - **Encrypted at rest:** Dotfiles stored as `.enc` files in Git
 - **Plaintext locally:** Your shell reads plaintext `~/.zshrc` normally
-- **No external services:** Keys in iCloud Keychain, data in your Git repo
-- **Full control:** You own the Git repo and the Keychain data
+- **No external services:** Keys derived from your passphrase, data in your Git repo
+- **Full control:** You own the Git repo and your passphrase
 
 ## How It Works
 
 1. **Install** - `brew install tether-cli`
-2. **Initialize** - Point Tether to your private Git repo; encryption key generated and stored in iCloud Keychain
+2. **Initialize** - Point Tether to your private Git repo; set a passphrase for encryption
 3. **Scan** - Tether scans your dotfiles for secrets (API keys, tokens, etc.)
-4. **Encrypt** - Dotfiles are encrypted with AES-256-GCM using key from Keychain
+4. **Encrypt** - Dotfiles are encrypted with AES-256-GCM using key derived from passphrase
 5. **Sync** - Encrypted dotfiles and package manifests pushed to Git
 6. **Propagate** - Other machines pull encrypted data from Git
-7. **Decrypt** - Other machines decrypt dotfiles using synced key from iCloud Keychain
+7. **Decrypt** - Other machines decrypt dotfiles using the same passphrase
 8. **Apply** - Plaintext dotfiles written locally; packages installed automatically
 
 ## Architecture
@@ -155,16 +155,11 @@ Built with Rust for performance, reliability, and single-binary distribution.
 ┌─────────────────┐
 │   Git Backend   │  Your private repo (dotfiles encrypted)
 └─────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│ iCloud Keychain │  Encryption keys (auto-syncs across Macs)
-└─────────────────┘
 ```
 
 ## Development Status
 
-🚧 **Currently in active development** - This repository is private while we build the MVP.
+🚧 **Currently in active development**
 
 ### Roadmap
 
@@ -174,7 +169,7 @@ Built with Rust for performance, reliability, and single-binary distribution.
 - ✅ npm/pnpm global package sync
 - ✅ AES-256-GCM encryption for dotfiles
 - ✅ Secret detection (API keys, tokens, etc.)
-- ✅ iCloud Keychain integration for key management
+- ✅ Passphrase-based key management
 - ✅ Git backend (GitHub, GitLab, self-hosted)
 - ✅ Background daemon with launchd integration
 
@@ -204,17 +199,17 @@ See [SPEC.md](SPEC.md) for detailed roadmap.
 - **File Watching:** notify
 - **Git Operations:** git2
 - **Encryption:** aes-gcm (AES-256-GCM)
-- **Keychain:** security-framework (macOS Keychain/iCloud)
+- **Key derivation:** age (passphrase-based encryption)
 - **Secret Detection:** regex (pattern matching)
 - **Randomness:** rand (cryptographic RNG)
 
 ## FAQ
 
 **Q: Is my data secure?**
-A: Yes. All dotfiles are encrypted with AES-256-GCM before being stored in Git. Encryption keys are stored in iCloud Keychain (never in Git). Tether also scans for secrets (API keys, tokens) and warns you before syncing. Even if someone gains access to your Git repo, they cannot decrypt your dotfiles without the encryption key from your iCloud Keychain.
+A: Yes. All dotfiles are encrypted with AES-256-GCM before being stored in Git. Encryption keys are derived from your passphrase (never stored in Git). Tether also scans for secrets (API keys, tokens) and warns you before syncing. Even if someone gains access to your Git repo, they cannot decrypt your dotfiles without your passphrase.
 
 **Q: How does encryption key sync work?**
-A: On your first machine, Tether generates a 256-bit encryption key and stores it in iCloud Keychain. When you initialize Tether on another Mac with the same iCloud account, the key is automatically available (synced by iCloud). No manual key management needed.
+A: Tether uses passphrase-based encryption. On your first machine, you set a passphrase that derives your encryption key. On other machines, enter the same passphrase to unlock. No cloud services required.
 
 **Q: What if I don't want encryption?**
 A: You can disable it in `~/.tether/config.toml` by setting `encrypt_dotfiles = false`. However, we strongly recommend keeping encryption enabled, especially if your dotfiles contain API keys or tokens.
@@ -229,7 +224,7 @@ A: Use ignore patterns or machine-specific overrides. Tether is flexible.
 A: v1.0 focuses on zsh. Support for bash, fish, and others is planned for v2.0.
 
 **Q: Can I use this with my team?**
-A: Yes! Share a sync repo to maintain consistent environments across your team. Note that all team members would need to share the same encryption key (stored in a shared iCloud account or distributed manually).
+A: Yes! Share a sync repo to maintain consistent environments across your team. All team members use the same passphrase to access encrypted dotfiles.
 
 **Q: What happens when I'm offline?**
 A: Changes are queued locally and synced when you're back online. Nothing is lost.
