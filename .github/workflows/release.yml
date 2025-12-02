@@ -12,7 +12,7 @@ jobs:
       - name: Update Homebrew formula
         uses: mislav/bump-homebrew-formula-action@v3
         with:
-          formula-name: tether
+          formula-name: tether-cli
           homebrew-tap: paddo-tech/homebrew-tap
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
