@@ -48,8 +48,9 @@ jobs:
       - name: Check if tag exists
         id: tag_check
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          if git ls-remote --tags origin | grep -q "refs/tags/v${{ steps.version.outputs.version }}$"; then
             echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag v${{ steps.version.outputs.version }} already exists, skipping release"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
@@ -88,14 +89,16 @@ jobs:
       - name: Check if this is a new release
         id: check
         run: |
-          # Only update homebrew if tag was just created (within last 5 mins)
+          # Check if tag was created by the release job (within last 5 mins)
+          git fetch --tags
           TAG_DATE=$(git log -1 --format=%ct "v${{ steps.version.outputs.version }}" 2>/dev/null || echo 0)
           NOW=$(date +%s)
           DIFF=$((NOW - TAG_DATE))
-          if [ $DIFF -lt 300 ]; then
+          if [ $DIFF -lt 300 ] && [ $TAG_DATE -ne 0 ]; then
             echo "new_release=true" >> $GITHUB_OUTPUT
           else
             echo "new_release=false" >> $GITHUB_OUTPUT
+            echo "Skipping homebrew update - tag is not new"
           fi
 
       - name: Update Homebrew formula
