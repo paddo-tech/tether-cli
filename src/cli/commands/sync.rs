@@ -74,7 +74,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Apply dotfiles from sync repo (if encrypted) - with conflict detection
     // Interactive mode when run manually, non-interactive when run by daemon
-    let interactive = std::env::var("TETHER_DAEMON").is_err();
+    let interactive = !crate::daemon::is_daemon_mode();
     if config.security.encrypt_dotfiles && !dry_run {
         decrypt_from_repo(
             &config,
@@ -103,30 +103,26 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                     .map(|f| f.hash != hash)
                     .unwrap_or(true);
 
-                if file_changed {
-                    scan_and_warn_secrets(&config, &source, file);
+                if file_changed && !dry_run {
+                    let filename = file.trim_start_matches('.');
 
-                    if !dry_run {
-                        let filename = file.trim_start_matches('.');
-
-                        if config.security.encrypt_dotfiles {
-                            let key = crate::security::get_encryption_key()?;
-                            let encrypted = crate::security::encrypt_file(&content, &key)?;
-                            let dest = dotfiles_dir.join(format!("{}.enc", filename));
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            std::fs::write(&dest, encrypted)?;
-                        } else {
-                            let dest = dotfiles_dir.join(filename);
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            std::fs::write(&dest, &content)?;
+                    if config.security.encrypt_dotfiles {
+                        let key = crate::security::get_encryption_key()?;
+                        let encrypted = crate::security::encrypt_file(&content, &key)?;
+                        let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
                         }
-
-                        state.update_file(file, hash.clone());
+                        std::fs::write(&dest, encrypted)?;
+                    } else {
+                        let dest = dotfiles_dir.join(filename);
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&dest, &content)?;
                     }
+
+                    state.update_file(file, hash.clone());
                 }
             }
         }
@@ -206,6 +202,30 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                     let team_git = GitBackend::open(&team_sync_dir)?;
 
                     if team_git.has_changes()? {
+                        // Scan for secrets before pushing to team repo
+                        let dotfiles_dir = team_sync_dir.join("dotfiles");
+                        if dotfiles_dir.exists() {
+                            for entry in std::fs::read_dir(&dotfiles_dir)? {
+                                let entry = entry?;
+                                if entry.file_type()?.is_file() {
+                                    if let Ok(findings) =
+                                        crate::security::scan_for_secrets(&entry.path())
+                                    {
+                                        if !findings.is_empty() {
+                                            Output::error(&format!(
+                                                "Team push blocked: {} contains {} secret(s)",
+                                                entry.file_name().to_string_lossy(),
+                                                findings.len()
+                                            ));
+                                            anyhow::bail!(
+                                                "Cannot push secrets to team repo. Remove sensitive data first."
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         team_git.commit("Update team configs", &state.machine_id)?;
                         team_git.push()?;
                     }
@@ -293,13 +313,15 @@ fn decrypt_from_repo(
                             ));
                         }
                     } else {
-                        // No conflict - check if file actually changed before writing
+                        // No true conflict - but preserve local-only changes
                         let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
                         let local_hash = std::fs::read(&local_file)
                             .ok()
                             .map(|c| format!("{:x}", Sha256::digest(&c)));
 
-                        if local_hash.as_ref() != Some(&remote_hash) {
+                        // Only write if local unchanged from last sync AND remote differs
+                        let local_unchanged = local_hash.as_deref() == last_synced_hash;
+                        if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
                             std::fs::write(&local_file, plaintext)?;
                         }
                         conflict_state.remove_conflict(file);
@@ -347,6 +369,12 @@ fn decrypt_from_repo(
                         .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {}", e))?;
                     let rel_path_str = rel_path.to_string_lossy();
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
+
+                    // Validate path is safe (defense-in-depth)
+                    if !crate::config::is_safe_dotfile_path(rel_path_no_enc) {
+                        Output::warning(&format!("  {} (unsafe path, skipping)", rel_path_no_enc));
+                        continue;
+                    }
 
                     if let Ok(encrypted_content) = std::fs::read(file_path) {
                         match crate::security::decrypt_file(&encrypted_content, &key) {
@@ -601,14 +629,12 @@ fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) ->
     let dest = dest_dir.join("config.toml.enc");
 
     // Check if file on disk differs
-    let file_hash = std::fs::read(&dest)
-        .ok()
-        .and_then(|enc| {
-            let key = crate::security::get_encryption_key().ok()?;
-            crate::security::decrypt_file(&enc, &key)
-                .ok()
-                .map(|plain| format!("{:x}", Sha256::digest(&plain)))
-        });
+    let file_hash = std::fs::read(&dest).ok().and_then(|enc| {
+        let key = crate::security::get_encryption_key().ok()?;
+        crate::security::decrypt_file(&enc, &key)
+            .ok()
+            .map(|plain| format!("{:x}", Sha256::digest(&plain)))
+    });
 
     if file_hash.as_ref() != Some(&hash) {
         let key = crate::security::get_encryption_key()?;
@@ -618,20 +644,6 @@ fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) ->
     }
 
     Ok(())
-}
-
-fn scan_and_warn_secrets(config: &Config, source: &Path, file: &str) {
-    if config.security.scan_secrets {
-        if let Ok(findings) = crate::security::scan_for_secrets(source) {
-            if !findings.is_empty() {
-                Output::warning(&format!(
-                    "{} has {} secret(s) - will be encrypted",
-                    file,
-                    findings.len()
-                ));
-            }
-        }
-    }
 }
 
 fn sync_directories(
@@ -647,6 +659,12 @@ fn sync_directories(
     std::fs::create_dir_all(&configs_dir)?;
 
     for dir_path in &config.dotfiles.dirs {
+        // Validate path is safe (security: prevents path traversal via synced config)
+        if !crate::config::is_safe_dotfile_path(dir_path) {
+            Output::warning(&format!("  {} (unsafe path, skipping)", dir_path));
+            continue;
+        }
+
         let expanded_path = if let Some(stripped) = dir_path.strip_prefix("~/") {
             home.join(stripped)
         } else {
