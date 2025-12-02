@@ -583,9 +583,9 @@ fn decrypt_project_configs(
 
                                 if local_hash.as_ref() != Some(&remote_hash) {
                                     if local_modified {
-                                        // Local has changes not yet synced - don't overwrite
-                                        Output::warning(&format!(
-                                            "  {}: {} (local changes preserved, run sync to push)",
+                                        // Local has changes not yet synced - don't overwrite, they'll be pushed
+                                        Output::info(&format!(
+                                            "{}: {} (local changes will be pushed)",
                                             project_name, rel_path_no_enc
                                         ));
                                     } else {

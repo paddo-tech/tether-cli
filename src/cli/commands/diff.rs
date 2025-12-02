@@ -289,6 +289,8 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
 }
 
 fn parse_brewfile(content: &str) -> HashMap<String, String> {
+    use crate::packages::brew::normalize_formula_name;
+
     let mut packages = HashMap::new();
     for line in content.lines() {
         let line = line.trim();
@@ -309,7 +311,13 @@ fn parse_brewfile(content: &str) -> HashMap<String, String> {
             } else {
                 "brew"
             };
-            packages.insert(pkg.to_string(), pkg_type.to_string());
+            // Normalize formula names to handle tap prefixes (e.g., "oven-sh/bun/bun" -> "bun")
+            let normalized = if pkg_type == "brew" {
+                normalize_formula_name(pkg).to_string()
+            } else {
+                pkg.to_string()
+            };
+            packages.insert(normalized, pkg_type.to_string());
         }
     }
     packages
