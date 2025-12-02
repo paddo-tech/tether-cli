@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: superfly/flyctl-action/setup-flyctl@master
+      - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only
