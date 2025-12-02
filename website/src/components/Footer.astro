@@ -4,8 +4,8 @@ const currentYear = new Date().getFullYear();
 const links = [
   { name: 'Documentation', href: '/docs' },
   { name: 'Security', href: '/security' },
-  { name: 'GitHub (Coming Soon)', href: '#', comingSoon: true },
-  { name: 'License (MIT)', href: '#', comingSoon: true },
+  { name: 'GitHub', href: 'https://github.com/paddo-tech/tether-cli' },
+  { name: 'License (MIT)', href: 'https://github.com/paddo-tech/tether-cli/blob/main/LICENSE' },
 ];
 ---
 
@@ -39,8 +39,6 @@ const links = [
                 class="text-muted hover:text-primary transition-colors text-sm"
                 target={link.href.startsWith('http') ? '_blank' : undefined}
                 rel={link.href.startsWith('http') ? 'noopener noreferrer' : undefined}
-                title={link.comingSoon ? 'Repository will be open sourced soon' : undefined}
-                onclick={link.comingSoon ? "event.preventDefault(); alert('Repository will be open sourced soon!');" : undefined}
               >
                 {link.name}
               </a>
@@ -56,12 +54,12 @@ const links = [
           Built in the open by developers, for developers.
         </p>
         <a
-          href="#"
-          class="inline-block px-4 py-2 bg-surface hover:bg-primary/10 text-primary border border-primary/30 rounded transition-all text-sm font-mono cursor-not-allowed opacity-75"
-          title="Repository will be open sourced soon"
-          onclick="event.preventDefault(); alert('Repository will be open sourced soon!');"
+          href="https://github.com/paddo-tech/tether-cli/issues"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-block px-4 py-2 bg-surface hover:bg-primary/10 text-primary border border-primary/30 rounded transition-all text-sm font-mono"
         >
-          Report an Issue (Coming Soon)
+          Report an Issue
         </a>
       </div>
     </div>

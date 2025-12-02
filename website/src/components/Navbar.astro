@@ -3,7 +3,7 @@ const navItems = [
   { name: 'Docs', href: '/docs' },
   { name: 'Teams', href: '/teams' },
   { name: 'Security', href: '/security' },
-  { name: 'GitHub', href: '#', external: false, comingSoon: true },
+  { name: 'GitHub', href: 'https://github.com/paddo-tech/tether-cli', external: true },
 ];
 ---
 
@@ -23,12 +23,9 @@ const navItems = [
             class="text-muted hover:text-primary transition-colors font-mono text-sm"
             target={item.external ? '_blank' : undefined}
             rel={item.external ? 'noopener noreferrer' : undefined}
-            title={item.comingSoon ? 'Repository coming soon' : undefined}
-            onclick={item.comingSoon ? "event.preventDefault(); alert('Repository will be open sourced soon!');" : undefined}
           >
             {item.name}
             {item.external && <span class="ml-1">↗</span>}
-            {item.comingSoon && <span class="ml-1 text-xs">(Soon)</span>}
           </a>
         ))}
       </div>
@@ -55,12 +52,9 @@ const navItems = [
           class="block text-muted hover:text-primary transition-colors font-mono text-sm py-2"
           target={item.external ? '_blank' : undefined}
           rel={item.external ? 'noopener noreferrer' : undefined}
-          title={item.comingSoon ? 'Repository coming soon' : undefined}
-          onclick={item.comingSoon ? "event.preventDefault(); alert('Repository will be open sourced soon!');" : undefined}
         >
           {item.name}
           {item.external && <span class="ml-1">↗</span>}
-          {item.comingSoon && <span class="ml-1 text-xs">(Soon)</span>}
         </a>
       ))}
     </div>
