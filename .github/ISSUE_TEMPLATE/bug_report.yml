@@ -1,0 +1,42 @@
+name: Bug Report
+description: Report something that isn't working
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Run `tether ...`
+        2. ...
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `tether --version`
+      placeholder: "tether 1.0.0"
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Other
