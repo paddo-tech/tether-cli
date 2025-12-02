@@ -1,17 +1,12 @@
-use crate::cli::{Output, Prompt};
+use crate::cli::{Output, Progress, Prompt};
 use crate::config::Config;
 use crate::github::GitHubCli;
 use crate::sync::{GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
-use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
 
 pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
     Output::header("Welcome to Tether!");
-    println!(
-        "{}",
-        "Sync your dev environment across machines".bright_black()
-    );
+    Output::dim("Sync your dev environment across machines");
     println!();
 
     // Check if already initialized
@@ -110,7 +105,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
 
 async fn setup_repository() -> Result<String> {
     let options = vec![
-        "GitHub (automatic - recommended) ⭐",
+        "GitHub (automatic - recommended)",
         "GitHub (manual - I'll create the repo)",
         "GitLab",
         "Custom Git URL",
@@ -124,24 +119,26 @@ async fn setup_repository() -> Result<String> {
             setup_github_automatic().await
         }
         1 => {
-            Output::info("You'll need to create a private repository on GitHub first.");
-            Output::info("Visit: https://github.com/new");
+            Output::info("Create a private repository on GitHub first");
+            Output::dim("  Visit: https://github.com/new");
             println!();
-            Prompt::input(
-                "Enter the repository URL (e.g., https://github.com/user/tether-sync.git)",
+            Prompt::input_with_help(
+                "Repository URL",
                 None,
+                "e.g., https://github.com/user/tether-sync.git",
             )
         }
         2 => {
-            Output::info("You'll need to create a private repository on GitLab first.");
-            Output::info("Visit: https://gitlab.com/projects/new");
+            Output::info("Create a private repository on GitLab first");
+            Output::dim("  Visit: https://gitlab.com/projects/new");
             println!();
-            Prompt::input(
-                "Enter the repository URL (e.g., https://gitlab.com/user/tether-sync.git)",
+            Prompt::input_with_help(
+                "Repository URL",
                 None,
+                "e.g., https://gitlab.com/user/tether-sync.git",
             )
         }
-        3 => Prompt::input("Enter your Git repository URL", None),
+        3 => Prompt::input_with_help("Git repository URL", None, "SSH or HTTPS URL"),
         _ => unreachable!(),
     }
 }
@@ -151,27 +148,22 @@ async fn setup_github_automatic() -> Result<String> {
         Output::warning("GitHub CLI (gh) is not installed");
 
         if Prompt::confirm("Install GitHub CLI via Homebrew?", true)? {
-            let pb = ProgressBar::new_spinner();
-            pb.set_style(
-                ProgressStyle::default_spinner()
-                    .template("{spinner:.green} {msg}")
-                    .unwrap(),
-            );
-            pb.set_message("Installing GitHub CLI...");
-            pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
+            let pb = Progress::spinner("Installing GitHub CLI...");
             GitHubCli::install().await?;
-
-            pb.finish_with_message("GitHub CLI installed ✓");
+            Progress::finish_success(&pb, "GitHub CLI installed");
         } else {
             Output::info("Falling back to manual setup");
-            return Prompt::input("Enter your GitHub repository URL", None);
+            return Prompt::input_with_help(
+                "GitHub repository URL",
+                None,
+                "SSH or HTTPS URL to your repo",
+            );
         }
     }
 
     if !GitHubCli::is_authenticated().await? {
         Output::info("Authenticating with GitHub...");
-        println!("  → This will open your browser");
+        Output::dim(&format!("  {} This will open your browser", Output::ARROW));
 
         if Prompt::confirm("Continue?", true)? {
             GitHubCli::authenticate().await?;
@@ -181,21 +173,23 @@ async fn setup_github_automatic() -> Result<String> {
         }
     } else {
         let username = GitHubCli::get_username().await?;
-        Output::success(&format!("Already authenticated as @{}", username));
+        Output::success(&format!("Authenticated as @{}", username));
     }
 
     if !GitHubCli::check_ssh_access().await? {
         Output::warning("SSH key not configured with GitHub");
-        Output::info("Tether uses SSH for secure Git operations");
+        Output::dim("  Tether uses SSH for secure Git operations");
 
         if Prompt::confirm("Set up SSH key now?", true)? {
-            Output::info("Follow the prompts to add your SSH key to GitHub...");
+            Output::info("Follow the prompts to add your SSH key...");
             if let Err(e) = GitHubCli::setup_ssh_key().await {
                 Output::warning(&format!("Automatic setup failed: {}", e));
+                println!();
                 Output::info("Manual setup:");
-                Output::info("  1. Generate key: ssh-keygen -t ed25519 -C \"your@email.com\"");
-                Output::info("  2. Add to GitHub: gh ssh-key add ~/.ssh/id_ed25519.pub");
-                Output::info("  Or visit: https://github.com/settings/keys");
+                Output::list_item("Generate: ssh-keygen -t ed25519 -C \"your@email.com\"");
+                Output::list_item("Add: gh ssh-key add ~/.ssh/id_ed25519.pub");
+                Output::dim("  Or visit: https://github.com/settings/keys");
+                println!();
 
                 if !Prompt::confirm("Continue after setting up SSH key?", false)? {
                     return Err(anyhow::anyhow!("SSH key setup required"));
@@ -203,8 +197,8 @@ async fn setup_github_automatic() -> Result<String> {
             }
         } else {
             Output::warning("SSH key required for Git operations");
-            Output::info(
-                "Setup instructions: https://docs.github.com/en/authentication/connecting-to-github-with-ssh",
+            Output::dim(
+                "  https://docs.github.com/en/authentication/connecting-to-github-with-ssh",
             );
             return Err(anyhow::anyhow!("SSH key setup required"));
         }
@@ -215,16 +209,13 @@ async fn setup_github_automatic() -> Result<String> {
 
     let username = GitHubCli::get_username().await?;
     if GitHubCli::repo_exists(&username, &repo_name).await? {
-        Output::warning(&format!(
-            "Repository {}/{} already exists",
-            username, repo_name
-        ));
+        Output::warning(&format!("{}/{} already exists", username, repo_name));
 
         if Prompt::confirm("Use existing repository?", true)? {
             return Ok(format!("git@github.com:{}/{}.git", username, repo_name));
         } else {
             let alt_name = GitHubCli::suggest_repo_name(&repo_name, &username).await?;
-            Output::info(&format!("Suggested name: {}", alt_name));
+            Output::dim(&format!("  Suggested: {}", alt_name));
 
             let final_name = Prompt::input("Repository name", Some(&alt_name))?;
             return create_github_repo(&final_name).await;
@@ -235,24 +226,12 @@ async fn setup_github_automatic() -> Result<String> {
 }
 
 async fn create_github_repo(repo_name: &str) -> Result<String> {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .unwrap(),
-    );
-    pb.set_message("Creating private repository...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
+    let pb = Progress::spinner("Creating private repository...");
     let repo_url = GitHubCli::create_repo(repo_name, true).await?;
-
-    pb.finish_with_message("Repository created ✓");
+    Progress::finish_success(&pb, "Repository created");
 
     let username = GitHubCli::get_username().await?;
-    Output::success(&format!(
-        "Created https://github.com/{}/{}",
-        username, repo_name
-    ));
+    Output::dim(&format!("  https://github.com/{}/{}", username, repo_name));
 
     Ok(repo_url)
 }

@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::sync::{ConflictState, SyncState};
 use anyhow::Result;
 use chrono::Local;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
 use std::path::PathBuf;
 
@@ -18,22 +18,19 @@ pub async fn run() -> Result<()> {
 
     let state = SyncState::load()?;
 
-    println!();
-    println!("{}", "🔗 Tether Status".bright_cyan().bold());
+    Output::section("Tether Status");
     println!();
 
-    // Daemon table
+    // Daemon status
     let pid = read_daemon_pid()?;
-    let (status_label, status_color) = match pid {
-        Some(pid) if is_process_running(pid) => (format!("● Running (PID {pid})"), Color::Green),
-        Some(pid) => (format!("● Not running (stale PID {pid})"), Color::Yellow),
-        None => ("● Not running".to_string(), Color::Yellow),
+    let (status_label, is_running) = match pid {
+        Some(pid) if is_process_running(pid) => (format!("Running (PID {pid})"), true),
+        Some(pid) => (format!("Not running (stale PID {pid})"), false),
+        None => ("Not running".to_string(), false),
     };
 
-    let mut daemon_table = Table::new();
+    let mut daemon_table = Output::table_full();
     daemon_table
-        .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
         .set_header(vec![
             Cell::new("Daemon")
                 .add_attribute(Attribute::Bold)
@@ -42,36 +39,37 @@ pub async fn run() -> Result<()> {
         ])
         .add_row(vec![
             Cell::new("Status"),
-            Cell::new(status_label).fg(status_color),
+            Cell::new(format!("{} {}", Output::DOT, status_label)).fg(if is_running {
+                Color::Green
+            } else {
+                Color::Yellow
+            }),
         ])
         .add_row(vec![
-            Cell::new("Info"),
-            Cell::new(format!("Log file: {}", daemon_log_path()?.display())),
+            Cell::new("Log"),
+            Cell::new(daemon_log_path()?.display().to_string()),
         ]);
     println!("{daemon_table}");
     println!();
 
-    // Conflicts warning (prominent if any exist)
+    // Conflicts warning
     let conflict_state = ConflictState::load().unwrap_or_default();
     if !conflict_state.conflicts.is_empty() {
-        let mut conflict_table = Table::new();
-        conflict_table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(vec![
-                Cell::new("⚠️  Conflicts")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Red),
-                Cell::new("Detected")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Red),
-            ]);
+        let mut conflict_table = Output::table_full();
+        conflict_table.set_header(vec![
+            Cell::new(format!("{}  Conflicts", Output::WARN))
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Red),
+            Cell::new("Detected")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Red),
+        ]);
 
         for conflict in &conflict_state.conflicts {
             let local_time = conflict.detected_at.with_timezone(&Local);
             conflict_table.add_row(vec![
                 Cell::new(&conflict.file_path).fg(Color::Yellow),
-                Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
+                Cell::new(local_time.format("%Y-%m-%d %H:%M").to_string()),
             ]);
         }
         println!("{conflict_table}");
@@ -82,11 +80,9 @@ pub async fn run() -> Result<()> {
         println!();
     }
 
-    // Sync table
-    let mut sync_table = Table::new();
+    // Sync info
+    let mut sync_table = Output::table_full();
     sync_table
-        .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
         .set_header(vec![
             Cell::new("Sync")
                 .add_attribute(Attribute::Bold)
@@ -99,7 +95,7 @@ pub async fn run() -> Result<()> {
                 state
                     .last_sync
                     .with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S")
+                    .format("%Y-%m-%d %H:%M")
                     .to_string(),
             )
             .fg(Color::Green),
@@ -109,65 +105,45 @@ pub async fn run() -> Result<()> {
             Cell::new(
                 state
                     .last_upgrade
-                    .map(|t| {
-                        t.with_timezone(&Local)
-                            .format("%Y-%m-%d %H:%M:%S")
-                            .to_string()
-                    })
+                    .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "Never".to_string()),
             ),
         ])
-        .add_row(vec![
-            Cell::new("Last Upgrade (with updates)"),
-            Cell::new(
-                state
-                    .last_upgrade_with_updates
-                    .map(|t| {
-                        t.with_timezone(&Local)
-                            .format("%Y-%m-%d %H:%M:%S")
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "Never".to_string()),
-            ),
-        ])
-        .add_row(vec![Cell::new("Machine ID"), Cell::new(&state.machine_id)])
+        .add_row(vec![Cell::new("Machine"), Cell::new(&state.machine_id)])
         .add_row(vec![Cell::new("Backend"), Cell::new(&config.backend.url)]);
     println!("{sync_table}");
     println!();
 
-    // Dotfiles table
+    // Dotfiles - minimal table for lists
     if !state.files.is_empty() {
-        let mut files_table = Table::new();
-        files_table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(vec![
-                Cell::new("📁 Dotfiles")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Status")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Last Modified")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-            ]);
+        let mut files_table = Output::table_minimal();
+        files_table.set_header(vec![
+            Cell::new("Dotfiles")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Status")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Modified")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+        ]);
 
         for (file, file_state) in &state.files {
-            let status_cell = if file_state.synced {
-                Cell::new("✓ Synced").fg(Color::Green)
+            let (status, color) = if file_state.synced {
+                (format!("{} Synced", Output::CHECK), Color::Green)
             } else {
-                Cell::new("⚠ Modified").fg(Color::Yellow)
+                (format!("{} Modified", Output::WARN), Color::Yellow)
             };
 
             files_table.add_row(vec![
                 Cell::new(file),
-                status_cell,
+                Cell::new(status).fg(color),
                 Cell::new(
                     file_state
                         .last_modified
                         .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M:%S")
+                        .format("%Y-%m-%d %H:%M")
                         .to_string(),
                 ),
             ]);
@@ -175,33 +151,30 @@ pub async fn run() -> Result<()> {
         println!("{files_table}");
         println!();
     } else {
-        println!("{}", "📁 Dotfiles: No files synced yet".bright_black());
+        Output::dim("  No dotfiles synced yet");
         println!();
     }
 
-    // Packages table
+    // Packages - minimal table for lists
     if !state.packages.is_empty() {
-        let mut packages_table = Table::new();
-        packages_table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(vec![
-                Cell::new("📦 Package Manager")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Last Sync")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-            ]);
+        let mut packages_table = Output::table_minimal();
+        packages_table.set_header(vec![
+            Cell::new("Packages")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Last Sync")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+        ]);
 
         for (manager, pkg_state) in &state.packages {
             packages_table.add_row(vec![
-                Cell::new(format!("✓ {}", manager)).fg(Color::Green),
+                Cell::new(format!("{} {}", Output::CHECK, manager)).fg(Color::Green),
                 Cell::new(
                     pkg_state
                         .last_sync
                         .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M:%S")
+                        .format("%Y-%m-%d %H:%M")
                         .to_string(),
                 ),
             ]);
@@ -209,7 +182,7 @@ pub async fn run() -> Result<()> {
         println!("{packages_table}");
         println!();
     } else {
-        println!("{}", "📦 Packages: No packages synced yet".bright_black());
+        Output::dim("  No packages synced yet");
         println!();
     }
 

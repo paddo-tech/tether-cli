@@ -123,7 +123,11 @@ impl Default for BrewManager {
 #[async_trait]
 impl PackageManager for BrewManager {
     async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
-        let output = self.run_brew(&["list", "--formula", "-1"]).await?;
+        // Use --installed-on-request to only get explicitly installed packages,
+        // not dependencies. This matches what `brew bundle dump` outputs.
+        let output = self
+            .run_brew(&["list", "--formula", "--installed-on-request", "-1"])
+            .await?;
 
         let mut packages = Vec::new();
         for line in output.lines() {
@@ -131,7 +135,7 @@ impl PackageManager for BrewManager {
             if !name.is_empty() {
                 packages.push(PackageInfo {
                     name: name.to_string(),
-                    version: None, // Version not needed with Brewfile approach
+                    version: None,
                 });
             }
         }

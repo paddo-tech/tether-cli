@@ -1,8 +1,8 @@
-use crate::cli::Output;
+use crate::cli::{Output, Progress};
 use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -29,12 +29,12 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
     // Pull latest to ensure we have current remote state
-    Output::info("Fetching latest changes...");
+    let pb = Progress::spinner("Fetching latest changes...");
     let git = GitBackend::open(&sync_path)?;
     git.pull()?;
+    pb.finish_and_clear();
 
-    println!();
-    println!("{}", "🔍 Tether Diff".bright_cyan().bold());
+    Output::section("Diff");
     println!();
 
     if let Some(target_machine) = machine {
@@ -135,23 +135,24 @@ fn show_dotfile_diff(
     }
 
     if diffs.is_empty() {
-        println!("{}", "📁 Dotfiles: All synced ✓".green());
+        println!(
+            "{} {}",
+            Output::CHECK.green(),
+            "Dotfiles: All synced".green()
+        );
     } else {
-        let mut table = Table::new();
-        table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(vec![
-                Cell::new("📁 Dotfiles")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Status")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Details")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-            ]);
+        let mut table = Output::table_minimal();
+        table.set_header(vec![
+            Cell::new("Dotfiles")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Status")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Details")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+        ]);
 
         for (file, status, details) in &diffs {
             let status_color = match status.as_str() {
@@ -196,7 +197,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 let diff = diff_packages(&remote_packages, &local_packages);
                 if !diff.is_empty() {
                     has_diff = true;
-                    println!("{}", "📦 Homebrew:".bright_cyan().bold());
+                    println!("{}", "Homebrew:".bright_cyan().bold());
                     for (pkg, status) in diff {
                         let symbol = match status.as_str() {
                             "added" => "+",
@@ -228,7 +229,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 let diff = diff_package_lists(&remote_packages, &local_packages);
                 if !diff.is_empty() {
                     has_diff = true;
-                    println!("{}", "📦 npm:".bright_cyan().bold());
+                    println!("{}", "npm:".bright_cyan().bold());
                     for (pkg, status) in diff {
                         let symbol = match status.as_str() {
                             "added" => "+",
@@ -260,7 +261,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 let diff = diff_package_lists(&remote_packages, &local_packages);
                 if !diff.is_empty() {
                     has_diff = true;
-                    println!("{}", "📦 pnpm:".bright_cyan().bold());
+                    println!("{}", "pnpm:".bright_cyan().bold());
                     for (pkg, status) in diff {
                         let symbol = match status.as_str() {
                             "added" => "+",
@@ -276,7 +277,11 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
     }
 
     if !has_diff {
-        println!("{}", "📦 Packages: All synced ✓".green());
+        println!(
+            "{} {}",
+            Output::CHECK.green(),
+            "Packages: All synced".green()
+        );
         println!();
     }
 
@@ -410,20 +415,21 @@ fn show_machine_diff(current: &MachineState, other: &MachineState) -> Result<()>
     }
 
     if file_diffs.is_empty() {
-        println!("{}", "📁 Dotfiles: Identical ✓".green());
+        println!(
+            "{} {}",
+            Output::CHECK.green(),
+            "Dotfiles: Identical".green()
+        );
     } else {
-        let mut table = Table::new();
-        table
-            .load_preset(UTF8_FULL)
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_header(vec![
-                Cell::new("📁 Dotfiles")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Difference")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-            ]);
+        let mut table = Output::table_minimal();
+        table.set_header(vec![
+            Cell::new("Dotfiles")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Difference")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+        ]);
 
         for (file, diff) in &file_diffs {
             let color = match diff.as_str() {
@@ -466,7 +472,7 @@ fn show_machine_diff(current: &MachineState, other: &MachineState) -> Result<()>
 
         if !diffs.is_empty() {
             has_pkg_diff = true;
-            println!("{}", format!("📦 {}:", manager).bright_cyan().bold());
+            println!("{}", format!("{}:", manager).bright_cyan().bold());
             for (pkg, status) in diffs {
                 let symbol = if status == "added" { "+" } else { "-" };
                 println!("{}", format_diff_line(symbol, &status, &pkg));
@@ -476,7 +482,11 @@ fn show_machine_diff(current: &MachineState, other: &MachineState) -> Result<()>
     }
 
     if !has_pkg_diff {
-        println!("{}", "📦 Packages: Identical ✓".green());
+        println!(
+            "{} {}",
+            Output::CHECK.green(),
+            "Packages: Identical".green()
+        );
         println!();
     }
 

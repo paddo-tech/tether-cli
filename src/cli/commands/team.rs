@@ -1,8 +1,8 @@
-use crate::cli::{Output, Prompt};
+use crate::cli::{Output, Progress, Prompt};
 use crate::config::{Config, TeamConfig};
 use crate::sync::GitBackend;
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color};
 
 /// Validate team name contains only safe characters for filesystem paths
 fn is_valid_team_name(name: &str) -> bool {
@@ -76,9 +76,9 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
         std::fs::create_dir_all(parent)?;
     }
 
-    Output::info("Cloning team repository...");
+    let pb = Progress::spinner("Cloning team repository...");
     GitBackend::clone(url, &team_repo_dir)?;
-    Output::success("Team repository cloned successfully");
+    Progress::finish_success(&pb, "Team repository cloned");
 
     // Security check: Scan for secrets in team repo
     Output::info("Scanning team configs for secrets...");
@@ -120,9 +120,9 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
     // Warn if secrets found
     if secrets_found {
         println!();
-        Output::warning("⚠️  Potential secrets detected in team repository!");
-        Output::warning("Team repositories should only contain non-sensitive shared configs.");
-        Output::info("For sensitive data, use a secrets manager (1Password, Vault, etc.)");
+        Output::warning("Potential secrets detected in team repository!");
+        Output::dim("  Team repositories should only contain non-sensitive shared configs.");
+        Output::dim("  For sensitive data, use a secrets manager (1Password, Vault, etc.)");
         println!();
 
         if !Prompt::confirm("Continue anyway?", false)? {
@@ -174,7 +174,7 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
     } else if !team_files.is_empty() {
         // Show preview of team config contents (security: let user review before sourcing)
         println!();
-        Output::warning("⚠️  Team configs will be sourced into your shell. Review contents:");
+        Output::warning("Team configs will be sourced into your shell. Review contents:");
         for file in &team_files {
             let team_file_path = team_repo_dir.join("dotfiles").join(file);
             if let Ok(content) = std::fs::read_to_string(&team_file_path) {
@@ -469,10 +469,8 @@ pub async fn status() -> Result<()> {
     println!();
     match &config.team {
         Some(team) => {
-            let mut table = Table::new();
+            let mut table = Output::table_full();
             table
-                .load_preset(UTF8_FULL)
-                .set_content_arrangement(ContentArrangement::Dynamic)
                 .set_header(vec![
                     Cell::new("Team Sync")
                         .add_attribute(Attribute::Bold)
@@ -482,9 +480,9 @@ pub async fn status() -> Result<()> {
                 .add_row(vec![
                     Cell::new("Status"),
                     if team.enabled {
-                        Cell::new("● Enabled").fg(Color::Green)
+                        Cell::new(format!("{} Enabled", Output::DOT)).fg(Color::Green)
                     } else {
-                        Cell::new("● Disabled").fg(Color::Yellow)
+                        Cell::new(format!("{} Disabled", Output::DOT)).fg(Color::Yellow)
                     },
                 ])
                 .add_row(vec![Cell::new("Repository"), Cell::new(&team.url)])

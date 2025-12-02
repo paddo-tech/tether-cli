@@ -1,4 +1,4 @@
-use crate::cli::{Output, Prompt};
+use crate::cli::{Output, Progress, Prompt};
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
@@ -36,7 +36,9 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     // Pull latest changes from personal repo
     let git = GitBackend::open(&sync_path)?;
     if !dry_run {
+        let pb = Progress::spinner("Pulling latest changes...");
         git.pull()?;
+        pb.finish_and_clear();
     }
 
     // Pull from team repo if enabled
@@ -181,12 +183,13 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Commit and push changes
     if !dry_run {
-        // Check if there are any changes (including machine state update)
         let has_changes = git.has_changes()?;
 
         if has_changes {
+            let pb = Progress::spinner("Pushing changes...");
             git.commit("Sync dotfiles and packages", &state.machine_id)?;
             git.push()?;
+            pb.finish_and_clear();
         }
 
         state.mark_synced();
