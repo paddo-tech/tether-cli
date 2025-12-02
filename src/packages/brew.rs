@@ -301,3 +301,107 @@ impl PackageManager for BrewManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Brewfile parsing tests
+    #[test]
+    fn test_parse_brewfile() {
+        let content = r#"
+tap "homebrew/core"
+tap "homebrew/cask"
+brew "git"
+brew "ripgrep"
+cask "visual-studio-code"
+"#;
+        let packages = BrewfilePackages::parse(content);
+        assert_eq!(packages.taps, vec!["homebrew/cask", "homebrew/core"]);
+        assert_eq!(packages.formulae, vec!["git", "ripgrep"]);
+        assert_eq!(packages.casks, vec!["visual-studio-code"]);
+    }
+
+    #[test]
+    fn test_parse_brewfile_skips_comments() {
+        let content = r#"
+# This is a comment
+tap "homebrew/core"
+# Another comment
+brew "git"
+"#;
+        let packages = BrewfilePackages::parse(content);
+        assert_eq!(packages.taps, vec!["homebrew/core"]);
+        assert_eq!(packages.formulae, vec!["git"]);
+    }
+
+    #[test]
+    fn test_parse_brewfile_empty() {
+        let packages = BrewfilePackages::parse("");
+        assert!(packages.taps.is_empty());
+        assert!(packages.formulae.is_empty());
+        assert!(packages.casks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_brewfile_only_comments() {
+        let content = "# comment\n# another\n";
+        let packages = BrewfilePackages::parse(content);
+        assert!(packages.taps.is_empty());
+    }
+
+    // Brewfile generation tests
+    #[test]
+    fn test_generate_brewfile() {
+        let packages = BrewfilePackages {
+            taps: vec!["homebrew/cask".to_string()],
+            formulae: vec!["git".to_string()],
+            casks: vec!["iterm2".to_string()],
+        };
+        let output = packages.generate();
+        assert!(output.contains("tap \"homebrew/cask\""));
+        assert!(output.contains("brew \"git\""));
+        assert!(output.contains("cask \"iterm2\""));
+    }
+
+    #[test]
+    fn test_generate_brewfile_empty() {
+        let packages = BrewfilePackages::default();
+        let output = packages.generate();
+        assert_eq!(output, "\n");
+    }
+
+    // Roundtrip tests
+    #[test]
+    fn test_brewfile_roundtrip() {
+        let original = BrewfilePackages {
+            taps: vec!["tap1".to_string(), "tap2".to_string()],
+            formulae: vec!["brew1".to_string(), "brew2".to_string()],
+            casks: vec!["cask1".to_string()],
+        };
+        let generated = original.generate();
+        let parsed = BrewfilePackages::parse(&generated);
+
+        assert_eq!(original.taps, parsed.taps);
+        assert_eq!(original.formulae, parsed.formulae);
+        assert_eq!(original.casks, parsed.casks);
+    }
+
+    // normalize_formula_name tests
+    #[test]
+    fn test_normalize_formula_name_simple() {
+        assert_eq!(normalize_formula_name("git"), "git");
+        assert_eq!(normalize_formula_name("ripgrep"), "ripgrep");
+    }
+
+    #[test]
+    fn test_normalize_formula_name_with_tap() {
+        assert_eq!(normalize_formula_name("homebrew/core/wget"), "wget");
+        assert_eq!(normalize_formula_name("oven-sh/bun/bun"), "bun");
+    }
+
+    #[test]
+    fn test_normalize_formula_name_empty() {
+        assert_eq!(normalize_formula_name(""), "");
+    }
+}

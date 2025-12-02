@@ -3,6 +3,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command;
 
+/// Parse a package@version string, handling scoped packages like @scope/pkg@version
+fn parse_package_version(s: &str) -> (String, Option<String>) {
+    if let Some(last_at) = s.rfind('@') {
+        // Check it's not the @ in a scoped package name (e.g., @google/pkg)
+        if last_at > 0 && !s[..last_at].ends_with('/') {
+            return (s[..last_at].to_string(), Some(s[last_at + 1..].to_string()));
+        }
+    }
+    (s.to_string(), None)
+}
+
 pub struct BunManager;
 
 impl BunManager {
@@ -73,19 +84,7 @@ impl PackageManager for BunManager {
 
             // Parse package@version format
             // Handle scoped packages like @google/gemini-cli@0.18.4
-            let (name, version) = if let Some(last_at) = cleaned.rfind('@') {
-                // Check it's not the @ in a scoped package name
-                if last_at > 0 && !cleaned[..last_at].ends_with('/') {
-                    (
-                        cleaned[..last_at].to_string(),
-                        Some(cleaned[last_at + 1..].to_string()),
-                    )
-                } else {
-                    (cleaned.to_string(), None)
-                }
-            } else {
-                (cleaned.to_string(), None)
-            };
+            let (name, version) = parse_package_version(cleaned);
 
             packages.push(PackageInfo { name, version });
         }
@@ -208,5 +207,45 @@ impl PackageManager for BunManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_package_version_simple() {
+        let (name, version) = parse_package_version("typescript@5.3.3");
+        assert_eq!(name, "typescript");
+        assert_eq!(version, Some("5.3.3".to_string()));
+    }
+
+    #[test]
+    fn test_parse_package_version_scoped() {
+        let (name, version) = parse_package_version("@google/gemini-cli@0.18.4");
+        assert_eq!(name, "@google/gemini-cli");
+        assert_eq!(version, Some("0.18.4".to_string()));
+    }
+
+    #[test]
+    fn test_parse_package_version_scoped_deep() {
+        let (name, version) = parse_package_version("@angular/cli@17.0.0");
+        assert_eq!(name, "@angular/cli");
+        assert_eq!(version, Some("17.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_package_version_no_version() {
+        let (name, version) = parse_package_version("typescript");
+        assert_eq!(name, "typescript");
+        assert_eq!(version, None);
+    }
+
+    #[test]
+    fn test_parse_package_version_scoped_no_version() {
+        let (name, version) = parse_package_version("@types/node");
+        assert_eq!(name, "@types/node");
+        assert_eq!(version, None);
     }
 }

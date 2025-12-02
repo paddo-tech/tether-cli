@@ -156,3 +156,73 @@ pub fn parse_backup_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|dt| dt.and_utc())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_backup_file_copies() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "content").unwrap();
+
+        let backup_dir = temp.path().join("backup");
+        std::fs::create_dir(&backup_dir).unwrap();
+
+        let result = backup_file(&backup_dir, "dotfiles", ".zshrc", &source).unwrap();
+        assert!(result);
+        assert!(backup_dir.join("dotfiles/.zshrc").exists());
+
+        let backed_up = std::fs::read_to_string(backup_dir.join("dotfiles/.zshrc")).unwrap();
+        assert_eq!(backed_up, "content");
+    }
+
+    #[test]
+    fn test_backup_file_skips_missing() {
+        let temp = TempDir::new().unwrap();
+        let backup_dir = temp.path().join("backup");
+        std::fs::create_dir(&backup_dir).unwrap();
+
+        let result = backup_file(
+            &backup_dir,
+            "dotfiles",
+            ".zshrc",
+            &temp.path().join("nonexistent"),
+        )
+        .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_backup_file_creates_nested_dirs() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.txt");
+        std::fs::write(&source, "nested").unwrap();
+
+        let backup_dir = temp.path().join("backup");
+        std::fs::create_dir(&backup_dir).unwrap();
+
+        let result =
+            backup_file(&backup_dir, "dotfiles", ".config/nvim/init.lua", &source).unwrap();
+        assert!(result);
+        assert!(backup_dir.join("dotfiles/.config/nvim/init.lua").exists());
+    }
+
+    #[test]
+    fn test_parse_backup_timestamp_valid() {
+        let ts = parse_backup_timestamp("2024-01-15T10-30-45");
+        assert!(ts.is_some());
+        let dt = ts.unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn test_parse_backup_timestamp_invalid() {
+        assert!(parse_backup_timestamp("invalid").is_none());
+        assert!(parse_backup_timestamp("2024/01/15").is_none());
+        assert!(parse_backup_timestamp("2024-01-15T10:30:45").is_none()); // wrong separators
+        assert!(parse_backup_timestamp("").is_none());
+    }
+}

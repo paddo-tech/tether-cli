@@ -266,3 +266,187 @@ impl SyncState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // Package name safety tests
+    #[test]
+    fn test_safe_package_names() {
+        assert!(MachineState::is_safe_package_name("git"));
+        assert!(MachineState::is_safe_package_name("node-18.x"));
+        assert!(MachineState::is_safe_package_name("@angular/cli"));
+        assert!(MachineState::is_safe_package_name("python3.11"));
+    }
+
+    #[test]
+    fn test_unsafe_package_name_shell_injection() {
+        assert!(!MachineState::is_safe_package_name("git; rm -rf /"));
+        assert!(!MachineState::is_safe_package_name("$(whoami)"));
+        assert!(!MachineState::is_safe_package_name("pkg`id`"));
+        assert!(!MachineState::is_safe_package_name("pkg|cat /etc/passwd"));
+        assert!(!MachineState::is_safe_package_name("pkg&background"));
+    }
+
+    #[test]
+    fn test_unsafe_package_name_quotes() {
+        assert!(!MachineState::is_safe_package_name("pkg'injection"));
+        assert!(!MachineState::is_safe_package_name("pkg\"injection"));
+        assert!(!MachineState::is_safe_package_name("pkg\\escape"));
+    }
+
+    #[test]
+    fn test_unsafe_package_name_newlines() {
+        assert!(!MachineState::is_safe_package_name("pkg\nmalicious"));
+        assert!(!MachineState::is_safe_package_name("pkg\rmalicious"));
+    }
+
+    #[test]
+    fn test_unsafe_package_name_empty() {
+        assert!(!MachineState::is_safe_package_name(""));
+    }
+
+    #[test]
+    fn test_unsafe_package_name_too_long() {
+        let long_name = "a".repeat(300);
+        assert!(!MachineState::is_safe_package_name(&long_name));
+
+        let max_len = "a".repeat(256);
+        assert!(MachineState::is_safe_package_name(&max_len));
+    }
+
+    // Validation tests
+    #[test]
+    fn test_validate_filters_unsafe_packages() {
+        let mut state = MachineState::new("test");
+        state.packages.insert(
+            "npm".to_string(),
+            vec![
+                "safe-pkg".to_string(),
+                "unsafe;cmd".to_string(),
+                "another-safe".to_string(),
+            ],
+        );
+        state.validate().unwrap();
+        let npm_pkgs = state.packages.get("npm").unwrap();
+        assert_eq!(npm_pkgs.len(), 2);
+        assert!(npm_pkgs.contains(&"safe-pkg".to_string()));
+        assert!(npm_pkgs.contains(&"another-safe".to_string()));
+    }
+
+    #[test]
+    fn test_validate_too_many_files() {
+        let mut state = MachineState::new("test");
+        for i in 0..60_000 {
+            state.files.insert(format!("file{}", i), "hash".to_string());
+        }
+        assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_too_many_packages() {
+        let mut state = MachineState::new("test");
+        let packages: Vec<String> = (0..15_000).map(|i| format!("pkg{}", i)).collect();
+        state.packages.insert("npm".to_string(), packages);
+        assert!(state.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_ok_within_limits() {
+        let mut state = MachineState::new("test");
+        for i in 0..100 {
+            state.files.insert(format!("file{}", i), "hash".to_string());
+        }
+        state
+            .packages
+            .insert("npm".to_string(), vec!["typescript".to_string()]);
+        assert!(state.validate().is_ok());
+    }
+
+    // Union computation tests
+    #[test]
+    fn test_compute_union_packages_merges() {
+        let mut m1 = MachineState::new("m1");
+        m1.packages
+            .insert("npm".to_string(), vec!["a".to_string(), "b".to_string()]);
+
+        let mut m2 = MachineState::new("m2");
+        m2.packages
+            .insert("npm".to_string(), vec!["b".to_string(), "c".to_string()]);
+
+        let union = MachineState::compute_union_packages(&[m1, m2]);
+        let npm = union.get("npm").unwrap();
+        assert_eq!(npm.len(), 3);
+        assert!(npm.contains(&"a".to_string()));
+        assert!(npm.contains(&"b".to_string()));
+        assert!(npm.contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_compute_union_packages_empty() {
+        let union = MachineState::compute_union_packages(&[]);
+        assert!(union.is_empty());
+    }
+
+    #[test]
+    fn test_compute_union_packages_sorted() {
+        let mut m1 = MachineState::new("m1");
+        m1.packages
+            .insert("npm".to_string(), vec!["z".to_string(), "a".to_string()]);
+
+        let union = MachineState::compute_union_packages(&[m1]);
+        let npm = union.get("npm").unwrap();
+        assert_eq!(npm, &vec!["a".to_string(), "z".to_string()]);
+    }
+
+    #[test]
+    fn test_compute_union_multiple_managers() {
+        let mut m1 = MachineState::new("m1");
+        m1.packages
+            .insert("npm".to_string(), vec!["typescript".to_string()]);
+        m1.packages
+            .insert("brew_formulae".to_string(), vec!["git".to_string()]);
+
+        let union = MachineState::compute_union_packages(&[m1]);
+        assert!(union.contains_key("npm"));
+        assert!(union.contains_key("brew_formulae"));
+    }
+
+    // Roundtrip tests
+    #[test]
+    fn test_machine_state_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let sync_path = temp.path();
+        std::fs::create_dir_all(sync_path.join("machines")).unwrap();
+
+        let mut state = MachineState::new("test-machine");
+        state
+            .packages
+            .insert("npm".to_string(), vec!["typescript".to_string()]);
+        state
+            .files
+            .insert(".zshrc".to_string(), "abc123".to_string());
+
+        state.save_to_repo(sync_path).unwrap();
+
+        let loaded = MachineState::load_from_repo(sync_path, "test-machine")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.machine_id, "test-machine");
+        assert_eq!(
+            loaded.packages.get("npm"),
+            Some(&vec!["typescript".to_string()])
+        );
+        assert_eq!(loaded.files.get(".zshrc"), Some(&"abc123".to_string()));
+    }
+
+    #[test]
+    fn test_machine_state_load_nonexistent() {
+        let temp = TempDir::new().unwrap();
+        let result = MachineState::load_from_repo(temp.path(), "nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+}

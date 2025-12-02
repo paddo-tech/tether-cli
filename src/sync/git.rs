@@ -334,3 +334,94 @@ fn find_git_repos_recursive(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // URL normalization tests
+    #[test]
+    fn test_normalize_ssh_url() {
+        assert_eq!(
+            normalize_remote_url("git@github.com:user/repo.git"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_ssh_url_no_git_suffix() {
+        assert_eq!(
+            normalize_remote_url("git@github.com:user/repo"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_https_url() {
+        assert_eq!(
+            normalize_remote_url("https://github.com/user/repo.git"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_https_url_no_git_suffix() {
+        assert_eq!(
+            normalize_remote_url("https://github.com/user/repo"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_http_url() {
+        assert_eq!(
+            normalize_remote_url("http://github.com/user/repo"),
+            "github.com/user/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_gitlab_url() {
+        assert_eq!(
+            normalize_remote_url("git@gitlab.com:group/subgroup/repo.git"),
+            "gitlab.com/group/subgroup/repo"
+        );
+    }
+
+    // Skip directory tests
+    #[test]
+    fn test_should_skip_hidden_dirs() {
+        assert!(should_skip_dir(".git"));
+        assert!(should_skip_dir(".cache"));
+        assert!(should_skip_dir(".hidden"));
+    }
+
+    #[test]
+    fn test_should_skip_node_modules() {
+        assert!(should_skip_dir("node_modules"));
+        assert!(should_skip_dir("bower_components"));
+    }
+
+    #[test]
+    fn test_should_skip_build_dirs() {
+        assert!(should_skip_dir("target"));
+        assert!(should_skip_dir("build"));
+        assert!(should_skip_dir("dist"));
+        assert!(should_skip_dir("out"));
+    }
+
+    #[test]
+    fn test_should_skip_python_dirs() {
+        assert!(should_skip_dir("__pycache__"));
+        assert!(should_skip_dir("venv"));
+        assert!(should_skip_dir(".venv"));
+    }
+
+    #[test]
+    fn test_should_not_skip_src() {
+        assert!(!should_skip_dir("src"));
+        assert!(!should_skip_dir("lib"));
+        assert!(!should_skip_dir("app"));
+        assert!(!should_skip_dir("components"));
+    }
+}

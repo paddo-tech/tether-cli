@@ -462,3 +462,166 @@ impl Default for Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Path safety tests
+    #[test]
+    fn test_safe_dotfile_path_simple() {
+        assert!(is_safe_dotfile_path(".zshrc"));
+        assert!(is_safe_dotfile_path(".config/nvim/init.lua"));
+        assert!(is_safe_dotfile_path(".local/share/data"));
+    }
+
+    #[test]
+    fn test_safe_dotfile_path_with_tilde() {
+        assert!(is_safe_dotfile_path("~/.zshrc"));
+        assert!(is_safe_dotfile_path("~/.config/zsh"));
+    }
+
+    #[test]
+    fn test_unsafe_path_traversal() {
+        assert!(!is_safe_dotfile_path("../../../etc/passwd"));
+        assert!(!is_safe_dotfile_path(".config/../../../etc/passwd"));
+        assert!(!is_safe_dotfile_path("foo/bar/../../../etc/passwd"));
+    }
+
+    #[test]
+    fn test_unsafe_path_traversal_after_tilde() {
+        assert!(!is_safe_dotfile_path("~/../etc/passwd"));
+        assert!(!is_safe_dotfile_path("~/foo/../../../etc/passwd"));
+    }
+
+    #[test]
+    fn test_unsafe_absolute_path() {
+        assert!(!is_safe_dotfile_path("/etc/passwd"));
+        assert!(!is_safe_dotfile_path("/Users/foo/.zshrc"));
+    }
+
+    #[test]
+    fn test_unsafe_empty_path() {
+        assert!(!is_safe_dotfile_path(""));
+    }
+
+    #[test]
+    fn test_tilde_only_is_valid() {
+        // "~" alone is valid - it refers to home directory
+        // (strip_prefix("~/") doesn't match "~", so "~" remains as-is)
+        assert!(is_safe_dotfile_path("~"));
+    }
+
+    // Merge tool validation tests
+    #[test]
+    fn test_valid_merge_tools() {
+        let tools = ["vimdiff", "opendiff", "meld", "code", "nvim", "kdiff3"];
+        for tool in tools {
+            let config = MergeConfig {
+                command: tool.to_string(),
+                args: vec![],
+            };
+            assert!(config.is_valid_command(), "{} should be valid", tool);
+        }
+    }
+
+    #[test]
+    fn test_valid_merge_tool_with_path() {
+        let config = MergeConfig {
+            command: "/usr/bin/opendiff".to_string(),
+            args: vec![],
+        };
+        assert!(config.is_valid_command());
+
+        let config = MergeConfig {
+            command: "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+                .to_string(),
+            args: vec![],
+        };
+        assert!(config.is_valid_command());
+    }
+
+    #[test]
+    fn test_invalid_merge_tool() {
+        let invalid = ["rm", "cat", "bash", "sh", "curl", "wget", "malicious"];
+        for tool in invalid {
+            let config = MergeConfig {
+                command: tool.to_string(),
+                args: vec![],
+            };
+            assert!(!config.is_valid_command(), "{} should be invalid", tool);
+        }
+    }
+
+    #[test]
+    fn test_merge_tool_case_insensitive() {
+        let config = MergeConfig {
+            command: "VIMDIFF".to_string(),
+            args: vec![],
+        };
+        assert!(config.is_valid_command());
+    }
+
+    // DotfileEntry tests
+    #[test]
+    fn test_dotfile_entry_simple_path() {
+        let entry = DotfileEntry::Simple(".zshrc".to_string());
+        assert_eq!(entry.path(), ".zshrc");
+        assert!(entry.create_if_missing());
+    }
+
+    #[test]
+    fn test_dotfile_entry_with_options() {
+        let entry = DotfileEntry::WithOptions {
+            path: ".bashrc".to_string(),
+            create_if_missing: false,
+        };
+        assert_eq!(entry.path(), ".bashrc");
+        assert!(!entry.create_if_missing());
+    }
+
+    #[test]
+    fn test_dotfile_entry_is_safe_path() {
+        let safe = DotfileEntry::Simple(".zshrc".to_string());
+        assert!(safe.is_safe_path());
+
+        let unsafe_entry = DotfileEntry::Simple("../../../etc/passwd".to_string());
+        assert!(!unsafe_entry.is_safe_path());
+    }
+
+    // Config default tests
+    #[test]
+    fn test_config_default_has_gitconfig() {
+        let config = Config::default();
+        let has_gitconfig = config
+            .dotfiles
+            .files
+            .iter()
+            .any(|e| e.path() == ".gitconfig");
+        assert!(has_gitconfig);
+    }
+
+    #[test]
+    fn test_config_default_sync_interval() {
+        let config = Config::default();
+        assert_eq!(config.sync.interval, "5m");
+    }
+
+    // Serialization tests
+    #[test]
+    fn test_conflict_strategy_in_config() {
+        // Test via full config serialization (enum can't be serialized standalone in toml)
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        assert!(toml_str.contains("last-write-wins"));
+    }
+
+    #[test]
+    fn test_config_toml_roundtrip() {
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config.sync.interval, parsed.sync.interval);
+        assert_eq!(config.dotfiles.files.len(), parsed.dotfiles.files.len());
+    }
+}

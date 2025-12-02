@@ -360,3 +360,162 @@ pub fn notify_conflicts(count: usize) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // is_true_conflict tests
+    #[test]
+    fn test_is_true_conflict_both_changed() {
+        let conflict = FileConflict {
+            file_path: ".zshrc".to_string(),
+            local_hash: "aaa".to_string(),
+            last_synced_hash: Some("bbb".to_string()),
+            remote_hash: "ccc".to_string(),
+            local_content: vec![],
+            remote_content: vec![],
+        };
+        assert!(conflict.is_true_conflict());
+    }
+
+    #[test]
+    fn test_is_not_conflict_only_local_changed() {
+        let conflict = FileConflict {
+            file_path: ".zshrc".to_string(),
+            local_hash: "aaa".to_string(),
+            last_synced_hash: Some("bbb".to_string()),
+            remote_hash: "bbb".to_string(), // remote unchanged from last sync
+            local_content: vec![],
+            remote_content: vec![],
+        };
+        assert!(!conflict.is_true_conflict());
+    }
+
+    #[test]
+    fn test_is_not_conflict_only_remote_changed() {
+        let conflict = FileConflict {
+            file_path: ".zshrc".to_string(),
+            local_hash: "bbb".to_string(), // local unchanged from last sync
+            last_synced_hash: Some("bbb".to_string()),
+            remote_hash: "ccc".to_string(),
+            local_content: vec![],
+            remote_content: vec![],
+        };
+        assert!(!conflict.is_true_conflict());
+    }
+
+    #[test]
+    fn test_is_conflict_no_sync_history_different() {
+        let conflict = FileConflict {
+            file_path: ".zshrc".to_string(),
+            local_hash: "aaa".to_string(),
+            last_synced_hash: None,
+            remote_hash: "bbb".to_string(),
+            local_content: vec![],
+            remote_content: vec![],
+        };
+        assert!(conflict.is_true_conflict());
+    }
+
+    #[test]
+    fn test_is_not_conflict_no_sync_history_same() {
+        let conflict = FileConflict {
+            file_path: ".zshrc".to_string(),
+            local_hash: "aaa".to_string(),
+            last_synced_hash: None,
+            remote_hash: "aaa".to_string(),
+            local_content: vec![],
+            remote_content: vec![],
+        };
+        assert!(!conflict.is_true_conflict());
+    }
+
+    // detect_conflict tests
+    #[test]
+    fn test_detect_conflict_returns_none_when_equal() {
+        let temp = TempDir::new().unwrap();
+        let local_path = temp.path().join(".zshrc");
+        let content = b"same content";
+        std::fs::write(&local_path, content).unwrap();
+
+        let result = detect_conflict(".zshrc", &local_path, content, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detect_conflict_returns_some_when_differ_no_history() {
+        let temp = TempDir::new().unwrap();
+        let local_path = temp.path().join(".zshrc");
+        std::fs::write(&local_path, b"local content").unwrap();
+
+        let result = detect_conflict(".zshrc", &local_path, b"remote content", None);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_detect_conflict_returns_none_when_local_missing() {
+        let temp = TempDir::new().unwrap();
+        let local_path = temp.path().join("nonexistent");
+
+        let result = detect_conflict("nonexistent", &local_path, b"remote", None);
+        assert!(result.is_none());
+    }
+
+    // ConflictState tests
+    #[test]
+    fn test_conflict_state_add_remove() {
+        let mut state = ConflictState::default();
+        assert!(!state.has_conflicts());
+
+        state.add_conflict(".zshrc", "aaa", "bbb");
+        assert!(state.has_conflicts());
+        assert_eq!(state.conflicts.len(), 1);
+
+        state.add_conflict(".zshrc", "aaa", "ccc"); // overwrites
+        assert_eq!(state.conflicts.len(), 1);
+        assert_eq!(state.conflicts[0].remote_hash, "ccc");
+
+        state.add_conflict(".bashrc", "xxx", "yyy"); // different file
+        assert_eq!(state.conflicts.len(), 2);
+
+        state.remove_conflict(".zshrc");
+        assert_eq!(state.conflicts.len(), 1);
+        assert_eq!(state.conflicts[0].file_path, ".bashrc");
+
+        state.remove_conflict(".bashrc");
+        assert!(!state.has_conflicts());
+    }
+
+    // escape_applescript tests
+    #[test]
+    fn test_escape_applescript_plain() {
+        assert_eq!(escape_applescript("hello"), "hello");
+    }
+
+    #[test]
+    fn test_escape_applescript_quotes() {
+        assert_eq!(escape_applescript("hello\"world"), "hello\\\"world");
+    }
+
+    #[test]
+    fn test_escape_applescript_backslashes() {
+        assert_eq!(escape_applescript("path\\to\\file"), "path\\\\to\\\\file");
+    }
+
+    #[test]
+    fn test_escape_applescript_truncates_long() {
+        let long = "a".repeat(200);
+        let escaped = escape_applescript(&long);
+        assert!(escaped.len() <= 100);
+    }
+
+    #[test]
+    fn test_escape_applescript_removes_control_chars() {
+        let with_control = "hello\nworld\ttab";
+        let escaped = escape_applescript(with_control);
+        assert!(!escaped.contains('\n'));
+        assert!(!escaped.contains('\t'));
+    }
+}
