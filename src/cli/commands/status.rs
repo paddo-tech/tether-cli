@@ -114,8 +114,14 @@ pub async fn run() -> Result<()> {
     println!("{sync_table}");
     println!();
 
+    // Split files into dotfiles and project configs
+    let (dotfiles, project_configs): (Vec<_>, Vec<_>) = state
+        .files
+        .iter()
+        .partition(|(file, _)| !file.starts_with("project:"));
+
     // Dotfiles - minimal table for lists
-    if !state.files.is_empty() {
+    if !dotfiles.is_empty() {
         let mut files_table = Output::table_minimal();
         files_table.set_header(vec![
             Cell::new("Dotfiles")
@@ -129,7 +135,7 @@ pub async fn run() -> Result<()> {
                 .fg(Color::Cyan),
         ]);
 
-        for (file, file_state) in &state.files {
+        for (file, file_state) in &dotfiles {
             let (status, color) = if file_state.synced {
                 (format!("{} Synced", Output::CHECK), Color::Green)
             } else {
@@ -152,6 +158,47 @@ pub async fn run() -> Result<()> {
         println!();
     } else {
         Output::dim("  No dotfiles synced yet");
+        println!();
+    }
+
+    // Project configs - separate table
+    if !project_configs.is_empty() {
+        let mut project_table = Output::table_minimal();
+        project_table.set_header(vec![
+            Cell::new("Project Configs")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Status")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Modified")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+        ]);
+
+        for (file, file_state) in &project_configs {
+            let (status, color) = if file_state.synced {
+                (format!("{} Synced", Output::CHECK), Color::Green)
+            } else {
+                (format!("{} Modified", Output::WARN), Color::Yellow)
+            };
+
+            // Strip "project:" prefix for cleaner display
+            let display_name = file.strip_prefix("project:").unwrap_or(file);
+
+            project_table.add_row(vec![
+                Cell::new(display_name),
+                Cell::new(status).fg(color),
+                Cell::new(
+                    file_state
+                        .last_modified
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                ),
+            ]);
+        }
+        println!("{project_table}");
         println!();
     }
 
