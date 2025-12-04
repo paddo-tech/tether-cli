@@ -93,15 +93,26 @@ impl GitBackend {
             return Ok(());
         }
 
-        // Use git CLI for pulling - rebase to handle divergent branches cleanly
-        let output = Command::new("git")
-            .args(["pull", "--rebase", "origin", "main"])
+        // Fetch first, then rebase explicitly onto origin/main
+        // This avoids "Cannot rebase onto multiple branches" errors
+        let fetch_output = Command::new("git")
+            .args(["fetch", "origin", "main"])
             .current_dir(&self.repo_path)
             .output()?;
 
-        if !output.status.success() {
-            let error = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Failed to pull changes: {}", error));
+        if !fetch_output.status.success() {
+            let error = String::from_utf8_lossy(&fetch_output.stderr);
+            return Err(anyhow::anyhow!("Failed to fetch changes: {}", error));
+        }
+
+        let rebase_output = Command::new("git")
+            .args(["rebase", "origin/main"])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !rebase_output.status.success() {
+            let error = String::from_utf8_lossy(&rebase_output.stderr);
+            return Err(anyhow::anyhow!("Failed to rebase: {}", error));
         }
 
         Ok(())
