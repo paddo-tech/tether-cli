@@ -292,12 +292,14 @@ enabled = false`} />
 tether config set packages.npm.enabled true`} />
 
     <h3>Homebrew</h3>
-    <p>Syncs formulae, casks, and taps via Brewfile format.</p>
+    <p>Syncs formulae, casks, and taps via Brewfile format. Casks include desktop apps like VS Code, Slack, Microsoft Office, and most macOS applications installed via <code>brew install --cask</code>.</p>
     <Code code={`# Manifest: manifests/Brewfile
 tap "homebrew/cask"
 brew "ripgrep"
 brew "fd"
-cask "visual-studio-code"`} />
+cask "visual-studio-code"
+cask "slack"
+cask "1password"`} />
 
     <h3>npm</h3>
     <p>Syncs global npm packages.</p>
