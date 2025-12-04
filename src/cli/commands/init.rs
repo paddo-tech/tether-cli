@@ -116,10 +116,10 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
     // Initial sync
     super::sync::run(false, false).await?;
 
-    // Start daemon if requested
+    // Install daemon for auto-start on login (unless opted out)
     if !no_daemon {
-        if let Err(err) = super::daemon::start().await {
-            Output::warning(&format!("Failed to start daemon: {}", err));
+        if let Err(err) = super::daemon::install().await {
+            Output::warning(&format!("Failed to install daemon: {}", err));
         }
     }
 
