@@ -117,7 +117,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.tag_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
@@ -143,43 +143,42 @@ jobs:
           git clone https://x-access-token:${COMMITTER_TOKEN}@github.com/paddo-tech/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
 
-          # Generate new formula
-          cat > Formula/tether-cli.rb << EOF
-class TetherCli < Formula
-  desc "Sync dotfiles and packages across machines"
-  homepage "https://github.com/paddo-tech/tether-cli"
-  version "${VERSION}"
-  license "MIT"
-
-  on_macos do
-    on_intel do
-      url "https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-x86_64-apple-darwin.tar.gz"
-      sha256 "${SHA_X86}"
-    end
-    on_arm do
-      url "https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-aarch64-apple-darwin.tar.gz"
-      sha256 "${SHA_ARM}"
-    end
-  end
-
-  def install
-    bin.install "tether"
-  end
-
-  def caveats
-    <<~EOS
-      To get started, run:
-        tether init
-
-      This will set up your sync repository and start the background daemon.
-    EOS
-  end
-
-  test do
-    assert_match "tether", shell_output("#{bin}/tether --help")
-  end
-end
-EOF
+          # Generate new formula using printf to avoid heredoc parsing issues
+          printf '%s\n' \
+            'class TetherCli < Formula' \
+            '  desc "Sync dotfiles and packages across machines"' \
+            '  homepage "https://github.com/paddo-tech/tether-cli"' \
+            "  version \"${VERSION}\"" \
+            '  license "MIT"' \
+            '' \
+            '  on_macos do' \
+            '    on_intel do' \
+            "      url \"https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-x86_64-apple-darwin.tar.gz\"" \
+            "      sha256 \"${SHA_X86}\"" \
+            '    end' \
+            '    on_arm do' \
+            "      url \"https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-aarch64-apple-darwin.tar.gz\"" \
+            "      sha256 \"${SHA_ARM}\"" \
+            '    end' \
+            '  end' \
+            '' \
+            '  def install' \
+            '    bin.install "tether"' \
+            '  end' \
+            '' \
+            '  def caveats' \
+            '    <<~EOS' \
+            '      To get started, run:' \
+            '        tether init' \
+            '' \
+            '      This will set up your sync repository and start the background daemon.' \
+            '    EOS' \
+            '  end' \
+            '' \
+            '  test do' \
+            '    assert_match "tether", shell_output("#{bin}/tether --help")' \
+            '  end' \
+            'end' > Formula/tether-cli.rb
 
           # Commit and push
           git config user.name "github-actions[bot]"
