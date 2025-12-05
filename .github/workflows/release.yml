@@ -187,3 +187,4 @@ EOF
           git add Formula/tether-cli.rb
           git commit -m "tether-cli ${VERSION}"
           git push
+
