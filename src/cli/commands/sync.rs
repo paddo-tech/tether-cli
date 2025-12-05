@@ -161,8 +161,32 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     let mut machine_state = build_machine_state(&config, &state, &sync_path).await?;
 
     // Import packages from manifests (install missing packages, respecting removed_packages)
+    // Interactive mode: install deferred casks from daemon syncs
     if !dry_run {
-        import_packages(&config, &sync_path, &machine_state).await?;
+        let deferred_casks = state.deferred_casks.clone();
+        if !deferred_casks.is_empty() {
+            Output::info(&format!(
+                "Installing {} previously deferred cask{}: {}",
+                deferred_casks.len(),
+                if deferred_casks.len() == 1 { "" } else { "s" },
+                deferred_casks.join(", ")
+            ));
+        }
+
+        import_packages(
+            &config,
+            &sync_path,
+            &machine_state,
+            false, // interactive mode
+            &deferred_casks,
+        )
+        .await?;
+
+        // Clear deferred casks after successful interactive sync
+        if !state.deferred_casks.is_empty() {
+            state.deferred_casks.clear();
+            state.save()?;
+        }
 
         // Rebuild machine state after import to capture newly installed packages
         machine_state = build_machine_state(&config, &state, &sync_path).await?;

@@ -12,38 +12,84 @@ on:
 permissions:
   contents: write
 
+env:
+  # Signing identity - must match certificate installed on runner
+  SIGNING_IDENTITY: "Developer ID Application: Paddo Tech PTY LTD (D9Q57P9D3L)"
+
 jobs:
-  release:
-    runs-on: macos-latest
+  build:
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust targets
+        run: |
+          rustup target add x86_64-apple-darwin
+          rustup target add aarch64-apple-darwin
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build release (Apple Silicon)
+        run: cargo build --release --target aarch64-apple-darwin
 
-      - name: Build release
-        run: cargo build --release
+      - name: Build release (Intel)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Sign binaries
+        run: |
+          codesign --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            --force \
+            target/aarch64-apple-darwin/release/tether
+
+          codesign --sign "$SIGNING_IDENTITY" \
+            --options runtime \
+            --timestamp \
+            --force \
+            target/x86_64-apple-darwin/release/tether
+
+      - name: Notarize binaries
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          # Notarize Apple Silicon binary
+          cd target/aarch64-apple-darwin/release
+          zip tether-arm64.zip tether
+          xcrun notarytool submit tether-arm64.zip \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          rm tether-arm64.zip
+          cd -
+
+          # Notarize Intel binary
+          cd target/x86_64-apple-darwin/release
+          zip tether-x64.zip tether
+          xcrun notarytool submit tether-x64.zip \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          rm tether-x64.zip
+
+      - name: Package binaries
+        run: |
+          cd target/aarch64-apple-darwin/release
+          tar -czf tether-aarch64-apple-darwin.tar.gz tether
+          shasum -a 256 tether-aarch64-apple-darwin.tar.gz > tether-aarch64-apple-darwin.tar.gz.sha256
+          cd -
+
+          cd target/x86_64-apple-darwin/release
+          tar -czf tether-x86_64-apple-darwin.tar.gz tether
+          shasum -a 256 tether-x86_64-apple-darwin.tar.gz > tether-x86_64-apple-darwin.tar.gz.sha256
 
       - name: Get version from Cargo.toml
         id: version
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
 
       - name: Check if tag exists
         id: tag_check
@@ -55,7 +101,7 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create tag and release
+      - name: Create tag
         if: steps.tag_check.outputs.exists == 'false'
         run: |
           git config user.name "github-actions[bot]"
@@ -69,44 +115,69 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
+          files: |
+            target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz
+            target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz.sha256
+            target/x86_64-apple-darwin/release/tether-x86_64-apple-darwin.tar.gz
+            target/x86_64-apple-darwin/release/tether-x86_64-apple-darwin.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  update-homebrew:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get version from Cargo.toml
-        id: version
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Check if this is a new release
-        id: check
-        run: |
-          # Check if tag was created by the release job (within last 5 mins)
-          git fetch --tags
-          TAG_DATE=$(git log -1 --format=%ct "v${{ steps.version.outputs.version }}" 2>/dev/null || echo 0)
-          NOW=$(date +%s)
-          DIFF=$((NOW - TAG_DATE))
-          if [ $DIFF -lt 300 ] && [ $TAG_DATE -ne 0 ]; then
-            echo "new_release=true" >> $GITHUB_OUTPUT
-          else
-            echo "new_release=false" >> $GITHUB_OUTPUT
-            echo "Skipping homebrew update - tag is not new"
-          fi
-
       - name: Update Homebrew formula
-        if: steps.check.outputs.new_release == 'true'
-        uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          formula-name: tether-cli
-          homebrew-tap: paddo-tech/homebrew-tap
-          tag-name: v${{ steps.version.outputs.version }}
+        if: steps.tag_check.outputs.exists == 'false'
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          SHA_ARM=$(cat target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+          SHA_X86=$(cat target/x86_64-apple-darwin/release/tether-x86_64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+
+          # Clone the tap repo
+          rm -rf /tmp/homebrew-tap
+          git clone https://x-access-token:${COMMITTER_TOKEN}@github.com/paddo-tech/homebrew-tap.git /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+
+          # Generate new formula
+          cat > Formula/tether-cli.rb << EOF
+class TetherCli < Formula
+  desc "Sync dotfiles and packages across machines"
+  homepage "https://github.com/paddo-tech/tether-cli"
+  version "${VERSION}"
+  license "MIT"
+
+  on_macos do
+    on_intel do
+      url "https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-x86_64-apple-darwin.tar.gz"
+      sha256 "${SHA_X86}"
+    end
+    on_arm do
+      url "https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-aarch64-apple-darwin.tar.gz"
+      sha256 "${SHA_ARM}"
+    end
+  end
+
+  def install
+    bin.install "tether"
+  end
+
+  def caveats
+    <<~EOS
+      To get started, run:
+        tether init
+
+      This will set up your sync repository and start the background daemon.
+    EOS
+  end
+
+  test do
+    assert_match "tether", shell_output("#{bin}/tether --help")
+  end
+end
+EOF
+
+          # Commit and push
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/tether-cli.rb
+          git commit -m "tether-cli ${VERSION}"
+          git push

@@ -44,20 +44,32 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
     },
 ];
 
-/// Import packages from manifests, installing only missing packages
+/// Import packages from manifests, installing only missing packages.
+/// In daemon mode, casks are deferred (require password).
+/// Returns list of deferred casks (empty if not in daemon mode).
 pub async fn import_packages(
     config: &Config,
     sync_path: &Path,
     machine_state: &MachineState,
-) -> Result<()> {
+    daemon_mode: bool,
+    previously_deferred: &[String],
+) -> Result<Vec<String>> {
     let manifests_dir = sync_path.join("manifests");
     if !manifests_dir.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+
+    let mut deferred_casks = Vec::new();
 
     // Homebrew - special handling for formulae/casks/taps
     if config.packages.brew.enabled {
-        import_brew(&manifests_dir, machine_state).await;
+        deferred_casks = import_brew(
+            &manifests_dir,
+            machine_state,
+            daemon_mode,
+            previously_deferred,
+        )
+        .await;
     }
 
     // Simple package managers (npm, pnpm, bun, gem)
@@ -75,24 +87,31 @@ pub async fn import_packages(
         }
     }
 
-    Ok(())
+    Ok(deferred_casks)
 }
 
-/// Import brew packages (formulae, casks, taps)
-async fn import_brew(manifests_dir: &Path, machine_state: &MachineState) {
+/// Import brew packages (formulae, casks, taps).
+/// In daemon mode, casks are skipped and returned as deferred.
+/// In interactive mode, previously deferred casks are included.
+async fn import_brew(
+    manifests_dir: &Path,
+    machine_state: &MachineState,
+    daemon_mode: bool,
+    previously_deferred: &[String],
+) -> Vec<String> {
     let brewfile = manifests_dir.join("Brewfile");
     if !brewfile.exists() {
-        return;
+        return Vec::new();
     }
 
     let brew = BrewManager::new();
     if !brew.is_available().await {
-        return;
+        return Vec::new();
     }
 
     let manifest = match std::fs::read_to_string(&brewfile) {
         Ok(m) => m,
-        Err(_) => return,
+        Err(_) => return Vec::new(),
     };
 
     // Parse the Brewfile
@@ -138,21 +157,40 @@ async fn import_brew(manifests_dir: &Path, machine_state: &MachineState) {
         .formulae
         .iter()
         .filter(|p| !local_formulae.contains(normalize_formula_name(p)))
+        .cloned()
         .collect();
     let missing_casks: Vec<_> = brew_packages
         .casks
         .iter()
         .filter(|p| !local_casks.contains(p.as_str()))
+        .cloned()
         .collect();
 
-    let total_missing = missing_formulae.len() + missing_casks.len();
+    // In daemon mode: skip casks (they require password)
+    let (casks_to_install, deferred_casks) = if daemon_mode {
+        (Vec::new(), missing_casks)
+    } else {
+        // Interactive: include previously deferred casks that are still missing
+        let mut casks = missing_casks;
+        for deferred in previously_deferred {
+            if !local_casks.contains(deferred.as_str())
+                && !casks.contains(deferred)
+                && !removed_casks.contains(deferred)
+            {
+                casks.push(deferred.clone());
+            }
+        }
+        (casks, Vec::new())
+    };
+
+    let total_missing = missing_formulae.len() + casks_to_install.len();
     if total_missing == 0 {
-        return;
+        return deferred_casks;
     }
 
     let missing_names: Vec<_> = missing_formulae
         .iter()
-        .chain(missing_casks.iter())
+        .chain(casks_to_install.iter())
         .map(|s| s.as_str())
         .collect();
     Output::info(&format!(
@@ -161,15 +199,22 @@ async fn import_brew(manifests_dir: &Path, machine_state: &MachineState) {
         if total_missing == 1 { "" } else { "s" },
         missing_names.join(", ")
     ));
-    if !missing_casks.is_empty() {
+    if !casks_to_install.is_empty() {
         Output::info("Casks may prompt for your password");
     }
 
-    // Generate filtered manifest and import
-    let filtered_manifest = brew_packages.generate();
+    // Generate filtered manifest (without deferred casks)
+    let filtered_packages = BrewfilePackages {
+        taps: brew_packages.taps,
+        formulae: missing_formulae,
+        casks: casks_to_install,
+    };
+    let filtered_manifest = filtered_packages.generate();
     if let Err(e) = brew.import_manifest(&filtered_manifest).await {
         Output::warning(&format!("Failed to import Brewfile: {}", e));
     }
+
+    deferred_casks
 }
 
 /// Import a simple package manager (one package per line manifest)

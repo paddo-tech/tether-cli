@@ -361,6 +361,23 @@ pub fn notify_conflicts(count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Send macOS notification about deferred casks
+pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
+    use std::process::Command;
+
+    let count = casks.len();
+    let script = format!(
+        r#"display notification "{} cask{} need{} password" with title "Tether" subtitle "Run 'tether sync' to install""#,
+        count,
+        if count == 1 { "" } else { "s" },
+        if count == 1 { "s" } else { "" }
+    );
+
+    Command::new("osascript").args(["-e", &script]).output()?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
