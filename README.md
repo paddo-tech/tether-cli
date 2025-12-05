@@ -72,9 +72,10 @@ Share a sync repo across your team to maintain consistent development environmen
 - **Homebrew Formulae** - CLI tools like git, ripgrep, node
 - **Homebrew Casks** - Desktop apps like VS Code, Slack, Docker, Spotify
 - **Homebrew Taps** - Custom repositories
-- **npm** - Global packages synced as simple text list
-- **pnpm** - Global packages synced as simple text list
-- More package managers coming soon (cargo, pipx, gem)
+- **npm** - Global packages
+- **pnpm** - Global packages
+- **bun** - Global packages
+- **gem** - Ruby gems
 
 **Note:** Package manifests are not encrypted since package names are not sensitive.
 
