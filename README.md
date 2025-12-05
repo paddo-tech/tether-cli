@@ -2,8 +2,16 @@
 
 > Sync your development environment across multiple machines automatically.
 
+[![GitHub Release](https://img.shields.io/github/v/release/paddo-tech/tether-cli)](https://github.com/paddo-tech/tether-cli/releases)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/paddo-tech/tether-cli/release.yml?branch=main)](https://github.com/paddo-tech/tether-cli/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org/)
+[![macOS Intel](https://img.shields.io/badge/macOS-Intel-success)](https://github.com/paddo-tech/tether-cli/releases)
+[![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-success)](https://github.com/paddo-tech/tether-cli/releases)
+[![Linux](https://img.shields.io/badge/Linux-Coming%20Soon-lightgrey)](https://github.com/paddo-tech/tether-cli)
+
+[![GitHub Stars](https://img.shields.io/github/stars/paddo-tech/tether-cli?style=social)](https://github.com/paddo-tech/tether-cli)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/paddotech)
 
 **Website:** [tether-cli.com](https://tether-cli.com)
 
