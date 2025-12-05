@@ -14,6 +14,9 @@ pub struct SyncState {
     pub last_upgrade: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_upgrade_with_updates: Option<DateTime<Utc>>,
+    /// Casks deferred during daemon sync (require password)
+    #[serde(default)]
+    pub deferred_casks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +241,7 @@ impl SyncState {
             packages: HashMap::new(),
             last_upgrade: None,
             last_upgrade_with_updates: None,
+            deferred_casks: Vec::new(),
         }
     }
 

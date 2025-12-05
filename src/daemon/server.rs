@@ -3,7 +3,8 @@ use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
 };
 use crate::sync::{
-    detect_conflict, notify_conflicts, ConflictState, GitBackend, SyncEngine, SyncState,
+    detect_conflict, import_packages, notify_conflicts, notify_deferred_casks, ConflictState,
+    GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
 use chrono::{Local, Timelike};
@@ -327,7 +328,41 @@ impl DaemonServer {
             }
         }
 
-        // Sync packages
+        // Import packages (daemon mode: defer casks that need password)
+        let machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
+            .unwrap_or_else(|| MachineState::new(&state.machine_id));
+        let deferred_casks = import_packages(
+            &config,
+            &sync_path,
+            &machine_state,
+            true, // daemon_mode
+            &state.deferred_casks,
+        )
+        .await?;
+
+        // Handle newly deferred casks
+        if !deferred_casks.is_empty() {
+            // Merge with existing deferred casks (dedupe)
+            let mut all_deferred: std::collections::HashSet<_> =
+                state.deferred_casks.iter().cloned().collect();
+            for cask in &deferred_casks {
+                all_deferred.insert(cask.clone());
+            }
+            state.deferred_casks = all_deferred.into_iter().collect();
+            state.deferred_casks.sort();
+            state.save()?;
+
+            // Notify user
+            notify_deferred_casks(&deferred_casks).ok();
+            log::info!(
+                "Deferred {} cask{} (require password): {}",
+                deferred_casks.len(),
+                if deferred_casks.len() == 1 { "" } else { "s" },
+                deferred_casks.join(", ")
+            );
+        }
+
+        // Sync packages (export)
         changes_made |= self.sync_packages(&config, &mut state, &sync_path).await?;
 
         // Commit and push if changes made

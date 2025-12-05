@@ -12,8 +12,8 @@ pub use backup::{
     prune_old_backups, restore_file,
 };
 pub use conflict::{
-    detect_conflict, notify_conflict, notify_conflicts, ConflictResolution, ConflictState,
-    FileConflict, PendingConflict,
+    detect_conflict, notify_conflict, notify_conflicts, notify_deferred_casks, ConflictResolution,
+    ConflictState, FileConflict, PendingConflict,
 };
 pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;
