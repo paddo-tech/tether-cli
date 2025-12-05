@@ -56,7 +56,8 @@ const comparisonData = [
   { feature: 'End-to-End Encryption', tether: true, mackup: false, chezmoi: true, manual: false },
   { feature: 'Package Managers', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'Secret Detection', tether: true, mackup: false, chezmoi: false, manual: false },
-  { feature: 'Cross-Platform', tether: true, mackup: true, chezmoi: true, manual: true },
+  { feature: 'macOS Support', tether: true, mackup: true, chezmoi: true, manual: true },
+  { feature: 'Linux Support', tether: 'testing', mackup: true, chezmoi: true, manual: true },
   { feature: 'Zero Config', tether: true, mackup: true, chezmoi: false, manual: false },
 ];
 ---
@@ -287,8 +288,10 @@ const comparisonData = [
                 <tr class="hover:bg-surface/50 transition-colors">
                   <td class="px-6 py-4 font-mono text-sm">{row.feature}</td>
                   <td class="px-6 py-4 text-center">
-                    {row.tether ? (
+                    {row.tether === true ? (
                       <span class="text-success text-xl">✓</span>
+                    ) : row.tether === 'testing' ? (
+                      <span class="text-warning text-xs font-mono">BETA</span>
                     ) : (
                       <span class="text-muted">—</span>
                     )}
