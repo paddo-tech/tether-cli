@@ -26,7 +26,7 @@ Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, et
 - 🔐 **End-to-end encryption** - Dotfiles encrypted with AES-256-GCM before syncing
 - 🔍 **Secret detection** - Automatic scanning for API keys, tokens, and credentials
 - 🔑 **Passphrase-based encryption** - Derive keys from a passphrase you remember
-- 📦 **Package manager support** - Syncs Homebrew (Brewfiles), npm, and pnpm global packages
+- 📦 **Package manager support** - Syncs Homebrew formulae, casks (VS Code, Slack, etc.), npm, and pnpm globals
 - 🔄 **Automatic syncing** - Background daemon keeps everything in sync
 - 🗂️ **Dotfile management** - Encrypted shell configs synced across machines
 - 🌳 **Git-backed** - Uses private Git repo for versioning and history
@@ -36,10 +36,10 @@ Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, et
 
 ```bash
 # Install via Homebrew
-brew install tether-cli
+brew tap paddo-tech/tap && brew install tether-cli
 
-# Initialize with your private sync repo
-tether init --repo git@github.com:username/tether-sync.git
+# Initialize (interactive setup)
+tether init
 
 # That's it! The daemon will keep everything in sync automatically.
 ```
@@ -69,7 +69,9 @@ Share a sync repo across your team to maintain consistent development environmen
 - Encryption key: Derived from your passphrase using age encryption
 
 ### Packages (Plaintext)
-- **Homebrew** - Synced via Brewfile (standard Homebrew format)
+- **Homebrew Formulae** - CLI tools like git, ripgrep, node
+- **Homebrew Casks** - Desktop apps like VS Code, Slack, Docker, Spotify
+- **Homebrew Taps** - Custom repositories
 - **npm** - Global packages synced as simple text list
 - **pnpm** - Global packages synced as simple text list
 - More package managers coming soon (cargo, pipx, gem)
