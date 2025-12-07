@@ -91,6 +91,12 @@ jobs:
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          # Detect prerelease (contains -alpha, -beta, -rc)
+          if [[ "$VERSION" =~ -alpha|-beta|-rc ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Check if tag exists
         id: tag_check
@@ -115,6 +121,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: |
             target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz
@@ -129,6 +136,7 @@ jobs:
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
+          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           SHA_ARM=$(cat target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
           SHA_X86=$(cat target/x86_64-apple-darwin/release/tether-x86_64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
@@ -138,9 +146,21 @@ jobs:
           git clone https://x-access-token:${COMMITTER_TOKEN}@github.com/paddo-tech/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
 
-          # Generate new formula using printf to avoid heredoc parsing issues
+          # Determine formula file and class name
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            # Versioned formula for prereleases: tether-cli@1.1.0-beta.1.rb
+            FORMULA_FILE="Formula/tether-cli@${VERSION}.rb"
+            # Convert version to valid Ruby class name (replace . and - with underscores)
+            CLASS_NAME="TetherCliAT$(echo ${VERSION} | sed 's/[.-]/_/g')"
+          else
+            # Main formula for stable releases
+            FORMULA_FILE="Formula/tether-cli.rb"
+            CLASS_NAME="TetherCli"
+          fi
+
+          # Generate formula
           printf '%s\n' \
-            'class TetherCli < Formula' \
+            "class ${CLASS_NAME} < Formula" \
             '  desc "Sync dotfiles and packages across machines"' \
             '  homepage "https://github.com/paddo-tech/tether-cli"' \
             "  version \"${VERSION}\"" \
@@ -173,12 +193,12 @@ jobs:
             '  test do' \
             '    assert_match "tether", shell_output("#{bin}/tether --help")' \
             '  end' \
-            'end' > Formula/tether-cli.rb
+            'end' > "$FORMULA_FILE"
 
           # Commit and push
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/tether-cli.rb
+          git add "$FORMULA_FILE"
           git commit -m "tether-cli ${VERSION}"
           git push
 
