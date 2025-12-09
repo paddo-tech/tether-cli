@@ -87,7 +87,27 @@ impl GitBackend {
         Ok(())
     }
 
+    /// Check if a rebase is currently in progress
+    fn is_rebase_in_progress(&self) -> bool {
+        self.repo_path.join(".git/rebase-merge").exists()
+            || self.repo_path.join(".git/rebase-apply").exists()
+    }
+
+    /// Abort any in-progress rebase
+    fn abort_rebase(&self) -> Result<()> {
+        Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&self.repo_path)
+            .output()?;
+        Ok(())
+    }
+
     pub fn pull(&self) -> Result<()> {
+        // Abort any stale rebase from a previous interrupted sync
+        if self.is_rebase_in_progress() {
+            self.abort_rebase()?;
+        }
+
         // Skip pull if remote branch doesn't exist (empty repository)
         if !self.remote_branch_exists("main") {
             return Ok(());
