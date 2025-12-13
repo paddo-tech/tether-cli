@@ -102,92 +102,18 @@ impl GitBackend {
         Ok(())
     }
 
-    /// Get list of conflicting files during rebase
-    fn get_conflicting_files(&self) -> Vec<PathBuf> {
+    /// Reset local branch to match remote
+    fn reset_to_remote(&self) -> Result<()> {
         let output = Command::new("git")
-            .args(["diff", "--name-only", "--diff-filter=U"])
-            .current_dir(&self.repo_path)
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(|l| self.repo_path.join(l))
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Auto-resolve manifest conflicts by taking union of all lines
-    fn auto_resolve_manifest_conflict(&self, file_path: &Path) -> Result<bool> {
-        let content = std::fs::read_to_string(file_path)?;
-
-        // Check if file has conflict markers
-        if !content.contains("<<<<<<<") {
-            return Ok(false);
-        }
-
-        // Parse and merge: collect all non-marker lines, dedupe, sort
-        let mut lines: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-
-        for line in content.lines() {
-            // Skip conflict markers
-            if line.starts_with("<<<<<<<")
-                || line.starts_with("=======")
-                || line.starts_with(">>>>>>>")
-            {
-                continue;
-            }
-            // Keep all non-empty lines from both sides
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                lines.insert(trimmed.to_string());
-            }
-        }
-
-        // Write merged content
-        let merged = lines.into_iter().collect::<Vec<_>>().join("\n") + "\n";
-        std::fs::write(file_path, merged)?;
-
-        // Stage the resolved file
-        Command::new("git")
-            .args(["add", file_path.to_str().unwrap_or("")])
+            .args(["reset", "--hard", "origin/main"])
             .current_dir(&self.repo_path)
             .output()?;
 
-        Ok(true)
-    }
-
-    /// Try to auto-resolve conflicts and continue rebase
-    fn try_auto_resolve_conflicts(&self) -> Result<bool> {
-        let conflicts = self.get_conflicting_files();
-
-        for file in &conflicts {
-            // Only auto-resolve manifest text files
-            let is_manifest = file
-                .strip_prefix(&self.repo_path)
-                .map(|p| {
-                    p.starts_with("manifests/")
-                        && p.extension().is_some_and(|e| e == "txt")
-                })
-                .unwrap_or(false);
-
-            if is_manifest {
-                self.auto_resolve_manifest_conflict(file)?;
-            } else {
-                // Non-manifest conflict - can't auto-resolve
-                return Ok(false);
-            }
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to reset: {}", error));
         }
-
-        // All conflicts resolved, continue rebase
-        let output = Command::new("git")
-            .args(["rebase", "--continue"])
-            .current_dir(&self.repo_path)
-            .env("GIT_EDITOR", "true") // Skip commit message editor
-            .output()?;
-
-        Ok(output.status.success())
+        Ok(())
     }
 
     pub fn pull(&self) -> Result<()> {
@@ -219,13 +145,10 @@ impl GitBackend {
             .output()?;
 
         if !rebase_output.status.success() {
-            // Rebase failed - try to auto-resolve manifest conflicts
-            if self.is_rebase_in_progress() && self.try_auto_resolve_conflicts()? {
-                return Ok(());
-            }
-
-            let error = String::from_utf8_lossy(&rebase_output.stderr);
-            return Err(anyhow::anyhow!("Failed to rebase: {}", error));
+            // Conflict - abort and reset to remote
+            // Safe because sync will re-export local state afterward
+            self.abort_rebase()?;
+            self.reset_to_remote()?;
         }
 
         Ok(())
