@@ -150,8 +150,9 @@ jobs:
           if [ "$IS_PRERELEASE" = "true" ]; then
             # Versioned formula for prereleases: tether-cli@1.1.0-beta.1.rb
             FORMULA_FILE="Formula/tether-cli@${VERSION}.rb"
-            # Convert version to valid Ruby class name (replace . and - with underscores)
-            CLASS_NAME="TetherCliAT$(echo ${VERSION} | sed 's/[.-]/_/g')"
+            # Convert version to valid Ruby class name: 1.1.0-beta.1 -> 110Beta1
+            # Remove dots, capitalize after hyphens, remove hyphens
+            CLASS_NAME="TetherCliAT$(echo ${VERSION} | perl -pe 's/\.//g; s/-(.)/\u$1/g')"
           else
             # Main formula for stable releases
             FORMULA_FILE="Formula/tether-cli.rb"
