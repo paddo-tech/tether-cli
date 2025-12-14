@@ -75,6 +75,52 @@ impl BrewManager {
         Self
     }
 
+    /// Unlink conflicting versioned formulae before installing new versions.
+    /// e.g., if installing tether-cli@1.0.0 but tether-cli@1.1.0 is linked, unlink it first.
+    async fn unlink_conflicting_versioned_formulae(&self, manifest_content: &str) -> Result<()> {
+        let packages = BrewfilePackages::parse(manifest_content);
+
+        for formula in &packages.formulae {
+            if let Some(at_pos) = formula.find('@') {
+                let base_name = &formula[..at_pos];
+                let requested_version = &formula[at_pos + 1..];
+
+                // Check what versions of this formula are installed
+                let output = Command::new("brew")
+                    .args(["list", "--versions"])
+                    .output()
+                    .await?;
+
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        // Format: "formula@version version-number" or "formula version-number"
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let Some(installed_name) = parts.first() {
+                            // Check if it's a versioned formula of the same base
+                            if let Some(installed_at_pos) = installed_name.find('@') {
+                                let installed_base = &installed_name[..installed_at_pos];
+                                let installed_version = &installed_name[installed_at_pos + 1..];
+
+                                // Same base, different version = conflict
+                                if installed_base == base_name
+                                    && installed_version != requested_version
+                                {
+                                    let _ = Command::new("brew")
+                                        .args(["unlink", installed_name])
+                                        .output()
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn run_brew(&self, args: &[&str]) -> Result<String> {
         let output = Command::new("brew").args(args).output().await?;
 
@@ -199,6 +245,10 @@ impl PackageManager for BrewManager {
     }
 
     async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
+        // Unlink any conflicting versioned formulae before installing
+        self.unlink_conflicting_versioned_formulae(manifest_content)
+            .await?;
+
         // Write manifest to temporary Brewfile
         let temp_path = Self::temp_brewfile_path()?;
 

@@ -41,8 +41,13 @@ impl PackageManager for UvManager {
         //     - ruff
         let mut packages = Vec::new();
         for line in output.lines() {
-            // Tool names are on lines that don't start with whitespace
-            if !line.starts_with(' ') && !line.starts_with('\t') && !line.is_empty() {
+            // Tool names are on lines that don't start with whitespace or '-'
+            // (lines starting with '-' are tool metadata, e.g. "- git-fame")
+            if !line.starts_with(' ')
+                && !line.starts_with('\t')
+                && !line.starts_with('-')
+                && !line.is_empty()
+            {
                 // Parse "toolname vX.Y.Z" - first token is name
                 let name = line.split_whitespace().next().unwrap_or("").to_string();
                 if !name.is_empty() {
