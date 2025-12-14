@@ -2,7 +2,7 @@ use crate::cli::Output;
 use crate::config::Config;
 use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, BunManager, GemManager, NpmManager,
-    PackageManager, PnpmManager,
+    PackageManager, PnpmManager, UvManager,
 };
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
@@ -42,6 +42,11 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
         display_name: "gem",
         manifest_file: "gems.txt",
     },
+    PackageManagerDef {
+        state_key: "uv",
+        display_name: "uv",
+        manifest_file: "uv.txt",
+    },
 ];
 
 /// Import packages from manifests, installing only missing packages.
@@ -79,6 +84,7 @@ pub async fn import_packages(
             "pnpm" => config.packages.pnpm.enabled,
             "bun" => config.packages.bun.enabled,
             "gem" => config.packages.gem.enabled,
+            "uv" => config.packages.uv.enabled,
             _ => false,
         };
 
@@ -234,6 +240,7 @@ async fn import_simple_manager(
         "pnpm" => Box::new(PnpmManager::new()),
         "bun" => Box::new(BunManager::new()),
         "gem" => Box::new(GemManager::new()),
+        "uv" => Box::new(UvManager::new()),
         _ => return,
     };
 
@@ -328,6 +335,7 @@ pub async fn sync_packages(
             "pnpm" => config.packages.pnpm.enabled,
             "bun" => config.packages.bun.enabled,
             "gem" => config.packages.gem.enabled,
+            "uv" => config.packages.uv.enabled,
             _ => false,
         };
 

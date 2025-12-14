@@ -177,7 +177,7 @@ fn show_dotfile_diff(
 }
 
 async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Result<()> {
-    use crate::packages::{BrewManager, NpmManager, PackageManager, PnpmManager};
+    use crate::packages::{BrewManager, NpmManager, PackageManager, PnpmManager, UvManager};
 
     let manifests_dir = sync_path.join("manifests");
     let mut has_diff = false;
@@ -262,6 +262,38 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 if !diff.is_empty() {
                     has_diff = true;
                     println!("{}", "pnpm:".bright_cyan().bold());
+                    for (pkg, status) in diff {
+                        let symbol = match status.as_str() {
+                            "added" => "+",
+                            "removed" => "-",
+                            _ => "~",
+                        };
+                        println!("{}", format_diff_line(symbol, &status, &pkg));
+                    }
+                    println!();
+                }
+            }
+        }
+    }
+
+    // uv diff
+    if config.packages.uv.enabled {
+        let uv = UvManager::new();
+        if uv.is_available().await {
+            let uv_path = manifests_dir.join("uv.txt");
+            if uv_path.exists() {
+                let remote_manifest = std::fs::read_to_string(&uv_path)?;
+                let local_manifest = uv.export_manifest().await?;
+
+                let remote_packages: Vec<_> =
+                    remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+                let local_packages: Vec<_> =
+                    local_manifest.lines().filter(|l| !l.is_empty()).collect();
+
+                let diff = diff_package_lists(&remote_packages, &local_packages);
+                if !diff.is_empty() {
+                    has_diff = true;
+                    println!("{}", "uv:".bright_cyan().bold());
                     for (pkg, status) in diff {
                         let symbol = match status.as_str() {
                             "added" => "+",

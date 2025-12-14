@@ -1,7 +1,7 @@
 use crate::cli::{Output, Progress, Prompt};
 use crate::config::Config;
 use crate::packages::{
-    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
 };
 use crate::sync::{
     import_packages, sync_packages, GitBackend, MachineState, SyncEngine, SyncState,
@@ -1080,6 +1080,19 @@ async fn build_machine_state(
             if let Ok(packages) = gem.list_installed().await {
                 machine_state.packages.insert(
                     "gem".to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // uv
+    if config.packages.uv.enabled {
+        let uv = UvManager::new();
+        if uv.is_available().await {
+            if let Ok(packages) = uv.list_installed().await {
+                machine_state.packages.insert(
+                    "uv".to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
                 );
             }

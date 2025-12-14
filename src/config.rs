@@ -58,6 +58,8 @@ pub struct PackagesConfig {
     pub pnpm: PnpmConfig,
     pub bun: BunConfig,
     pub gem: GemConfig,
+    #[serde(default)]
+    pub uv: UvConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +91,21 @@ pub struct BunConfig {
 pub struct GemConfig {
     pub enabled: bool,
     pub sync_versions: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UvConfig {
+    pub enabled: bool,
+    pub sync_versions: bool,
+}
+
+impl Default for UvConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sync_versions: false,
+        }
+    }
 }
 
 /// A dotfile entry - either a simple string path or an object with options
@@ -417,6 +434,7 @@ impl Default for Config {
                     enabled: true,
                     sync_versions: false,
                 },
+                uv: UvConfig::default(),
             },
             dotfiles: DotfilesConfig {
                 files: vec![

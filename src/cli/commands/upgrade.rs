@@ -1,7 +1,7 @@
 use crate::cli::output::Output;
 use crate::packages::{
     brew::BrewManager, bun::BunManager, gem::GemManager, manager::PackageManager, npm::NpmManager,
-    pnpm::PnpmManager,
+    pnpm::PnpmManager, uv::UvManager,
 };
 use crate::sync::SyncState;
 use anyhow::Result;
@@ -16,6 +16,7 @@ pub async fn run() -> Result<()> {
         Box::new(PnpmManager::new()),
         Box::new(BunManager::new()),
         Box::new(GemManager::new()),
+        Box::new(UvManager::new()),
     ];
 
     let mut any_upgraded = false;
