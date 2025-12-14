@@ -98,26 +98,31 @@ jobs:
             echo "prerelease=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Check if tag exists
-        id: tag_check
+      - name: Check if release exists
+        id: release_check
         run: |
-          if git ls-remote --tags origin | grep -q "refs/tags/v${{ steps.version.outputs.version }}$"; then
+          if gh release view "v${{ steps.version.outputs.version }}" &>/dev/null; then
             echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} already exists, skipping release"
+            echo "Release v${{ steps.version.outputs.version }} already exists, skipping"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create tag
-        if: steps.tag_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
+        if: steps.release_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          # Only create tag if it doesn't exist
+          if ! git ls-remote --tags origin | grep -q "refs/tags/v${{ steps.version.outputs.version }}$"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
+            git push origin "v${{ steps.version.outputs.version }}"
+          fi
 
       - name: Create GitHub Release
-        if: steps.tag_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
+        if: steps.release_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
@@ -132,7 +137,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update Homebrew formula
-        if: steps.tag_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
+        if: steps.release_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
         env:
           COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}

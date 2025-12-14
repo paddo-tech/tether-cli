@@ -80,11 +80,9 @@ Before completing work:
 
 Homebrew tap: `paddo-tech/homebrew-tap`
 
-Push a tag to trigger auto-update of the formula:
+To release: bump version in `Cargo.toml`, commit, and push. CI creates the tag and updates the formula.
 
-```bash
-git tag v0.1.0-beta.2 && git push origin v0.1.0-beta.2
-```
+**Do NOT create tags manually** - the release workflow handles tagging.
 
 Users install via:
 ```bash
