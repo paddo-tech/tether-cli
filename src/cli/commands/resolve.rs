@@ -38,8 +38,8 @@ pub async fn run(file: Option<&str>) -> Result<()> {
     };
 
     if conflicts_to_resolve.is_empty() {
-        if file.is_some() {
-            Output::error(&format!("No conflict found for '{}'", file.unwrap()));
+        if let Some(f) = file {
+            Output::error(&format!("No conflict found for '{}'", f));
         } else {
             Output::success("No conflicts to resolve");
         }

@@ -155,22 +155,32 @@ impl GitBackend {
     }
 
     pub fn push(&self) -> Result<()> {
-        // Use git CLI for pushing - it handles gh authentication automatically
-        // Use -u flag to set upstream tracking on first push
         let args = if self.remote_branch_exists("main") {
             vec!["push", "origin", "main"]
         } else {
             vec!["push", "-u", "origin", "main"]
         };
 
-        let output = Command::new("git")
-            .args(&args)
-            .current_dir(&self.repo_path)
-            .output()?;
+        for attempt in 1..=3 {
+            let output = Command::new("git")
+                .args(&args)
+                .current_dir(&self.repo_path)
+                .output()?;
 
-        if !output.status.success() {
+            if output.status.success() {
+                return Ok(());
+            }
+
             let error = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("Failed to push changes: {}", error));
+
+            // Retry on rejection due to remote changes
+            let is_rejection = error.contains("fetch first") || error.contains("non-fast-forward");
+            if is_rejection && attempt < 3 {
+                self.pull()?;
+                continue;
+            }
+
+            return Err(anyhow::anyhow!("Failed to push: {}", error));
         }
 
         Ok(())
