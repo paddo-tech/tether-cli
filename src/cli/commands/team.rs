@@ -565,46 +565,134 @@ async fn apply_layer_sync(
     team_files: &[String],
 ) -> Result<()> {
     use crate::sync::layers::map_team_to_personal_name;
-    use crate::sync::{init_layers, sync_dotfile_with_layers, sync_team_to_layer, FileType};
+    use crate::sync::{detect_file_type, init_layers, sync_dotfile_with_layers, sync_team_to_layer, FileType};
 
-    Output::info("Setting up layer-based dotfile sync...");
-
-    // Initialize layer directories
-    init_layers(team_name)?;
-
-    // Copy team dotfiles to team layer (renames team.* to .*)
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     let dotfiles_dir = team_repo_dir.join("dotfiles");
-    sync_team_to_layer(team_name, &dotfiles_dir)?;
 
-    // Process each team dotfile
+    Output::info("Setting up team dotfile sync...");
+
     for file in team_files {
-        // Map team.* files to personal dotfile names
         let personal_name = map_team_to_personal_name(file);
+        let team_file_path = dotfiles_dir.join(file);
+        let personal_file = home.join(&personal_name);
+        let file_type = detect_file_type(std::path::Path::new(&personal_name));
 
-        match sync_dotfile_with_layers(team_name, &personal_name) {
-            Ok(crate::sync::LayerSyncResult::Merged { file_type }) => {
-                let merge_type = match file_type {
-                    FileType::Toml => "TOML merge",
-                    FileType::Json => "JSON merge",
-                    FileType::Ini => "INI merge",
-                    FileType::Plain => "concatenated",
-                };
-                Output::success(&format!("  {} → {} ({})", file, personal_name, merge_type));
+        match file_type {
+            FileType::Shell => {
+                // Inject source line into personal file
+                let source_line = format!(
+                    "[ -f \"{}\" ] && source \"{}\"",
+                    team_file_path.display(),
+                    team_file_path.display()
+                );
+
+                if inject_source_line(&personal_file, &source_line)? {
+                    Output::success(&format!("  {} → {} (source injected)", file, personal_name));
+                } else {
+                    Output::dim(&format!("  {} → {} (already sourced)", file, personal_name));
+                }
             }
-            Ok(crate::sync::LayerSyncResult::TeamOnly) => {
-                Output::success(&format!("  {} → {} (team only)", file, personal_name));
+            FileType::GitConfig => {
+                // Inject [include] directive
+                if inject_gitconfig_include(&personal_file, &team_file_path)? {
+                    Output::success(&format!("  {} → {} (include added)", file, personal_name));
+                } else {
+                    Output::dim(&format!("  {} → {} (already included)", file, personal_name));
+                }
             }
-            Ok(crate::sync::LayerSyncResult::Skipped) => {
-                Output::dim(&format!("  {} skipped", file));
+            FileType::Toml | FileType::Json => {
+                // Use layer-based merge for structured files
+                init_layers(team_name)?;
+                sync_team_to_layer(team_name, &dotfiles_dir)?;
+
+                match sync_dotfile_with_layers(team_name, &personal_name) {
+                    Ok(crate::sync::LayerSyncResult::Merged { file_type }) => {
+                        let merge_type = match file_type {
+                            FileType::Toml => "TOML merged",
+                            FileType::Json => "JSON merged",
+                            _ => "merged",
+                        };
+                        Output::success(&format!("  {} → {} ({})", file, personal_name, merge_type));
+                    }
+                    Ok(crate::sync::LayerSyncResult::TeamOnly) => {
+                        Output::success(&format!("  {} → {} (team only)", file, personal_name));
+                    }
+                    Ok(crate::sync::LayerSyncResult::Skipped) => {
+                        Output::dim(&format!("  {} skipped", file));
+                    }
+                    Err(e) => {
+                        Output::warning(&format!("  {} merge failed: {}", file, e));
+                    }
+                }
             }
-            Err(e) => {
-                Output::warning(&format!("  {} failed: {}", file, e));
+            FileType::Unknown => {
+                Output::warning(&format!("  {} skipped (unknown file type)", file));
             }
         }
     }
 
-    Output::success("Layer-based sync configured");
+    Output::success("Team dotfile sync configured");
     Ok(())
+}
+
+/// Inject a source line into a shell config file (at the top, after any shebang/comments)
+fn inject_source_line(file: &std::path::Path, source_line: &str) -> Result<bool> {
+    let content = if file.exists() {
+        std::fs::read_to_string(file)?
+    } else {
+        String::new()
+    };
+
+    // Check if already sourced
+    if content.contains(source_line) {
+        return Ok(false);
+    }
+
+    // Find insertion point (after shebang and initial comments)
+    let mut lines: Vec<&str> = content.lines().collect();
+    let mut insert_idx = 0;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            insert_idx = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Insert with a blank line after for readability
+    lines.insert(insert_idx, source_line);
+    if insert_idx + 1 < lines.len() && !lines[insert_idx + 1].is_empty() {
+        lines.insert(insert_idx + 1, "");
+    }
+
+    let new_content = lines.join("\n");
+    std::fs::write(file, new_content)?;
+    Ok(true)
+}
+
+/// Inject an [include] directive into gitconfig (at the top)
+fn inject_gitconfig_include(file: &std::path::Path, team_file: &std::path::Path) -> Result<bool> {
+    let content = if file.exists() {
+        std::fs::read_to_string(file)?
+    } else {
+        String::new()
+    };
+
+    let team_path_str = team_file.display().to_string();
+
+    // Check if already included
+    if content.contains(&team_path_str) {
+        return Ok(false);
+    }
+
+    let include_block = format!("[include]\n\tpath = {}\n\n", team_path_str);
+    let new_content = format!("{}{}", include_block, content);
+
+    std::fs::write(file, new_content)?;
+    Ok(true)
 }
 
 #[allow(dead_code)]
