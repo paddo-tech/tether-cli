@@ -248,6 +248,11 @@ pub enum TeamAction {
         #[command(subcommand)]
         action: OrgAction,
     },
+    /// Manage team secrets (encrypted with age)
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -263,6 +268,45 @@ pub enum OrgAction {
     Remove {
         /// GitHub organization name
         org: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecretsAction {
+    /// Add a recipient's public key to the team
+    AddRecipient {
+        /// age public key or path to .pub file
+        key: String,
+        /// Name for this recipient (defaults to username)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List team recipients
+    ListRecipients,
+    /// Remove a recipient from the team
+    RemoveRecipient {
+        /// Recipient name
+        name: String,
+    },
+    /// Add or update a secret
+    Set {
+        /// Secret name (e.g., "GITHUB_TOKEN")
+        name: String,
+        /// Secret value (prompts if not provided)
+        #[arg(long)]
+        value: Option<String>,
+    },
+    /// Get a secret value
+    Get {
+        /// Secret name
+        name: String,
+    },
+    /// List all secrets
+    List,
+    /// Remove a secret
+    Remove {
+        /// Secret name
+        name: String,
     },
 }
 
@@ -320,6 +364,21 @@ impl Cli {
                     OrgAction::Add { org } => team::orgs_add(org).await,
                     OrgAction::List => team::orgs_list().await,
                     OrgAction::Remove { org } => team::orgs_remove(org).await,
+                },
+                TeamAction::Secrets { action } => match action {
+                    SecretsAction::AddRecipient { key, name } => {
+                        team::secrets_add_recipient(key, name.as_deref()).await
+                    }
+                    SecretsAction::ListRecipients => team::secrets_list_recipients().await,
+                    SecretsAction::RemoveRecipient { name } => {
+                        team::secrets_remove_recipient(name).await
+                    }
+                    SecretsAction::Set { name, value } => {
+                        team::secrets_set(name, value.as_deref()).await
+                    }
+                    SecretsAction::Get { name } => team::secrets_get(name).await,
+                    SecretsAction::List => team::secrets_list().await,
+                    SecretsAction::Remove { name } => team::secrets_remove(name).await,
                 },
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,

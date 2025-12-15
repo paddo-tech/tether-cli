@@ -792,3 +792,212 @@ pub async fn orgs_remove(org: &str) -> Result<()> {
     Output::success(&format!("Removed '{}' from allowed organizations", org));
     Ok(())
 }
+
+// --- Team secrets management ---
+
+/// Get active team's repo directory or error
+fn get_active_team_repo() -> Result<(String, std::path::PathBuf)> {
+    let config = Config::load()?;
+    let teams = config
+        .teams
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No teams configured. Run 'tether team add' first."))?;
+    let active = teams
+        .active
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No active team. Run 'tether team switch <name>' first."))?;
+    let repo_dir = Config::team_repo_dir(active)?;
+    if !repo_dir.exists() {
+        anyhow::bail!("Team repository not found. Re-add the team.");
+    }
+    Ok((active.clone(), repo_dir))
+}
+
+pub async fn secrets_add_recipient(key: &str, name: Option<&str>) -> Result<()> {
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let recipients_dir = repo_dir.join("recipients");
+    std::fs::create_dir_all(&recipients_dir)?;
+
+    // Validate key format
+    let pubkey = if std::path::Path::new(key).exists() {
+        std::fs::read_to_string(key)?
+    } else {
+        key.to_string()
+    };
+    crate::security::validate_pubkey(&pubkey)?;
+
+    // Determine recipient name
+    let recipient_name = name
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()));
+
+    let pubkey_file = recipients_dir.join(format!("{}.pub", recipient_name));
+    std::fs::write(&pubkey_file, pubkey.trim())?;
+
+    // Commit to team repo
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(&format!("Add recipient: {}", recipient_name), "tether")?;
+
+    Output::success(&format!(
+        "Added recipient '{}' to team '{}'",
+        recipient_name, team_name
+    ));
+    Output::info("Run 'tether sync' to push changes to team repo");
+    Ok(())
+}
+
+pub async fn secrets_list_recipients() -> Result<()> {
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let recipients_dir = repo_dir.join("recipients");
+
+    if !recipients_dir.exists() {
+        Output::info(&format!("No recipients configured for team '{}'", team_name));
+        return Ok(());
+    }
+
+    println!();
+    println!("Recipients for team '{}':", team_name);
+
+    for entry in std::fs::read_dir(&recipients_dir)? {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|e| e == "pub") {
+            if let Some(name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                let pubkey = std::fs::read_to_string(entry.path())?;
+                let short_key = if pubkey.len() > 20 {
+                    format!("{}...", &pubkey.trim()[..20])
+                } else {
+                    pubkey.trim().to_string()
+                };
+                println!("  • {} ({})", name, short_key);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn secrets_remove_recipient(name: &str) -> Result<()> {
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let pubkey_file = repo_dir.join("recipients").join(format!("{}.pub", name));
+
+    if !pubkey_file.exists() {
+        Output::error(&format!("Recipient '{}' not found", name));
+        return Ok(());
+    }
+
+    std::fs::remove_file(&pubkey_file)?;
+
+    // Commit to team repo
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(&format!("Remove recipient: {}", name), "tether")?;
+
+    Output::success(&format!(
+        "Removed recipient '{}' from team '{}'",
+        name, team_name
+    ));
+    Output::warning("Existing secrets should be re-encrypted without this recipient");
+    Ok(())
+}
+
+pub async fn secrets_set(name: &str, value: Option<&str>) -> Result<()> {
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let secrets_dir = repo_dir.join("secrets");
+    std::fs::create_dir_all(&secrets_dir)?;
+
+    // Get secret value
+    let secret_value = match value {
+        Some(v) => v.to_string(),
+        None => Prompt::password(&format!("Enter value for '{}':", name))?,
+    };
+
+    // Load recipients
+    let recipients_dir = repo_dir.join("recipients");
+    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    if recipients.is_empty() {
+        Output::error("No recipients configured. Add recipients first.");
+        Output::info("Run: tether team secrets add-recipient <pubkey>");
+        return Ok(());
+    }
+
+    // Encrypt to all recipients
+    let encrypted = crate::security::encrypt_to_recipients(secret_value.as_bytes(), &recipients)?;
+    let secret_file = secrets_dir.join(format!("{}.age", name));
+    std::fs::write(&secret_file, &encrypted)?;
+
+    // Commit to team repo
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(&format!("Set secret: {}", name), "tether")?;
+
+    Output::success(&format!("Secret '{}' set for team '{}'", name, team_name));
+    Output::info(&format!("Encrypted to {} recipient(s)", recipients.len()));
+    Ok(())
+}
+
+pub async fn secrets_get(name: &str) -> Result<()> {
+    let (_team_name, repo_dir) = get_active_team_repo()?;
+    let secret_file = repo_dir.join("secrets").join(format!("{}.age", name));
+
+    if !secret_file.exists() {
+        Output::error(&format!("Secret '{}' not found", name));
+        return Ok(());
+    }
+
+    // Load user's identity
+    let identity = crate::security::load_identity(None).map_err(|_| {
+        anyhow::anyhow!("Identity not unlocked. Run 'tether identity unlock' first.")
+    })?;
+
+    // Decrypt
+    let encrypted = std::fs::read(&secret_file)?;
+    let decrypted = crate::security::decrypt_with_identity(&encrypted, &identity)?;
+    let value = String::from_utf8(decrypted)?;
+
+    println!("{}", value);
+    Ok(())
+}
+
+pub async fn secrets_list() -> Result<()> {
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let secrets_dir = repo_dir.join("secrets");
+
+    if !secrets_dir.exists() {
+        Output::info(&format!("No secrets configured for team '{}'", team_name));
+        return Ok(());
+    }
+
+    println!();
+    println!("Secrets for team '{}':", team_name);
+
+    for entry in std::fs::read_dir(&secrets_dir)? {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|e| e == "age") {
+            if let Some(name) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                println!("  • {}", name);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+pub async fn secrets_remove(name: &str) -> Result<()> {
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let secret_file = repo_dir.join("secrets").join(format!("{}.age", name));
+
+    if !secret_file.exists() {
+        Output::error(&format!("Secret '{}' not found", name));
+        return Ok(());
+    }
+
+    std::fs::remove_file(&secret_file)?;
+
+    // Commit to team repo
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(&format!("Remove secret: {}", name), "tether")?;
+
+    Output::success(&format!(
+        "Removed secret '{}' from team '{}'",
+        name, team_name
+    ));
+    Ok(())
+}
