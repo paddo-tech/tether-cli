@@ -318,6 +318,9 @@ pub struct TeamsConfig {
     pub active: Option<String>,
     /// Map of team name -> team configuration
     pub teams: HashMap<String, TeamConfig>,
+    /// Allowed GitHub organizations for team repos (empty = no restriction)
+    #[serde(default)]
+    pub allowed_orgs: Vec<String>,
 }
 
 /// Project-local config syncing.

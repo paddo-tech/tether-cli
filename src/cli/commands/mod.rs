@@ -1,6 +1,7 @@
 mod config;
 mod daemon;
 mod diff;
+mod identity;
 mod ignore;
 mod init;
 mod machines;
@@ -108,6 +109,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: RestoreAction,
     },
+
+    /// Manage age identity for team secrets
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -192,6 +199,20 @@ pub enum RestoreAction {
 }
 
 #[derive(Subcommand)]
+pub enum IdentityAction {
+    /// Generate a new age identity
+    Init,
+    /// Show your public key
+    Show,
+    /// Unlock identity with passphrase
+    Unlock,
+    /// Lock identity (clear cached key)
+    Lock,
+    /// Reset identity (generate new, destroys old)
+    Reset,
+}
+
+#[derive(Subcommand)]
 pub enum TeamAction {
     /// Add team sync repository
     Add {
@@ -222,6 +243,27 @@ pub enum TeamAction {
     Disable,
     /// Show team sync status
     Status,
+    /// Manage allowed organizations for team repos
+    Orgs {
+        #[command(subcommand)]
+        action: OrgAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrgAction {
+    /// Add allowed organization
+    Add {
+        /// GitHub organization name
+        org: String,
+    },
+    /// List allowed organizations
+    List,
+    /// Remove allowed organization
+    Remove {
+        /// GitHub organization name
+        org: String,
+    },
 }
 
 impl Cli {
@@ -274,6 +316,11 @@ impl Cli {
                 TeamAction::Enable => team::enable().await,
                 TeamAction::Disable => team::disable().await,
                 TeamAction::Status => team::status().await,
+                TeamAction::Orgs { action } => match action {
+                    OrgAction::Add { org } => team::orgs_add(org).await,
+                    OrgAction::List => team::orgs_list().await,
+                    OrgAction::Remove { org } => team::orgs_remove(org).await,
+                },
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,
             Commands::Unlock => unlock::run().await,
@@ -284,6 +331,13 @@ impl Cli {
                 RestoreAction::File { from, file } => {
                     restore::run(from.as_deref(), file.as_deref()).await
                 }
+            },
+            Commands::Identity { action } => match action {
+                IdentityAction::Init => identity::init().await,
+                IdentityAction::Show => identity::show().await,
+                IdentityAction::Unlock => identity::unlock().await,
+                IdentityAction::Lock => identity::lock().await,
+                IdentityAction::Reset => identity::reset().await,
             },
         }
     }
