@@ -59,4 +59,11 @@ impl Prompt {
             .without_confirmation()
             .prompt()?)
     }
+
+    pub fn password_with_confirm(message: &str, confirm_message: &str) -> Result<String> {
+        Ok(Password::new(message)
+            .with_display_mode(PasswordDisplayMode::Masked)
+            .with_custom_confirmation_message(confirm_message)
+            .prompt()?)
+    }
 }

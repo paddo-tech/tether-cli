@@ -25,8 +25,38 @@ fn sanitize_team_name(name: &str) -> String {
         .to_string()
 }
 
+/// Validate that a URL belongs to an allowed organization
+fn validate_org_restriction(url: &str, allowed_orgs: &[String]) -> Result<()> {
+    if allowed_orgs.is_empty() {
+        return Ok(()); // No restrictions configured
+    }
+
+    let org = crate::sync::extract_team_name_from_url(url)
+        .ok_or_else(|| anyhow::anyhow!("Could not extract organization from URL: {}", url))?;
+
+    if !allowed_orgs
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&org))
+    {
+        anyhow::bail!(
+            "Team repository must belong to an allowed organization.\n\
+             Allowed orgs: {}\n\
+             Found org: {}",
+            allowed_orgs.join(", "),
+            org
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<()> {
     let mut config = Config::load()?;
+
+    // Check org restriction before cloning
+    if let Some(teams) = &config.teams {
+        validate_org_restriction(url, &teams.allowed_orgs)?;
+    }
 
     // Determine team name (custom or auto-extracted)
     let raw_name = name.map(|s| s.to_string()).unwrap_or_else(|| {
@@ -628,4 +658,85 @@ fn show_injection_instructions(team_files: &[String]) {
         }
     }
     println!();
+}
+
+// --- Org restriction management ---
+
+pub async fn orgs_add(org: &str) -> Result<()> {
+    let mut config = Config::load()?;
+
+    // Initialize teams config if needed
+    if config.teams.is_none() {
+        config.teams = Some(crate::config::TeamsConfig::default());
+    }
+
+    let teams = config.teams.as_mut().unwrap();
+
+    // Check if already exists (case-insensitive)
+    if teams
+        .allowed_orgs
+        .iter()
+        .any(|o| o.eq_ignore_ascii_case(org))
+    {
+        Output::info(&format!("Organization '{}' is already allowed", org));
+        return Ok(());
+    }
+
+    teams.allowed_orgs.push(org.to_string());
+    config.save()?;
+
+    Output::success(&format!("Added '{}' to allowed organizations", org));
+    Ok(())
+}
+
+pub async fn orgs_list() -> Result<()> {
+    let config = Config::load()?;
+
+    let allowed_orgs = config
+        .teams
+        .as_ref()
+        .map(|t| &t.allowed_orgs)
+        .filter(|o| !o.is_empty());
+
+    match allowed_orgs {
+        Some(orgs) => {
+            println!();
+            println!("Allowed organizations:");
+            for org in orgs {
+                println!("  • {}", org);
+            }
+            println!();
+        }
+        None => {
+            Output::info("No organization restrictions configured");
+            Output::dim("  Any team repository URL is allowed");
+        }
+    }
+    Ok(())
+}
+
+pub async fn orgs_remove(org: &str) -> Result<()> {
+    let mut config = Config::load()?;
+
+    let teams = match config.teams.as_mut() {
+        Some(t) => t,
+        None => {
+            Output::info("No organization restrictions configured");
+            return Ok(());
+        }
+    };
+
+    let original_len = teams.allowed_orgs.len();
+    teams
+        .allowed_orgs
+        .retain(|o| !o.eq_ignore_ascii_case(org));
+
+    if teams.allowed_orgs.len() == original_len {
+        Output::warning(&format!("Organization '{}' not found in allowed list", org));
+        return Ok(());
+    }
+
+    config.save()?;
+    Output::success(&format!("Removed '{}' from allowed organizations", org));
+    Ok(())
 }
