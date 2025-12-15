@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-/// File types we can merge intelligently
+/// File types and how to handle them
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileType {
-    Toml,
-    Json,
-    Ini,      // gitconfig, .ini, .cfg
-    Plain,    // Shell scripts, unknown files - concatenate
+    Toml,      // Deep merge (no include support)
+    Json,      // Deep merge (no include support)
+    Shell,     // Use source directive
+    GitConfig, // Use [include] directive
+    Unknown,   // Skip - warn user
 }
 
 /// Detect file type from path
@@ -20,22 +21,36 @@ pub fn detect_file_type(path: &Path) -> FileType {
     match extension {
         Some("toml") => return FileType::Toml,
         Some("json") => return FileType::Json,
-        Some("ini") | Some("cfg") => return FileType::Ini,
         _ => {}
     }
 
-    // Check filename patterns
+    // GitConfig - uses [include] directive
     if filename == ".gitconfig"
         || filename.ends_with("gitconfig")
-        || filename == ".gitignore_global"
+        || filename == "team.gitconfig"
     {
-        return FileType::Ini;
+        return FileType::GitConfig;
     }
 
-    FileType::Plain
+    // Shell files - use source directive
+    if filename == ".zshrc"
+        || filename == ".bashrc"
+        || filename == ".bash_profile"
+        || filename == ".profile"
+        || filename == ".zprofile"
+        || filename == ".zshenv"
+        || filename.ends_with("rc")
+        || filename.ends_with("profile")
+        || filename.starts_with("team.") && (filename.ends_with("rc") || filename.ends_with("profile"))
+    {
+        return FileType::Shell;
+    }
+
+    FileType::Unknown
 }
 
 /// Merge two files: team (base) + personal (overlay)
+/// Only for file types that don't support includes (TOML, JSON)
 /// Personal wins on key conflicts
 pub fn merge_files(team_path: &Path, personal_path: &Path) -> Result<String> {
     let file_type = detect_file_type(personal_path);
@@ -48,8 +63,12 @@ pub fn merge_files(team_path: &Path, personal_path: &Path) -> Result<String> {
     match file_type {
         FileType::Toml => merge_toml(&team_content, &personal_content),
         FileType::Json => merge_json(&team_content, &personal_content),
-        FileType::Ini => merge_ini(&team_content, &personal_content),
-        FileType::Plain => Ok(merge_plain(&team_content, &personal_content)),
+        FileType::Shell | FileType::GitConfig | FileType::Unknown => {
+            Err(anyhow::anyhow!(
+                "File type {:?} should use source/include, not merge",
+                file_type
+            ))
+        }
     }
 }
 
@@ -112,89 +131,6 @@ fn deep_merge_json(base: serde_json::Value, overlay: serde_json::Value) -> serde
     }
 }
 
-/// Merge INI/gitconfig: section-level merge, personal sections win
-/// Format: [section] or [section "subsection"] followed by key = value
-fn merge_ini(team: &str, personal: &str) -> Result<String> {
-    let team_sections = parse_ini(team);
-    let personal_sections = parse_ini(personal);
-
-    let mut merged = team_sections;
-
-    // Personal sections override team sections (at section level, not key level for simplicity)
-    // For gitconfig, users typically want their entire section to override
-    for (section, entries) in personal_sections {
-        merged.insert(section, entries);
-    }
-
-    Ok(serialize_ini(&merged))
-}
-
-/// Parse INI-style content into sections
-fn parse_ini(content: &str) -> std::collections::HashMap<String, Vec<String>> {
-    let mut sections = std::collections::HashMap::new();
-    let mut current_section = String::new();
-    let mut current_entries = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            // Save previous section
-            if !current_section.is_empty() || !current_entries.is_empty() {
-                sections.insert(current_section.clone(), current_entries);
-            }
-            current_section = trimmed.to_string();
-            current_entries = Vec::new();
-        } else {
-            current_entries.push(line.to_string());
-        }
-    }
-
-    // Save last section
-    if !current_section.is_empty() || !current_entries.is_empty() {
-        sections.insert(current_section, current_entries);
-    }
-
-    sections
-}
-
-/// Serialize INI sections back to string
-fn serialize_ini(sections: &std::collections::HashMap<String, Vec<String>>) -> String {
-    let mut result = Vec::new();
-
-    // Handle entries before any section header (e.g., comments at top)
-    if let Some(entries) = sections.get("") {
-        for entry in entries {
-            result.push(entry.clone());
-        }
-    }
-
-    // Sort sections for consistent output
-    let mut section_names: Vec<_> = sections.keys().filter(|k| !k.is_empty()).collect();
-    section_names.sort();
-
-    for section in section_names {
-        if !result.is_empty() {
-            result.push(String::new()); // Blank line between sections
-        }
-        result.push(section.clone());
-        if let Some(entries) = sections.get(section) {
-            for entry in entries {
-                result.push(entry.clone());
-            }
-        }
-    }
-
-    result.join("\n")
-}
-
-/// Merge plain text files by concatenation
-/// Team content first, then personal content (personal overrides if both define same things)
-fn merge_plain(team: &str, personal: &str) -> String {
-    let separator = "\n# --- Personal config below (overrides team defaults) ---\n";
-    format!("{}{}{}", team.trim_end(), separator, personal)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,11 +147,19 @@ mod tests {
         );
         assert_eq!(
             detect_file_type(Path::new(".gitconfig")),
-            FileType::Ini
+            FileType::GitConfig
         );
         assert_eq!(
             detect_file_type(Path::new(".zshrc")),
-            FileType::Plain
+            FileType::Shell
+        );
+        assert_eq!(
+            detect_file_type(Path::new(".bashrc")),
+            FileType::Shell
+        );
+        assert_eq!(
+            detect_file_type(Path::new("random.txt")),
+            FileType::Unknown
         );
     }
 
@@ -262,42 +206,4 @@ t = "test --release"
         assert_eq!(val["c"], 3); // personal addition
     }
 
-    #[test]
-    fn test_merge_ini() {
-        let team = r#"
-[user]
-    name = Team Name
-    email = team@example.com
-
-[alias]
-    st = status
-"#;
-        let personal = r#"
-[user]
-    name = Personal Name
-
-[core]
-    editor = vim
-"#;
-        let merged = merge_ini(team, personal).unwrap();
-
-        // personal section replaces team section entirely
-        assert!(merged.contains("name = Personal Name"));
-        assert!(!merged.contains("email = team@example.com")); // Gone because [user] replaced
-        // team sections preserved if not in personal
-        assert!(merged.contains("st = status"));
-        // personal additions
-        assert!(merged.contains("editor = vim"));
-    }
-
-    #[test]
-    fn test_merge_plain() {
-        let team = "export TEAM_VAR=1";
-        let personal = "export PERSONAL_VAR=2";
-        let merged = merge_plain(team, personal);
-
-        assert!(merged.contains("TEAM_VAR=1"));
-        assert!(merged.contains("PERSONAL_VAR=2"));
-        assert!(merged.contains("# --- Personal config below"));
-    }
 }
