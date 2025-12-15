@@ -572,6 +572,21 @@ async fn apply_layer_sync(
 
     Output::info("Setting up team dotfile sync...");
 
+    // Check if any files need layer-based merge (TOML/JSON)
+    let needs_layers = team_files.iter().any(|f| {
+        let personal_name = map_team_to_personal_name(f);
+        matches!(
+            detect_file_type(std::path::Path::new(&personal_name)),
+            FileType::Toml | FileType::Json
+        )
+    });
+
+    // Initialize layers once if needed
+    if needs_layers {
+        init_layers(team_name)?;
+        sync_team_to_layer(team_name, &dotfiles_dir)?;
+    }
+
     for file in team_files {
         let personal_name = map_team_to_personal_name(file);
         let team_file_path = dotfiles_dir.join(file);
@@ -580,7 +595,12 @@ async fn apply_layer_sync(
 
         match file_type {
             FileType::Shell => {
-                // Inject source line into personal file
+                // Only inject if personal file exists
+                if !personal_file.exists() {
+                    Output::warning(&format!("  {} skipped ({} doesn't exist)", file, personal_name));
+                    continue;
+                }
+
                 let source_line = format!(
                     "[ -f \"{}\" ] && source \"{}\"",
                     team_file_path.display(),
@@ -594,7 +614,12 @@ async fn apply_layer_sync(
                 }
             }
             FileType::GitConfig => {
-                // Inject [include] directive
+                // Only inject if personal file exists
+                if !personal_file.exists() {
+                    Output::warning(&format!("  {} skipped ({} doesn't exist)", file, personal_name));
+                    continue;
+                }
+
                 if inject_gitconfig_include(&personal_file, &team_file_path)? {
                     Output::success(&format!("  {} → {} (include added)", file, personal_name));
                 } else {
@@ -602,10 +627,6 @@ async fn apply_layer_sync(
                 }
             }
             FileType::Toml | FileType::Json => {
-                // Use layer-based merge for structured files
-                init_layers(team_name)?;
-                sync_team_to_layer(team_name, &dotfiles_dir)?;
-
                 match sync_dotfile_with_layers(team_name, &personal_name) {
                     Ok(crate::sync::LayerSyncResult::Merged { file_type }) => {
                         let merge_type = match file_type {
@@ -637,12 +658,9 @@ async fn apply_layer_sync(
 }
 
 /// Inject a source line into a shell config file (at the top, after any shebang/comments)
+/// Caller must verify file exists before calling.
 fn inject_source_line(file: &std::path::Path, source_line: &str) -> Result<bool> {
-    let content = if file.exists() {
-        std::fs::read_to_string(file)?
-    } else {
-        String::new()
-    };
+    let content = std::fs::read_to_string(file)?;
 
     // Check if already sourced
     if content.contains(source_line) {
@@ -674,13 +692,9 @@ fn inject_source_line(file: &std::path::Path, source_line: &str) -> Result<bool>
 }
 
 /// Inject an [include] directive into gitconfig (at the top)
+/// Caller must verify file exists before calling.
 fn inject_gitconfig_include(file: &std::path::Path, team_file: &std::path::Path) -> Result<bool> {
-    let content = if file.exists() {
-        std::fs::read_to_string(file)?
-    } else {
-        String::new()
-    };
-
+    let content = std::fs::read_to_string(file)?;
     let team_path_str = team_file.display().to_string();
 
     // Check if already included
@@ -693,111 +707,6 @@ fn inject_gitconfig_include(file: &std::path::Path, team_file: &std::path::Path)
 
     std::fs::write(file, new_content)?;
     Ok(true)
-}
-
-#[allow(dead_code)]
-async fn inject_team_sources(team_files: &[String]) -> Result<()> {
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
-    let team_sync_dir = Config::team_sync_dir()?;
-
-    for file in team_files {
-        let (personal_file, source_line) = if file == "team.zshrc" {
-            (
-                home.join(".zshrc"),
-                format!(
-                    "[ -f {}/dotfiles/team.zshrc ] && source {}/dotfiles/team.zshrc",
-                    team_sync_dir.display(),
-                    team_sync_dir.display()
-                ),
-            )
-        } else if file == "team.gitconfig" {
-            let include_line = format!(
-                "[include]\n    path = {}/dotfiles/team.gitconfig",
-                team_sync_dir.display()
-            );
-            (home.join(".gitconfig"), include_line)
-        } else if file.starts_with("team.") && (file.ends_with("rc") || file.ends_with("profile")) {
-            (
-                home.join(file.replace("team.", ".")),
-                format!(
-                    "[ -f {}/dotfiles/{} ] && source {}/dotfiles/{}",
-                    team_sync_dir.display(),
-                    file,
-                    team_sync_dir.display(),
-                    file
-                ),
-            )
-        } else {
-            continue;
-        };
-
-        if !personal_file.exists() {
-            Output::warning(&format!(
-                "  {} not found, skipping",
-                personal_file.display()
-            ));
-            continue;
-        }
-
-        let content = std::fs::read_to_string(&personal_file)?;
-
-        if content.contains(&source_line)
-            || content.contains(&format!(
-                "source {}/dotfiles/{}",
-                team_sync_dir.display(),
-                file
-            ))
-        {
-            Output::info(&format!(
-                "  {} already sources team config",
-                file.replace("team.", ".")
-            ));
-            continue;
-        }
-
-        let new_content = if file == "team.gitconfig" {
-            format!("{}\n\n{}", source_line, content)
-        } else if content.starts_with("#!") {
-            let mut lines: Vec<&str> = content.lines().collect();
-            lines.insert(1, "");
-            lines.insert(2, &source_line);
-            lines.join("\n")
-        } else {
-            format!("{}\n\n{}", source_line, content)
-        };
-
-        std::fs::write(&personal_file, new_content)?;
-        Output::success(&format!(
-            "  Added source line to {}",
-            file.replace("team.", ".")
-        ));
-    }
-
-    Ok(())
-}
-
-#[allow(dead_code)]
-fn show_injection_instructions(team_files: &[String]) {
-    let team_sync_dir = Config::team_sync_dir().unwrap();
-
-    for file in team_files {
-        if file == "team.zshrc" {
-            println!("  Add to ~/.zshrc:");
-            println!(
-                "    [ -f {}/dotfiles/team.zshrc ] && source {}/dotfiles/team.zshrc",
-                team_sync_dir.display(),
-                team_sync_dir.display()
-            );
-        } else if file == "team.gitconfig" {
-            println!("  Add to ~/.gitconfig:");
-            println!("    [include]");
-            println!(
-                "        path = {}/dotfiles/team.gitconfig",
-                team_sync_dir.display()
-            );
-        }
-    }
-    println!();
 }
 
 // --- Org restriction management ---
