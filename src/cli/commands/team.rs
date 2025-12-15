@@ -419,35 +419,74 @@ pub async fn list() -> Result<()> {
     Ok(())
 }
 
-pub async fn remove(_name: Option<&str>) -> Result<()> {
+pub async fn remove(name: Option<&str>) -> Result<()> {
     let mut config = Config::load()?;
 
-    if config.team.is_none() {
-        Output::warning("Team sync is not configured");
+    let teams = match config.teams.as_mut() {
+        Some(t) if !t.teams.is_empty() => t,
+        _ => {
+            Output::warning("No teams configured");
+            return Ok(());
+        }
+    };
+
+    // Determine which team to remove
+    let team_name = match name {
+        Some(n) => n.to_string(),
+        None => {
+            // Use active team or prompt if multiple
+            match &teams.active {
+                Some(active) => active.clone(),
+                None => {
+                    if teams.teams.len() == 1 {
+                        teams.teams.keys().next().unwrap().clone()
+                    } else {
+                        Output::error("Multiple teams configured. Specify which to remove:");
+                        for name in teams.teams.keys() {
+                            println!("  • {}", name);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    };
+
+    if !teams.teams.contains_key(&team_name) {
+        Output::error(&format!("Team '{}' not found", team_name));
         return Ok(());
     }
 
-    if !Prompt::confirm("Remove team sync configuration?", false)? {
+    if !Prompt::confirm(&format!("Remove team '{}'?", team_name), false)? {
         return Ok(());
     }
 
-    // Clean up symlinks first
+    Output::info(&format!("Removing team '{}'...", team_name));
+
+    // Clean up injected source/include lines
+    Output::info("Cleaning up dotfile injections...");
+    cleanup_team_injections(&team_name)?;
+
+    // Clean up symlinks
     Output::info("Removing symlinks...");
     let mut manifest = crate::sync::TeamManifest::load()?;
-    manifest.cleanup()?;
+    manifest.cleanup_team(Some(&team_name))?;
     Output::success("Symlinks removed");
 
-    // Remove team sync directory
-    let team_sync_dir = Config::team_sync_dir()?;
-    if team_sync_dir.exists() {
-        std::fs::remove_dir_all(&team_sync_dir)?;
+    // Remove team repo directory
+    let team_repo_dir = Config::team_repo_dir(&team_name)?;
+    if team_repo_dir.exists() {
+        std::fs::remove_dir_all(&team_repo_dir)?;
     }
 
-    config.team = None;
+    // Remove from config
+    teams.teams.remove(&team_name);
+    if teams.active.as_ref() == Some(&team_name) {
+        teams.active = teams.teams.keys().next().cloned();
+    }
     config.save()?;
 
-    Output::success("Team sync removed");
-    Output::info("Note: Source lines in your dotfiles were not removed automatically");
+    Output::success(&format!("Team '{}' removed", team_name));
     Ok(())
 }
 
@@ -707,6 +746,148 @@ fn inject_gitconfig_include(file: &std::path::Path, team_file: &std::path::Path)
 
     std::fs::write(file, new_content)?;
     Ok(true)
+}
+
+/// Remove source lines that reference a team repo path from shell config files
+fn remove_source_lines(file: &std::path::Path, team_repo_path: &std::path::Path) -> Result<bool> {
+    if !file.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(file)?;
+    let team_path_str = team_repo_path.display().to_string();
+
+    // Check if file contains any reference to team repo
+    if !content.contains(&team_path_str) {
+        return Ok(false);
+    }
+
+    // Remove lines containing the team repo path
+    let new_lines: Vec<&str> = content
+        .lines()
+        .filter(|line| !line.contains(&team_path_str))
+        .collect();
+
+    // Clean up any resulting double blank lines
+    let mut cleaned = Vec::new();
+    let mut prev_blank = false;
+    for line in new_lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank {
+            continue;
+        }
+        cleaned.push(line);
+        prev_blank = is_blank;
+    }
+
+    let new_content = cleaned.join("\n");
+    std::fs::write(file, new_content)?;
+    Ok(true)
+}
+
+/// Remove [include] blocks that reference a team repo path from gitconfig
+fn remove_gitconfig_include(file: &std::path::Path, team_repo_path: &std::path::Path) -> Result<bool> {
+    if !file.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(file)?;
+    let team_path_str = team_repo_path.display().to_string();
+
+    // Check if file contains any reference to team repo
+    if !content.contains(&team_path_str) {
+        return Ok(false);
+    }
+
+    // Parse and filter out [include] sections that reference team repo
+    let mut new_lines: Vec<&str> = Vec::new();
+    let mut skip_until_next_section = false;
+    let mut in_include_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Check for section header
+        if trimmed.starts_with('[') {
+            in_include_section = trimmed.to_lowercase().starts_with("[include]");
+            skip_until_next_section = false;
+        }
+
+        // If in [include] section and line contains team path, skip this include block
+        if in_include_section && line.contains(&team_path_str) {
+            // Remove the [include] header we just added and skip until next section
+            if let Some(last) = new_lines.last() {
+                if last.trim().to_lowercase() == "[include]" {
+                    new_lines.pop();
+                }
+            }
+            skip_until_next_section = true;
+            continue;
+        }
+
+        if skip_until_next_section {
+            if trimmed.starts_with('[') {
+                skip_until_next_section = false;
+            } else {
+                continue;
+            }
+        }
+
+        new_lines.push(line);
+    }
+
+    // Clean up leading/trailing blank lines and double blank lines
+    let mut cleaned: Vec<&str> = Vec::new();
+    let mut prev_blank = true; // Start true to skip leading blanks
+    for line in new_lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank {
+            continue;
+        }
+        cleaned.push(line);
+        prev_blank = is_blank;
+    }
+    // Remove trailing blank line
+    while cleaned.last().map(|s: &&str| s.trim().is_empty()).unwrap_or(false) {
+        cleaned.pop();
+    }
+
+    let new_content = cleaned.join("\n");
+    std::fs::write(file, new_content)?;
+    Ok(true)
+}
+
+/// Clean up all injected source/include lines for a team
+fn cleanup_team_injections(team_name: &str) -> Result<()> {
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let team_repo_dir = Config::team_repo_dir(team_name)?;
+
+    // Shell files to check
+    let shell_files = [".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile", ".zshenv"];
+    for shell_file in &shell_files {
+        let path = home.join(shell_file);
+        if remove_source_lines(&path, &team_repo_dir)? {
+            Output::success(&format!("  Removed source line from {}", shell_file));
+        }
+    }
+
+    // Gitconfig
+    let gitconfig = home.join(".gitconfig");
+    if remove_gitconfig_include(&gitconfig, &team_repo_dir)? {
+        Output::success("  Removed include from .gitconfig");
+    }
+
+    // Clean up merged files
+    let merged_dir = crate::sync::layers::merged_dir()?;
+    if merged_dir.exists() {
+        std::fs::remove_dir_all(&merged_dir)?;
+        Output::success("  Removed merged dotfiles");
+    }
+
+    // Clean up team layer
+    crate::sync::layers::cleanup_team_layers(team_name)?;
+
+    Ok(())
 }
 
 // --- Org restriction management ---
