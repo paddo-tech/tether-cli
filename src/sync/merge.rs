@@ -33,16 +33,13 @@ pub fn detect_file_type(path: &Path) -> FileType {
     }
 
     // Shell files - use source directive
-    if filename == ".zshrc"
-        || filename == ".bashrc"
-        || filename == ".bash_profile"
-        || filename == ".profile"
-        || filename == ".zprofile"
-        || filename == ".zshenv"
-        || filename.ends_with("rc")
-        || filename.ends_with("profile")
-        || filename.starts_with("team.") && (filename.ends_with("rc") || filename.ends_with("profile"))
-    {
+    // Be explicit to avoid matching .npmrc, .yarnrc, etc.
+    let shell_files = [
+        ".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile", ".zshenv",
+        ".bash_login", ".bash_logout", ".zlogin", ".zlogout",
+        "team.zshrc", "team.bashrc", "team.bash_profile", "team.profile",
+    ];
+    if shell_files.contains(&filename) {
         return FileType::Shell;
     }
 
@@ -137,30 +134,24 @@ mod tests {
 
     #[test]
     fn test_detect_file_type() {
-        assert_eq!(
-            detect_file_type(Path::new("config.toml")),
-            FileType::Toml
-        );
-        assert_eq!(
-            detect_file_type(Path::new("settings.json")),
-            FileType::Json
-        );
-        assert_eq!(
-            detect_file_type(Path::new(".gitconfig")),
-            FileType::GitConfig
-        );
-        assert_eq!(
-            detect_file_type(Path::new(".zshrc")),
-            FileType::Shell
-        );
-        assert_eq!(
-            detect_file_type(Path::new(".bashrc")),
-            FileType::Shell
-        );
-        assert_eq!(
-            detect_file_type(Path::new("random.txt")),
-            FileType::Unknown
-        );
+        // Structured files - need merge
+        assert_eq!(detect_file_type(Path::new("config.toml")), FileType::Toml);
+        assert_eq!(detect_file_type(Path::new("settings.json")), FileType::Json);
+
+        // Git config - use [include]
+        assert_eq!(detect_file_type(Path::new(".gitconfig")), FileType::GitConfig);
+        assert_eq!(detect_file_type(Path::new("team.gitconfig")), FileType::GitConfig);
+
+        // Shell files - use source
+        assert_eq!(detect_file_type(Path::new(".zshrc")), FileType::Shell);
+        assert_eq!(detect_file_type(Path::new(".bashrc")), FileType::Shell);
+        assert_eq!(detect_file_type(Path::new(".profile")), FileType::Shell);
+        assert_eq!(detect_file_type(Path::new("team.zshrc")), FileType::Shell);
+
+        // NOT shell files - should be Unknown
+        assert_eq!(detect_file_type(Path::new(".npmrc")), FileType::Unknown);
+        assert_eq!(detect_file_type(Path::new(".yarnrc")), FileType::Unknown);
+        assert_eq!(detect_file_type(Path::new("random.txt")), FileType::Unknown);
     }
 
     #[test]
