@@ -3,6 +3,7 @@ pub mod conflict;
 pub mod discovery;
 pub mod engine;
 pub mod git;
+pub mod layers;
 pub mod merge;
 pub mod packages;
 pub mod state;
@@ -21,6 +22,10 @@ pub use engine::SyncEngine;
 pub use git::GitBackend;
 pub use packages::{import_packages, sync_packages};
 pub use state::{MachineState, SyncState};
+pub use layers::{
+    init_layers, list_team_layer_files, map_team_to_personal_name, merge_layers, remerge_all,
+    sync_dotfile_with_layers, sync_team_to_layer, LayerSyncResult,
+};
 pub use merge::{detect_file_type, merge_files, FileType};
 pub use team::{
     discover_symlinkable_dirs, extract_team_name_from_url, resolve_conflict, TeamManifest,
