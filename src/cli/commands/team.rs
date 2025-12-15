@@ -50,7 +50,7 @@ fn validate_org_restriction(url: &str, allowed_orgs: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<()> {
+pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result<()> {
     let mut config = Config::load()?;
 
     // Check org restriction before cloning
@@ -198,13 +198,15 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
         Output::info("Team sync configured with write access - you can push updates");
     }
 
-    // Ask about auto-injection with content preview
-    let auto_inject = if no_auto_inject {
-        false
-    } else if !team_files.is_empty() {
-        // Show preview of team config contents (security: let user review before sourcing)
+    // Set up layer-based sync for dotfiles
+    let use_layers = if !team_files.is_empty() {
         println!();
-        Output::warning("Team configs will be sourced into your shell. Review contents:");
+        Output::info("Team dotfiles will be merged with your personal configs.");
+        Output::dim("  Personal settings always override team defaults.");
+        println!();
+
+        // Show preview of team config contents
+        Output::info("Team dotfile contents:");
         for file in &team_files {
             let team_file_path = team_repo_dir.join("dotfiles").join(file);
             if let Ok(content) = std::fs::read_to_string(&team_file_path) {
@@ -223,18 +225,14 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
             }
         }
         println!();
-        Prompt::confirm("Auto-inject source lines to your personal configs?", false)?
+        Prompt::confirm("Merge team dotfiles with your personal configs?", true)?
     } else {
         false
     };
 
-    // Perform auto-injection if requested
-    if auto_inject {
-        inject_team_sources(&team_files).await?;
-    } else if !team_files.is_empty() {
-        println!();
-        Output::info("To use team configs, add these lines to your dotfiles:");
-        show_injection_instructions(&team_files);
+    // Perform layer-based merge if confirmed
+    if use_layers && !team_files.is_empty() {
+        apply_layer_sync(&team_name, &team_repo_dir, &team_files).await?;
     }
 
     // Discover and create symlinks for config directories
@@ -286,7 +284,7 @@ pub async fn add(url: &str, name: Option<&str>, no_auto_inject: bool) -> Result<
             TeamConfig {
                 enabled: true,
                 url: url.to_string(),
-                auto_inject,
+                auto_inject: use_layers, // Now means "use layer-based merge"
                 read_only,
             },
         );
@@ -557,6 +555,59 @@ pub async fn status() -> Result<()> {
     Ok(())
 }
 
+/// Apply layer-based sync for team dotfiles
+/// 1. Copy team dotfiles to team layer
+/// 2. Capture personal dotfiles to personal layer (first time)
+/// 3. Merge and apply to home directory
+async fn apply_layer_sync(
+    team_name: &str,
+    team_repo_dir: &std::path::Path,
+    team_files: &[String],
+) -> Result<()> {
+    use crate::sync::layers::map_team_to_personal_name;
+    use crate::sync::{init_layers, sync_dotfile_with_layers, sync_team_to_layer, FileType};
+
+    Output::info("Setting up layer-based dotfile sync...");
+
+    // Initialize layer directories
+    init_layers(team_name)?;
+
+    // Copy team dotfiles to team layer (renames team.* to .*)
+    let dotfiles_dir = team_repo_dir.join("dotfiles");
+    sync_team_to_layer(team_name, &dotfiles_dir)?;
+
+    // Process each team dotfile
+    for file in team_files {
+        // Map team.* files to personal dotfile names
+        let personal_name = map_team_to_personal_name(file);
+
+        match sync_dotfile_with_layers(team_name, &personal_name) {
+            Ok(crate::sync::LayerSyncResult::Merged { file_type }) => {
+                let merge_type = match file_type {
+                    FileType::Toml => "TOML merge",
+                    FileType::Json => "JSON merge",
+                    FileType::Ini => "INI merge",
+                    FileType::Plain => "concatenated",
+                };
+                Output::success(&format!("  {} → {} ({})", file, personal_name, merge_type));
+            }
+            Ok(crate::sync::LayerSyncResult::TeamOnly) => {
+                Output::success(&format!("  {} → {} (team only)", file, personal_name));
+            }
+            Ok(crate::sync::LayerSyncResult::Skipped) => {
+                Output::dim(&format!("  {} skipped", file));
+            }
+            Err(e) => {
+                Output::warning(&format!("  {} failed: {}", file, e));
+            }
+        }
+    }
+
+    Output::success("Layer-based sync configured");
+    Ok(())
+}
+
+#[allow(dead_code)]
 async fn inject_team_sources(team_files: &[String]) -> Result<()> {
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     let team_sync_dir = Config::team_sync_dir()?;
@@ -637,6 +688,7 @@ async fn inject_team_sources(team_files: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn show_injection_instructions(team_files: &[String]) {
     let team_sync_dir = Config::team_sync_dir().unwrap();
 
