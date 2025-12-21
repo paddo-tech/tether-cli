@@ -446,12 +446,16 @@ fn decrypt_from_repo(
                                 if let Some(parent) = local_file.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
-                                // Skip write if content is unchanged
+                                // Only write if local unchanged since last sync AND remote differs
+                                let state_key = format!("~/{}", rel_path_no_enc);
+                                let last_synced_hash =
+                                    state.files.get(&state_key).map(|f| f.hash.as_str());
                                 let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
                                 let local_hash = std::fs::read(&local_file)
                                     .ok()
                                     .map(|c| format!("{:x}", Sha256::digest(&c)));
-                                if local_hash.as_ref() != Some(&remote_hash) {
+                                let local_unchanged = local_hash.as_deref() == last_synced_hash;
+                                if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
                                     std::fs::write(&local_file, plaintext)?;
                                 }
                             }
