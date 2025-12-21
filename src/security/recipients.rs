@@ -211,7 +211,10 @@ pub fn load_recipients(recipients_dir: &Path) -> Result<Vec<age::x25519::Recipie
 }
 
 /// Encrypt data to multiple recipients
-pub fn encrypt_to_recipients(data: &[u8], recipients: &[age::x25519::Recipient]) -> Result<Vec<u8>> {
+pub fn encrypt_to_recipients(
+    data: &[u8],
+    recipients: &[age::x25519::Recipient],
+) -> Result<Vec<u8>> {
     if recipients.is_empty() {
         return Err(anyhow::anyhow!("No recipients specified"));
     }

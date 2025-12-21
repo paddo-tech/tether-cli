@@ -20,15 +20,17 @@ pub use conflict::{
 pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;
 pub use git::GitBackend;
-pub use packages::{import_packages, sync_packages};
-pub use state::{MachineState, SyncState};
 pub use layers::{
     init_layers, list_team_layer_files, map_team_to_personal_name, merge_layers, remerge_all,
     sync_dotfile_with_layers, sync_team_to_layer, LayerSyncResult,
 };
 pub use merge::{detect_file_type, merge_files, FileType};
+pub use packages::{import_packages, sync_packages};
+pub use state::{MachineState, SyncState};
 pub use team::{
-    discover_symlinkable_dirs, extract_team_name_from_url, resolve_conflict, TeamManifest,
+    default_local_patterns, discover_symlinkable_dirs, extract_org_from_url,
+    extract_team_name_from_url, get_project_org, is_local_file, project_matches_team_orgs,
+    resolve_conflict, TeamManifest,
 };
 
 use anyhow::Result;

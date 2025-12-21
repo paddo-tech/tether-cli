@@ -1,15 +1,22 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Tracks team-synced symlinks and conflict resolutions
+/// Tracks team-synced symlinks, conflict resolutions, and file preferences
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TeamManifest {
     /// Symlinks created by team sync: team_name -> (target_path -> source_path)
     pub symlinks: HashMap<String, HashMap<String, String>>,
     /// Conflict resolutions: team_name -> (target_path -> resolution)
     pub conflicts: HashMap<String, HashMap<String, ConflictResolution>>,
+    /// Patterns for files that are always local (never synced): team_name -> patterns
+    /// e.g., ["*.local", "*.local.*", ".env.local"]
+    #[serde(default)]
+    pub local_patterns: HashMap<String, Vec<String>>,
+    /// Files user has explicitly marked as personal (skip team sync): team_name -> file paths
+    #[serde(default)]
+    pub personal_files: HashMap<String, HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +130,116 @@ impl TeamManifest {
         self.save()?;
         Ok(())
     }
+
+    /// Get local patterns for a team (with defaults)
+    pub fn get_local_patterns(&self, team_name: &str) -> Vec<String> {
+        self.local_patterns
+            .get(team_name)
+            .cloned()
+            .unwrap_or_else(default_local_patterns)
+    }
+
+    /// Set local patterns for a team
+    pub fn set_local_patterns(&mut self, team_name: &str, patterns: Vec<String>) {
+        self.local_patterns.insert(team_name.to_string(), patterns);
+    }
+
+    /// Check if a file matches local patterns (should not be synced from team)
+    pub fn is_local_file(&self, team_name: &str, filename: &str) -> bool {
+        let patterns = self.get_local_patterns(team_name);
+        is_local_file(filename, &patterns)
+    }
+
+    /// Check if user has marked a file as personal (skip team sync)
+    pub fn is_personal_file(&self, team_name: &str, filepath: &str) -> bool {
+        self.personal_files
+            .get(team_name)
+            .map(|files| files.contains(filepath))
+            .unwrap_or(false)
+    }
+
+    /// Mark a file as personal (skip team sync)
+    pub fn add_personal_file(&mut self, team_name: &str, filepath: &str) {
+        self.personal_files
+            .entry(team_name.to_string())
+            .or_default()
+            .insert(filepath.to_string());
+    }
+
+    /// Remove personal file marker (resume team sync)
+    pub fn remove_personal_file(&mut self, team_name: &str, filepath: &str) {
+        if let Some(files) = self.personal_files.get_mut(team_name) {
+            files.remove(filepath);
+        }
+    }
+
+    /// Get all personal files for a team
+    pub fn get_personal_files(&self, team_name: &str) -> Vec<String> {
+        self.personal_files
+            .get(team_name)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Default local patterns (files that are never synced from team)
+pub fn default_local_patterns() -> Vec<String> {
+    vec![
+        "*.local".to_string(),
+        "*.local.*".to_string(),
+        ".env.local".to_string(),
+        "appsettings.local.json".to_string(),
+    ]
+}
+
+/// Check if a filename matches any local pattern
+pub fn is_local_file(filename: &str, patterns: &[String]) -> bool {
+    for pattern in patterns {
+        if glob_match(pattern, filename) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Simple glob matching for local file patterns
+/// Supports: * (any chars), ? (single char)
+/// Uses iterative approach with backtracking to avoid stack overflow
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+
+    let mut pi = 0; // pattern index
+    let mut ti = 0; // text index
+    let mut star_pi = None; // position of last * in pattern
+    let mut star_ti = 0; // text position when we hit last *
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            // Match single char or ?
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            // Record star position for backtracking
+            star_pi = Some(pi);
+            star_ti = ti;
+            pi += 1; // Try matching * with empty string first
+        } else if let Some(sp) = star_pi {
+            // Backtrack: * matches one more character
+            pi = sp + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    // Check remaining pattern is all *
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+
+    pi == p.len()
 }
 
 /// Discovers directories in team repo that should be symlinked
@@ -283,12 +400,22 @@ impl SymlinkableDir {
     }
 }
 
-/// Extract team name from Git URL
+/// Extract org name from Git URL
 /// Examples:
 /// - git@github.com:acme-corp/team-configs.git → "acme-corp"
 /// - https://github.com/company/dotfiles.git → "company"
 /// - git@gitlab.com:my-org/configs.git → "my-org"
-pub fn extract_team_name_from_url(url: &str) -> Option<String> {
+pub fn extract_org_from_url(url: &str) -> Option<String> {
+    // Try HTTPS format first: https://host/org/repo.git
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let parts: Vec<&str> = url.split('/').collect();
+        if parts.len() >= 5 {
+            // https://github.com/company/repo.git -> parts = ["https:", "", "github.com", "company", "repo.git"]
+            return Some(parts[3].to_string());
+        }
+        return None;
+    }
+
     // Try SSH format: git@host:org/repo.git
     if let Some(after_colon) = url.split(':').nth(1) {
         if let Some(org) = after_colon.split('/').next() {
@@ -296,15 +423,48 @@ pub fn extract_team_name_from_url(url: &str) -> Option<String> {
         }
     }
 
-    // Try HTTPS format: https://host/org/repo.git
-    if url.starts_with("http") {
-        let parts: Vec<&str> = url.split('/').collect();
-        if parts.len() >= 4 {
-            return Some(parts[parts.len() - 2].to_string());
-        }
+    None
+}
+
+/// Alias for backwards compatibility
+pub fn extract_team_name_from_url(url: &str) -> Option<String> {
+    extract_org_from_url(url)
+}
+
+/// Get the git remote origin URL for a project directory
+pub fn get_project_remote_url(project_path: &Path) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(project_path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Get the org from a project's git remote
+pub fn get_project_org(project_path: &Path) -> Option<String> {
+    get_project_remote_url(project_path).and_then(|url| extract_org_from_url(&url))
+}
+
+/// Check if a project belongs to any of the allowed orgs for a team
+pub fn project_matches_team_orgs(project_path: &Path, allowed_orgs: &[String]) -> bool {
+    if allowed_orgs.is_empty() {
+        return false; // No orgs configured = no project sync
     }
 
-    None
+    match get_project_org(project_path) {
+        Some(org) => allowed_orgs
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&org)),
+        None => false, // Can't determine org = no match
+    }
 }
 
 /// Handle a conflict by prompting user
@@ -381,5 +541,72 @@ pub fn resolve_conflict(target: &Path, team_source: &Path) -> Result<ConflictRes
             Ok(ConflictResolution::TeamRenamed)
         }
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_glob_match_star() {
+        assert!(glob_match("*.local", ".env.local"));
+        assert!(glob_match("*.local", "config.local"));
+        assert!(!glob_match("*.local", ".env.local.bak"));
+    }
+
+    #[test]
+    fn test_glob_match_star_middle() {
+        assert!(glob_match("*.local.*", "config.local.json"));
+        assert!(glob_match("*.local.*", "appsettings.local.json"));
+        assert!(!glob_match("*.local.*", ".env.local"));
+    }
+
+    #[test]
+    fn test_glob_match_exact() {
+        assert!(glob_match(".env.local", ".env.local"));
+        assert!(!glob_match(".env.local", ".env.local.bak"));
+        assert!(!glob_match(".env.local", "env.local"));
+    }
+
+    #[test]
+    fn test_glob_match_question() {
+        assert!(glob_match("file?.txt", "file1.txt"));
+        assert!(glob_match("file?.txt", "fileA.txt"));
+        assert!(!glob_match("file?.txt", "file12.txt"));
+    }
+
+    #[test]
+    fn test_is_local_file_default_patterns() {
+        let patterns = default_local_patterns();
+        assert!(is_local_file(".env.local", &patterns));
+        assert!(is_local_file("config.local", &patterns));
+        assert!(is_local_file("appsettings.local.json", &patterns));
+        assert!(!is_local_file(".env.development", &patterns));
+        assert!(!is_local_file("appsettings.json", &patterns));
+    }
+
+    #[test]
+    fn test_extract_org_ssh() {
+        assert_eq!(
+            extract_org_from_url("git@github.com:acme-corp/repo.git"),
+            Some("acme-corp".to_string())
+        );
+        assert_eq!(
+            extract_org_from_url("git@gitlab.com:my-org/project.git"),
+            Some("my-org".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_https() {
+        assert_eq!(
+            extract_org_from_url("https://github.com/company/repo.git"),
+            Some("company".to_string())
+        );
+        assert_eq!(
+            extract_org_from_url("https://gitlab.com/org-name/project.git"),
+            Some("org-name".to_string())
+        );
     }
 }

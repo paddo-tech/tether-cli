@@ -289,11 +289,13 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
             },
         );
 
-        // Set as active team if it's the first or user confirms
-        if teams.active.is_none()
-            || Prompt::confirm(&format!("Set '{}' as active team?", team_name), true)?
+        // Add to active teams if first or user confirms
+        if teams.active.is_empty()
+            || Prompt::confirm(&format!("Activate team '{}'?", team_name), true)?
         {
-            teams.active = Some(team_name.clone());
+            if !teams.active.contains(&team_name) {
+                teams.active.push(team_name.clone());
+            }
             true
         } else {
             false
@@ -310,6 +312,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
     Ok(())
 }
 
+/// Toggle a team's active status (activate if inactive, deactivate if active)
 pub async fn switch(name: &str) -> Result<()> {
     let mut config = Config::load()?;
 
@@ -330,53 +333,88 @@ pub async fn switch(name: &str) -> Result<()> {
         return Ok(());
     }
 
-    if teams.active.as_ref() == Some(&name.to_string()) {
-        Output::info(&format!("Team '{}' is already active", name));
-        return Ok(());
-    }
+    let is_active = teams.active.contains(&name.to_string());
 
-    Output::info(&format!("Switching to team '{}'...", name));
+    if is_active {
+        // Deactivate this team
+        Output::info(&format!("Deactivating team '{}'...", name));
 
-    // Deactivate current team (remove symlinks)
-    if let Some(current) = &teams.active {
-        Output::info(&format!("Deactivating team '{}'...", current));
+        // Remove symlinks for this team
         let mut manifest = crate::sync::TeamManifest::load()?;
-        manifest.cleanup_team(Some(current))?;
-        Output::success("Current team deactivated");
-    }
+        manifest.cleanup_team(Some(name))?;
 
-    // Activate new team (create symlinks)
-    Output::info(&format!("Activating team '{}'...", name));
-    let team_repo_dir = Config::team_repo_dir(name)?;
+        // Remove injections for this team
+        cleanup_team_injections(name)?;
 
-    if !team_repo_dir.exists() {
-        Output::error(&format!(
-            "Team repository not found at {}",
-            team_repo_dir.display()
-        ));
-        Output::info("The team may need to be re-added.");
-        return Ok(());
-    }
+        // Remove from active list
+        teams.active.retain(|n| n != name);
+        let active_teams = teams.active.clone();
+        config.save()?;
 
-    let symlinkable_dirs = crate::sync::discover_symlinkable_dirs(&team_repo_dir)?;
-    if !symlinkable_dirs.is_empty() {
-        let mut manifest = crate::sync::TeamManifest::load()?;
-        for dir in &symlinkable_dirs {
-            let results = dir.create_symlinks(name, &mut manifest, false)?;
-            for result in results {
-                if let crate::sync::team::SymlinkResult::Created(target) = result {
-                    Output::success(&format!("  ✓ {}", target.display()));
+        Output::success(&format!("Team '{}' deactivated", name));
+
+        // Show current active teams
+        if !active_teams.is_empty() {
+            Output::info(&format!("Active teams: {}", active_teams.join(", ")));
+        }
+    } else {
+        // Activate this team
+        Output::info(&format!("Activating team '{}'...", name));
+
+        let team_repo_dir = Config::team_repo_dir(name)?;
+
+        if !team_repo_dir.exists() {
+            Output::error(&format!(
+                "Team repository not found at {}",
+                team_repo_dir.display()
+            ));
+            Output::info("The team may need to be re-added.");
+            return Ok(());
+        }
+
+        // Create symlinks
+        let symlinkable_dirs = crate::sync::discover_symlinkable_dirs(&team_repo_dir)?;
+        if !symlinkable_dirs.is_empty() {
+            let mut manifest = crate::sync::TeamManifest::load()?;
+            for dir in &symlinkable_dirs {
+                let results = dir.create_symlinks(name, &mut manifest, false)?;
+                for result in results {
+                    if let crate::sync::team::SymlinkResult::Created(target) = result {
+                        Output::success(&format!("  ✓ {}", target.display()));
+                    }
                 }
             }
+            manifest.save()?;
         }
-        manifest.save()?;
+
+        // Apply layer sync for dotfiles
+        let dotfiles_dir = team_repo_dir.join("dotfiles");
+        if dotfiles_dir.exists() {
+            let mut team_files = Vec::new();
+            for entry in std::fs::read_dir(&dotfiles_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    if let Some(filename) = entry.file_name().to_str() {
+                        team_files.push(filename.to_string());
+                    }
+                }
+            }
+            if !team_files.is_empty() {
+                apply_layer_sync(name, &team_repo_dir, &team_files).await?;
+            }
+        }
+
+        // Add to active list
+        teams.active.push(name.to_string());
+        let active_teams = teams.active.clone();
+        config.save()?;
+
+        Output::success(&format!("Team '{}' activated", name));
+
+        // Show current active teams
+        Output::info(&format!("Active teams: {}", active_teams.join(", ")));
     }
 
-    teams.active = Some(name.to_string());
-    config.save()?;
-
-    println!();
-    Output::success(&format!("Switched to team '{}'", name));
     Ok(())
 }
 
@@ -399,7 +437,7 @@ pub async fn list() -> Result<()> {
     println!();
     println!("Teams:");
     for (name, team) in &teams.teams {
-        let active_marker = if teams.active.as_ref() == Some(name) {
+        let active_marker = if teams.active.contains(name) {
             " (active)"
         } else {
             ""
@@ -434,20 +472,17 @@ pub async fn remove(name: Option<&str>) -> Result<()> {
     let team_name = match name {
         Some(n) => n.to_string(),
         None => {
-            // Use active team or prompt if multiple
-            match &teams.active {
-                Some(active) => active.clone(),
-                None => {
-                    if teams.teams.len() == 1 {
-                        teams.teams.keys().next().unwrap().clone()
-                    } else {
-                        Output::error("Multiple teams configured. Specify which to remove:");
-                        for name in teams.teams.keys() {
-                            println!("  • {}", name);
-                        }
-                        return Ok(());
-                    }
+            // Use first active team or prompt if multiple
+            if !teams.active.is_empty() {
+                teams.active[0].clone()
+            } else if teams.teams.len() == 1 {
+                teams.teams.keys().next().unwrap().clone()
+            } else {
+                Output::error("Multiple teams configured. Specify which to remove:");
+                for name in teams.teams.keys() {
+                    println!("  • {}", name);
                 }
+                return Ok(());
             }
         }
     };
@@ -481,9 +516,7 @@ pub async fn remove(name: Option<&str>) -> Result<()> {
 
     // Remove from config
     teams.teams.remove(&team_name);
-    if teams.active.as_ref() == Some(&team_name) {
-        teams.active = teams.teams.keys().next().cloned();
-    }
+    teams.active.retain(|n| n != &team_name);
     config.save()?;
 
     Output::success(&format!("Team '{}' removed", team_name));
@@ -604,7 +637,9 @@ async fn apply_layer_sync(
     team_files: &[String],
 ) -> Result<()> {
     use crate::sync::layers::map_team_to_personal_name;
-    use crate::sync::{detect_file_type, init_layers, sync_dotfile_with_layers, sync_team_to_layer, FileType};
+    use crate::sync::{
+        detect_file_type, init_layers, sync_dotfile_with_layers, sync_team_to_layer, FileType,
+    };
 
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
     let dotfiles_dir = team_repo_dir.join("dotfiles");
@@ -613,7 +648,7 @@ async fn apply_layer_sync(
 
     // Check if any files need layer-based merge (TOML/JSON)
     let needs_layers = team_files.iter().any(|f| {
-        let personal_name = map_team_to_personal_name(f);
+        let personal_name = map_team_to_personal_name(f, team_name);
         matches!(
             detect_file_type(std::path::Path::new(&personal_name)),
             FileType::Toml | FileType::Json
@@ -627,7 +662,7 @@ async fn apply_layer_sync(
     }
 
     for file in team_files {
-        let personal_name = map_team_to_personal_name(file);
+        let personal_name = map_team_to_personal_name(file, team_name);
         let team_file_path = dotfiles_dir.join(file);
         let personal_file = home.join(&personal_name);
         let file_type = detect_file_type(std::path::Path::new(&personal_name));
@@ -636,7 +671,10 @@ async fn apply_layer_sync(
             FileType::Shell => {
                 // Only inject if personal file exists
                 if !personal_file.exists() {
-                    Output::warning(&format!("  {} skipped ({} doesn't exist)", file, personal_name));
+                    Output::warning(&format!(
+                        "  {} skipped ({} doesn't exist)",
+                        file, personal_name
+                    ));
                     continue;
                 }
 
@@ -655,14 +693,20 @@ async fn apply_layer_sync(
             FileType::GitConfig => {
                 // Only inject if personal file exists
                 if !personal_file.exists() {
-                    Output::warning(&format!("  {} skipped ({} doesn't exist)", file, personal_name));
+                    Output::warning(&format!(
+                        "  {} skipped ({} doesn't exist)",
+                        file, personal_name
+                    ));
                     continue;
                 }
 
                 if inject_gitconfig_include(&personal_file, &team_file_path)? {
                     Output::success(&format!("  {} → {} (include added)", file, personal_name));
                 } else {
-                    Output::dim(&format!("  {} → {} (already included)", file, personal_name));
+                    Output::dim(&format!(
+                        "  {} → {} (already included)",
+                        file, personal_name
+                    ));
                 }
             }
             FileType::Toml | FileType::Json => {
@@ -673,7 +717,10 @@ async fn apply_layer_sync(
                             FileType::Json => "JSON merged",
                             _ => "merged",
                         };
-                        Output::success(&format!("  {} → {} ({})", file, personal_name, merge_type));
+                        Output::success(&format!(
+                            "  {} → {} ({})",
+                            file, personal_name, merge_type
+                        ));
                     }
                     Ok(crate::sync::LayerSyncResult::TeamOnly) => {
                         Output::success(&format!("  {} → {} (team only)", file, personal_name));
@@ -786,7 +833,10 @@ fn remove_source_lines(file: &std::path::Path, team_repo_path: &std::path::Path)
 }
 
 /// Remove [include] blocks that reference a team repo path from gitconfig
-fn remove_gitconfig_include(file: &std::path::Path, team_repo_path: &std::path::Path) -> Result<bool> {
+fn remove_gitconfig_include(
+    file: &std::path::Path,
+    team_repo_path: &std::path::Path,
+) -> Result<bool> {
     if !file.exists() {
         return Ok(false);
     }
@@ -848,7 +898,11 @@ fn remove_gitconfig_include(file: &std::path::Path, team_repo_path: &std::path::
         prev_blank = is_blank;
     }
     // Remove trailing blank line
-    while cleaned.last().map(|s: &&str| s.trim().is_empty()).unwrap_or(false) {
+    while cleaned
+        .last()
+        .map(|s: &&str| s.trim().is_empty())
+        .unwrap_or(false)
+    {
         cleaned.pop();
     }
 
@@ -863,7 +917,14 @@ fn cleanup_team_injections(team_name: &str) -> Result<()> {
     let team_repo_dir = Config::team_repo_dir(team_name)?;
 
     // Shell files to check
-    let shell_files = [".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile", ".zshenv"];
+    let shell_files = [
+        ".zshrc",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".zprofile",
+        ".zshenv",
+    ];
     for shell_file in &shell_files {
         let path = home.join(shell_file);
         if remove_source_lines(&path, &team_repo_dir)? {
@@ -957,9 +1018,7 @@ pub async fn orgs_remove(org: &str) -> Result<()> {
     };
 
     let original_len = teams.allowed_orgs.len();
-    teams
-        .allowed_orgs
-        .retain(|o| !o.eq_ignore_ascii_case(org));
+    teams.allowed_orgs.retain(|o| !o.eq_ignore_ascii_case(org));
 
     if teams.allowed_orgs.len() == original_len {
         Output::warning(&format!("Organization '{}' not found in allowed list", org));
@@ -973,7 +1032,7 @@ pub async fn orgs_remove(org: &str) -> Result<()> {
 
 // --- Team secrets management ---
 
-/// Get active team's repo directory or error
+/// Get first active team's repo directory or error
 fn get_active_team_repo() -> Result<(String, std::path::PathBuf)> {
     let config = Config::load()?;
     let teams = config
@@ -982,7 +1041,7 @@ fn get_active_team_repo() -> Result<(String, std::path::PathBuf)> {
         .ok_or_else(|| anyhow::anyhow!("No teams configured. Run 'tether team add' first."))?;
     let active = teams
         .active
-        .as_ref()
+        .first()
         .ok_or_else(|| anyhow::anyhow!("No active team. Run 'tether team switch <name>' first."))?;
     let repo_dir = Config::team_repo_dir(active)?;
     if !repo_dir.exists() {
@@ -1029,7 +1088,10 @@ pub async fn secrets_list_recipients() -> Result<()> {
     let recipients_dir = repo_dir.join("recipients");
 
     if !recipients_dir.exists() {
-        Output::info(&format!("No recipients configured for team '{}'", team_name));
+        Output::info(&format!(
+            "No recipients configured for team '{}'",
+            team_name
+        ));
         return Ok(());
     }
 
@@ -1177,5 +1239,220 @@ pub async fn secrets_remove(name: &str) -> Result<()> {
         "Removed secret '{}' from team '{}'",
         name, team_name
     ));
+    Ok(())
+}
+
+// ============================================================================
+// Files subcommands
+// ============================================================================
+
+/// List synced team files and their status
+pub async fn files_list() -> Result<()> {
+    let (team_name, _repo_dir) = get_active_team_repo()?;
+    let manifest = crate::sync::TeamManifest::load()?;
+
+    // List team layer files
+    let team_files = crate::sync::layers::list_team_layer_files(&team_name)?;
+
+    if team_files.is_empty() {
+        Output::info("No team files synced");
+        return Ok(());
+    }
+
+    let mut table = comfy_table::Table::new();
+    table.set_header(vec![
+        Cell::new("File").add_attribute(Attribute::Bold),
+        Cell::new("Status").add_attribute(Attribute::Bold),
+    ]);
+
+    let personal_files = manifest.get_personal_files(&team_name);
+    let local_patterns = manifest.get_local_patterns(&team_name);
+
+    for file in &team_files {
+        let status = if personal_files.contains(file) {
+            Cell::new("personal (ignored)").fg(Color::Yellow)
+        } else if crate::sync::is_local_file(file, &local_patterns) {
+            Cell::new("local pattern").fg(Color::Cyan)
+        } else {
+            Cell::new("synced").fg(Color::Green)
+        };
+
+        table.add_row(vec![Cell::new(file), status]);
+    }
+
+    println!("{}", table);
+    Ok(())
+}
+
+/// Show local patterns (files that are never synced)
+pub async fn files_local_patterns() -> Result<()> {
+    let (team_name, _repo_dir) = get_active_team_repo()?;
+    let manifest = crate::sync::TeamManifest::load()?;
+    let patterns = manifest.get_local_patterns(&team_name);
+
+    Output::info(&format!("Local patterns for team '{}':", team_name));
+    println!();
+    for pattern in &patterns {
+        println!("  {}", pattern);
+    }
+    println!();
+    Output::info("Files matching these patterns are never synced from team");
+    Ok(())
+}
+
+/// Reset a file to the team version (clobber local changes)
+pub async fn files_reset(file: Option<&str>, all: bool) -> Result<()> {
+    let (team_name, _repo_dir) = get_active_team_repo()?;
+
+    if all {
+        if !Prompt::confirm(
+            "Reset ALL files to team versions? This will overwrite local changes.",
+            false,
+        )? {
+            return Ok(());
+        }
+
+        let reset_files = crate::sync::layers::reset_all_to_team(&team_name)?;
+        Output::success(&format!(
+            "Reset {} files to team versions",
+            reset_files.len()
+        ));
+        for file in &reset_files {
+            println!("  {}", file);
+        }
+    } else if let Some(filename) = file {
+        if !Prompt::confirm(&format!("Reset '{}' to team version?", filename), false)? {
+            return Ok(());
+        }
+
+        crate::sync::layers::reset_to_team(&team_name, filename)?;
+        Output::success(&format!("Reset '{}' to team version", filename));
+    } else {
+        Output::error("Specify a file or use --all");
+    }
+
+    Ok(())
+}
+
+/// Promote a local file to the team repository
+pub async fn files_promote(file: &str) -> Result<()> {
+    let config = Config::load()?;
+    let (team_name, team_config) = config
+        .active_team()
+        .ok_or_else(|| anyhow::anyhow!("No active team"))?;
+
+    if team_config.read_only {
+        Output::error("Cannot promote files: team is configured as read-only");
+        Output::info("Ask a team admin to grant you write access");
+        return Ok(());
+    }
+
+    let repo_dir = Config::team_repo_dir(&team_name)?;
+
+    // Promote the file
+    crate::sync::layers::promote_to_team(&team_name, file, &repo_dir)?;
+
+    // Commit and push
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(&format!("Promote file: {}", file), "tether")?;
+
+    let pb = Progress::spinner("Pushing to team repository...");
+    match git.push() {
+        Ok(_) => {
+            Progress::finish_success(&pb, "Pushed to team repository");
+            Output::success(&format!("Promoted '{}' to team '{}'", file, team_name));
+        }
+        Err(e) => {
+            Progress::finish_error(&pb, "Push failed");
+            Output::error(&format!("Failed to push: {}", e));
+            Output::info("You may not have write access to the team repository");
+        }
+    }
+
+    Ok(())
+}
+
+/// Mark a file as personal (skip team sync)
+pub async fn files_ignore(file: &str) -> Result<()> {
+    let (team_name, _repo_dir) = get_active_team_repo()?;
+    let mut manifest = crate::sync::TeamManifest::load()?;
+
+    manifest.add_personal_file(&team_name, file);
+    manifest.save()?;
+
+    Output::success(&format!(
+        "Marked '{}' as personal - will skip team sync",
+        file
+    ));
+    Ok(())
+}
+
+/// Remove personal file marker (resume team sync)
+pub async fn files_unignore(file: &str) -> Result<()> {
+    let (team_name, _repo_dir) = get_active_team_repo()?;
+    let mut manifest = crate::sync::TeamManifest::load()?;
+
+    manifest.remove_personal_file(&team_name, file);
+    manifest.save()?;
+
+    Output::success(&format!("Unmarked '{}' - will resume team sync", file));
+    Ok(())
+}
+
+/// Show diff between local and team version of a file
+pub async fn files_diff(file: Option<&str>) -> Result<()> {
+    use similar::{ChangeTag, TextDiff};
+
+    let (team_name, _repo_dir) = get_active_team_repo()?;
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+
+    let files_to_diff = if let Some(f) = file {
+        vec![f.to_string()]
+    } else {
+        crate::sync::layers::list_team_layer_files(&team_name)?
+    };
+
+    if files_to_diff.is_empty() {
+        Output::info("No team files to diff");
+        return Ok(());
+    }
+
+    for filename in &files_to_diff {
+        let team_file = crate::sync::layers::team_layer_dir(&team_name)?.join(filename);
+        let home_file = home.join(filename);
+
+        if !team_file.exists() {
+            continue;
+        }
+
+        if !home_file.exists() {
+            println!("--- {}: only in team (not in home)", filename);
+            continue;
+        }
+
+        let team_content = std::fs::read_to_string(&team_file)?;
+        let home_content = std::fs::read_to_string(&home_file)?;
+
+        if team_content == home_content {
+            println!("--- {}: identical", filename);
+            continue;
+        }
+
+        println!("--- {} (team vs local)", filename);
+        let diff = TextDiff::from_lines(&team_content, &home_content);
+
+        for change in diff.iter_all_changes() {
+            let (sign, color) = match change.tag() {
+                ChangeTag::Delete => ("-", "\x1b[31m"), // red
+                ChangeTag::Insert => ("+", "\x1b[32m"), // green
+                ChangeTag::Equal => (" ", ""),
+            };
+            if change.tag() != ChangeTag::Equal {
+                print!("{}{}{}\x1b[0m", color, sign, change);
+            }
+        }
+        println!();
+    }
+
     Ok(())
 }

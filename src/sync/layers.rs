@@ -35,15 +35,27 @@ pub fn init_layers(team_name: &str) -> Result<()> {
 }
 
 /// Map team dotfile name to personal dotfile name
-/// e.g., "team.zshrc" -> ".zshrc", "team.gitconfig" -> ".gitconfig"
-pub fn map_team_to_personal_name(team_name: &str) -> String {
-    if let Some(stripped) = team_name.strip_prefix("team.") {
-        format!(".{}", stripped)
-    } else if team_name.starts_with('.') {
-        team_name.to_string()
-    } else {
-        format!(".{}", team_name)
+/// e.g., "acme.zshrc" -> ".zshrc" (with team_slug "acme")
+/// Also handles legacy "team." prefix for backwards compatibility
+pub fn map_team_to_personal_name(team_filename: &str, team_slug: &str) -> String {
+    // Try stripping team slug prefix first (new format: "acme.zshrc")
+    let slug_prefix = format!("{}.", team_slug);
+    if let Some(stripped) = team_filename.strip_prefix(&slug_prefix) {
+        return format!(".{}", stripped);
     }
+
+    // Backwards compatibility: handle "team." prefix
+    if let Some(stripped) = team_filename.strip_prefix("team.") {
+        return format!(".{}", stripped);
+    }
+
+    // If already starts with dot, keep as-is
+    if team_filename.starts_with('.') {
+        return team_filename.to_string();
+    }
+
+    // Default: prepend dot
+    format!(".{}", team_filename)
 }
 
 /// Copy team dotfiles from repo to team layer
@@ -64,8 +76,8 @@ pub fn sync_team_to_layer(team_name: &str, team_repo_dotfiles: &Path) -> Result<
 
         if path.is_file() {
             if let Some(orig_name) = entry.file_name().to_str() {
-                // Map team.* to .*
-                let personal_name = map_team_to_personal_name(orig_name);
+                // Map {slug}.* to .*
+                let personal_name = map_team_to_personal_name(orig_name, team_name);
                 let dest = team_layer.join(&personal_name);
                 fs::copy(&path, &dest)?;
                 synced_files.push(personal_name);
@@ -126,7 +138,10 @@ pub fn merge_layers(team_name: &str, filename: &str) -> Result<PathBuf> {
         // Only team - use as-is
         fs::read_to_string(&team_file)?
     } else {
-        return Err(anyhow::anyhow!("Neither team nor personal file exists for {}", filename));
+        return Err(anyhow::anyhow!(
+            "Neither team nor personal file exists for {}",
+            filename
+        ));
     };
 
     fs::write(&merged_file, &merged_content)?;
@@ -253,6 +268,93 @@ pub fn remerge_all(team_name: &str) -> Result<Vec<String>> {
     Ok(remerged)
 }
 
+/// Reset a file to the team version (clobber local changes)
+/// This copies the team version directly to home, bypassing personal layer
+pub fn reset_to_team(team_name: &str, filename: &str) -> Result<()> {
+    let home = home::home_dir().context("Could not find home directory")?;
+    let team_file = team_layer_dir(team_name)?.join(filename);
+    let personal_file = personal_layer_dir()?.join(filename);
+    let home_file = home.join(filename);
+
+    if !team_file.exists() {
+        return Err(anyhow::anyhow!(
+            "Team file does not exist: {}",
+            team_file.display()
+        ));
+    }
+
+    // Backup current home file if it exists and differs
+    if home_file.exists() {
+        let backup_dir = crate::sync::create_backup_dir()?;
+        crate::sync::backup_file(&backup_dir, "reset", filename, &home_file)?;
+    }
+
+    // Remove personal layer copy (resets user customizations)
+    if personal_file.exists() {
+        fs::remove_file(&personal_file)?;
+    }
+
+    // Copy team version directly to home
+    fs::copy(&team_file, &home_file)?;
+
+    Ok(())
+}
+
+/// Reset all team files to team versions
+pub fn reset_all_to_team(team_name: &str) -> Result<Vec<String>> {
+    let team_files = list_team_layer_files(team_name)?;
+    let mut reset_files = Vec::new();
+
+    for filename in team_files {
+        reset_to_team(team_name, &filename)?;
+        reset_files.push(filename);
+    }
+
+    Ok(reset_files)
+}
+
+/// Promote a local file to the team repository
+/// This copies the home version to the team repo's dotfiles directory
+pub fn promote_to_team(team_name: &str, filename: &str, team_repo_path: &Path) -> Result<()> {
+    let home = home::home_dir().context("Could not find home directory")?;
+    let home_file = home.join(filename);
+
+    if !home_file.exists() {
+        return Err(anyhow::anyhow!(
+            "Local file does not exist: {}",
+            home_file.display()
+        ));
+    }
+
+    // Map personal filename to team filename (e.g., .zshrc -> acme.zshrc)
+    let team_filename = map_personal_to_team_name(filename, team_name);
+    let team_dotfiles = team_repo_path.join("dotfiles");
+    let dest = team_dotfiles.join(&team_filename);
+
+    // Ensure dotfiles directory exists
+    fs::create_dir_all(&team_dotfiles)?;
+
+    // Copy local file to team repo
+    fs::copy(&home_file, &dest)?;
+
+    // Also update the team layer
+    let team_layer_file = team_layer_dir(team_name)?.join(filename);
+    fs::create_dir_all(team_layer_file.parent().unwrap())?;
+    fs::copy(&home_file, &team_layer_file)?;
+
+    Ok(())
+}
+
+/// Map personal dotfile name to team repo name
+/// e.g., ".zshrc" -> "acme.zshrc" (with team_slug "acme")
+pub fn map_personal_to_team_name(personal_name: &str, team_slug: &str) -> String {
+    if let Some(stripped) = personal_name.strip_prefix('.') {
+        format!("{}.{}", team_slug, stripped)
+    } else {
+        format!("{}.{}", team_slug, personal_name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +369,36 @@ mod tests {
 
         let team = team_layer_dir("acme").unwrap();
         assert!(team.ends_with("acme"));
+    }
+
+    #[test]
+    fn test_map_personal_to_team_name() {
+        assert_eq!(map_personal_to_team_name(".zshrc", "acme"), "acme.zshrc");
+        assert_eq!(
+            map_personal_to_team_name(".gitconfig", "acme"),
+            "acme.gitconfig"
+        );
+        assert_eq!(
+            map_personal_to_team_name("file.txt", "corp"),
+            "corp.file.txt"
+        );
+    }
+
+    #[test]
+    fn test_map_team_to_personal_name() {
+        // New format with org slug
+        assert_eq!(map_team_to_personal_name("acme.zshrc", "acme"), ".zshrc");
+        assert_eq!(
+            map_team_to_personal_name("acme.gitconfig", "acme"),
+            ".gitconfig"
+        );
+        // Backwards compat: team.* prefix still works
+        assert_eq!(map_team_to_personal_name("team.zshrc", "acme"), ".zshrc");
+        assert_eq!(
+            map_team_to_personal_name("team.gitconfig", "acme"),
+            ".gitconfig"
+        );
+        // Already has dot prefix
+        assert_eq!(map_team_to_personal_name(".zshrc", "acme"), ".zshrc");
     }
 }

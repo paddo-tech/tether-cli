@@ -306,21 +306,82 @@ pub struct TeamConfig {
 
 /// Multi-team sync configuration.
 ///
-/// Supports multiple team repositories with easy switching between them.
-/// Only one team can be active at a time, but you can quickly switch between
-/// different teams (e.g., different clients, company vs open source).
+/// Supports multiple team repositories active simultaneously.
+/// Teams can be layered - e.g., company-wide + project-specific.
 ///
 /// Team names are automatically extracted from the Git URL's organization/owner
 /// (e.g., git@github.com:acme-corp/dotfiles.git → "acme-corp") but can be overridden.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TeamsConfig {
-    /// Currently active team (if any)
-    pub active: Option<String>,
+    /// Currently active teams (supports multiple)
+    /// Backwards compatible: accepts both "team-name" and ["team1", "team2"]
+    #[serde(default, deserialize_with = "deserialize_active_teams")]
+    pub active: Vec<String>,
     /// Map of team name -> team configuration
     pub teams: HashMap<String, TeamConfig>,
     /// Allowed GitHub organizations for team repos (empty = no restriction)
     #[serde(default)]
     pub allowed_orgs: Vec<String>,
+}
+
+/// Custom deserializer to handle both old (string) and new (array) formats
+fn deserialize_active_teams<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct ActiveTeamsVisitor;
+
+    impl<'de> Visitor<'de> for ActiveTeamsVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string or array of strings")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Vec::new())
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![value.to_string()])
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![value])
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            let mut teams = Vec::new();
+            while let Some(team) = seq.next_element::<String>()? {
+                teams.push(team);
+            }
+            Ok(teams)
+        }
+    }
+
+    deserializer.deserialize_option(ActiveTeamsVisitor)
 }
 
 /// Project-local config syncing.
@@ -382,12 +443,33 @@ impl Config {
         Ok(Self::team_dir(team_name)?.join("sync"))
     }
 
-    /// Get active team configuration
+    /// Get first active team configuration (for backwards compatibility)
     pub fn active_team(&self) -> Option<(String, &TeamConfig)> {
         let teams = self.teams.as_ref()?;
-        let active_name = teams.active.as_ref()?;
+        let active_name = teams.active.first()?;
         let team_config = teams.teams.get(active_name)?;
         Some((active_name.clone(), team_config))
+    }
+
+    /// Get all active team configurations
+    pub fn active_teams(&self) -> Vec<(String, &TeamConfig)> {
+        let Some(teams) = self.teams.as_ref() else {
+            return Vec::new();
+        };
+
+        teams
+            .active
+            .iter()
+            .filter_map(|name| teams.teams.get(name).map(|cfg| (name.clone(), cfg)))
+            .collect()
+    }
+
+    /// Check if a team is active
+    pub fn is_team_active(&self, team_name: &str) -> bool {
+        self.teams
+            .as_ref()
+            .map(|t| t.active.iter().any(|n| n == team_name))
+            .unwrap_or(false)
     }
 
     pub fn load() -> Result<Self> {
