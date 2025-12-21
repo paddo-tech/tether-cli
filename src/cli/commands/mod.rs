@@ -253,6 +253,11 @@ pub enum TeamAction {
         #[command(subcommand)]
         action: SecretsAction,
     },
+    /// Manage team files and sync preferences
+    Files {
+        #[command(subcommand)]
+        action: FilesAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -307,6 +312,42 @@ pub enum SecretsAction {
     Remove {
         /// Secret name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum FilesAction {
+    /// List synced team files
+    List,
+    /// Show local patterns (files never synced)
+    LocalPatterns,
+    /// Reset file to team version (clobber local changes)
+    Reset {
+        /// File to reset
+        file: Option<String>,
+        /// Reset all files
+        #[arg(long)]
+        all: bool,
+    },
+    /// Promote local file to team repository
+    Promote {
+        /// File to promote
+        file: String,
+    },
+    /// Mark file as personal (skip team sync)
+    Ignore {
+        /// File to ignore
+        file: String,
+    },
+    /// Unmark file as personal (resume team sync)
+    Unignore {
+        /// File to unignore
+        file: String,
+    },
+    /// Show diff between local and team version
+    Diff {
+        /// File to diff (all if not specified)
+        file: Option<String>,
     },
 }
 
@@ -379,6 +420,17 @@ impl Cli {
                     SecretsAction::Get { name } => team::secrets_get(name).await,
                     SecretsAction::List => team::secrets_list().await,
                     SecretsAction::Remove { name } => team::secrets_remove(name).await,
+                },
+                TeamAction::Files { action } => match action {
+                    FilesAction::List => team::files_list().await,
+                    FilesAction::LocalPatterns => team::files_local_patterns().await,
+                    FilesAction::Reset { file, all } => {
+                        team::files_reset(file.as_deref(), *all).await
+                    }
+                    FilesAction::Promote { file } => team::files_promote(file).await,
+                    FilesAction::Ignore { file } => team::files_ignore(file).await,
+                    FilesAction::Unignore { file } => team::files_unignore(file).await,
+                    FilesAction::Diff { file } => team::files_diff(file.as_deref()).await,
                 },
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,

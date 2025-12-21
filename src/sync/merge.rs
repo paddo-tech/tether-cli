@@ -25,19 +25,27 @@ pub fn detect_file_type(path: &Path) -> FileType {
     }
 
     // GitConfig - uses [include] directive
-    if filename == ".gitconfig"
-        || filename.ends_with("gitconfig")
-        || filename == "team.gitconfig"
-    {
+    if filename == ".gitconfig" || filename.ends_with("gitconfig") || filename == "team.gitconfig" {
         return FileType::GitConfig;
     }
 
     // Shell files - use source directive
     // Be explicit to avoid matching .npmrc, .yarnrc, etc.
     let shell_files = [
-        ".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile", ".zshenv",
-        ".bash_login", ".bash_logout", ".zlogin", ".zlogout",
-        "team.zshrc", "team.bashrc", "team.bash_profile", "team.profile",
+        ".zshrc",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".zprofile",
+        ".zshenv",
+        ".bash_login",
+        ".bash_logout",
+        ".zlogin",
+        ".zlogout",
+        "team.zshrc",
+        "team.bashrc",
+        "team.bash_profile",
+        "team.profile",
     ];
     if shell_files.contains(&filename) {
         return FileType::Shell;
@@ -60,12 +68,10 @@ pub fn merge_files(team_path: &Path, personal_path: &Path) -> Result<String> {
     match file_type {
         FileType::Toml => merge_toml(&team_content, &personal_content),
         FileType::Json => merge_json(&team_content, &personal_content),
-        FileType::Shell | FileType::GitConfig | FileType::Unknown => {
-            Err(anyhow::anyhow!(
-                "File type {:?} should use source/include, not merge",
-                file_type
-            ))
-        }
+        FileType::Shell | FileType::GitConfig | FileType::Unknown => Err(anyhow::anyhow!(
+            "File type {:?} should use source/include, not merge",
+            file_type
+        )),
     }
 }
 
@@ -139,8 +145,14 @@ mod tests {
         assert_eq!(detect_file_type(Path::new("settings.json")), FileType::Json);
 
         // Git config - use [include]
-        assert_eq!(detect_file_type(Path::new(".gitconfig")), FileType::GitConfig);
-        assert_eq!(detect_file_type(Path::new("team.gitconfig")), FileType::GitConfig);
+        assert_eq!(
+            detect_file_type(Path::new(".gitconfig")),
+            FileType::GitConfig
+        );
+        assert_eq!(
+            detect_file_type(Path::new("team.gitconfig")),
+            FileType::GitConfig
+        );
 
         // Shell files - use source
         assert_eq!(detect_file_type(Path::new(".zshrc")), FileType::Shell);
@@ -196,5 +208,4 @@ t = "test --release"
         assert_eq!(val["b"]["y"], 20); // team preserved
         assert_eq!(val["c"], 3); // personal addition
     }
-
 }
