@@ -200,7 +200,7 @@ See [SPEC.md](SPEC.md) for detailed roadmap.
 
 - [SPEC.md](SPEC.md) - Complete technical specification
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines *(coming soon)*
-- [CHANGELOG.md](CHANGELOG.md) - Version history *(coming soon)*
+- [CHANGELOG.md](CHANGELOG.md) - Version history
 
 ## Technology
 
