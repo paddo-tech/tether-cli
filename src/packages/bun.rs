@@ -199,11 +199,18 @@ impl PackageManager for BunManager {
             return Ok(());
         }
 
-        let output = Command::new("bun").args(["update", "-g"]).output().await?;
+        // bun update -g is broken (only updates first package)
+        // Workaround: reinstall each package to get latest version
+        for pkg in packages {
+            let output = Command::new("bun")
+                .args(["add", "-g", &pkg.name])
+                .output()
+                .await?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("bun update failed: {}", stderr));
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("Warning: Failed to update {}: {}", pkg.name, stderr);
+            }
         }
 
         Ok(())

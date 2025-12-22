@@ -80,9 +80,21 @@ Before completing work:
 
 Homebrew tap: `paddo-tech/homebrew-tap`
 
-To release: bump version in `Cargo.toml`, commit, and push. CI creates the tag and updates the formula.
+### Version Bump Checklist
+
+1. Update version in `Cargo.toml`
+2. Add entry to `CHANGELOG.md` with date and changes
+3. Commit: `git commit -am "chore: release vX.Y.Z"`
+4. Push to main - CI creates tag, builds, signs, notarizes, and updates Homebrew formula
 
 **Do NOT create tags manually** - the release workflow handles tagging.
+
+### Versioning
+
+- **Patch** (1.0.x): Bug fixes
+- **Minor** (1.x.0): New features, backward compatible
+- **Major** (x.0.0): Breaking changes
+- **Prerelease**: Use `-beta.N` suffix (creates versioned formula)
 
 Users install via:
 ```bash
