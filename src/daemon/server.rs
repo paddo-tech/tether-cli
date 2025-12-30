@@ -7,7 +7,7 @@ use crate::sync::{
     GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
-use chrono::{Local, Timelike};
+use chrono::Local;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +20,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use tokio::signal::unix::{signal, SignalKind};
 
 const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes
-const UPDATE_HOUR: u32 = 2; // 2am local time
 
 /// Thread-safe flag indicating daemon mode (avoids unsafe std::env::set_var in async)
 static DAEMON_MODE: AtomicBool = AtomicBool::new(false);
@@ -493,25 +492,32 @@ impl DaemonServer {
         Ok(false)
     }
 
-    /// Check if we should run daily package updates (2am local, once per day)
+    /// Check if we should run daily package updates (once per 24h, catches up on missed runs)
     fn should_run_update(&mut self) -> bool {
-        let now = Local::now();
-        let today = now.date_naive();
-        let current_hour = now.hour();
-
-        // Only run at the update hour (2am)
-        if current_hour != UPDATE_HOUR {
-            return false;
-        }
-
-        // Only run once per day
+        // In-memory guard: don't run twice in same session day
+        let today = Local::now().date_naive();
         if self.last_update_date == Some(today) {
             return false;
         }
 
-        // Mark as run for today
-        self.last_update_date = Some(today);
-        true
+        // Check persisted state for last upgrade time
+        let state = match SyncState::load() {
+            Ok(s) => s,
+            Err(_) => return true,
+        };
+
+        let should_run = match state.last_upgrade {
+            None => true,
+            Some(last) => {
+                let elapsed = chrono::Utc::now() - last;
+                elapsed.num_hours() >= 24
+            }
+        };
+
+        if should_run {
+            self.last_update_date = Some(today);
+        }
+        should_run
     }
 
     /// Update all enabled package managers
