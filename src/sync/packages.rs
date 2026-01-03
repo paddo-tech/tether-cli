@@ -97,8 +97,8 @@ pub async fn import_packages(
 }
 
 /// Import brew packages (formulae, casks, taps).
-/// In daemon mode, casks are skipped and returned as deferred.
-/// In interactive mode, previously deferred casks are included.
+/// Casks are installed individually to detect which need password.
+/// Returns list of casks that need password (flagged for manual sync).
 async fn import_brew(
     manifests_dir: &Path,
     machine_state: &MachineState,
@@ -165,62 +165,81 @@ async fn import_brew(
         .filter(|p| !local_formulae.contains(normalize_formula_name(p)))
         .cloned()
         .collect();
-    let missing_casks: Vec<_> = brew_packages
+
+    // Collect casks to install: missing + previously deferred that still need install
+    let mut casks_to_try: Vec<_> = brew_packages
         .casks
         .iter()
         .filter(|p| !local_casks.contains(p.as_str()))
         .cloned()
         .collect();
 
-    // In daemon mode: skip casks (they require password)
-    let (casks_to_install, deferred_casks) = if daemon_mode {
-        (Vec::new(), missing_casks)
-    } else {
-        // Interactive: include previously deferred casks that are still missing
-        let mut casks = missing_casks;
-        for deferred in previously_deferred {
-            if !local_casks.contains(deferred.as_str())
-                && !casks.contains(deferred)
-                && !removed_casks.contains(deferred)
-            {
-                casks.push(deferred.clone());
+    for deferred in previously_deferred {
+        if !local_casks.contains(deferred.as_str())
+            && !casks_to_try.contains(deferred)
+            && !removed_casks.contains(deferred)
+        {
+            casks_to_try.push(deferred.clone());
+        }
+    }
+
+    // Install formulae via bundle (no password needed)
+    if !missing_formulae.is_empty() {
+        Output::info(&format!(
+            "Installing {} brew formula{}: {}",
+            missing_formulae.len(),
+            if missing_formulae.len() == 1 { "" } else { "e" },
+            missing_formulae.join(", ")
+        ));
+
+        let formulae_manifest = BrewfilePackages {
+            taps: brew_packages.taps,
+            formulae: missing_formulae,
+            casks: Vec::new(),
+        };
+        if let Err(e) = brew.import_manifest(&formulae_manifest.generate()).await {
+            Output::warning(&format!("Failed to import formulae: {}", e));
+        }
+    }
+
+    // Install casks one-by-one to detect which need password
+    let mut flagged_casks = Vec::new();
+
+    if !casks_to_try.is_empty() {
+        Output::info(&format!(
+            "Installing {} cask{}: {}",
+            casks_to_try.len(),
+            if casks_to_try.len() == 1 { "" } else { "s" },
+            casks_to_try.join(", ")
+        ));
+        if !daemon_mode {
+            Output::info("Casks may prompt for your password");
+        }
+
+        for cask in &casks_to_try {
+            match brew.install_cask(cask, !daemon_mode).await {
+                Ok(true) => {} // installed successfully
+                Ok(false) => {
+                    if daemon_mode {
+                        // Daemon: needs password - flag for manual sync
+                        Output::info(&format!(
+                            "Cask {} requires password, flagged for manual sync",
+                            cask
+                        ));
+                        flagged_casks.push(cask.clone());
+                    } else {
+                        // Interactive: user had their chance, just log failure
+                        Output::warning(&format!("Failed to install cask {}", cask));
+                    }
+                }
+                Err(e) => {
+                    Output::warning(&format!("Failed to install cask {}: {}", cask, e));
+                }
             }
         }
-        (casks, Vec::new())
-    };
-
-    let total_missing = missing_formulae.len() + casks_to_install.len();
-    if total_missing == 0 {
-        return deferred_casks;
     }
 
-    let missing_names: Vec<_> = missing_formulae
-        .iter()
-        .chain(casks_to_install.iter())
-        .map(|s| s.as_str())
-        .collect();
-    Output::info(&format!(
-        "Installing {} brew package{}: {}",
-        total_missing,
-        if total_missing == 1 { "" } else { "s" },
-        missing_names.join(", ")
-    ));
-    if !casks_to_install.is_empty() {
-        Output::info("Casks may prompt for your password");
-    }
-
-    // Generate filtered manifest (without deferred casks)
-    let filtered_packages = BrewfilePackages {
-        taps: brew_packages.taps,
-        formulae: missing_formulae,
-        casks: casks_to_install,
-    };
-    let filtered_manifest = filtered_packages.generate();
-    if let Err(e) = brew.import_manifest(&filtered_manifest).await {
-        Output::warning(&format!("Failed to import Brewfile: {}", e));
-    }
-
-    deferred_casks
+    flagged_casks
 }
 
 /// Import a simple package manager (one package per line manifest)

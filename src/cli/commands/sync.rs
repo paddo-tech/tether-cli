@@ -164,14 +164,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     // Interactive mode: install deferred casks from daemon syncs
     if !dry_run {
         let deferred_casks = state.deferred_casks.clone();
-        if !deferred_casks.is_empty() {
-            Output::info(&format!(
-                "Installing {} previously deferred cask{}: {}",
-                deferred_casks.len(),
-                if deferred_casks.len() == 1 { "" } else { "s" },
-                deferred_casks.join(", ")
-            ));
-        }
 
         import_packages(
             &config,
@@ -182,9 +174,10 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         )
         .await?;
 
-        // Clear deferred casks after successful interactive sync
+        // Clear deferred casks after interactive sync (user had their chance)
         if !state.deferred_casks.is_empty() {
             state.deferred_casks.clear();
+            state.deferred_casks_hash = None;
             state.save()?;
         }
 

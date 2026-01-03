@@ -158,6 +158,52 @@ impl BrewManager {
             .filter(|s| !s.is_empty())
             .collect())
     }
+
+    /// Install a single cask.
+    /// Returns Ok(true) if installed, Ok(false) if needs password (flagged for manual sync).
+    pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {
+        use std::process::Stdio;
+
+        let mut cmd = Command::new("brew");
+        cmd.args(["install", "--cask", cask])
+            .env("NONINTERACTIVE", "1")
+            .env("HOMEBREW_NO_AUTO_UPDATE", "1");
+
+        if allow_interactive {
+            cmd.stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+            let status = cmd.status().await?;
+            Ok(status.success())
+        } else {
+            // Daemon mode: stdin=null so sudo fails instead of hanging
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            let output = cmd.output().await?;
+
+            if output.status.success() {
+                return Ok(true);
+            }
+
+            // Check if failed due to password prompt
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("sudo: no tty present")
+                || stderr.contains("Password:")
+                || stderr.contains("password is required")
+            {
+                return Ok(false); // needs password
+            }
+
+            // Other error - propagate
+            Err(anyhow::anyhow!(
+                "Failed to install cask {}: {}",
+                cask,
+                stderr
+            ))
+        }
+    }
 }
 
 impl Default for BrewManager {

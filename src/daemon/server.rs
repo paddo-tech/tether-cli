@@ -349,16 +349,28 @@ impl DaemonServer {
             }
             state.deferred_casks = all_deferred.into_iter().collect();
             state.deferred_casks.sort();
-            state.save()?;
 
-            // Notify user
-            notify_deferred_casks(&deferred_casks).ok();
-            log::info!(
-                "Deferred {} cask{} (require password): {}",
-                deferred_casks.len(),
-                if deferred_casks.len() == 1 { "" } else { "s" },
-                deferred_casks.join(", ")
+            // Only notify if list changed (avoid repeated notifications)
+            let hash = format!(
+                "{:x}",
+                Sha256::digest(state.deferred_casks.join(",").as_bytes())
             );
+            if state.deferred_casks_hash.as_ref() != Some(&hash) {
+                notify_deferred_casks(&state.deferred_casks).ok();
+                state.deferred_casks_hash = Some(hash);
+                log::info!(
+                    "Deferred {} cask{} (require password): {}",
+                    state.deferred_casks.len(),
+                    if state.deferred_casks.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    state.deferred_casks.join(", ")
+                );
+            }
+
+            state.save()?;
         }
 
         // Sync packages (export)

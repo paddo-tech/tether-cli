@@ -17,6 +17,9 @@ pub struct SyncState {
     /// Casks deferred during daemon sync (require password)
     #[serde(default)]
     pub deferred_casks: Vec<String>,
+    /// Hash of deferred_casks for change detection (notify once)
+    #[serde(default)]
+    pub deferred_casks_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +245,7 @@ impl SyncState {
             last_upgrade: None,
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
+            deferred_casks_hash: None,
         }
     }
 
