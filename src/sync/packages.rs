@@ -192,6 +192,19 @@ async fn import_brew(
             missing_formulae.join(", ")
         ));
 
+        // Explicitly tap any missing taps before bundle install
+        // (brew bundle sometimes fails to tap before installing)
+        if let Ok(local_taps) = brew.list_taps().await {
+            let local_taps_set: HashSet<_> = local_taps.iter().map(|s| s.as_str()).collect();
+            for tap in &brew_packages.taps {
+                if !local_taps_set.contains(tap.as_str()) {
+                    if let Err(e) = brew.tap(tap).await {
+                        Output::warning(&format!("Failed to tap {}: {}", tap, e));
+                    }
+                }
+            }
+        }
+
         let formulae_manifest = BrewfilePackages {
             taps: brew_packages.taps,
             formulae: missing_formulae,

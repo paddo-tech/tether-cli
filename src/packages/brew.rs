@@ -159,6 +159,12 @@ impl BrewManager {
             .collect())
     }
 
+    /// Add a tap
+    pub async fn tap(&self, tap_name: &str) -> Result<()> {
+        self.run_brew(&["tap", tap_name]).await?;
+        Ok(())
+    }
+
     /// Install a single cask.
     /// Returns Ok(true) if installed, Ok(false) if needs password (flagged for manual sync).
     pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {
