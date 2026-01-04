@@ -1,7 +1,7 @@
 use anyhow::Result;
 use git2::{Repository, Signature};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub struct GitBackend {
     repo_path: PathBuf,
@@ -30,6 +30,7 @@ impl GitBackend {
         let output = Command::new("git")
             .args(["ls-remote", "--heads", "origin", branch])
             .current_dir(&self.repo_path)
+            .stdin(Stdio::inherit())
             .output();
 
         match output {
@@ -45,6 +46,7 @@ impl GitBackend {
             .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
         let output = Command::new("git")
             .args(["clone", url, path_str])
+            .stdin(Stdio::inherit())
             .output()?;
 
         if !output.status.success() {
@@ -132,6 +134,7 @@ impl GitBackend {
         let fetch_output = Command::new("git")
             .args(["fetch", "origin", "main"])
             .current_dir(&self.repo_path)
+            .stdin(Stdio::inherit())
             .output()?;
 
         if !fetch_output.status.success() {
@@ -165,6 +168,7 @@ impl GitBackend {
             let output = Command::new("git")
                 .args(&args)
                 .current_dir(&self.repo_path)
+                .stdin(Stdio::inherit())
                 .output()?;
 
             if output.status.success() {
@@ -196,6 +200,7 @@ impl GitBackend {
         let output = Command::new("git")
             .args(["push", "--dry-run", "origin", "HEAD"])
             .current_dir(&self.repo_path)
+            .stdin(Stdio::inherit())
             .output()?;
 
         // If dry-run succeeds or gives specific errors, we have write access

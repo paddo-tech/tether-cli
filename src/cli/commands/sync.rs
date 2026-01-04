@@ -36,9 +36,8 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     // Pull latest changes from personal repo
     let git = GitBackend::open(&sync_path)?;
     if !dry_run {
-        let pb = Progress::spinner("Pulling latest changes...");
+        Output::info("Pulling latest changes...");
         git.pull()?;
-        pb.finish_and_clear();
     }
 
     // Pull from team repo if enabled

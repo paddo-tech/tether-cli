@@ -1,4 +1,4 @@
-use crate::cli::{Output, Progress};
+use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
@@ -29,10 +29,9 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
     // Pull latest to ensure we have current remote state
-    let pb = Progress::spinner("Fetching latest changes...");
+    Output::info("Fetching latest changes...");
     let git = GitBackend::open(&sync_path)?;
     git.pull()?;
-    pb.finish_and_clear();
 
     Output::section("Diff");
     println!();
