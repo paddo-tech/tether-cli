@@ -25,6 +25,257 @@ fn sanitize_team_name(name: &str) -> String {
         .to_string()
 }
 
+/// Interactive team setup wizard
+pub async fn setup() -> Result<()> {
+    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+
+    println!();
+    Output::info("Team Setup Wizard");
+    Output::dim("Configure team sync for shared dotfiles and project secrets");
+    println!();
+
+    let mut config = Config::load()?;
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+
+    // Step 1: Check for existing teams or add new one
+    let team_name = if let Some(teams) = &config.teams {
+        if !teams.teams.is_empty() {
+            let team_names: Vec<&str> = teams.teams.keys().map(|s| s.as_str()).collect();
+            let mut options: Vec<&str> = team_names.clone();
+            options.push("Add new team");
+
+            let choice = Prompt::select("Select team to configure:", options.clone(), 0)?;
+
+            if choice == options.len() - 1 {
+                // Add new team
+                let url = Prompt::input("Team repository URL:", None)?;
+                add(&url, None, false).await?;
+                crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
+            } else {
+                team_names[choice].to_string()
+            }
+        } else {
+            let url = Prompt::input("Team repository URL:", None)?;
+            add(&url, None, false).await?;
+            crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
+        }
+    } else {
+        let url = Prompt::input("Team repository URL:", None)?;
+        add(&url, None, false).await?;
+        crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
+    };
+
+    // Reload config after potential add
+    config = Config::load()?;
+
+    println!();
+    Output::info(&format!("Configuring team '{}'", team_name));
+
+    // Step 2: Identity setup
+    println!();
+    let identity_path = Config::config_dir()?.join("identity.age");
+    if !identity_path.exists() {
+        Output::warning("No identity found - needed for team secrets");
+        if Prompt::confirm("Create identity now?", true)? {
+            crate::cli::commands::identity::init().await?;
+        }
+    } else {
+        Output::success("Identity exists");
+    }
+
+    // Step 3: Org mapping for project secrets
+    println!();
+    Output::info("Project secrets: Map GitHub/GitLab orgs to this team");
+    Output::dim("Projects from mapped orgs will use team secrets instead of personal sync");
+    println!();
+
+    // Determine search paths
+    let default_paths: Vec<String> = config
+        .project_configs
+        .search_paths
+        .iter()
+        .map(|p| {
+            if let Some(stripped) = p.strip_prefix("~/") {
+                home.join(stripped).to_string_lossy().to_string()
+            } else {
+                p.clone()
+            }
+        })
+        .collect();
+
+    println!("Default search paths: {}", default_paths.join(", "));
+    let custom_path = if Prompt::confirm("Scan a different directory?", false)? {
+        Some(Prompt::input("Directory to scan:", None)?)
+    } else {
+        None
+    };
+
+    // Scan for git repos
+    let mut discovered_orgs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let search_paths: Vec<std::path::PathBuf> = if let Some(ref p) = custom_path {
+        let path = if let Some(stripped) = p.strip_prefix("~/") {
+            home.join(stripped)
+        } else {
+            std::path::PathBuf::from(p)
+        };
+        vec![path]
+    } else {
+        config
+            .project_configs
+            .search_paths
+            .iter()
+            .map(|p| {
+                if let Some(stripped) = p.strip_prefix("~/") {
+                    home.join(stripped)
+                } else {
+                    std::path::PathBuf::from(p)
+                }
+            })
+            .collect()
+    };
+
+    let spinner = Progress::spinner("Scanning for git repos...");
+    for search_path in &search_paths {
+        if let Ok(repos) = find_git_repos(search_path) {
+            for repo_path in repos {
+                if let Ok(remote_url) = get_remote_url(&repo_path) {
+                    let normalized = normalize_remote_url(&remote_url);
+                    if let Some(org) = crate::sync::extract_org_from_normalized_url(&normalized) {
+                        discovered_orgs.insert(org);
+                    }
+                }
+            }
+        }
+    }
+    Progress::finish_success(&spinner, &format!("Found {} unique org(s)", discovered_orgs.len()));
+
+    let teams = config.teams.as_ref().unwrap();
+    let team_config = teams.teams.get(&team_name).unwrap();
+    let existing_orgs: std::collections::HashSet<String> =
+        team_config.orgs.iter().cloned().collect();
+
+    // Filter out already-mapped orgs
+    let suggested_orgs: Vec<String> = discovered_orgs
+        .difference(&existing_orgs)
+        .cloned()
+        .collect();
+
+    if !existing_orgs.is_empty() {
+        println!("Currently mapped orgs:");
+        for org in &existing_orgs {
+            println!("  • {}", org);
+        }
+        println!();
+    }
+
+    if !suggested_orgs.is_empty() {
+        println!("Discovered orgs from your projects:");
+        for (i, org) in suggested_orgs.iter().enumerate() {
+            println!("  {}. {}", i + 1, org);
+        }
+        println!();
+
+        if Prompt::confirm("Add any of these orgs to the team?", true)? {
+            let selections = Prompt::input(
+                "Enter numbers to add (comma-separated, or 'all'):",
+                Some("all"),
+            )?;
+
+            let orgs_to_add: Vec<&String> = if selections.trim().eq_ignore_ascii_case("all") {
+                suggested_orgs.iter().collect()
+            } else {
+                selections
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<usize>().ok())
+                    .filter_map(|i| suggested_orgs.get(i.saturating_sub(1)))
+                    .collect()
+            };
+
+            for org in orgs_to_add {
+                orgs_add(org).await?;
+            }
+        }
+    } else if existing_orgs.is_empty() {
+        Output::dim("No local projects found to suggest orgs");
+        if Prompt::confirm("Add an org manually?", false)? {
+            let org = Prompt::input("Org (e.g., github.com/acme-corp):", None)?;
+            orgs_add(&org).await?;
+        }
+    }
+
+    // Step 4: Recipient setup (if admin)
+    println!();
+    let teams = config.teams.as_ref().unwrap();
+    let team_config = teams.teams.get(&team_name).unwrap();
+
+    if !team_config.read_only {
+        Output::info("Team secrets: Add recipients who can decrypt team secrets");
+
+        let repo_dir = Config::team_repo_dir(&team_name)?;
+        let recipients_dir = repo_dir.join("recipients");
+        let existing_recipients = if recipients_dir.exists() {
+            std::fs::read_dir(&recipients_dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|ext| ext == "pub").unwrap_or(false))
+                .count()
+        } else {
+            0
+        };
+
+        println!("Current recipients: {}", existing_recipients);
+
+        // Check if user's identity is a recipient
+        let identity_pub_path = Config::config_dir()?.join("identity.pub");
+        if identity_pub_path.exists() {
+            let my_pubkey = std::fs::read_to_string(&identity_pub_path)?;
+            let my_pubkey = my_pubkey.trim();
+
+            let am_recipient = if recipients_dir.exists() {
+                std::fs::read_dir(&recipients_dir)?
+                    .filter_map(|e| e.ok())
+                    .any(|e| {
+                        std::fs::read_to_string(e.path())
+                            .map(|content| content.trim() == my_pubkey)
+                            .unwrap_or(false)
+                    })
+            } else {
+                false
+            };
+
+            if !am_recipient {
+                println!();
+                Output::warning("You are not a recipient - you won't be able to decrypt team secrets");
+                if Prompt::confirm("Add yourself as a recipient?", true)? {
+                    let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+                    let name = Prompt::input("Your name for this recipient:", Some(&username))?;
+                    secrets_add_recipient(&identity_pub_path.to_string_lossy(), Some(&name)).await?;
+                }
+            } else {
+                Output::success("You are a recipient");
+            }
+        }
+    } else {
+        Output::dim("Team is read-only - recipient management disabled");
+    }
+
+    // Step 5: Summary
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    Output::success("Team setup complete!");
+    println!();
+
+    // Reload and show status
+    status().await?;
+
+    println!();
+    Output::info("Next steps:");
+    println!("  • Run 'tether sync' to sync team dotfiles");
+    println!("  • Use 'tether team projects add .env' to share project secrets");
+    println!("  • Use 'tether team secrets set KEY' to share team-wide secrets");
+
+    Ok(())
+}
+
 /// Validate that a URL belongs to an allowed organization
 fn validate_org_restriction(url: &str, allowed_orgs: &[String]) -> Result<()> {
     if allowed_orgs.is_empty() {
@@ -286,6 +537,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
                 url: url.to_string(),
                 auto_inject: use_layers, // Now means "use layer-based merge"
                 read_only,
+                orgs: Vec::new(), // Configure via 'tether team orgs add'
             },
         );
 
@@ -951,58 +1203,111 @@ fn cleanup_team_injections(team_name: &str) -> Result<()> {
     Ok(())
 }
 
-// --- Org restriction management ---
+// --- Per-team org management ---
+// Maps GitHub/GitLab orgs to teams for project secrets
 
 pub async fn orgs_add(org: &str) -> Result<()> {
+    use crate::sync::SyncEngine;
+
     let mut config = Config::load()?;
 
-    // Initialize teams config if needed
-    if config.teams.is_none() {
-        config.teams = Some(crate::config::TeamsConfig::default());
-    }
+    let teams = match config.teams.as_mut() {
+        Some(t) => t,
+        None => {
+            Output::error("No teams configured. Run 'tether team add' first.");
+            return Ok(());
+        }
+    };
 
-    let teams = config.teams.as_mut().unwrap();
+    let active = teams
+        .active
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No active team"))?
+        .clone();
 
-    // Check if already exists (case-insensitive)
-    if teams
-        .allowed_orgs
-        .iter()
-        .any(|o| o.eq_ignore_ascii_case(org))
-    {
-        Output::info(&format!("Organization '{}' is already allowed", org));
+    let team_config = teams
+        .teams
+        .get_mut(&active)
+        .ok_or_else(|| anyhow::anyhow!("Team not found"))?;
+
+    // Validate format (should be host/org like github.com/acme-corp)
+    if !org.contains('/') {
+        Output::error("Org format should be 'host/org' (e.g., github.com/acme-corp)");
         return Ok(());
     }
 
-    teams.allowed_orgs.push(org.to_string());
+    // Check if already exists
+    if team_config.orgs.iter().any(|o| o.eq_ignore_ascii_case(org)) {
+        Output::info(&format!("'{}' already mapped to team '{}'", org, active));
+        return Ok(());
+    }
+
+    team_config.orgs.push(org.to_string());
     config.save()?;
 
-    Output::success(&format!("Added '{}' to allowed organizations", org));
+    Output::success(&format!("Mapped '{}' to team '{}'", org, active));
+    Output::info("Projects from this org will now use team secrets");
+
+    // Check for personal project files that should be cleaned up
+    let sync_path = SyncEngine::sync_path()?;
+    let personal_projects_dir = sync_path.join("projects");
+
+    if personal_projects_dir.exists() {
+        let matching = find_personal_projects_for_org(&personal_projects_dir, org)?;
+        if !matching.is_empty() {
+            println!();
+            Output::warning(&format!(
+                "Found {} project(s) in personal sync that now belong to team:",
+                matching.len()
+            ));
+            for project in &matching {
+                println!("  • {}", project);
+            }
+            println!();
+
+            if Prompt::confirm("Remove these from personal sync?", true)? {
+                purge_personal_project_files(&sync_path, &matching)?;
+                Output::success("Removed from personal sync");
+
+                if Prompt::confirm("Also purge from git history? (rewrites history)", false)? {
+                    purge_from_git_history(&sync_path, &matching)?;
+                    force_push_sync_repo(&sync_path)?;
+                    Output::success("Purged from git history and pushed");
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
 pub async fn orgs_list() -> Result<()> {
     let config = Config::load()?;
 
-    let allowed_orgs = config
-        .teams
-        .as_ref()
-        .map(|t| &t.allowed_orgs)
-        .filter(|o| !o.is_empty());
+    let teams = match config.teams.as_ref() {
+        Some(t) => t,
+        None => {
+            Output::info("No teams configured");
+            return Ok(());
+        }
+    };
 
-    match allowed_orgs {
-        Some(orgs) => {
-            println!();
-            println!("Allowed organizations:");
-            for org in orgs {
+    println!();
+    for (name, team_config) in &teams.teams {
+        let active = teams.active.contains(name);
+        let marker = if active { " (active)" } else { "" };
+        println!("Team '{}'{}:", name, marker);
+
+        if team_config.orgs.is_empty() {
+            Output::dim("  No orgs mapped - project secrets disabled");
+        } else {
+            for org in &team_config.orgs {
                 println!("  • {}", org);
             }
-            println!();
         }
-        None => {
-            Output::info("No organization restrictions configured");
-            Output::dim("  Any team repository URL is allowed");
-        }
+        println!();
     }
+
     Ok(())
 }
 
@@ -1012,21 +1317,223 @@ pub async fn orgs_remove(org: &str) -> Result<()> {
     let teams = match config.teams.as_mut() {
         Some(t) => t,
         None => {
-            Output::info("No organization restrictions configured");
+            Output::error("No teams configured");
             return Ok(());
         }
     };
 
-    let original_len = teams.allowed_orgs.len();
-    teams.allowed_orgs.retain(|o| !o.eq_ignore_ascii_case(org));
+    let active = teams
+        .active
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No active team"))?
+        .clone();
 
-    if teams.allowed_orgs.len() == original_len {
-        Output::warning(&format!("Organization '{}' not found in allowed list", org));
+    let team_config = teams
+        .teams
+        .get_mut(&active)
+        .ok_or_else(|| anyhow::anyhow!("Team not found"))?;
+
+    let original_len = team_config.orgs.len();
+    team_config.orgs.retain(|o| !o.eq_ignore_ascii_case(org));
+
+    if team_config.orgs.len() == original_len {
+        Output::warning(&format!("'{}' not mapped to team '{}'", org, active));
         return Ok(());
     }
 
     config.save()?;
-    Output::success(&format!("Removed '{}' from allowed organizations", org));
+    Output::success(&format!("Removed '{}' from team '{}'", org, active));
+    Ok(())
+}
+
+/// Find personal project directories matching an org
+fn find_personal_projects_for_org(
+    personal_projects_dir: &std::path::Path,
+    org: &str,
+) -> Result<Vec<String>> {
+    use walkdir::WalkDir;
+
+    let mut matching = Vec::new();
+
+    // Org format is "github.com/acme-corp"
+    // Projects are stored as "projects/github.com/acme-corp/repo-name/..."
+    let parts: Vec<&str> = org.split('/').collect();
+    if parts.len() != 2 {
+        return Ok(matching);
+    }
+
+    let (host, org_name) = (parts[0], parts[1]);
+    let org_path = personal_projects_dir.join(host).join(org_name);
+
+    if !org_path.exists() {
+        return Ok(matching);
+    }
+
+    // Find all repo directories under this org
+    for entry in WalkDir::new(&org_path).min_depth(1).max_depth(1) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if entry.file_type().is_dir() {
+            let repo_name = entry.file_name().to_string_lossy();
+            matching.push(format!("{}/{}/{}", host, org_name, repo_name));
+        }
+    }
+
+    Ok(matching)
+}
+
+/// Remove project files from personal sync
+fn purge_personal_project_files(sync_path: &std::path::Path, projects: &[String]) -> Result<()> {
+    let projects_dir = sync_path.join("projects");
+
+    for project in projects {
+        let project_path = projects_dir.join(project);
+        if project_path.exists() {
+            std::fs::remove_dir_all(&project_path)?;
+        }
+    }
+
+    // Clean up empty parent directories
+    for project in projects {
+        let parts: Vec<&str> = project.split('/').collect();
+        if parts.len() >= 2 {
+            let org_path = projects_dir.join(parts[0]).join(parts[1]);
+            if org_path.exists() && org_path.read_dir()?.next().is_none() {
+                std::fs::remove_dir_all(&org_path)?;
+            }
+            let host_path = projects_dir.join(parts[0]);
+            if host_path.exists() && host_path.read_dir()?.next().is_none() {
+                std::fs::remove_dir_all(&host_path)?;
+            }
+        }
+    }
+
+    // Commit the removal
+    let git = GitBackend::open(sync_path)?;
+    if git.has_changes()? {
+        git.commit("Remove project secrets moved to team sync", "tether")?;
+    }
+
+    Ok(())
+}
+
+/// Purge project files from git history using git filter-repo
+fn purge_from_git_history(sync_path: &std::path::Path, projects: &[String]) -> Result<()> {
+    use std::process::Command;
+
+    // Check if git-filter-repo is available
+    let filter_repo_check = Command::new("git")
+        .args(["filter-repo", "--version"])
+        .output();
+
+    if filter_repo_check.is_err() || !filter_repo_check.unwrap().status.success() {
+        Output::warning("git-filter-repo not found, using git filter-branch instead");
+        Output::dim("  Install git-filter-repo for safer history rewriting");
+        return purge_with_filter_branch(sync_path, projects);
+    }
+
+    // Build paths to purge
+    let mut args = vec!["filter-repo".to_string(), "--force".to_string()];
+    for project in projects {
+        args.push("--path".to_string());
+        args.push(format!("projects/{}", project));
+        args.push("--invert-paths".to_string());
+    }
+
+    let output = Command::new("git")
+        .current_dir(sync_path)
+        .args(&args)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git filter-repo failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Force push the sync repo after history rewrite
+fn force_push_sync_repo(sync_path: &std::path::Path) -> Result<()> {
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .current_dir(sync_path)
+        .args(["push", "--force-with-lease"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't fail if remote doesn't exist or other non-critical errors
+        if !stderr.contains("No configured push destination") {
+            Output::warning(&format!("Push failed: {}", stderr.trim()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Fallback to git filter-branch if git-filter-repo isn't available
+fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) -> Result<()> {
+    use std::process::Command;
+
+    // Build the filter command
+    let mut rm_commands = Vec::new();
+    for project in projects {
+        rm_commands.push(format!(
+            "git rm -rf --cached --ignore-unmatch projects/{}",
+            project
+        ));
+    }
+    let filter_cmd = rm_commands.join(" && ");
+
+    let output = Command::new("git")
+        .current_dir(sync_path)
+        .args([
+            "filter-branch",
+            "--force",
+            "--index-filter",
+            &filter_cmd,
+            "--prune-empty",
+            "HEAD",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("git filter-branch failed: {}", stderr);
+    }
+
+    // Clean up refs
+    let _ = Command::new("git")
+        .current_dir(sync_path)
+        .args(["for-each-ref", "--format=%(refname)", "refs/original/"])
+        .output()
+        .map(|o| {
+            if o.status.success() {
+                let refs = String::from_utf8_lossy(&o.stdout);
+                for r in refs.lines() {
+                    let _ = Command::new("git")
+                        .current_dir(sync_path)
+                        .args(["update-ref", "-d", r])
+                        .output();
+                }
+            }
+        });
+
+    let _ = Command::new("git")
+        .current_dir(sync_path)
+        .args(["reflog", "expire", "--expire=now", "--all"])
+        .output();
+
+    let _ = Command::new("git")
+        .current_dir(sync_path)
+        .args(["gc", "--prune=now"])
+        .output();
+
     Ok(())
 }
 
@@ -1454,5 +1961,229 @@ pub async fn files_diff(file: Option<&str>) -> Result<()> {
         println!();
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Projects subcommands
+// ============================================================================
+
+/// Add a project secret to the team repo
+pub async fn projects_add(file: &str, project_path: Option<&str>) -> Result<()> {
+    use crate::sync::git::{get_remote_url, normalize_remote_url};
+
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let config = Config::load()?;
+
+    // Check that team has write access
+    let teams = config
+        .teams
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No teams configured"))?;
+    let team_config = teams
+        .teams
+        .get(&team_name)
+        .ok_or_else(|| anyhow::anyhow!("Team not found"))?;
+
+    if team_config.read_only {
+        Output::error("This team is read-only. Only admins can add project secrets.");
+        return Ok(());
+    }
+
+    // Determine project path
+    let project_dir = match project_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir()?,
+    };
+
+    // Get remote URL and normalize
+    let remote_url = get_remote_url(&project_dir)?;
+    let normalized_url = normalize_remote_url(&remote_url);
+
+    // Check if project belongs to this team's orgs
+    let project_org = crate::sync::extract_org_from_normalized_url(&normalized_url);
+    let belongs_to_team = project_org
+        .as_ref()
+        .map(|org| team_config.orgs.iter().any(|t| t.eq_ignore_ascii_case(org)))
+        .unwrap_or(false);
+
+    if !belongs_to_team {
+        Output::error(&format!(
+            "Project '{}' doesn't belong to team '{}' orgs",
+            normalized_url, team_name
+        ));
+        Output::info(&format!("Team orgs: {:?}", team_config.orgs));
+        return Ok(());
+    }
+
+    // Read the file
+    let file_path = project_dir.join(file);
+    if !file_path.exists() {
+        Output::error(&format!("File not found: {}", file_path.display()));
+        return Ok(());
+    }
+
+    let content = std::fs::read(&file_path)?;
+
+    // Load recipients and encrypt
+    let recipients_dir = repo_dir.join("recipients");
+    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    if recipients.is_empty() {
+        Output::error("No recipients configured. Add recipients first.");
+        Output::info("Run: tether team secrets add-recipient <pubkey>");
+        return Ok(());
+    }
+
+    let encrypted = crate::security::encrypt_to_recipients(&content, &recipients)?;
+
+    // Write to team repo: projects/{normalized_url}/{file}.age
+    let dest_dir = repo_dir.join("projects").join(&normalized_url);
+    std::fs::create_dir_all(&dest_dir)?;
+    let dest_file = dest_dir.join(format!("{}.age", file));
+    std::fs::write(&dest_file, &encrypted)?;
+
+    // Commit
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(
+        &format!("Add project secret: {}/{}", normalized_url, file),
+        "tether",
+    )?;
+
+    Output::success(&format!(
+        "Added '{}' to team '{}' for project '{}'",
+        file, team_name, normalized_url
+    ));
+    Output::info(&format!("Encrypted to {} recipient(s)", recipients.len()));
+    Output::info("Run 'tether sync' to push to team repo");
+    Ok(())
+}
+
+/// List team project secrets
+pub async fn projects_list() -> Result<()> {
+    use walkdir::WalkDir;
+
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let projects_dir = repo_dir.join("projects");
+
+    if !projects_dir.exists() {
+        Output::info(&format!(
+            "No project secrets configured for team '{}'",
+            team_name
+        ));
+        return Ok(());
+    }
+
+    println!();
+    println!("Project secrets for team '{}':", team_name);
+
+    let mut current_project = String::new();
+
+    for entry in WalkDir::new(&projects_dir)
+        .follow_links(false)
+        .min_depth(4)
+        .sort_by_file_name()
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let file_path = entry.path();
+        if !file_path.to_string_lossy().ends_with(".age") {
+            continue;
+        }
+
+        if let Ok(rel_path) = file_path.strip_prefix(&projects_dir) {
+            let components: Vec<_> = rel_path.components().collect();
+            if components.len() >= 4 {
+                let project = format!(
+                    "{}/{}/{}",
+                    components[0].as_os_str().to_string_lossy(),
+                    components[1].as_os_str().to_string_lossy(),
+                    components[2].as_os_str().to_string_lossy()
+                );
+
+                if project != current_project {
+                    println!();
+                    println!("  {}:", project);
+                    current_project = project;
+                }
+
+                let file_name = file_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_end_matches(".age")
+                    .to_string();
+                println!("    • {}", file_name);
+            }
+        }
+    }
+    println!();
+
+    Ok(())
+}
+
+/// Remove a project secret from the team repo
+pub async fn projects_remove(file: &str, project: Option<&str>) -> Result<()> {
+    use crate::sync::git::{get_remote_url, normalize_remote_url};
+
+    let (team_name, repo_dir) = get_active_team_repo()?;
+    let config = Config::load()?;
+
+    // Check that team has write access
+    let teams = config
+        .teams
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No teams configured"))?;
+    let team_config = teams
+        .teams
+        .get(&team_name)
+        .ok_or_else(|| anyhow::anyhow!("Team not found"))?;
+
+    if team_config.read_only {
+        Output::error("This team is read-only. Only admins can remove project secrets.");
+        return Ok(());
+    }
+
+    // Determine project URL
+    let normalized_url = if let Some(p) = project {
+        p.to_string()
+    } else {
+        let project_dir = std::env::current_dir()?;
+        let remote_url = get_remote_url(&project_dir)?;
+        normalize_remote_url(&remote_url)
+    };
+
+    let secret_file = repo_dir
+        .join("projects")
+        .join(&normalized_url)
+        .join(format!("{}.age", file));
+
+    if !secret_file.exists() {
+        Output::error(&format!(
+            "Secret '{}' not found for project '{}'",
+            file, normalized_url
+        ));
+        return Ok(());
+    }
+
+    std::fs::remove_file(&secret_file)?;
+
+    // Commit
+    let git = GitBackend::open(&repo_dir)?;
+    git.commit(
+        &format!("Remove project secret: {}/{}", normalized_url, file),
+        "tether",
+    )?;
+
+    Output::success(&format!(
+        "Removed '{}' from project '{}'",
+        file, normalized_url
+    ));
     Ok(())
 }

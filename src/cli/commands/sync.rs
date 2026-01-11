@@ -151,9 +151,14 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
     }
 
-    // Sync project-local configs
+    // Sync project-local configs (personal)
     if config.project_configs.enabled {
         sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
+    }
+
+    // Sync team project secrets
+    if !dry_run {
+        sync_team_project_secrets(&config, &home)?;
     }
 
     // Build machine state first (to know what's installed locally + respect removed_packages)
@@ -889,6 +894,13 @@ fn sync_project_configs(
 
             let normalized_url = normalize_remote_url(&remote_url);
 
+            // Skip projects that belong to a team (team sync handles those)
+            if let Some(teams) = &config.teams {
+                if crate::sync::find_team_for_project(&normalized_url, &teams.teams).is_some() {
+                    continue;
+                }
+            }
+
             for pattern in &config.project_configs.patterns {
                 let walker = WalkDir::new(&repo_path)
                     .follow_links(false)
@@ -917,16 +929,20 @@ fn sync_project_configs(
                         None => continue,
                     };
 
-                    let matches = if pattern.contains('*') {
-                        let pattern_parts: Vec<&str> = pattern.split('*').collect();
-                        if pattern_parts.len() == 2 {
-                            file_name.starts_with(pattern_parts[0])
-                                && file_name.ends_with(pattern_parts[1])
+                    // Handle ** for directory patterns (e.g., ".idea/**")
+                    let matches = if pattern.contains("**") {
+                        // For ** patterns, match against full relative path
+                        if let Ok(rel_path) = file_path.strip_prefix(&repo_path) {
+                            let rel_str = rel_path.to_string_lossy();
+                            // Convert ** to match any path
+                            let pattern_for_path = pattern.replace("**", "*");
+                            crate::sync::glob_match(&pattern_for_path, &rel_str)
                         } else {
                             false
                         }
                     } else {
-                        file_name == pattern.as_str()
+                        // For single * patterns, match filename only
+                        crate::sync::glob_match(pattern, &file_name)
                     };
 
                     if !matches {
@@ -1160,4 +1176,158 @@ fn detect_removed_packages(
         // Clean up: if a package is now installed, remove it from removed_packages
         removed_set.retain(|pkg| !current_pkgs.contains(pkg));
     }
+}
+
+/// Sync project secrets from team repos to local projects
+fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
+    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+    use walkdir::WalkDir;
+
+    let teams = match &config.teams {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    // Build map of local projects: normalized_url -> local_path
+    let mut local_projects: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+
+    for search_path_str in &config.project_configs.search_paths {
+        let search_path = if let Some(stripped) = search_path_str.strip_prefix("~/") {
+            home.join(stripped)
+        } else {
+            PathBuf::from(search_path_str)
+        };
+
+        if let Ok(repos) = find_git_repos(&search_path) {
+            for repo_path in repos {
+                if let Ok(remote_url) = get_remote_url(&repo_path) {
+                    let normalized = normalize_remote_url(&remote_url);
+                    local_projects.insert(normalized, repo_path);
+                }
+            }
+        }
+    }
+
+    // Try to load user's identity for decryption
+    let identity = match crate::security::load_identity(None) {
+        Ok(id) => id,
+        Err(_) => {
+            // Identity not unlocked - skip team project secrets
+            return Ok(());
+        }
+    };
+
+    // For each active team with configured orgs
+    for team_name in &teams.active {
+        let team_config = match teams.teams.get(team_name) {
+            Some(c) if c.enabled && !c.orgs.is_empty() => c,
+            _ => continue,
+        };
+
+        let team_repo_dir = Config::team_repo_dir(team_name)?;
+        let projects_dir = team_repo_dir.join("projects");
+
+        if !projects_dir.exists() {
+            continue;
+        }
+
+        // Walk the team's projects directory
+        for entry in WalkDir::new(&projects_dir).follow_links(false).min_depth(4) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let file_path = entry.path();
+
+            // Only process .age encrypted files
+            if !file_path.to_string_lossy().ends_with(".age") {
+                continue;
+            }
+
+            // Extract project path: projects/github.com/org/repo/file.age
+            let rel_to_projects = match file_path.strip_prefix(&projects_dir) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let components: Vec<_> = rel_to_projects.components().collect();
+            if components.len() < 4 {
+                continue;
+            }
+
+            // Reconstruct normalized URL: github.com/org/repo
+            let normalized_url = format!(
+                "{}/{}/{}",
+                components[0].as_os_str().to_string_lossy(),
+                components[1].as_os_str().to_string_lossy(),
+                components[2].as_os_str().to_string_lossy()
+            );
+
+            // Check if this project belongs to this team's orgs
+            let project_org = crate::sync::extract_org_from_normalized_url(&normalized_url);
+            let belongs_to_team = project_org
+                .as_ref()
+                .map(|org| team_config.orgs.iter().any(|t| t.eq_ignore_ascii_case(org)))
+                .unwrap_or(false);
+
+            if !belongs_to_team {
+                continue;
+            }
+
+            // Check if we have this project locally
+            let local_project = match local_projects.get(&normalized_url) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Get relative file path (remove .age extension)
+            let rel_file_path: PathBuf = components[3..].iter().map(|c| c.as_os_str()).collect();
+            let rel_file_str = rel_file_path.to_string_lossy();
+            let rel_file_no_age = rel_file_str.trim_end_matches(".age");
+
+            let local_file = local_project.join(rel_file_no_age);
+
+            // Decrypt and write
+            match std::fs::read(file_path) {
+                Ok(encrypted) => {
+                    match crate::security::decrypt_with_identity(&encrypted, &identity) {
+                        Ok(decrypted) => {
+                            // Only write if different or doesn't exist
+                            let should_write = if local_file.exists() {
+                                std::fs::read(&local_file)
+                                    .map(|existing| existing != decrypted)
+                                    .unwrap_or(true)
+                            } else {
+                                true
+                            };
+
+                            if should_write {
+                                if let Some(parent) = local_file.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                std::fs::write(&local_file, &decrypted)?;
+                                Output::success(&format!(
+                                    "Team secret: {} → {}",
+                                    rel_file_no_age,
+                                    local_project.file_name().unwrap().to_string_lossy()
+                                ));
+                            }
+                        }
+                        Err(_) => {
+                            // Not a recipient - silently skip
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    Ok(())
 }

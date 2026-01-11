@@ -19,7 +19,7 @@ pub use conflict::{
 };
 pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;
-pub use git::GitBackend;
+pub use git::{extract_org_from_normalized_url, GitBackend};
 pub use layers::{
     init_layers, list_team_layer_files, map_team_to_personal_name, merge_layers, remerge_all,
     sync_dotfile_with_layers, sync_team_to_layer, LayerSyncResult,
@@ -29,8 +29,8 @@ pub use packages::{import_packages, sync_packages};
 pub use state::{MachineState, SyncState};
 pub use team::{
     default_local_patterns, discover_symlinkable_dirs, extract_org_from_url,
-    extract_team_name_from_url, get_project_org, is_local_file, project_matches_team_orgs,
-    resolve_conflict, TeamManifest,
+    extract_team_name_from_url, find_team_for_project, get_project_org, glob_match, is_local_file,
+    project_matches_team_orgs, resolve_conflict, TeamManifest,
 };
 
 use anyhow::Result;

@@ -302,6 +302,10 @@ pub struct TeamConfig {
     pub url: String,
     pub auto_inject: bool,
     pub read_only: bool,
+    /// Organizations that map to this team (full format: "github.com/org-name")
+    /// Projects belonging to these orgs will use team secrets instead of personal sync
+    #[serde(default)]
+    pub orgs: Vec<String>,
 }
 
 /// Multi-team sync configuration.
@@ -408,9 +412,13 @@ impl Default for ProjectConfigSettings {
             enabled: false,
             search_paths: vec!["~/Projects".to_string(), "~/Code".to_string()],
             patterns: vec![
-                ".env.local".to_string(),
-                "appsettings.*.json".to_string(),
+                ".env*".to_string(),              // .env, .env.local, .env.development, etc.
+                ".dev.vars".to_string(),          // Cloudflare Workers
+                "appsettings.*.json".to_string(), // .NET
                 ".vscode/settings.json".to_string(),
+                ".idea/**".to_string(),               // JetBrains
+                "*.xcconfig".to_string(),             // Xcode
+                "*service-account*.json".to_string(), // GCP
             ],
             only_if_gitignored: true,
         }

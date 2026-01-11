@@ -286,6 +286,20 @@ pub fn normalize_remote_url(url: &str) -> String {
     normalized
 }
 
+/// Extract the org portion from a normalized URL
+/// Examples:
+/// - github.com/acme-corp/repo -> github.com/acme-corp
+/// - gitlab.com/group/subgroup/repo -> gitlab.com/group (first level only)
+pub fn extract_org_from_normalized_url(normalized_url: &str) -> Option<String> {
+    let parts: Vec<&str> = normalized_url.split('/').collect();
+    if parts.len() >= 2 {
+        // host/org (e.g., github.com/acme-corp)
+        Some(format!("{}/{}", parts[0], parts[1]))
+    } else {
+        None
+    }
+}
+
 /// Check if a file is gitignored in its repository
 pub fn is_gitignored(file_path: &Path) -> Result<bool> {
     // Get the directory containing the file
@@ -448,6 +462,28 @@ mod tests {
             normalize_remote_url("git@gitlab.com:group/subgroup/repo.git"),
             "gitlab.com/group/subgroup/repo"
         );
+    }
+
+    #[test]
+    fn test_extract_org_github() {
+        assert_eq!(
+            extract_org_from_normalized_url("github.com/acme-corp/repo"),
+            Some("github.com/acme-corp".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_gitlab() {
+        assert_eq!(
+            extract_org_from_normalized_url("gitlab.com/group/subgroup/repo"),
+            Some("gitlab.com/group".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_org_invalid() {
+        assert_eq!(extract_org_from_normalized_url("github.com"), None);
+        assert_eq!(extract_org_from_normalized_url(""), None);
     }
 
     // Skip directory tests

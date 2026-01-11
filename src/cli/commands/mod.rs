@@ -214,6 +214,8 @@ pub enum IdentityAction {
 
 #[derive(Subcommand)]
 pub enum TeamAction {
+    /// Interactive team setup wizard
+    Setup,
     /// Add team sync repository
     Add {
         /// Team repository URL
@@ -257,6 +259,11 @@ pub enum TeamAction {
     Files {
         #[command(subcommand)]
         action: FilesAction,
+    },
+    /// Manage team project secrets
+    Projects {
+        #[command(subcommand)]
+        action: ProjectsAction,
     },
 }
 
@@ -351,6 +358,28 @@ pub enum FilesAction {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ProjectsAction {
+    /// Add a project secret to the team repo
+    Add {
+        /// File to add (e.g., .env)
+        file: String,
+        /// Project path (defaults to current directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List team project secrets
+    List,
+    /// Remove a project secret
+    Remove {
+        /// File to remove
+        file: String,
+        /// Project (normalized URL like github.com/org/repo)
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
 impl Cli {
     pub async fn run(&self) -> Result<()> {
         match &self.command {
@@ -390,6 +419,7 @@ impl Cli {
                 ConfigAction::Dotfiles => config::dotfiles().await,
             },
             Commands::Team { action } => match action {
+                TeamAction::Setup => team::setup().await,
                 TeamAction::Add {
                     url,
                     name,
@@ -431,6 +461,15 @@ impl Cli {
                     FilesAction::Ignore { file } => team::files_ignore(file).await,
                     FilesAction::Unignore { file } => team::files_unignore(file).await,
                     FilesAction::Diff { file } => team::files_diff(file.as_deref()).await,
+                },
+                TeamAction::Projects { action } => match action {
+                    ProjectsAction::Add { file, project } => {
+                        team::projects_add(file, project.as_deref()).await
+                    }
+                    ProjectsAction::List => team::projects_list().await,
+                    ProjectsAction::Remove { file, project } => {
+                        team::projects_remove(file, project.as_deref()).await
+                    }
                 },
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,

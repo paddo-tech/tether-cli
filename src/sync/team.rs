@@ -205,7 +205,7 @@ pub fn is_local_file(filename: &str, patterns: &[String]) -> bool {
 /// Simple glob matching for local file patterns
 /// Supports: * (any chars), ? (single char)
 /// Uses iterative approach with backtracking to avoid stack overflow
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
 
@@ -467,6 +467,31 @@ pub fn project_matches_team_orgs(project_path: &Path, allowed_orgs: &[String]) -
     }
 }
 
+/// Find which team owns a project based on its normalized URL
+/// Returns the team name if found, None otherwise
+///
+/// The normalized URL format is "host/org/repo" (e.g., "github.com/acme-corp/api")
+/// Team orgs are stored as "host/org" (e.g., "github.com/acme-corp")
+pub fn find_team_for_project(
+    normalized_url: &str,
+    teams: &std::collections::HashMap<String, crate::config::TeamConfig>,
+) -> Option<String> {
+    let project_org = crate::sync::extract_org_from_normalized_url(normalized_url)?;
+
+    for (team_name, team_config) in teams {
+        if !team_config.enabled {
+            continue;
+        }
+        for org in &team_config.orgs {
+            if org.eq_ignore_ascii_case(&project_org) {
+                return Some(team_name.clone());
+            }
+        }
+    }
+
+    None
+}
+
 /// Handle a conflict by prompting user
 pub fn resolve_conflict(target: &Path, team_source: &Path) -> Result<ConflictResolution> {
     use crate::cli::{Output, Prompt};
@@ -577,6 +602,34 @@ mod tests {
     }
 
     #[test]
+    fn test_glob_match_double_star() {
+        // Double * pattern like *service-account*.json
+        assert!(glob_match(
+            "*service-account*.json",
+            "my-service-account-prod.json"
+        ));
+        assert!(glob_match("*service-account*.json", "service-account.json"));
+        assert!(glob_match(
+            "*service-account*.json",
+            "gcp-service-account-dev.json"
+        ));
+        assert!(!glob_match(
+            "*service-account*.json",
+            "service-account.yaml"
+        ));
+    }
+
+    #[test]
+    fn test_glob_match_env_patterns() {
+        // .env* should match all env files
+        assert!(glob_match(".env*", ".env"));
+        assert!(glob_match(".env*", ".env.local"));
+        assert!(glob_match(".env*", ".env.development"));
+        assert!(glob_match(".env*", ".env.production.local"));
+        assert!(!glob_match(".env*", "env"));
+    }
+
+    #[test]
     fn test_is_local_file_default_patterns() {
         let patterns = default_local_patterns();
         assert!(is_local_file(".env.local", &patterns));
@@ -607,6 +660,66 @@ mod tests {
         assert_eq!(
             extract_org_from_url("https://gitlab.com/org-name/project.git"),
             Some("org-name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_team_for_project() {
+        use std::collections::HashMap;
+
+        let mut teams = HashMap::new();
+        teams.insert(
+            "acme".to_string(),
+            crate::config::TeamConfig {
+                enabled: true,
+                url: "git@github.com:acme-corp/configs.git".to_string(),
+                auto_inject: false,
+                read_only: true,
+                orgs: vec![
+                    "github.com/acme-corp".to_string(),
+                    "github.com/acme-inc".to_string(),
+                ],
+            },
+        );
+        teams.insert(
+            "personal".to_string(),
+            crate::config::TeamConfig {
+                enabled: true,
+                url: "git@github.com:user/dotfiles.git".to_string(),
+                auto_inject: false,
+                read_only: false,
+                orgs: vec!["github.com/user".to_string()],
+            },
+        );
+
+        // Match acme-corp
+        assert_eq!(
+            find_team_for_project("github.com/acme-corp/api", &teams),
+            Some("acme".to_string())
+        );
+
+        // Match acme-inc (alias)
+        assert_eq!(
+            find_team_for_project("github.com/acme-inc/dashboard", &teams),
+            Some("acme".to_string())
+        );
+
+        // Match personal
+        assert_eq!(
+            find_team_for_project("github.com/user/myproject", &teams),
+            Some("personal".to_string())
+        );
+
+        // No match
+        assert_eq!(
+            find_team_for_project("github.com/other-org/repo", &teams),
+            None
+        );
+
+        // Case insensitive
+        assert_eq!(
+            find_team_for_project("github.com/ACME-CORP/api", &teams),
+            Some("acme".to_string())
         );
     }
 }
