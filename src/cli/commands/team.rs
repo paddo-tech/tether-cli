@@ -114,7 +114,7 @@ pub async fn setup() -> Result<()> {
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
     // Step 1: Check for existing teams or add new one
-    let team_name = if let Some(teams) = &config.teams {
+    let (team_name, team_url) = if let Some(teams) = &config.teams {
         if !teams.teams.is_empty() {
             let team_names: Vec<&str> = teams.teams.keys().map(|s| s.as_str()).collect();
             let mut options: Vec<&str> = team_names.clone();
@@ -128,25 +128,30 @@ pub async fn setup() -> Result<()> {
                 println!();
                 let url = prompt_for_team_repo().await?;
                 add(&url, None, false).await?;
-                crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
+                let name = crate::sync::extract_team_name_from_url(&url)
+                    .unwrap_or_else(|| "team".to_string());
+                (name, Some(url))
             } else {
-                team_names[choice].to_string()
+                let name = team_names[choice].to_string();
+                let url = teams.teams.get(&name).map(|t| t.url.clone());
+                (name, url)
             }
         } else {
             Output::info("Step 1: Connect to team repository");
             let url = prompt_for_team_repo().await?;
             add(&url, None, false).await?;
-            crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
+            let name =
+                crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string());
+            (name, Some(url))
         }
     } else {
         Output::info("Step 1: Connect to team repository");
         let url = prompt_for_team_repo().await?;
         add(&url, None, false).await?;
-        crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
+        let name =
+            crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string());
+        (name, Some(url))
     };
-
-    // Reload config after potential add
-    config = Config::load()?;
 
     println!();
     Output::info(&format!("Configuring team '{}'", team_name));
@@ -166,122 +171,121 @@ pub async fn setup() -> Result<()> {
 
     // Step 3: Org mapping for project secrets
     println!();
-    Output::info("Project secrets: Map GitHub/GitLab orgs to this team");
+    Output::info("Step 3: Map orgs for project secrets");
     Output::dim("Projects from mapped orgs will use team secrets instead of personal sync");
     println!();
 
-    // Determine search paths
-    let default_paths: Vec<String> = config
-        .project_configs
-        .search_paths
-        .iter()
-        .map(|p| {
-            if let Some(stripped) = p.strip_prefix("~/") {
-                home.join(stripped).to_string_lossy().to_string()
+    // Auto-map org from team URL
+    if let Some(ref url) = team_url {
+        let normalized = normalize_remote_url(url);
+        if let Some(org) = crate::sync::extract_org_from_normalized_url(&normalized) {
+            // Reload config to get current orgs
+            config = Config::load()?;
+            let teams = config.teams.as_ref().unwrap();
+            let team_config = teams.teams.get(&team_name).unwrap();
+
+            if !team_config.orgs.contains(&org) {
+                Output::success(&format!("Auto-mapped org: {}", org));
+                orgs_add(&org).await?;
             } else {
-                p.clone()
-            }
-        })
-        .collect();
-
-    println!("Default search paths: {}", default_paths.join(", "));
-    let custom_path = if Prompt::confirm("Scan a different directory?", false)? {
-        Some(Prompt::input("Directory to scan:", None)?)
-    } else {
-        None
-    };
-
-    // Scan for git repos
-    let mut discovered_orgs: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let search_paths: Vec<std::path::PathBuf> = if let Some(ref p) = custom_path {
-        let path = if let Some(stripped) = p.strip_prefix("~/") {
-            home.join(stripped)
-        } else {
-            std::path::PathBuf::from(p)
-        };
-        vec![path]
-    } else {
-        config
-            .project_configs
-            .search_paths
-            .iter()
-            .map(|p| {
-                if let Some(stripped) = p.strip_prefix("~/") {
-                    home.join(stripped)
-                } else {
-                    std::path::PathBuf::from(p)
-                }
-            })
-            .collect()
-    };
-
-    let spinner = Progress::spinner("Scanning for git repos...");
-    for search_path in &search_paths {
-        if let Ok(repos) = find_git_repos(search_path) {
-            for repo_path in repos {
-                if let Ok(remote_url) = get_remote_url(&repo_path) {
-                    let normalized = normalize_remote_url(&remote_url);
-                    if let Some(org) = crate::sync::extract_org_from_normalized_url(&normalized) {
-                        discovered_orgs.insert(org);
-                    }
-                }
+                println!("Org already mapped: {}", org);
             }
         }
     }
-    Progress::finish_success(
-        &spinner,
-        &format!("Found {} unique org(s)", discovered_orgs.len()),
-    );
 
+    // Reload config after potential org add
+    config = Config::load()?;
     let teams = config.teams.as_ref().unwrap();
     let team_config = teams.teams.get(&team_name).unwrap();
     let existing_orgs: std::collections::HashSet<String> =
         team_config.orgs.iter().cloned().collect();
 
-    // Filter out already-mapped orgs
-    let suggested_orgs: Vec<String> = discovered_orgs
-        .difference(&existing_orgs)
-        .cloned()
-        .collect();
-
     if !existing_orgs.is_empty() {
-        println!("Currently mapped orgs:");
+        println!("Mapped orgs:");
         for org in &existing_orgs {
             println!("  • {}", org);
         }
         println!();
     }
 
-    if !suggested_orgs.is_empty() {
-        println!("Discovered orgs from your projects:");
-        for (i, org) in suggested_orgs.iter().enumerate() {
-            println!("  {}. {}", i + 1, org);
-        }
-        println!();
+    // Offer to add more orgs
+    if Prompt::confirm("Add more orgs to this team?", false)? {
+        let options = vec!["Scan local projects for suggestions", "Enter manually"];
+        let choice = Prompt::select("How?", options, 0)?;
 
-        if Prompt::confirm("Add any of these orgs to the team?", true)? {
-            let selections = Prompt::input(
-                "Enter numbers to add (comma-separated, or 'all'):",
-                Some("all"),
-            )?;
+        if choice == 0 {
+            // Scan for git repos
+            let search_paths: Vec<std::path::PathBuf> = config
+                .project_configs
+                .search_paths
+                .iter()
+                .map(|p| {
+                    if let Some(stripped) = p.strip_prefix("~/") {
+                        home.join(stripped)
+                    } else {
+                        std::path::PathBuf::from(p)
+                    }
+                })
+                .collect();
 
-            let orgs_to_add: Vec<&String> = if selections.trim().eq_ignore_ascii_case("all") {
-                suggested_orgs.iter().collect()
-            } else {
-                selections
-                    .split(',')
-                    .filter_map(|s| s.trim().parse::<usize>().ok())
-                    .filter_map(|i| suggested_orgs.get(i.saturating_sub(1)))
-                    .collect()
-            };
-
-            for org in orgs_to_add {
-                orgs_add(org).await?;
+            let spinner = Progress::spinner("Scanning for git repos...");
+            let mut discovered_orgs: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for search_path in &search_paths {
+                if let Ok(repos) = find_git_repos(search_path) {
+                    for repo_path in repos {
+                        if let Ok(remote_url) = get_remote_url(&repo_path) {
+                            let normalized = normalize_remote_url(&remote_url);
+                            if let Some(org) =
+                                crate::sync::extract_org_from_normalized_url(&normalized)
+                            {
+                                discovered_orgs.insert(org);
+                            }
+                        }
+                    }
+                }
             }
-        }
-    } else if existing_orgs.is_empty() {
-        Output::dim("No local projects found to suggest orgs");
-        if Prompt::confirm("Add an org manually?", false)? {
+            Progress::finish_success(
+                &spinner,
+                &format!("Found {} unique org(s)", discovered_orgs.len()),
+            );
+
+            // Filter out already-mapped orgs
+            let suggested_orgs: Vec<String> = discovered_orgs
+                .difference(&existing_orgs)
+                .cloned()
+                .collect();
+
+            if !suggested_orgs.is_empty() {
+                println!("Discovered orgs:");
+                for (i, org) in suggested_orgs.iter().enumerate() {
+                    println!("  {}. {}", i + 1, org);
+                }
+                println!();
+
+                let selections = Prompt::input(
+                    "Enter numbers to add (comma-separated, or 'all'):",
+                    Some("all"),
+                )?;
+
+                let orgs_to_add: Vec<&String> = if selections.trim().eq_ignore_ascii_case("all") {
+                    suggested_orgs.iter().collect()
+                } else {
+                    selections
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<usize>().ok())
+                        .filter_map(|i| suggested_orgs.get(i.saturating_sub(1)))
+                        .collect()
+                };
+
+                for org in orgs_to_add {
+                    orgs_add(org).await?;
+                }
+            } else {
+                Output::dim("No additional orgs found");
+            }
+        } else {
+            // Manual entry
             let org = Prompt::input("Org (e.g., github.com/acme-corp):", None)?;
             orgs_add(&org).await?;
         }
