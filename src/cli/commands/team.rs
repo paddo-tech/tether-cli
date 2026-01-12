@@ -34,7 +34,7 @@ async fn prompt_for_team_repo() -> Result<String> {
         GitHubCli::is_installed() && GitHubCli::is_authenticated().await.unwrap_or(false);
 
     if gh_available {
-        let options = vec!["Create new GitHub repo", "Use existing repo URL"];
+        let options = vec!["Create new private GitHub repo", "Use existing repo URL"];
         let choice = Prompt::select("Team repository:", options, 0)?;
 
         if choice == 0 {
@@ -69,7 +69,10 @@ async fn prompt_for_team_repo() -> Result<String> {
             } else {
                 GitHubCli::create_org_repo(&owner, &repo_name, true).await?
             };
-            Progress::finish_success(&spinner, &format!("Created {}/{}", owner, repo_name));
+            Progress::finish_success(
+                &spinner,
+                &format!("Created {}/{} (private)", owner, repo_name),
+            );
 
             Ok(url)
         } else {
