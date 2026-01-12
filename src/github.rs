@@ -145,4 +145,50 @@ impl GitHubCli {
 
         Ok(())
     }
+
+    /// List organizations the user belongs to
+    pub async fn list_orgs() -> Result<Vec<String>> {
+        let output = Command::new("gh")
+            .args(["api", "user/orgs", "--jq", ".[].login"])
+            .output()
+            .await
+            .context("Failed to list organizations")?;
+
+        if !output.status.success() {
+            return Ok(Vec::new()); // Return empty if API fails
+        }
+
+        let orgs: Vec<String> = String::from_utf8(output.stdout)?
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        Ok(orgs)
+    }
+
+    /// Create a new private GitHub repository in an organization
+    pub async fn create_org_repo(org: &str, name: &str, private: bool) -> Result<String> {
+        let repo_spec = format!("{}/{}", org, name);
+        let mut args = vec!["repo", "create", &repo_spec, "--clone=false"];
+
+        if private {
+            args.push("--private");
+        } else {
+            args.push("--public");
+        }
+
+        let output = Command::new("gh")
+            .args(&args)
+            .output()
+            .await
+            .context("Failed to create GitHub repository")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to create repo: {}", stderr));
+        }
+
+        Ok(format!("git@github.com:{}/{}.git", org, name))
+    }
 }

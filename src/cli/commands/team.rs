@@ -25,6 +25,72 @@ fn sanitize_team_name(name: &str) -> String {
         .to_string()
 }
 
+/// Prompt for team repository - offers to create or use existing
+async fn prompt_for_team_repo() -> Result<String> {
+    use crate::github::GitHubCli;
+
+    // Check if gh CLI is available and authenticated
+    let gh_available =
+        GitHubCli::is_installed() && GitHubCli::is_authenticated().await.unwrap_or(false);
+
+    if gh_available {
+        let options = vec!["Create new GitHub repo", "Use existing repo URL"];
+        let choice = Prompt::select("Team repository:", options, 0)?;
+
+        if choice == 0 {
+            // Create new repo - fetch orgs and username
+            let spinner = Progress::spinner("Fetching GitHub organizations...");
+            let orgs = GitHubCli::list_orgs().await.unwrap_or_default();
+            let username = GitHubCli::get_username().await?;
+            Progress::finish_success(&spinner, "Done");
+
+            // Build location options: personal account + orgs
+            let mut locations: Vec<String> = vec![format!("{} (personal)", username)];
+            for org in &orgs {
+                locations.push(org.clone());
+            }
+            let location_refs: Vec<&str> = locations.iter().map(|s| s.as_str()).collect();
+
+            let loc_choice = Prompt::select("Where to create the repo?", location_refs, 0)?;
+            let owner = if loc_choice == 0 {
+                username.clone()
+            } else {
+                orgs[loc_choice - 1].clone()
+            };
+
+            // Prompt for repo name
+            let default_name = "team-dotfiles";
+            let repo_name = Prompt::input("Repository name:", Some(default_name))?;
+
+            // Create the repo
+            let spinner = Progress::spinner(&format!("Creating {}/{}...", owner, repo_name));
+            let url = if loc_choice == 0 {
+                GitHubCli::create_repo(&repo_name, true).await?
+            } else {
+                GitHubCli::create_org_repo(&owner, &repo_name, true).await?
+            };
+            Progress::finish_success(&spinner, &format!("Created {}/{}", owner, repo_name));
+
+            Ok(url)
+        } else {
+            // Use existing URL
+            Output::dim("Enter the Git URL of your team's shared config repository");
+            Output::dim("Example: git@github.com:your-org/team-dotfiles.git");
+            println!();
+            Prompt::input("Team repository URL:", None)
+        }
+    } else {
+        // No gh CLI - just ask for URL
+        if !GitHubCli::is_installed() {
+            Output::dim("Tip: Install 'gh' CLI to create repos directly from this wizard");
+        }
+        Output::dim("Enter the Git URL of your team's shared config repository");
+        Output::dim("Example: git@github.com:your-org/team-dotfiles.git");
+        println!();
+        Prompt::input("Team repository URL:", None)
+    }
+}
+
 /// Interactive team setup wizard
 pub async fn setup() -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
@@ -57,9 +123,7 @@ pub async fn setup() -> Result<()> {
             if choice == options.len() - 1 {
                 // Add new team
                 println!();
-                Output::info("Adding new team");
-                Output::dim("Enter the Git URL of your team's shared config repository");
-                let url = Prompt::input("Team repository URL:", None)?;
+                let url = prompt_for_team_repo().await?;
                 add(&url, None, false).await?;
                 crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
             } else {
@@ -67,19 +131,13 @@ pub async fn setup() -> Result<()> {
             }
         } else {
             Output::info("Step 1: Connect to team repository");
-            Output::dim("Enter the Git URL of your team's shared config repository");
-            Output::dim("Example: git@github.com:your-org/team-dotfiles.git");
-            println!();
-            let url = Prompt::input("Team repository URL:", None)?;
+            let url = prompt_for_team_repo().await?;
             add(&url, None, false).await?;
             crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
         }
     } else {
         Output::info("Step 1: Connect to team repository");
-        Output::dim("Enter the Git URL of your team's shared config repository");
-        Output::dim("Example: git@github.com:your-org/team-dotfiles.git");
-        println!();
-        let url = Prompt::input("Team repository URL:", None)?;
+        let url = prompt_for_team_repo().await?;
         add(&url, None, false).await?;
         crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
     };
@@ -167,7 +225,10 @@ pub async fn setup() -> Result<()> {
             }
         }
     }
-    Progress::finish_success(&spinner, &format!("Found {} unique org(s)", discovered_orgs.len()));
+    Progress::finish_success(
+        &spinner,
+        &format!("Found {} unique org(s)", discovered_orgs.len()),
+    );
 
     let teams = config.teams.as_ref().unwrap();
     let team_config = teams.teams.get(&team_name).unwrap();
@@ -236,7 +297,12 @@ pub async fn setup() -> Result<()> {
         let existing_recipients = if recipients_dir.exists() {
             std::fs::read_dir(&recipients_dir)?
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map(|ext| ext == "pub").unwrap_or(false))
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "pub")
+                        .unwrap_or(false)
+                })
                 .count()
         } else {
             0
@@ -264,11 +330,14 @@ pub async fn setup() -> Result<()> {
 
             if !am_recipient {
                 println!();
-                Output::warning("You are not a recipient - you won't be able to decrypt team secrets");
+                Output::warning(
+                    "You are not a recipient - you won't be able to decrypt team secrets",
+                );
                 if Prompt::confirm("Add yourself as a recipient?", true)? {
                     let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
                     let name = Prompt::input("Your name for this recipient:", Some(&username))?;
-                    secrets_add_recipient(&identity_pub_path.to_string_lossy(), Some(&name)).await?;
+                    secrets_add_recipient(&identity_pub_path.to_string_lossy(), Some(&name))
+                        .await?;
                 }
             } else {
                 Output::success("You are a recipient");
