@@ -1341,7 +1341,7 @@ pub async fn orgs_add(org: &str) -> Result<()> {
     Output::success(&format!("Mapped '{}' to team '{}'", org, active));
     Output::info("Projects from this org will now use team secrets");
 
-    // Check for personal project files that should be cleaned up
+    // Clean up personal project files that now belong to team
     let sync_path = SyncEngine::sync_path()?;
     let personal_projects_dir = sync_path.join("projects");
 
@@ -1349,24 +1349,22 @@ pub async fn orgs_add(org: &str) -> Result<()> {
         let matching = find_personal_projects_for_org(&personal_projects_dir, org)?;
         if !matching.is_empty() {
             println!();
-            Output::warning(&format!(
-                "Found {} project(s) in personal sync that now belong to team:",
+            Output::info(&format!(
+                "Removing {} project(s) from personal sync (now team-owned):",
                 matching.len()
             ));
             for project in &matching {
                 println!("  • {}", project);
             }
-            println!();
 
-            if Prompt::confirm("Remove these from personal sync?", true)? {
-                purge_personal_project_files(&sync_path, &matching)?;
-                Output::success("Removed from personal sync");
+            purge_personal_project_files(&sync_path, &matching)?;
+            Output::success("Removed from personal sync");
 
-                if Prompt::confirm("Also purge from git history? (rewrites history)", false)? {
-                    purge_from_git_history(&sync_path, &matching)?;
-                    force_push_sync_repo(&sync_path)?;
-                    Output::success("Purged from git history and pushed");
-                }
+            // Git history purge is optional - destructive operation
+            if Prompt::confirm("Also purge from git history? (rewrites history)", false)? {
+                purge_from_git_history(&sync_path, &matching)?;
+                force_push_sync_repo(&sync_path)?;
+                Output::success("Purged from git history");
             }
         }
     }
