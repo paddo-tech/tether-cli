@@ -1341,7 +1341,7 @@ pub async fn orgs_add(org: &str) -> Result<()> {
     Output::success(&format!("Mapped '{}' to team '{}'", org, active));
     Output::info("Projects from this org will now use team secrets");
 
-    // Clean up personal project files that now belong to team
+    // Check for personal project files that now belong to team
     let sync_path = SyncEngine::sync_path()?;
     let personal_projects_dir = sync_path.join("projects");
 
@@ -1349,23 +1349,17 @@ pub async fn orgs_add(org: &str) -> Result<()> {
         let matching = find_personal_projects_for_org(&personal_projects_dir, org)?;
         if !matching.is_empty() {
             println!();
-            Output::info(&format!(
-                "Removing {} project(s) from personal sync (now team-owned):",
+            Output::warning(&format!(
+                "Found {} project(s) in personal sync that are now team-owned:",
                 matching.len()
             ));
             for project in &matching {
                 println!("  • {}", project);
             }
-
-            purge_personal_project_files(&sync_path, &matching)?;
-            Output::success("Removed from personal sync");
-
-            // Git history purge is optional - destructive operation
-            if Prompt::confirm("Also purge from git history? (rewrites history)", false)? {
-                purge_from_git_history(&sync_path, &matching)?;
-                force_push_sync_repo(&sync_path)?;
-                Output::success("Purged from git history");
-            }
+            println!();
+            Output::dim("These will be ignored during sync (team version takes priority).");
+            Output::dim("Run 'tether team projects purge-personal' to clean up once all");
+            Output::dim("machines are on the team.");
         }
     }
 
@@ -2276,5 +2270,80 @@ pub async fn projects_remove(file: &str, project: Option<&str>) -> Result<()> {
         "Removed '{}' from project '{}'",
         file, normalized_url
     ));
+    Ok(())
+}
+
+pub async fn projects_purge_personal(purge_history: bool) -> Result<()> {
+    use crate::sync::SyncEngine;
+
+    let config = Config::load()?;
+
+    let teams = match config.teams.as_ref() {
+        Some(t) => t,
+        None => {
+            Output::info("No teams configured");
+            return Ok(());
+        }
+    };
+
+    // Collect all orgs mapped to teams
+    let mut team_orgs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for team_config in teams.teams.values() {
+        if team_config.enabled {
+            for org in &team_config.orgs {
+                team_orgs.insert(org.to_lowercase());
+            }
+        }
+    }
+
+    if team_orgs.is_empty() {
+        Output::info("No orgs mapped to teams - nothing to purge");
+        return Ok(());
+    }
+
+    let sync_path = SyncEngine::sync_path()?;
+    let personal_projects_dir = sync_path.join("projects");
+
+    if !personal_projects_dir.exists() {
+        Output::info("No personal project secrets found");
+        return Ok(());
+    }
+
+    // Find all personal projects that belong to team orgs
+    let mut to_purge: Vec<String> = Vec::new();
+    for org in &team_orgs {
+        let matching = find_personal_projects_for_org(&personal_projects_dir, org)?;
+        to_purge.extend(matching);
+    }
+
+    if to_purge.is_empty() {
+        Output::success("No personal projects to purge - all clean");
+        return Ok(());
+    }
+
+    println!("Projects to purge from personal sync:");
+    for project in &to_purge {
+        println!("  • {}", project);
+    }
+    println!();
+
+    if !Prompt::confirm(
+        &format!("Remove {} project(s) from personal sync?", to_purge.len()),
+        true,
+    )? {
+        Output::info("Cancelled");
+        return Ok(());
+    }
+
+    purge_personal_project_files(&sync_path, &to_purge)?;
+    Output::success("Removed from personal sync");
+
+    if purge_history {
+        Output::info("Purging from git history...");
+        purge_from_git_history(&sync_path, &to_purge)?;
+        force_push_sync_repo(&sync_path)?;
+        Output::success("Purged from git history");
+    }
+
     Ok(())
 }

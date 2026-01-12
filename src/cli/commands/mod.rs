@@ -378,6 +378,12 @@ pub enum ProjectsAction {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Remove personal project secrets that are now team-owned
+    PurgePersonal {
+        /// Also purge from git history
+        #[arg(long)]
+        history: bool,
+    },
 }
 
 impl Cli {
@@ -469,6 +475,9 @@ impl Cli {
                     ProjectsAction::List => team::projects_list().await,
                     ProjectsAction::Remove { file, project } => {
                         team::projects_remove(file, project.as_deref()).await
+                    }
+                    ProjectsAction::PurgePersonal { history } => {
+                        team::projects_purge_personal(*history).await
                     }
                 },
             },
