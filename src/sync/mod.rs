@@ -26,7 +26,7 @@ pub use layers::{
 };
 pub use merge::{detect_file_type, merge_files, FileType};
 pub use packages::{import_packages, sync_packages};
-pub use state::{MachineState, SyncState};
+pub use state::{FileState, MachineState, SyncState};
 pub use team::{
     default_local_patterns, discover_symlinkable_dirs, extract_org_from_url,
     extract_team_name_from_url, find_team_for_project, get_project_org, glob_match, is_local_file,
