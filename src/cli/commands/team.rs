@@ -524,10 +524,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
         Output::info("As a team admin/contributor, you can push updates to team configs.");
         println!();
 
-        !Prompt::confirm(
-            "Enable write access? (No = read-only mode for regular team members)",
-            true,
-        )?
+        !Prompt::confirm("Enable write access? (No = read-only mode)", true)?
     } else {
         println!();
         Output::info("Read-only access detected (regular team member mode)");
