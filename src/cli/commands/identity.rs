@@ -28,13 +28,10 @@ pub async fn init() -> Result<()> {
 
     Output::success("Identity created");
     println!();
-    println!("{}", "Your public key (share with team admins):".cyan());
+    println!("{}", "Your public key:".cyan());
     println!("{}", pubkey.green().bold());
     println!();
-    println!(
-        "{}",
-        "This key is also saved to ~/.tether/identity.pub".dimmed()
-    );
+    println!("{}", "Saved to ~/.tether/identity.pub".dimmed());
 
     Ok(())
 }
