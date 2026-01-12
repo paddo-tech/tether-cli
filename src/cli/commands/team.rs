@@ -291,35 +291,18 @@ pub async fn setup() -> Result<()> {
         }
     }
 
-    // Step 4: Recipient setup (if admin)
+    // Step 4: Auto-add self as recipient
     println!();
+    config = Config::load()?;
     let teams = config.teams.as_ref().unwrap();
     let team_config = teams.teams.get(&team_name).unwrap();
 
     if !team_config.read_only {
-        Output::info("Team secrets: Add recipients who can decrypt team secrets");
-
-        let repo_dir = Config::team_repo_dir(&team_name)?;
-        let recipients_dir = repo_dir.join("recipients");
-        let existing_recipients = if recipients_dir.exists() {
-            std::fs::read_dir(&recipients_dir)?
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "pub")
-                        .unwrap_or(false)
-                })
-                .count()
-        } else {
-            0
-        };
-
-        println!("Current recipients: {}", existing_recipients);
-
-        // Check if user's identity is a recipient
         let identity_pub_path = Config::config_dir()?.join("identity.pub");
         if identity_pub_path.exists() {
+            let repo_dir = Config::team_repo_dir(&team_name)?;
+            let recipients_dir = repo_dir.join("recipients");
+
             let my_pubkey = std::fs::read_to_string(&identity_pub_path)?;
             let my_pubkey = my_pubkey.trim();
 
@@ -336,22 +319,14 @@ pub async fn setup() -> Result<()> {
             };
 
             if !am_recipient {
-                println!();
-                Output::warning(
-                    "You are not a recipient - you won't be able to decrypt team secrets",
-                );
-                if Prompt::confirm("Add yourself as a recipient?", true)? {
-                    let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-                    let name = Prompt::input("Your name for this recipient:", Some(&username))?;
-                    secrets_add_recipient(&identity_pub_path.to_string_lossy(), Some(&name))
-                        .await?;
-                }
+                Output::info("Adding you as a recipient...");
+                let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+                secrets_add_recipient(&identity_pub_path.to_string_lossy(), Some(&username))
+                    .await?;
             } else {
                 Output::success("You are a recipient");
             }
         }
-    } else {
-        Output::dim("Team is read-only - recipient management disabled");
     }
 
     // Step 5: Summary
