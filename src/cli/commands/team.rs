@@ -30,8 +30,15 @@ pub async fn setup() -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
 
     println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     Output::info("Team Setup Wizard");
-    Output::dim("Configure team sync for shared dotfiles and project secrets");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("This wizard will help you:");
+    println!("  1. Connect to a team repository");
+    println!("  2. Set up your encryption identity");
+    println!("  3. Map your GitHub/GitLab orgs for project secrets");
+    println!("  4. Configure team secret recipients");
     println!();
 
     let mut config = Config::load()?;
@@ -44,10 +51,14 @@ pub async fn setup() -> Result<()> {
             let mut options: Vec<&str> = team_names.clone();
             options.push("Add new team");
 
-            let choice = Prompt::select("Select team to configure:", options.clone(), 0)?;
+            println!("You have {} team(s) configured.", teams.teams.len());
+            let choice = Prompt::select("What would you like to do?", options.clone(), 0)?;
 
             if choice == options.len() - 1 {
                 // Add new team
+                println!();
+                Output::info("Adding new team");
+                Output::dim("Enter the Git URL of your team's shared config repository");
                 let url = Prompt::input("Team repository URL:", None)?;
                 add(&url, None, false).await?;
                 crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
@@ -55,11 +66,19 @@ pub async fn setup() -> Result<()> {
                 team_names[choice].to_string()
             }
         } else {
+            Output::info("Step 1: Connect to team repository");
+            Output::dim("Enter the Git URL of your team's shared config repository");
+            Output::dim("Example: git@github.com:your-org/team-dotfiles.git");
+            println!();
             let url = Prompt::input("Team repository URL:", None)?;
             add(&url, None, false).await?;
             crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
         }
     } else {
+        Output::info("Step 1: Connect to team repository");
+        Output::dim("Enter the Git URL of your team's shared config repository");
+        Output::dim("Example: git@github.com:your-org/team-dotfiles.git");
+        println!();
         let url = Prompt::input("Team repository URL:", None)?;
         add(&url, None, false).await?;
         crate::sync::extract_team_name_from_url(&url).unwrap_or_else(|| "team".to_string())
@@ -73,14 +92,15 @@ pub async fn setup() -> Result<()> {
 
     // Step 2: Identity setup
     println!();
+    Output::info("Step 2: Encryption identity");
     let identity_path = Config::config_dir()?.join("identity.age");
     if !identity_path.exists() {
-        Output::warning("No identity found - needed for team secrets");
+        Output::dim("An identity is required to encrypt/decrypt team secrets");
         if Prompt::confirm("Create identity now?", true)? {
             crate::cli::commands::identity::init().await?;
         }
     } else {
-        Output::success("Identity exists");
+        Output::success("Identity already configured");
     }
 
     // Step 3: Org mapping for project secrets
