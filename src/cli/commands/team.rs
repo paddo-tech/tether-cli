@@ -96,35 +96,33 @@ async fn prompt_for_team_repo() -> Result<String> {
 
 /// Interactive team setup wizard
 pub async fn setup() -> Result<()> {
-    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+    use crate::sync::git::normalize_remote_url;
 
     println!();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     Output::info("Team Setup Wizard");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!();
-    println!("This wizard will help you:");
-    println!("  1. Connect to a team repository");
-    println!("  2. Set up your encryption identity");
-    println!("  3. Map your GitHub/GitLab orgs for project secrets");
-    println!("  4. Configure team secret recipients");
-    println!();
 
     let mut config = Config::load()?;
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
     // Step 1: Check for existing teams or add new one
     let (team_name, team_url) = if let Some(teams) = &config.teams {
-        if !teams.teams.is_empty() {
+        if teams.teams.len() == 1 {
+            // Single team - just use it
+            let (name, team_config) = teams.teams.iter().next().unwrap();
+            Output::success(&format!("Team repository: {} ✓", name));
+            (name.clone(), Some(team_config.url.clone()))
+        } else if !teams.teams.is_empty() {
+            // Multiple teams - let user choose
             let team_names: Vec<&str> = teams.teams.keys().map(|s| s.as_str()).collect();
             let mut options: Vec<&str> = team_names.clone();
             options.push("Add new team");
 
             println!("You have {} team(s) configured.", teams.teams.len());
-            let choice = Prompt::select("What would you like to do?", options.clone(), 0)?;
+            let choice = Prompt::select("Which team to configure?", options.clone(), 0)?;
 
             if choice == options.len() - 1 {
-                // Add new team
                 println!();
                 let url = prompt_for_team_repo().await?;
                 add(&url, None, false).await?;
@@ -137,6 +135,11 @@ pub async fn setup() -> Result<()> {
                 (name, url)
             }
         } else {
+            println!("This wizard will help you:");
+            println!("  1. Connect to a team repository");
+            println!("  2. Set up your encryption identity");
+            println!("  3. Map your GitHub/GitLab orgs for project secrets");
+            println!();
             Output::info("Step 1: Connect to team repository");
             let url = prompt_for_team_repo().await?;
             add(&url, None, false).await?;
@@ -145,6 +148,11 @@ pub async fn setup() -> Result<()> {
             (name, Some(url))
         }
     } else {
+        println!("This wizard will help you:");
+        println!("  1. Connect to a team repository");
+        println!("  2. Set up your encryption identity");
+        println!("  3. Map your GitHub/GitLab orgs for project secrets");
+        println!();
         Output::info("Step 1: Connect to team repository");
         let url = prompt_for_team_repo().await?;
         add(&url, None, false).await?;
@@ -153,146 +161,38 @@ pub async fn setup() -> Result<()> {
         (name, Some(url))
     };
 
-    println!();
-    Output::info(&format!("Configuring team '{}'", team_name));
-
     // Step 2: Identity setup
-    println!();
-    Output::info("Step 2: Encryption identity");
     let identity_path = Config::config_dir()?.join("identity.age");
     if !identity_path.exists() {
-        Output::dim("An identity is required to encrypt/decrypt team secrets");
+        println!();
+        Output::info("Encryption identity required");
+        Output::dim("An identity is needed to encrypt/decrypt team secrets");
         if Prompt::confirm("Create identity now?", true)? {
             crate::cli::commands::identity::init().await?;
         }
     } else {
-        Output::success("Identity already configured");
+        Output::success("Encryption identity ✓");
     }
 
     // Step 3: Org mapping for project secrets
-    println!();
-    Output::info("Step 3: Map orgs for project secrets");
-    Output::dim("Projects from mapped orgs will use team secrets instead of personal sync");
-    println!();
-
-    // Auto-map org from team URL
+    // Auto-map org from team URL if not already mapped
     if let Some(ref url) = team_url {
         let normalized = normalize_remote_url(url);
         if let Some(org) = crate::sync::extract_org_from_normalized_url(&normalized) {
-            // Reload config to get current orgs
             config = Config::load()?;
             let teams = config.teams.as_ref().unwrap();
             let team_config = teams.teams.get(&team_name).unwrap();
 
             if !team_config.orgs.contains(&org) {
-                Output::success(&format!("Auto-mapped org: {}", org));
                 orgs_add(&org).await?;
+                Output::success(&format!("Mapped org: {} ✓", org));
             } else {
-                println!("Org already mapped: {}", org);
+                Output::success(&format!("Mapped org: {} ✓", org));
             }
-        }
-    }
-
-    // Reload config after potential org add
-    config = Config::load()?;
-    let teams = config.teams.as_ref().unwrap();
-    let team_config = teams.teams.get(&team_name).unwrap();
-    let existing_orgs: std::collections::HashSet<String> =
-        team_config.orgs.iter().cloned().collect();
-
-    if !existing_orgs.is_empty() {
-        println!("Mapped orgs:");
-        for org in &existing_orgs {
-            println!("  • {}", org);
-        }
-        println!();
-    }
-
-    // Offer to add more orgs
-    if Prompt::confirm("Add more orgs to this team?", false)? {
-        let options = vec!["Scan local projects for suggestions", "Enter manually"];
-        let choice = Prompt::select("How?", options, 0)?;
-
-        if choice == 0 {
-            // Scan for git repos
-            let search_paths: Vec<std::path::PathBuf> = config
-                .project_configs
-                .search_paths
-                .iter()
-                .map(|p| {
-                    if let Some(stripped) = p.strip_prefix("~/") {
-                        home.join(stripped)
-                    } else {
-                        std::path::PathBuf::from(p)
-                    }
-                })
-                .collect();
-
-            let spinner = Progress::spinner("Scanning for git repos...");
-            let mut discovered_orgs: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            for search_path in &search_paths {
-                if let Ok(repos) = find_git_repos(search_path) {
-                    for repo_path in repos {
-                        if let Ok(remote_url) = get_remote_url(&repo_path) {
-                            let normalized = normalize_remote_url(&remote_url);
-                            if let Some(org) =
-                                crate::sync::extract_org_from_normalized_url(&normalized)
-                            {
-                                discovered_orgs.insert(org);
-                            }
-                        }
-                    }
-                }
-            }
-            Progress::finish_success(
-                &spinner,
-                &format!("Found {} unique org(s)", discovered_orgs.len()),
-            );
-
-            // Filter out already-mapped orgs
-            let suggested_orgs: Vec<String> = discovered_orgs
-                .difference(&existing_orgs)
-                .cloned()
-                .collect();
-
-            if !suggested_orgs.is_empty() {
-                println!("Discovered orgs:");
-                for (i, org) in suggested_orgs.iter().enumerate() {
-                    println!("  {}. {}", i + 1, org);
-                }
-                println!();
-
-                let selections = Prompt::input(
-                    "Enter numbers to add (comma-separated, or 'all'):",
-                    Some("all"),
-                )?;
-
-                let orgs_to_add: Vec<&String> = if selections.trim().eq_ignore_ascii_case("all") {
-                    suggested_orgs.iter().collect()
-                } else {
-                    selections
-                        .split(',')
-                        .filter_map(|s| s.trim().parse::<usize>().ok())
-                        .filter_map(|i| suggested_orgs.get(i.saturating_sub(1)))
-                        .collect()
-                };
-
-                for org in orgs_to_add {
-                    orgs_add(org).await?;
-                }
-            } else {
-                Output::dim("No additional orgs found");
-            }
-        } else {
-            // Manual entry
-            let org = Prompt::input("Org (e.g., github.com/acme-corp):", None)?;
-            orgs_add(&org).await?;
         }
     }
 
     // Step 4: Auto-add self as recipient
-    println!();
     config = Config::load()?;
     let teams = config.teams.as_ref().unwrap();
     let team_config = teams.teams.get(&team_name).unwrap();
@@ -319,30 +219,24 @@ pub async fn setup() -> Result<()> {
             };
 
             if !am_recipient {
-                Output::info("Adding you as a recipient...");
                 let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
                 secrets_add_recipient(&identity_pub_path.to_string_lossy(), Some(&username))
                     .await?;
-            } else {
-                Output::success("You are a recipient");
             }
+            Output::success("You are a recipient ✓");
         }
     }
 
-    // Step 5: Summary
+    // Summary
     println!();
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     Output::success("Team setup complete!");
     println!();
-
-    // Reload and show status
-    status().await?;
-
-    println!();
-    Output::info("Next steps:");
-    println!("  • Run 'tether sync' to sync team dotfiles");
-    println!("  • Use 'tether team projects add .env' to share project secrets");
-    println!("  • Use 'tether team secrets set KEY' to share team-wide secrets");
+    Output::dim("Next steps:");
+    Output::dim("  tether sync                       - sync team dotfiles");
+    Output::dim("  tether team projects add .env     - share project secrets");
+    Output::dim("  tether team secrets set KEY       - share team-wide secrets");
+    Output::dim("  tether team orgs add <org>        - map additional orgs");
 
     Ok(())
 }
