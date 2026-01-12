@@ -887,63 +887,69 @@ pub async fn status() -> Result<()> {
     let config = Config::load()?;
 
     println!();
-    match &config.team {
-        Some(team) => {
-            let mut table = Output::table_full();
-            table
-                .set_header(vec![
-                    Cell::new("Team Sync")
-                        .add_attribute(Attribute::Bold)
-                        .fg(Color::Cyan),
-                    Cell::new(""),
-                ])
-                .add_row(vec![
-                    Cell::new("Status"),
-                    if team.enabled {
-                        Cell::new(format!("{} Enabled", Output::DOT)).fg(Color::Green)
-                    } else {
-                        Cell::new(format!("{} Disabled", Output::DOT)).fg(Color::Yellow)
-                    },
-                ])
-                .add_row(vec![Cell::new("Repository"), Cell::new(&team.url)])
-                .add_row(vec![
-                    Cell::new("Access Mode"),
-                    if team.read_only {
-                        Cell::new("Read-only").fg(Color::Yellow)
-                    } else {
-                        Cell::new("Read-write (Admin)").fg(Color::Green)
-                    },
-                ])
-                .add_row(vec![
-                    Cell::new("Auto-inject"),
-                    Cell::new(if team.auto_inject { "Yes" } else { "No" }),
-                ]);
+    match &config.teams {
+        Some(teams) if !teams.teams.is_empty() => {
+            for (name, team) in &teams.teams {
+                let is_active = teams.active.contains(name);
+                let mut table = Output::table_full();
+                table
+                    .set_header(vec![
+                        Cell::new(format!("Team: {}", name))
+                            .add_attribute(Attribute::Bold)
+                            .fg(Color::Cyan),
+                        Cell::new(if is_active { "(active)" } else { "" }).fg(Color::DarkGrey),
+                    ])
+                    .add_row(vec![
+                        Cell::new("Status"),
+                        if team.enabled {
+                            Cell::new(format!("{} Enabled", Output::DOT)).fg(Color::Green)
+                        } else {
+                            Cell::new(format!("{} Disabled", Output::DOT)).fg(Color::Yellow)
+                        },
+                    ])
+                    .add_row(vec![Cell::new("Repository"), Cell::new(&team.url)])
+                    .add_row(vec![
+                        Cell::new("Access Mode"),
+                        if team.read_only {
+                            Cell::new("Read-only").fg(Color::Yellow)
+                        } else {
+                            Cell::new("Read-write").fg(Color::Green)
+                        },
+                    ]);
 
-            // Show team files
-            let team_sync_dir = Config::team_sync_dir()?;
-            let dotfiles_dir = team_sync_dir.join("dotfiles");
+                // Show mapped orgs
+                if !team.orgs.is_empty() {
+                    table.add_row(vec![
+                        Cell::new("Mapped orgs"),
+                        Cell::new(team.orgs.join(", ")),
+                    ]);
+                }
 
-            if dotfiles_dir.exists() {
-                let mut count = 0;
-                for entry in std::fs::read_dir(&dotfiles_dir)? {
-                    if entry?.file_type()?.is_file() {
-                        count += 1;
+                // Show team files count
+                if let Ok(repo_dir) = Config::team_repo_dir(name) {
+                    let dotfiles_dir = repo_dir.join("dotfiles");
+                    if dotfiles_dir.exists() {
+                        let count = std::fs::read_dir(&dotfiles_dir)
+                            .map(|entries| entries.filter_map(|e| e.ok()).count())
+                            .unwrap_or(0);
+                        if count > 0 {
+                            table.add_row(vec![
+                                Cell::new("Dotfiles"),
+                                Cell::new(format!("{} files", count)),
+                            ]);
+                        }
                     }
                 }
-                table.add_row(vec![
-                    Cell::new("Team files"),
-                    Cell::new(format!("{} files", count)),
-                ]);
-            }
 
-            println!("{table}");
+                println!("{table}");
+                println!();
+            }
         }
-        None => {
-            Output::info("Team sync is not configured");
-            Output::info("Run 'tether team add <url>' to add team sync");
+        _ => {
+            Output::info("No teams configured");
+            Output::info("Run 'tether team setup' or 'tether team add <url>' to add a team");
         }
     }
-    println!();
     Ok(())
 }
 
