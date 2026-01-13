@@ -1446,7 +1446,7 @@ fn migrate_personal_to_team(
 
     // Load user identity for verification (test decrypt after encrypt)
     let identity = crate::security::load_identity(None)
-        .map_err(|_| anyhow::anyhow!("Identity required for migration. Run 'tether unlock' first."))?;
+        .map_err(|_| anyhow::anyhow!("Identity required for migration. Run 'tether identity unlock' first."))?;
 
     // Load team recipients for re-encryption
     let recipients_dir = team_repo_dir.join("recipients");

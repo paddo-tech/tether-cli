@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-01-13
+
+### Added
+
+- Auto-migrate personal project secrets to team repo when adding org (`tether team orgs add`)
+- New `tether team projects migrate` command for manual migration
+- Global `--yes` / `-y` flag to skip confirmation prompts (non-interactive mode)
+- Config versioning system to prevent older tether from corrupting newer configs
+
+### Fixed
+
+- Show config version error instead of generic "not initialized" message
+- Correct error message for identity unlock command
+
 ## [1.1.6] - 2026-01-04
 
 ### Fixed
