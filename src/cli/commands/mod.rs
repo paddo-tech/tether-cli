@@ -21,6 +21,10 @@ use clap::{Parser, Subcommand};
 #[command(about = "Sync your dev environment across machines", long_about = None)]
 #[command(version)]
 pub struct Cli {
+    /// Skip confirmation prompts (non-interactive mode)
+    #[arg(short = 'y', long, global = true)]
+    pub yes: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -384,6 +388,8 @@ pub enum ProjectsAction {
         #[arg(long)]
         history: bool,
     },
+    /// Migrate personal project secrets to team repo
+    Migrate,
 }
 
 impl Cli {
@@ -438,7 +444,7 @@ impl Cli {
                 TeamAction::Disable => team::disable().await,
                 TeamAction::Status => team::status().await,
                 TeamAction::Orgs { action } => match action {
-                    OrgAction::Add { org } => team::orgs_add(org).await,
+                    OrgAction::Add { org } => team::orgs_add(org, self.yes).await,
                     OrgAction::List => team::orgs_list().await,
                     OrgAction::Remove { org } => team::orgs_remove(org).await,
                 },
@@ -477,8 +483,9 @@ impl Cli {
                         team::projects_remove(file, project.as_deref()).await
                     }
                     ProjectsAction::PurgePersonal { history } => {
-                        team::projects_purge_personal(*history).await
+                        team::projects_purge_personal(*history, self.yes).await
                     }
+                    ProjectsAction::Migrate => team::projects_migrate(self.yes).await,
                 },
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,

@@ -10,8 +10,13 @@ use std::path::PathBuf;
 pub async fn run() -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
-        Err(_) => {
-            Output::error("Tether is not initialized. Run 'tether init' first.");
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("Config version") {
+                Output::error(&msg);
+            } else {
+                Output::error("Tether is not initialized. Run 'tether init' first.");
+            }
             return Ok(());
         }
     };

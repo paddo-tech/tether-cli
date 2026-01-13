@@ -210,7 +210,7 @@ pub async fn setup() -> Result<()> {
             let team_config = teams.teams.get(&team_name).unwrap();
 
             if !team_config.orgs.contains(&org) {
-                orgs_add(&org).await?;
+                orgs_add(&org, false).await?;
                 Output::success(&format!("Mapped org: {} ✓", org));
             } else {
                 Output::success(&format!("Mapped org: {} ✓", org));
@@ -1200,7 +1200,7 @@ fn cleanup_team_injections(team_name: &str) -> Result<()> {
 // --- Per-team org management ---
 // Maps GitHub/GitLab orgs to teams for project secrets
 
-pub async fn orgs_add(org: &str) -> Result<()> {
+pub async fn orgs_add(org: &str, yes: bool) -> Result<()> {
     use crate::sync::SyncEngine;
 
     let mut config = Config::load()?;
@@ -1251,17 +1251,38 @@ pub async fn orgs_add(org: &str) -> Result<()> {
         let matching = find_personal_projects_for_org(&personal_projects_dir, org)?;
         if !matching.is_empty() {
             println!();
-            Output::warning(&format!(
-                "Found {} project(s) in personal sync that are now team-owned:",
+            Output::info(&format!(
+                "Found {} project(s) in personal sync that should move to team:",
                 matching.len()
             ));
             for project in &matching {
                 println!("  • {}", project);
             }
             println!();
-            Output::dim("These will be ignored during sync (team version takes priority).");
-            Output::dim("Run 'tether team projects purge-personal' to clean up once all");
-            Output::dim("machines are on the team.");
+
+            // Get team repo dir for migration
+            let team_repo_dir = Config::team_repo_dir(&active)?;
+
+            if yes || Prompt::confirm("Migrate these to team repo now?", true)? {
+                let pb = Progress::spinner("Migrating project secrets...");
+                match migrate_personal_to_team(&sync_path, &team_repo_dir, &matching) {
+                    Ok(migrated) => {
+                        pb.finish_and_clear();
+                        Output::success(&format!(
+                            "Migrated {} project(s) to team repo",
+                            migrated.len()
+                        ));
+                    }
+                    Err(e) => {
+                        pb.finish_and_clear();
+                        Output::error(&format!("Migration failed: {}", e));
+                        Output::dim("Personal secrets were NOT deleted (safe).");
+                        Output::dim("Fix the issue and run 'tether team projects migrate' to retry.");
+                    }
+                }
+            } else {
+                Output::dim("Run 'tether team projects migrate' later to move them.");
+            }
         }
     }
 
@@ -1404,6 +1425,221 @@ fn purge_personal_project_files(sync_path: &std::path::Path, projects: &[String]
         git.commit("Remove project secrets moved to team sync", "tether")?;
     }
 
+    Ok(())
+}
+
+/// Migrate personal project secrets to team repo
+/// Returns list of successfully migrated projects
+fn migrate_personal_to_team(
+    sync_path: &std::path::Path,
+    team_repo_dir: &std::path::Path,
+    projects: &[String],
+) -> Result<Vec<String>> {
+    use std::path::Path;
+    use walkdir::WalkDir;
+
+    let personal_projects_dir = sync_path.join("projects");
+    let team_projects_dir = team_repo_dir.join("projects");
+
+    // Load encryption key for personal secrets
+    let personal_key = crate::security::get_encryption_key()?;
+
+    // Load user identity for verification (test decrypt after encrypt)
+    let identity = crate::security::load_identity(None)
+        .map_err(|_| anyhow::anyhow!("Identity required for migration. Run 'tether unlock' first."))?;
+
+    // Load team recipients for re-encryption
+    let recipients_dir = team_repo_dir.join("recipients");
+    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    if recipients.is_empty() {
+        anyhow::bail!("No team recipients configured. Add recipients first with: tether team secrets add-recipient");
+    }
+
+    let mut migrated: Vec<String> = Vec::new();
+    let mut migrated_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut skipped_existing = 0usize;
+
+    for project in projects {
+        let personal_project_path = personal_projects_dir.join(project);
+        if !personal_project_path.exists() {
+            continue;
+        }
+
+        let mut project_had_files = false;
+
+        // Find all .enc files in this project
+        for entry in WalkDir::new(&personal_project_path).follow_links(false) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let file_path = entry.path();
+
+            // Use proper Path extension check instead of string manipulation
+            if file_path.extension().and_then(|e| e.to_str()) != Some("enc") {
+                continue;
+            }
+
+            // Build team destination path using proper Path methods
+            let rel_to_project = file_path.strip_prefix(&personal_project_path)?;
+            let team_dest_dir = team_projects_dir.join(project);
+
+            // Replace .enc extension with .age
+            let rel_with_age = Path::new(rel_to_project).with_extension("age");
+            let team_dest_file = team_dest_dir.join(&rel_with_age);
+
+            // Idempotent: skip if team file already exists
+            if team_dest_file.exists() {
+                skipped_existing += 1;
+                continue;
+            }
+
+            // Decrypt personal secret
+            let encrypted_content = std::fs::read(file_path)?;
+            let plaintext = crate::security::decrypt_file(&encrypted_content, &personal_key)
+                .map_err(|e| anyhow::anyhow!("Failed to decrypt {}: {}", file_path.display(), e))?;
+
+            // Re-encrypt with team recipients
+            let team_encrypted = crate::security::encrypt_to_recipients(&plaintext, &recipients)?;
+
+            // Verify encryption by test-decrypting (round-trip check)
+            crate::security::decrypt_with_identity(&team_encrypted, &identity)
+                .map_err(|e| anyhow::anyhow!(
+                    "Verification failed for {}: encrypted file not decryptable: {}",
+                    file_path.display(), e
+                ))?;
+
+            // Write to team repo
+            if let Some(parent) = team_dest_file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&team_dest_file, &team_encrypted)?;
+
+            // Verify the team file exists and has content
+            let metadata = std::fs::metadata(&team_dest_file)
+                .map_err(|e| anyhow::anyhow!("Failed to verify {}: {}", team_dest_file.display(), e))?;
+            if metadata.len() == 0 {
+                anyhow::bail!(
+                    "Migration verification failed: {} was written but is empty",
+                    team_dest_file.display()
+                );
+            }
+
+            migrated_files.push(team_dest_file);
+            project_had_files = true;
+        }
+
+        if project_had_files {
+            migrated.push(project.clone());
+        }
+    }
+
+    if skipped_existing > 0 {
+        Output::dim(&format!("  Skipped {} file(s) already in team repo", skipped_existing));
+    }
+
+    if migrated_files.is_empty() {
+        return Ok(migrated);
+    }
+
+    // Commit team repo first (additions) - this must succeed before we delete personal
+    let team_git = GitBackend::open(team_repo_dir)?;
+    let team_has_changes = team_git.has_changes()?;
+
+    if team_has_changes {
+        team_git.commit(
+            &format!("Migrate {} project(s) from personal sync", migrated.len()),
+            "tether",
+        )?;
+        team_git.push()?;
+    } else if migrated_files.is_empty() {
+        // No changes and no files migrated - nothing to do
+        return Ok(Vec::new());
+    }
+
+    // Verify all team files exist before deleting personal (defense in depth)
+    for team_file in &migrated_files {
+        if !team_file.exists() {
+            anyhow::bail!(
+                "Safety check failed: {} missing after commit. Aborting to prevent data loss.",
+                team_file.display()
+            );
+        }
+    }
+
+    // Create backup before deleting personal files
+    let backup_dir = std::env::temp_dir().join(format!(
+        "tether-migration-backup-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    std::fs::create_dir_all(&backup_dir)?;
+
+    // Backup personal project dirs
+    for project in &migrated {
+        let src = personal_projects_dir.join(project);
+        if src.exists() {
+            let dest = backup_dir.join(project);
+            copy_dir_recursive(&src, &dest)?;
+        }
+    }
+
+    // Now safe to remove from personal
+    purge_personal_project_files(sync_path, &migrated)?;
+
+    // Push personal repo changes - restore backup if this fails
+    let personal_git = GitBackend::open(sync_path)?;
+    if personal_git.has_changes()? {
+        if let Err(e) = personal_git.push() {
+            // Push failed - restore from backup
+            Output::error(&format!("Failed to push personal repo: {}", e));
+            Output::warning("Restoring from backup...");
+
+            for project in &migrated {
+                let backup_src = backup_dir.join(project);
+                let dest = personal_projects_dir.join(project);
+                if backup_src.exists() {
+                    copy_dir_recursive(&backup_src, &dest)?;
+                }
+            }
+
+            // Re-stage the restored files
+            let git = GitBackend::open(sync_path)?;
+            git.commit("Restore after failed migration push", "tether")?;
+
+            anyhow::bail!(
+                "Personal repo push failed. Files restored from backup at {}. \
+                 Team repo has the files - run 'tether sync' on other machines first, \
+                 then retry 'tether team projects migrate'.",
+                backup_dir.display()
+            );
+        }
+    }
+
+    // Success - clean up backup
+    let _ = std::fs::remove_dir_all(&backup_dir);
+
+    Ok(migrated)
+}
+
+/// Recursively copy a directory
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            std::fs::copy(&src_path, &dest_path)?;
+        }
+    }
     Ok(())
 }
 
@@ -2234,7 +2470,7 @@ pub async fn projects_remove(file: &str, project: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub async fn projects_purge_personal(purge_history: bool) -> Result<()> {
+pub async fn projects_purge_personal(purge_history: bool, yes: bool) -> Result<()> {
     use crate::sync::SyncEngine;
 
     let config = Config::load()?;
@@ -2288,10 +2524,12 @@ pub async fn projects_purge_personal(purge_history: bool) -> Result<()> {
     }
     println!();
 
-    if !Prompt::confirm(
-        &format!("Remove {} project(s) from personal sync?", to_purge.len()),
-        true,
-    )? {
+    if !yes
+        && !Prompt::confirm(
+            &format!("Remove {} project(s) from personal sync?", to_purge.len()),
+            true,
+        )?
+    {
         Output::info("Cancelled");
         return Ok(());
     }
@@ -2304,6 +2542,101 @@ pub async fn projects_purge_personal(purge_history: bool) -> Result<()> {
         purge_from_git_history(&sync_path, &to_purge)?;
         force_push_sync_repo(&sync_path)?;
         Output::success("Purged from git history");
+    }
+
+    Ok(())
+}
+
+/// Migrate personal project secrets to team repo
+pub async fn projects_migrate(yes: bool) -> Result<()> {
+    use crate::sync::SyncEngine;
+
+    let config = Config::load()?;
+
+    let teams = match config.teams.as_ref() {
+        Some(t) => t,
+        None => {
+            Output::info("No teams configured");
+            return Ok(());
+        }
+    };
+
+    // Get active team
+    let active = match teams.active.first() {
+        Some(name) => name.clone(),
+        None => {
+            Output::info("No active team");
+            return Ok(());
+        }
+    };
+
+    let team_config = match teams.teams.get(&active) {
+        Some(c) if c.enabled => c,
+        _ => {
+            Output::info("Active team is not enabled");
+            return Ok(());
+        }
+    };
+
+    if team_config.orgs.is_empty() {
+        Output::info("No orgs mapped to team - nothing to migrate");
+        Output::dim("Run 'tether team orgs add <host/org>' first");
+        return Ok(());
+    }
+
+    let sync_path = SyncEngine::sync_path()?;
+    let personal_projects_dir = sync_path.join("projects");
+
+    if !personal_projects_dir.exists() {
+        Output::info("No personal project secrets found");
+        return Ok(());
+    }
+
+    // Find all personal projects that belong to team orgs
+    let mut to_migrate: Vec<String> = Vec::new();
+    for org in &team_config.orgs {
+        let matching = find_personal_projects_for_org(&personal_projects_dir, org)?;
+        to_migrate.extend(matching);
+    }
+
+    if to_migrate.is_empty() {
+        Output::success("No personal projects to migrate - all clean");
+        return Ok(());
+    }
+
+    println!("Projects to migrate to team '{}':", active);
+    for project in &to_migrate {
+        println!("  • {}", project);
+    }
+    println!();
+
+    if !yes
+        && !Prompt::confirm(
+            &format!("Migrate {} project(s) to team repo?", to_migrate.len()),
+            true,
+        )?
+    {
+        Output::info("Cancelled");
+        return Ok(());
+    }
+
+    let team_repo_dir = Config::team_repo_dir(&active)?;
+    let pb = Progress::spinner("Migrating project secrets...");
+
+    match migrate_personal_to_team(&sync_path, &team_repo_dir, &to_migrate) {
+        Ok(migrated) => {
+            pb.finish_and_clear();
+            Output::success(&format!(
+                "Migrated {} project(s) to team repo",
+                migrated.len()
+            ));
+        }
+        Err(e) => {
+            pb.finish_and_clear();
+            Output::error(&format!("Migration failed: {}", e));
+            Output::dim("Personal secrets were NOT deleted (safe).");
+            return Err(e);
+        }
     }
 
     Ok(())
