@@ -293,8 +293,8 @@ pub fn normalize_remote_url(url: &str) -> String {
 pub fn extract_org_from_normalized_url(normalized_url: &str) -> Option<String> {
     let parts: Vec<&str> = normalized_url.split('/').collect();
     if parts.len() >= 2 {
-        // host/org (e.g., github.com/acme-corp)
-        Some(format!("{}/{}", parts[0], parts[1]))
+        // host/org (e.g., github.com/acme-corp), normalized to lowercase
+        Some(format!("{}/{}", parts[0], parts[1]).to_lowercase())
     } else {
         None
     }
@@ -484,6 +484,14 @@ mod tests {
     fn test_extract_org_invalid() {
         assert_eq!(extract_org_from_normalized_url("github.com"), None);
         assert_eq!(extract_org_from_normalized_url(""), None);
+    }
+
+    #[test]
+    fn test_extract_org_case_normalization() {
+        assert_eq!(
+            extract_org_from_normalized_url("GitHub.com/ACME-Corp/Repo"),
+            Some("github.com/acme-corp".to_string())
+        );
     }
 
     // Skip directory tests

@@ -646,11 +646,6 @@ fn decrypt_project_configs(
                     }
                 }
             }
-        } else {
-            Output::warning(&format!(
-                "Project config skipped: {} (repo not found in search paths)",
-                project_name
-            ));
         }
     }
 
@@ -1181,6 +1176,7 @@ fn detect_removed_packages(
 /// Sync project secrets from team repos to local projects
 fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+    use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
 
     let teams = match &config.teams {
@@ -1217,6 +1213,12 @@ fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
             return Ok(());
         }
     };
+
+    // Track secrets we couldn't decrypt (not a recipient)
+    let mut skipped_secrets: Vec<String> = vec![];
+
+    // Backup directory (lazy init)
+    let mut backup_dir: Option<PathBuf> = None;
 
     // For each active team with configured orgs
     for team_name in &teams.active {
@@ -1308,6 +1310,20 @@ fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                             };
 
                             if should_write {
+                                // Backup before overwriting
+                                if local_file.exists() {
+                                    if backup_dir.is_none() {
+                                        backup_dir = Some(create_backup_dir()?);
+                                    }
+                                    let backup_path =
+                                        format!("{}/{}", normalized_url, rel_file_no_age);
+                                    backup_file(
+                                        backup_dir.as_ref().unwrap(),
+                                        "team-projects",
+                                        &backup_path,
+                                        &local_file,
+                                    )?;
+                                }
                                 if let Some(parent) = local_file.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
@@ -1319,14 +1335,32 @@ fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                                 ));
                             }
                         }
-                        Err(_) => {
-                            // Not a recipient - silently skip
+                        Err(e) => {
+                            let err_str = e.to_string().to_lowercase();
+                            if err_str.contains("not a recipient")
+                                || err_str.contains("no matching keys")
+                            {
+                                skipped_secrets
+                                    .push(format!("{}/{}", normalized_url, rel_file_no_age));
+                            } else {
+                                Output::warning(&format!(
+                                    "Failed to decrypt {}/{}: {}",
+                                    normalized_url, rel_file_no_age, e
+                                ));
+                            }
                         }
                     }
                 }
                 Err(_) => continue,
             }
         }
+    }
+
+    if !skipped_secrets.is_empty() {
+        Output::warning(&format!(
+            "Skipped {} team secret(s) (not a recipient)",
+            skipped_secrets.len()
+        ));
     }
 
     Ok(())

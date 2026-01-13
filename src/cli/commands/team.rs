@@ -25,6 +25,32 @@ fn sanitize_team_name(name: &str) -> String {
         .to_string()
 }
 
+/// Re-encrypt all .age files in a directory with new recipients
+fn reencrypt_age_files(
+    dir: &std::path::Path,
+    identity: &age::x25519::Identity,
+    recipients: &[age::x25519::Recipient],
+) -> Result<usize> {
+    use walkdir::WalkDir;
+
+    if !dir.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0;
+    for entry in WalkDir::new(dir) {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|e| e == "age") {
+            let encrypted = std::fs::read(entry.path())?;
+            let decrypted = crate::security::decrypt_with_identity(&encrypted, identity)?;
+            let reencrypted = crate::security::encrypt_to_recipients(&decrypted, recipients)?;
+            std::fs::write(entry.path(), reencrypted)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Prompt for team repository - offers to create or use existing
 async fn prompt_for_team_repo() -> Result<String> {
     use crate::github::GitHubCli;
@@ -1204,13 +1230,14 @@ pub async fn orgs_add(org: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Check if already exists
+    // Check if already exists (case-insensitive)
     if team_config.orgs.iter().any(|o| o.eq_ignore_ascii_case(org)) {
         Output::info(&format!("'{}' already mapped to team '{}'", org, active));
         return Ok(());
     }
 
-    team_config.orgs.push(org.to_string());
+    // Store normalized (lowercase) for consistency
+    team_config.orgs.push(org.to_lowercase());
     config.save()?;
 
     Output::success(&format!("Mapped '{}' to team '{}'", org, active));
@@ -1538,14 +1565,43 @@ pub async fn secrets_add_recipient(key: &str, name: Option<&str>) -> Result<()> 
     let pubkey_file = recipients_dir.join(format!("{}.pub", recipient_name));
     std::fs::write(&pubkey_file, pubkey.trim())?;
 
+    // Re-encrypt existing secrets with new recipient list
+    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    let secrets_dir = repo_dir.join("secrets");
+    let projects_dir = repo_dir.join("projects");
+    let has_existing_secrets = secrets_dir.exists() || projects_dir.exists();
+
+    let mut reencrypted_count = 0;
+    if has_existing_secrets && recipients.len() > 1 {
+        let identity = crate::security::load_identity(None)
+            .map_err(|_| anyhow::anyhow!("Identity not unlocked. Run: tether identity unlock"))?;
+
+        reencrypted_count += reencrypt_age_files(&secrets_dir, &identity, &recipients)?;
+        reencrypted_count += reencrypt_age_files(&projects_dir, &identity, &recipients)?;
+    }
+
     // Commit to team repo
     let git = GitBackend::open(&repo_dir)?;
-    git.commit(&format!("Add recipient: {}", recipient_name), "tether")?;
+    let commit_msg = if reencrypted_count > 0 {
+        format!(
+            "Add recipient: {} (re-encrypted {} secret(s))",
+            recipient_name, reencrypted_count
+        )
+    } else {
+        format!("Add recipient: {}", recipient_name)
+    };
+    git.commit(&commit_msg, "tether")?;
 
     Output::success(&format!(
         "Added recipient '{}' to team '{}'",
         recipient_name, team_name
     ));
+    if reencrypted_count > 0 {
+        Output::info(&format!(
+            "Re-encrypted {} existing secret(s)",
+            reencrypted_count
+        ));
+    }
     Output::info("Run 'tether sync' to push changes to team repo");
     Ok(())
 }
@@ -1585,7 +1641,8 @@ pub async fn secrets_list_recipients() -> Result<()> {
 
 pub async fn secrets_remove_recipient(name: &str) -> Result<()> {
     let (team_name, repo_dir) = get_active_team_repo()?;
-    let pubkey_file = repo_dir.join("recipients").join(format!("{}.pub", name));
+    let recipients_dir = repo_dir.join("recipients");
+    let pubkey_file = recipients_dir.join(format!("{}.pub", name));
 
     if !pubkey_file.exists() {
         Output::error(&format!("Recipient '{}' not found", name));
@@ -1594,15 +1651,44 @@ pub async fn secrets_remove_recipient(name: &str) -> Result<()> {
 
     std::fs::remove_file(&pubkey_file)?;
 
+    // Re-encrypt existing secrets without removed recipient
+    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    let secrets_dir = repo_dir.join("secrets");
+    let projects_dir = repo_dir.join("projects");
+
+    let mut reencrypted_count = 0;
+    if !recipients.is_empty() {
+        let identity = crate::security::load_identity(None)
+            .map_err(|_| anyhow::anyhow!("Identity not unlocked. Run: tether identity unlock"))?;
+
+        reencrypted_count += reencrypt_age_files(&secrets_dir, &identity, &recipients)?;
+        reencrypted_count += reencrypt_age_files(&projects_dir, &identity, &recipients)?;
+    }
+
     // Commit to team repo
     let git = GitBackend::open(&repo_dir)?;
-    git.commit(&format!("Remove recipient: {}", name), "tether")?;
+    let commit_msg = if reencrypted_count > 0 {
+        format!(
+            "Remove recipient: {} (re-encrypted {} secret(s))",
+            name, reencrypted_count
+        )
+    } else {
+        format!("Remove recipient: {}", name)
+    };
+    git.commit(&commit_msg, "tether")?;
 
     Output::success(&format!(
         "Removed recipient '{}' from team '{}'",
         name, team_name
     ));
-    Output::warning("Existing secrets should be re-encrypted without this recipient");
+    if reencrypted_count > 0 {
+        Output::info(&format!(
+            "Re-encrypted {} secret(s) without removed recipient",
+            reencrypted_count
+        ));
+    }
+    Output::warning("Git history still contains old encrypted data readable by removed recipient");
+    Output::info("Run 'tether sync' to push changes to team repo");
     Ok(())
 }
 
@@ -2002,19 +2088,19 @@ pub async fn projects_add(file: &str, project_path: Option<&str>) -> Result<()> 
     let dest_file = dest_dir.join(format!("{}.age", file));
     std::fs::write(&dest_file, &encrypted)?;
 
-    // Commit
+    // Commit and push
     let git = GitBackend::open(&repo_dir)?;
     git.commit(
         &format!("Add project secret: {}/{}", normalized_url, file),
         "tether",
     )?;
+    git.push()?;
 
     Output::success(&format!(
         "Added '{}' to team '{}' for project '{}'",
         file, team_name, normalized_url
     ));
     Output::info(&format!("Encrypted to {} recipient(s)", recipients.len()));
-    Output::info("Run 'tether sync' to push to team repo");
     Ok(())
 }
 
