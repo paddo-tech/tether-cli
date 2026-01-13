@@ -3,23 +3,9 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import Navbar from '../components/Navbar.astro';
 import Footer from '../components/Footer.astro';
 import CodeBlock from '../components/CodeBlock.astro';
-import FeatureCard from '../components/FeatureCard.astro';
-
-// Phosphor icons (regular weight)
-const icons = {
-  users: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z"/></svg>',
-  lock: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M208,80H176V56a48,48,0,0,0-96,0V80H48A16,16,0,0,0,32,96V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM96,56a32,32,0,0,1,64,0V80H96ZM208,208H48V96H208V208Zm-80-96a28,28,0,0,0-8,54.83V184a8,8,0,0,0,16,0V166.83A28,28,0,0,0,128,112Zm0,40a12,12,0,1,1,12-12A12,12,0,0,1,128,152Z"/></svg>',
-  robot: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M200,48H136V16a8,8,0,0,0-16,0V48H56A32,32,0,0,0,24,80V192a32,32,0,0,0,32,32H200a32,32,0,0,0,32-32V80A32,32,0,0,0,200,48Zm16,144a16,16,0,0,1-16,16H56a16,16,0,0,1-16-16V80A16,16,0,0,1,56,64H200a16,16,0,0,1,16,16Zm-36-56a12,12,0,1,1-12-12A12,12,0,0,1,180,136ZM88,136a12,12,0,1,1-12-12A12,12,0,0,1,88,136Zm80,32a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,168Z"/></svg>',
-  wrench: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M226.76,69a8,8,0,0,0-12.84-2.88l-40.3,37.19-17.23-3.7-3.7-17.23,37.19-40.3A8,8,0,0,0,187,29.24,72,72,0,0,0,88,96a72.34,72.34,0,0,0,5.74,28.29L36.69,176.55a24,24,0,0,0,33.94,33.94l52.26-57a72.34,72.34,0,0,0,28.29,5.74A72,72,0,0,0,218,92.57,71.89,71.89,0,0,0,226.76,69ZM160,184a56.14,56.14,0,0,1-27.07-7,8,8,0,0,0-9.92,1.77l-55.42,61a8,8,0,0,1-11.32-11.32l61-55.42a8,8,0,0,0,1.77-9.92,56,56,0,0,1,62.43-80.19l-32.3,35a8,8,0,0,0-2,6.95l5.15,24a8,8,0,0,0,6.27,6.27l24,5.15a8,8,0,0,0,6.95-2l35-32.3A56.06,56.06,0,0,1,160,184Z"/></svg>',
-  gear: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.21,107.21,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3-3L186,40.54a8,8,0,0,0-3.94-6,107.71,107.71,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3,3L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.21,107.21,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3,3L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3-3L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06Zm-16.1-6.5a73.93,73.93,0,0,1,0,8.68,8,8,0,0,0,1.74,5.48l14.19,17.73a91.57,91.57,0,0,1-6.23,15L187,173.11a8,8,0,0,0-5.1,2.64,74.11,74.11,0,0,1-6.14,6.14,8,8,0,0,0-2.64,5.1l-2.51,22.58a91.32,91.32,0,0,1-15,6.23l-17.74-14.19a8,8,0,0,0-5-1.75h-.48a73.93,73.93,0,0,1-8.68,0,8,8,0,0,0-5.48,1.74L100.45,215.8a91.57,91.57,0,0,1-15-6.23L82.89,187a8,8,0,0,0-2.64-5.1,74.11,74.11,0,0,1-6.14-6.14,8,8,0,0,0-5.1-2.64L46.43,170.6a91.32,91.32,0,0,1-6.23-15l14.19-17.74a8,8,0,0,0,1.74-5.48,73.93,73.93,0,0,1,0-8.68,8,8,0,0,0-1.74-5.48L40.2,100.45a91.57,91.57,0,0,1,6.23-15L69,82.89a8,8,0,0,0,5.1-2.64,74.11,74.11,0,0,1,6.14-6.14A8,8,0,0,0,82.89,69L85.4,46.43a91.32,91.32,0,0,1,15-6.23l17.74,14.19a8,8,0,0,0,5.48,1.74,73.93,73.93,0,0,1,8.68,0,8,8,0,0,0,5.48-1.74L155.55,40.2a91.57,91.57,0,0,1,15,6.23L173.11,69a8,8,0,0,0,2.64,5.1,74.11,74.11,0,0,1,6.14,6.14,8,8,0,0,0,5.1,2.64l22.58,2.51a91.32,91.32,0,0,1,6.23,15l-14.19,17.74A8,8,0,0,0,199.87,123.66Z"/></svg>',
-  user: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>',
-  userGear: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M144,157.68a68,68,0,1,0-71.9,0c-20.65,6.76-39.23,19.39-54.17,37.17a8,8,0,0,0,12.24,10.3C50.25,181.19,77.91,168,108,168s57.75,13.19,77.87,37.15a8,8,0,0,0,12.25-10.3C183.18,177.07,164.6,164.44,144,157.68ZM56,100a52,52,0,1,1,52,52A52.06,52.06,0,0,1,56,100Zm197.66,33.66-4.89,1.09a22.41,22.41,0,0,0,.42-4.12,23.51,23.51,0,0,0-.65-5.51l4.74-1.3a8,8,0,0,0-4.22-15.44l-4.87,1.34a24,24,0,0,0-5.89-6.75l2.71-4.2a8,8,0,0,0-13.44-8.66l-2.73,4.22A24.17,24.17,0,0,0,216,94a23.94,23.94,0,0,0-8.83,1.68l-2.73-4.22a8,8,0,0,0-13.44,8.66l2.72,4.2a24,24,0,0,0-5.89,6.75l-4.87-1.34a8,8,0,1,0-4.22,15.44l4.74,1.3a23.51,23.51,0,0,0-.65,5.51,22.41,22.41,0,0,0,.42,4.12l-4.89,1.09a8,8,0,0,0,3.5,15.6l5-1.12A24,24,0,0,0,192,154.59l-2.1,4a8,8,0,0,0,14.12,7.5l2-3.89a24.46,24.46,0,0,0,4-.35,23.64,23.64,0,0,0,4,.35l2,3.89a8,8,0,1,0,14.12-7.5l-2.1-4a24,24,0,0,0,5.32-8.5l5,1.12a8,8,0,0,0,3.5-15.6ZM216,138.63a8,8,0,1,1,8-8A8,8,0,0,1,216,138.63Z"/></svg>',
-  check: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/></svg>',
-  x: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M165.66,101.66,139.31,128l26.35,26.34a8,8,0,0,1-11.32,11.32L128,139.31l-26.34,26.35a8,8,0,0,1-11.32-11.32L116.69,128,90.34,101.66a8,8,0,0,1,11.32-11.32L128,116.69l26.34-26.35a8,8,0,0,1,11.32,11.32ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/></svg>',
-};
 ---
 
-<BaseLayout title="Team Sync - Tether CLI" description="Share team configurations while keeping personal configs private with Tether's team sync feature">
+<BaseLayout title="Team Sync - Tether CLI" description="Share .env files and project secrets across your team with age encryption">
   <Navbar />
 
   <main class="pt-16">
@@ -34,559 +20,80 @@ const icons = {
           </div>
 
           <h1 class="text-4xl sm:text-5xl lg:text-6xl font-bold font-mono leading-tight">
-            Share team configs,<br />
-            <span class="gradient-text">keep secrets personal</span>
+            Share <span class="gradient-text">.env files</span><br />
+            across your team
           </h1>
 
           <p class="text-xl text-muted leading-relaxed max-w-2xl mx-auto">
-            Sync shared team configurations across your organization with automatic symlink management. Team configs seamlessly integrate with tools like Claude Code, while personal dotfiles stay encrypted.
+            Sync project secrets across team members with age encryption. Map GitHub orgs to automatically share .env files when teammates clone repos.
           </p>
-
-          <div class="flex flex-col sm:flex-row gap-4 justify-center">
-            <a href="#how-it-works" class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-primary hover:bg-primary/90 text-background rounded-lg transition-all font-mono font-semibold">
-              <span>See How It Works</span>
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-              </svg>
-            </a>
-            <a href="/docs" class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-surface hover:bg-surface/80 text-text border border-surface rounded-lg transition-all font-mono">
-              <span>Read Docs</span>
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-              </svg>
-            </a>
-          </div>
         </div>
       </div>
     </section>
 
-    <!-- Use Cases -->
+    <!-- Quick Start -->
     <section class="py-20 bg-surface/30">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="text-center mb-16">
-          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
-            Perfect for <span class="text-accent">growing teams</span>
-          </h2>
-          <p class="text-muted text-lg">One tool, two sync repositories</p>
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-12">
+          <h2 class="text-3xl font-bold font-mono mb-4">Quick Start</h2>
         </div>
 
-        <div class="grid md:grid-cols-2 gap-8">
-          <!-- Team Repo -->
-          <div class="bg-background rounded-xl p-8 border border-accent/30">
-            <div class="w-10 h-10 text-accent mb-4" set:html={icons.users} />
-            <h3 class="text-2xl font-bold font-mono mb-4 text-accent">Team Repository</h3>
-            <p class="text-muted mb-6">Shared, read-only configurations for everyone</p>
-
-            <div class="space-y-3">
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Editor configs (.editorconfig, .prettierrc)</span>
-              </div>
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Shared shell aliases and functions</span>
-              </div>
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Git aliases and configurations</span>
-              </div>
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Company-wide tool settings</span>
-              </div>
-            </div>
-
-            <div class="mt-6 p-4 bg-surface rounded border border-accent/20">
-              <div class="text-xs font-mono text-muted mb-2">team.zshrc</div>
-              <pre class="text-xs text-accent font-mono overflow-x-auto"><code># Company aliases
-alias deploy='./scripts/deploy.sh'
-alias logs='kubectl logs -f'</code></pre>
-            </div>
+        <div class="space-y-8">
+          <div class="bg-background rounded-xl p-6 border border-primary/30">
+            <h3 class="font-mono font-semibold mb-4 text-primary">1. Setup team</h3>
+            <CodeBlock language="bash" code={`tether team setup
+# Creates team repo, generates age identity, adds you as recipient`} />
           </div>
 
-          <!-- Personal Repo -->
-          <div class="bg-background rounded-xl p-8 border border-primary/30">
-            <div class="w-10 h-10 text-primary mb-4" set:html={icons.lock} />
-            <h3 class="text-2xl font-bold font-mono mb-4 text-primary">Personal Repository</h3>
-            <p class="text-muted mb-6">Private, encrypted, always takes priority</p>
+          <div class="bg-background rounded-xl p-6 border border-accent/30">
+            <h3 class="font-mono font-semibold mb-4 text-accent">2. Map your org</h3>
+            <CodeBlock language="bash" code={`tether team orgs add github.com/your-company
+# Project secrets from this org will be shared with the team`} />
+          </div>
 
-            <div class="space-y-3">
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Your personal shell configs (.zshrc)</span>
-              </div>
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Git config with your email & signing key</span>
-              </div>
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">SSH keys, AWS credentials</span>
-              </div>
-              <div class="flex items-start space-x-3">
-                <svg class="w-5 h-5 text-success mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                <span class="text-sm text-muted">Custom overrides of team configs</span>
-              </div>
-            </div>
-
-            <div class="mt-6 p-4 bg-surface rounded border border-primary/20">
-              <div class="text-xs font-mono text-muted mb-2">.zshrc (encrypted)</div>
-              <pre class="text-xs text-primary font-mono overflow-x-auto"><code># Source team configs first
-source ~/.tether/team-sync/team.zshrc
-
-# Personal settings override</code></pre>
-            </div>
+          <div class="bg-background rounded-xl p-6 border border-success/30">
+            <h3 class="font-mono font-semibold mb-4 text-success">3. Share project secrets</h3>
+            <CodeBlock language="bash" code={`tether team projects add .env
+# Encrypts and shares .env with team members`} />
           </div>
         </div>
       </div>
     </section>
 
-    <!-- How It Works -->
-    <section id="how-it-works" class="py-20">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="text-center mb-16">
-          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
-            How team sync <span class="text-primary">works</span>
-          </h2>
-          <p class="text-muted text-lg">Three roles, automatic detection</p>
-        </div>
-
-        <div class="grid lg:grid-cols-3 gap-8">
-          <!-- Step 1: Admin Setup -->
-          <div class="flex flex-col">
-            <div class="w-16 h-16 bg-accent/10 rounded-full flex items-center justify-center border-2 border-accent mb-4">
-              <span class="text-2xl font-bold font-mono text-accent">1</span>
-            </div>
-            <h3 class="text-xl font-bold font-mono mb-4">Team Admin Creates Repo</h3>
-            <div class="flex-1 min-h-[280px]">
-              <CodeBlock language="bash" code={`# Admin creates team repo
-mkdir team-configs && cd team-configs
-
-# Add team dotfiles
-cat > team.zshrc << 'EOF'
-alias deploy='./deploy.sh'
-alias logs='kubectl logs -f'
-EOF
-
-git init && git push`} />
-            </div>
-            <p class="text-muted text-sm mt-4">Admin pushes shared configs to private team repository</p>
-          </div>
-
-          <!-- Step 2: Team Member Setup -->
-          <div class="flex flex-col">
-            <div class="w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center border-2 border-primary mb-4">
-              <span class="text-2xl font-bold font-mono text-primary">2</span>
-            </div>
-            <h3 class="text-xl font-bold font-mono mb-4">Members Add Team Sync</h3>
-            <div class="flex-1 min-h-[280px]">
-              <CodeBlock language="bash" code={`# Add team repository
-tether team add git@github.com:co/configs
-
-# Tether detects permissions
-✓ Read-only access detected
-✓ Team sync configured
-
-# Auto-injects source line
-Added to ~/.zshrc:
-source ~/.tether/team-sync/team.zshrc`} />
-            </div>
-            <p class="text-muted text-sm mt-4">Tether auto-detects Git permissions and configures accordingly</p>
-          </div>
-
-          <!-- Step 3: Automatic Sync -->
-          <div class="flex flex-col">
-            <div class="w-16 h-16 bg-success/10 rounded-full flex items-center justify-center border-2 border-success mb-4">
-              <span class="text-2xl font-bold font-mono text-success">3</span>
-            </div>
-            <h3 class="text-xl font-bold font-mono mb-4">Syncs Automatically</h3>
-            <div class="flex-1 min-h-[280px]">
-              <CodeBlock language="bash" code={`# Regular sync pulls both repos
-tether sync
-
-ℹ Pulling latest changes...
-✓ Personal configs synced
-ℹ Pulling team configs...
-✓ Team configs updated
-
-✓ Sync complete!`} />
-            </div>
-            <p class="text-muted text-sm mt-4">Team configs update automatically across all members</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Symlink Management -->
-    <section class="py-20 bg-surface/30">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="text-center mb-16">
-          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
-            <span class="text-primary">Automatic</span> symlink management
-          </h2>
-          <p class="text-muted text-lg">Team configs seamlessly integrate with your tools</p>
-        </div>
-
-        <div class="max-w-5xl mx-auto space-y-8">
-          <!-- Overview -->
-          <div class="bg-background rounded-xl p-8 border border-primary/30">
-            <h3 class="text-2xl font-bold font-mono mb-4 text-text">How Symlinks Work</h3>
-            <p class="text-muted mb-6">
-              Team configs are cloned to <code class="text-primary bg-surface px-2 py-1 rounded text-sm">~/.tether/team-sync/</code> and Tether automatically creates symlinks for individual files and subdirectories into the locations your tools expect. Your existing directories like <code class="text-primary bg-surface px-2 py-1 rounded text-sm">~/.claude/</code> are NOT replaced—team items are symlinked alongside your personal files.
-            </p>
-
-            <div class="grid md:grid-cols-2 gap-6">
-              <!-- Left: Directory Structure -->
-              <div>
-                <h4 class="font-mono font-semibold text-text mb-4">Team Repository Structure</h4>
-                <CodeBlock language="bash" code={`team-configs/
-├── dotfiles/team.zshrc
-└── .claude/skills/
-    ├── code-review/
-    └── team-testing/`} />
-              </div>
-
-              <!-- Right: After Sync -->
-              <div>
-                <h4 class="font-mono font-semibold text-text mb-4">After Team Sync</h4>
-                <CodeBlock language="bash" code={`~/.claude/skills/
-├── my-skill/        # Personal
-├── code-review →    # Team symlink
-└── team-testing →   # Team symlink`} />
-              </div>
-            </div>
-          </div>
-
-          <!-- Use Cases -->
-          <div class="bg-background rounded-xl p-8 border border-accent/30">
-            <h3 class="text-2xl font-bold font-mono mb-4 text-text">Perfect for Team Tools</h3>
-            <p class="text-muted mb-6">
-              Use symlinks to share configurations for development tools across your team:
-            </p>
-
-            <div class="grid md:grid-cols-3 gap-4">
-              <div class="bg-surface p-4 rounded border border-surface">
-                <div class="w-6 h-6 text-primary mb-2" set:html={icons.robot} />
-                <h4 class="font-mono font-semibold text-sm mb-2">Claude Code Skills</h4>
-                <p class="text-xs text-muted">Share custom AI workflows</p>
-                <code class="text-xs text-primary">~/.claude/</code>
-              </div>
-
-              <div class="bg-surface p-4 rounded border border-surface">
-                <div class="w-6 h-6 text-primary mb-2" set:html={icons.wrench} />
-                <h4 class="font-mono font-semibold text-sm mb-2">VS Code Settings</h4>
-                <p class="text-xs text-muted">Team editor configurations</p>
-                <code class="text-xs text-primary">~/.vscode/</code>
-              </div>
-
-              <div class="bg-surface p-4 rounded border border-surface">
-                <div class="w-6 h-6 text-primary mb-2" set:html={icons.gear} />
-                <h4 class="font-mono font-semibold text-sm mb-2">Tool Configs</h4>
-                <p class="text-xs text-muted">Any config directory</p>
-                <code class="text-xs text-primary">~/.config/</code>
-              </div>
-            </div>
-          </div>
-
-          <!-- How It Works -->
-          <div class="bg-background rounded-xl p-8 border border-accent/30">
-            <h3 class="text-2xl font-bold font-mono mb-4 text-text">Individual Item Symlinks</h3>
-            <p class="text-muted mb-6">
-              Tether symlinks individual files and subdirectories from the team repository into your existing directories. This means your personal items and team items coexist in the same parent directory.
-            </p>
-
-            <div class="space-y-4">
-              <div class="flex items-start space-x-3">
-                <div class="w-8 h-8 bg-success/10 rounded-full flex items-center justify-center flex-shrink-0">
-                  <span class="text-success font-bold">1</span>
-                </div>
-                <div>
-                  <h4 class="font-mono font-semibold text-text mb-1">Existing Directories Preserved</h4>
-                  <p class="text-sm text-muted">Your <code class="text-primary bg-surface px-1 py-0.5 rounded text-xs">~/.claude/</code> directory already exists and remains unchanged</p>
-                </div>
-              </div>
-
-              <div class="flex items-start space-x-3">
-                <div class="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
-                  <span class="text-primary font-bold">2</span>
-                </div>
-                <div>
-                  <h4 class="font-mono font-semibold text-text mb-1">Team Items Added Inside</h4>
-                  <p class="text-sm text-muted">Team repository has <code class="text-primary bg-surface px-1 py-0.5 rounded text-xs">.claude/skills/code-review/</code>, so Tether symlinks just that subdirectory into <code class="text-primary bg-surface px-1 py-0.5 rounded text-xs">~/.claude/skills/</code></p>
-                </div>
-              </div>
-
-              <div class="flex items-start space-x-3">
-                <div class="w-8 h-8 bg-accent/10 rounded-full flex items-center justify-center flex-shrink-0">
-                  <span class="text-accent font-bold">3</span>
-                </div>
-                <div>
-                  <h4 class="font-mono font-semibold text-text mb-1">Personal & Team Coexist</h4>
-                  <p class="text-sm text-muted">Your <code class="text-primary bg-surface px-1 py-0.5 rounded text-xs">~/.claude/skills/</code> now contains both your personal skills AND the symlinked team skills</p>
-                </div>
-              </div>
-            </div>
-
-            <div class="mt-6 bg-accent/5 border border-accent/20 p-4 rounded">
-              <p class="text-sm text-muted">
-                <span class="font-semibold text-accent">Key Point:</span> Tether never replaces entire directories like <code class="text-primary bg-surface px-1 py-0.5 rounded text-xs">~/.claude/</code>. It only adds symlinks for individual items from the team repository into your existing directory structure.
-              </p>
-            </div>
-          </div>
-
-          <!-- Example Workflow -->
-          <div class="bg-background rounded-xl p-8 border border-success/30">
-            <h3 class="text-2xl font-bold font-mono mb-4 text-text">Example: Sharing Claude Code Skills</h3>
-
-            <div class="space-y-6">
-              <div>
-                <h4 class="font-mono font-semibold text-text mb-3">Before Team Sync (Personal Setup)</h4>
-                <CodeBlock language="bash" code={`# User already has personal skills
-~/.claude/
-└── skills/
-    └── personal-skill/
-        └── my-workflow.md`} />
-              </div>
-
-              <div>
-                <h4 class="font-mono font-semibold text-text mb-3">Team Admin Creates Repository</h4>
-                <CodeBlock language="bash" code={`# Create team repository
-mkdir team-configs
-cd team-configs
-
-# Add Claude Code skills
-mkdir -p config-dirs/.claude/skills/code-review
-mkdir -p config-dirs/.claude/skills/team-testing
-
-# Create team skills
-cat > config-dirs/.claude/skills/code-review/deploy.md << 'EOF'
-# Deploy Command
-Run the deployment script for production
-EOF
-
-cat > config-dirs/.claude/skills/team-testing/test.md << 'EOF'
-# Test Command
-Run the test suite
-EOF
-
-# Push to team repository
-git init && git add . && git commit -m "Add team skills"
-git push`} />
-              </div>
-
-              <div>
-                <h4 class="font-mono font-semibold text-text mb-3">Team Member Adds Team Sync</h4>
-                <CodeBlock language="bash" code={`# Add team repository
-tether team add git@github.com:company/team-configs.git
-
-ℹ Syncing team configs...
-✓ Team configs cloned to ~/.tether/team-sync/
-✓ Created symlink: ~/.claude/skills/code-review → ~/.tether/team-sync/.claude/skills/code-review/
-✓ Created symlink: ~/.claude/skills/team-testing → ~/.tether/team-sync/.claude/skills/team-testing/
-✓ Team sync complete!`} />
-              </div>
-
-              <div>
-                <h4 class="font-mono font-semibold text-text mb-3">After Team Sync (Personal + Team)</h4>
-                <CodeBlock language="bash" code={`# User now has both personal AND team skills
-~/.claude/
-└── skills/
-    ├── personal-skill/          # Personal (unchanged)
-    │   └── my-workflow.md
-    ├── code-review → ~/.tether/team-sync/.claude/skills/code-review/    # Team symlink
-    └── team-testing → ~/.tether/team-sync/.claude/skills/team-testing/  # Team symlink
-
-# Claude Code sees all skills
-claude --list-skills
-Available skills:
-  - personal-skill (personal)
-  - code-review (team)
-  - team-testing (team)`} />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Access Modes -->
-    <section class="py-20 bg-gradient-to-b from-surface/30 to-transparent">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="text-center mb-16">
-          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
-            <span class="text-accent">Smart</span> access control
-          </h2>
-          <p class="text-muted text-lg">Automatic permission detection based on Git repository access</p>
-        </div>
-
-        <div class="grid md:grid-cols-2 gap-8 max-w-5xl mx-auto">
-          <!-- Read-Only Mode -->
-          <div class="bg-surface rounded-xl p-8 border border-surface">
-            <div class="flex items-center space-x-3 mb-6">
-              <div class="w-8 h-8 text-text" set:html={icons.user} />
-              <div>
-                <h3 class="text-xl font-bold font-mono">Regular Team Members</h3>
-                <span class="text-sm font-mono text-warning">Read-Only Mode</span>
-              </div>
-            </div>
-
-            <div class="space-y-4">
-              <p class="text-muted text-sm">Automatically configured when you have read-only Git access:</p>
-
-              <div class="space-y-2">
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span class="text-sm text-muted">Pull team configs automatically</span>
-                </div>
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span class="text-sm text-muted">Source team files from personal configs</span>
-                </div>
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span class="text-sm text-muted">Never push to team repository</span>
-                </div>
-              </div>
-
-              <div class="mt-4 p-3 bg-background rounded border border-surface">
-                <code class="text-xs font-mono text-muted">
-                  Access Mode: Read-only
-                </code>
-              </div>
-            </div>
-          </div>
-
-          <!-- Read-Write Mode -->
-          <div class="bg-surface rounded-xl p-8 border border-primary/30">
-            <div class="flex items-center space-x-3 mb-6">
-              <div class="w-8 h-8 text-text" set:html={icons.userGear} />
-              <div>
-                <h3 class="text-xl font-bold font-mono">Team Admins</h3>
-                <span class="text-sm font-mono text-success">Read-Write Mode</span>
-              </div>
-            </div>
-
-            <div class="space-y-4">
-              <p class="text-muted text-sm">Automatically detected when you have write Git access:</p>
-
-              <div class="space-y-2">
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span class="text-sm text-muted">Pull team configs automatically</span>
-                </div>
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span class="text-sm text-muted">Edit team configs directly</span>
-                </div>
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span class="text-sm text-muted">Push updates to team repository</span>
-                </div>
-              </div>
-
-              <div class="mt-4 p-3 bg-background rounded border border-primary/20">
-                <code class="text-xs font-mono text-primary">
-                  Access Mode: Read-write (Admin)
-                </code>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-12 max-w-3xl mx-auto bg-accent/5 border border-accent/20 rounded-xl p-6">
-          <div class="flex items-start space-x-3">
-            <svg class="w-6 h-6 text-accent flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <div class="space-y-2">
-              <h4 class="font-mono font-semibold text-accent">Automatic Permission Detection</h4>
-              <p class="text-sm text-muted">
-                Tether automatically detects your Git repository permissions during setup. No manual configuration needed—just add the team repo URL and Tether configures the correct access mode.
-              </p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Security -->
+    <!-- How it works -->
     <section class="py-20">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="max-w-5xl mx-auto bg-surface rounded-2xl p-8 lg:p-12 border border-surface">
-          <div class="grid lg:grid-cols-2 gap-8 items-center">
-            <div class="space-y-6">
-              <div class="inline-block px-4 py-1 bg-warning/10 text-warning text-sm font-mono rounded-full border border-warning/30">
-                Security Design
-              </div>
-              <h2 class="text-3xl font-bold font-mono">
-                Team repos are <span class="text-warning">not encrypted</span>
-              </h2>
-              <p class="text-muted leading-relaxed">
-                By design, team repositories contain only non-sensitive shared configurations. They're protected by Git access controls, not encryption. This avoids complex key distribution while maintaining security.
-              </p>
-              <div class="space-y-3 text-sm text-muted">
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span>Secret scanning warns if sensitive data detected</span>
-                </div>
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span>Personal repos remain fully encrypted</span>
-                </div>
-                <div class="flex items-start space-x-2">
-                  <span class="text-success mt-0.5">✓</span>
-                  <span>Git access controls protect team repo</span>
-                </div>
-              </div>
-            </div>
+      <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-12">
+          <h2 class="text-3xl font-bold font-mono mb-4">How it works</h2>
+        </div>
 
-            <div class="space-y-4">
-              <div class="bg-background p-4 rounded-lg border border-success/10">
-                <div class="flex items-start space-x-3">
-                  <div class="w-6 h-6 text-success" set:html={icons.check} />
-                  <div class="space-y-1">
-                    <h4 class="font-mono font-semibold">Safe for Team Repos</h4>
-                    <ul class="text-sm text-muted space-y-1">
-                      <li>• Editor configurations</li>
-                      <li>• Shared shell aliases</li>
-                      <li>• Git aliases & settings</li>
-                      <li>• Tool configurations</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div class="bg-surface rounded-xl p-6 border border-surface">
+            <h3 class="font-mono font-semibold mb-3 text-primary">Age Encryption</h3>
+            <p class="text-muted text-sm">
+              Secrets encrypted with age public-key cryptography. Each team member adds their public key as a recipient.
+            </p>
+          </div>
 
-              <div class="bg-background p-4 rounded-lg border border-error/10">
-                <div class="flex items-start space-x-3">
-                  <div class="w-6 h-6 text-error" set:html={icons.x} />
-                  <div class="space-y-1">
-                    <h4 class="font-mono font-semibold">Use Secrets Manager</h4>
-                    <ul class="text-sm text-muted space-y-1">
-                      <li>• API keys & tokens</li>
-                      <li>• Database credentials</li>
-                      <li>• SSH private keys</li>
-                      <li>• Service URLs (if sensitive)</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
-            </div>
+          <div class="bg-surface rounded-xl p-6 border border-surface">
+            <h3 class="font-mono font-semibold mb-3 text-accent">Git Remote Matching</h3>
+            <p class="text-muted text-sm">
+              Projects matched by Git remote URL. Same repo on different machines automatically syncs the same secrets.
+            </p>
+          </div>
+
+          <div class="bg-surface rounded-xl p-6 border border-surface">
+            <h3 class="font-mono font-semibold mb-3 text-success">Org-Based Sharing</h3>
+            <p class="text-muted text-sm">
+              Map GitHub orgs to teams. When a teammate clones an org repo, project secrets are automatically available.
+            </p>
+          </div>
+
+          <div class="bg-surface rounded-xl p-6 border border-surface">
+            <h3 class="font-mono font-semibold mb-3 text-warning">Auto Migration</h3>
+            <p class="text-muted text-sm">
+              Migrate existing personal project secrets to team with one command. Purge personal copies after migration.
+            </p>
           </div>
         </div>
       </div>
@@ -596,48 +103,99 @@ Available skills:
     <section class="py-20 bg-surface/30">
       <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="text-center mb-12">
-          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
-            Simple <span class="text-primary">commands</span>
-          </h2>
-          <p class="text-muted text-lg">Manage team sync with ease</p>
+          <h2 class="text-3xl font-bold font-mono mb-4">Commands</h2>
         </div>
 
         <div class="space-y-6">
-          <div class="bg-surface rounded-lg p-6 border border-surface">
-            <h3 class="font-mono font-semibold mb-3 text-primary">tether team add &lt;url&gt;</h3>
-            <p class="text-muted text-sm mb-4">Add team repository and configure sync</p>
-            <CodeBlock language="bash" code="tether team add git@github.com:company/team-configs.git" />
-          </div>
-
-          <div class="bg-surface rounded-lg p-6 border border-surface">
-            <h3 class="font-mono font-semibold mb-3 text-accent">tether team status</h3>
-            <p class="text-muted text-sm mb-4">View team sync configuration and files</p>
-            <CodeBlock language="bash" code={`tether team status
-
-┌──────────────┬────────────────────┐
-│ Team Sync    │                    │
-├──────────────┼────────────────────┤
-│ Status       │ ● Enabled          │
-│ Repository   │ git@github.com:... │
-│ Access Mode  │ Read-only          │
-│ Team files   │ 3 files            │
-└──────────────┴────────────────────┘`} />
-          </div>
-
-          <div class="grid md:grid-cols-2 gap-6">
-            <div class="bg-surface rounded-lg p-6 border border-surface">
-              <h3 class="font-mono font-semibold mb-3">tether team enable</h3>
-              <p class="text-muted text-sm">Enable team sync (toggle on)</p>
-            </div>
-            <div class="bg-surface rounded-lg p-6 border border-surface">
-              <h3 class="font-mono font-semibold mb-3">tether team disable</h3>
-              <p class="text-muted text-sm">Disable team sync (toggle off)</p>
+          <!-- Team Setup -->
+          <div>
+            <h3 class="text-sm font-mono text-muted mb-3">Setup</h3>
+            <div class="grid md:grid-cols-2 gap-3">
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-primary">tether team setup</code>
+                <p class="text-muted text-xs mt-1">Interactive wizard</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team status</code>
+                <p class="text-muted text-xs mt-1">View team config</p>
+              </div>
             </div>
           </div>
 
-          <div class="bg-surface rounded-lg p-6 border border-surface">
-            <h3 class="font-mono font-semibold mb-3 text-error">tether team remove</h3>
-            <p class="text-muted text-sm">Remove team sync configuration</p>
+          <!-- Orgs -->
+          <div>
+            <h3 class="text-sm font-mono text-muted mb-3">Organizations</h3>
+            <div class="grid md:grid-cols-3 gap-3">
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-accent">tether team orgs add</code>
+                <p class="text-muted text-xs mt-1">Map org to team</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team orgs list</code>
+                <p class="text-muted text-xs mt-1">List mapped orgs</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team orgs remove</code>
+                <p class="text-muted text-xs mt-1">Unmap org</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Project Secrets -->
+          <div>
+            <h3 class="text-sm font-mono text-muted mb-3">Project Secrets</h3>
+            <div class="grid md:grid-cols-2 gap-3">
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-primary">tether team projects add .env</code>
+                <p class="text-muted text-xs mt-1">Share project secret</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team projects list</code>
+                <p class="text-muted text-xs mt-1">List shared secrets</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-accent">tether team projects migrate</code>
+                <p class="text-muted text-xs mt-1">Auto-migrate to team</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-warning">tether team projects purge-personal</code>
+                <p class="text-muted text-xs mt-1">Remove personal copies</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recipients -->
+          <div>
+            <h3 class="text-sm font-mono text-muted mb-3">Recipients (age keys)</h3>
+            <div class="grid md:grid-cols-3 gap-3">
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-primary">tether team secrets add-recipient</code>
+                <p class="text-muted text-xs mt-1">Add member's key</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team secrets list-recipients</code>
+                <p class="text-muted text-xs mt-1">List recipients</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team secrets remove-recipient</code>
+                <p class="text-muted text-xs mt-1">Remove access</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Team Secrets -->
+          <div>
+            <h3 class="text-sm font-mono text-muted mb-3">Team-wide Secrets</h3>
+            <div class="grid md:grid-cols-2 gap-3">
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs text-accent">tether team secrets set NAME</code>
+                <p class="text-muted text-xs mt-1">Set a team secret</p>
+              </div>
+              <div class="bg-background rounded-lg p-3 border border-surface">
+                <code class="font-mono text-xs">tether team secrets get NAME</code>
+                <p class="text-muted text-xs mt-1">Get a team secret</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -647,23 +205,17 @@ Available skills:
     <section class="py-20">
       <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         <div class="bg-gradient-to-br from-accent/20 to-primary/20 rounded-2xl p-12 border border-accent/30">
-          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
-            Start syncing your team today
+          <h2 class="text-3xl font-bold font-mono mb-4">
+            Stop sharing .env files in Slack
           </h2>
           <p class="text-muted text-lg mb-8">
-            One setup command. Automatic sync. Perfect for teams of any size.
+            Encrypted. Synced. Automatic.
           </p>
           <div class="flex flex-col sm:flex-row gap-4 justify-center">
             <a href="/docs" class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-primary hover:bg-primary/90 text-background rounded-lg transition-all font-mono font-semibold">
               <span>Get Started</span>
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-              </svg>
             </a>
             <a href="https://github.com/paddo-tech/tether-cli" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center space-x-2 px-6 py-3 bg-surface hover:bg-surface/80 text-text border border-surface rounded-lg transition-all font-mono">
-              <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
-              </svg>
               <span>View on GitHub</span>
             </a>
           </div>

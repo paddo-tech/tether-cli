@@ -17,10 +17,11 @@ import Code from '../../components/Code.astro';
     <ul>
       <li><strong>Automatic Sync</strong> — Background daemon watches for changes and syncs in real-time</li>
       <li><strong>End-to-End Encryption</strong> — AES-256-GCM encryption with passphrase-protected keys</li>
+      <li><strong>Project Configs</strong> — Sync .env files and IDE settings across machines by Git remote</li>
       <li><strong>Package Manager Support</strong> — Syncs Homebrew, npm, pnpm, bun, and gem packages</li>
       <li><strong>Secret Detection</strong> — Prevents accidental syncing of API keys and credentials</li>
       <li><strong>Git-Backed</strong> — Full version history and rollback capabilities</li>
-      <li><strong>Team Sync</strong> — Share configurations across teams with symlink management</li>
+      <li><strong>Team Secrets</strong> — Share encrypted secrets across teams with age encryption</li>
     </ul>
   </section>
 
@@ -177,14 +178,31 @@ tether config dotfiles`} />
     </ul>
 
     <h3 id="cmd-team">tether team</h3>
-    <p>Manage team sync repositories.</p>
-    <Code code={`tether team add <URL> [--name <NAME>] [--no-auto-inject]
-tether team switch <NAME>
-tether team list
-tether team remove [NAME]
-tether team enable
-tether team disable
-tether team status`} />
+    <p>Manage team sync repositories, secrets, and project sharing.</p>
+    <Code code={`# Team management
+tether team setup                     # Interactive wizard
+tether team add <URL>                 # Add team repo
+tether team list                      # List teams
+tether team status                    # Show status
+tether team enable/disable            # Toggle sync
+
+# Organization mapping
+tether team orgs add <ORG>            # Map GitHub org to team
+tether team orgs list                 # List mapped orgs
+tether team orgs remove <ORG>         # Unmap org
+
+# Team secrets (age encryption)
+tether team secrets add-recipient <KEY>   # Add member's public key
+tether team secrets list-recipients       # List recipients
+tether team secrets set <NAME>            # Set a secret
+tether team secrets get <NAME>            # Get a secret
+tether team secrets list                  # List all secrets
+
+# Project secrets
+tether team projects add <FILE>       # Share project secret
+tether team projects list             # List shared secrets
+tether team projects migrate          # Auto-migrate to team
+tether team projects purge-personal   # Remove personal copies`} />
 
     <h3 id="cmd-resolve">tether resolve</h3>
     <p>Resolve file conflicts.</p>
@@ -349,10 +367,14 @@ prettier`} />
   <!-- Team Sync -->
   <section id="team-sync">
     <h2>Team Sync</h2>
-    <p>Share configurations across a team with a separate repository.</p>
+    <p>Share configurations and encrypted secrets across a team.</p>
 
     <h3>Setup</h3>
-    <Code code="tether team add git@github.com:org/team-dotfiles.git --name myteam" />
+    <Code code={`# Interactive setup wizard
+tether team setup
+
+# Or add manually
+tether team add git@github.com:org/team-dotfiles.git`} />
     <p>This clones the team repo and creates symlinks to team config files.</p>
 
     <h3>How It Works</h3>
@@ -362,6 +384,36 @@ prettier`} />
       <li>Read-only access means you receive updates only</li>
       <li>Auto-inject adds <code>source</code> lines to your personal dotfiles (optional)</li>
     </ul>
+
+    <h3>Team Secrets</h3>
+    <p>Share encrypted secrets using <a href="https://age-encryption.org/" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">age</a> public-key cryptography:</p>
+    <Code code={`# Add your public key as a recipient
+tether team secrets add-recipient age1...
+
+# Set a secret (encrypted for all recipients)
+tether team secrets set API_KEY
+
+# Get a secret
+tether team secrets get API_KEY`} />
+
+    <h3>Organization Mapping</h3>
+    <p>Map GitHub organizations to teams for automatic project secret sharing:</p>
+    <Code code={`# Map org to team
+tether team orgs add github.com/acme-corp
+
+# Project secrets from that org are now shared with the team
+tether team projects list`} />
+
+    <h3>Project Secrets</h3>
+    <p>Share .env files and project configs across team members:</p>
+    <Code code={`# Share a project secret
+tether team projects add .env
+
+# Auto-migrate secrets from mapped orgs
+tether team projects migrate
+
+# Remove personal copies (use team version)
+tether team projects purge-personal`} />
 
     <h3>Managing Teams</h3>
     <Code code={`tether team list          # Show all teams

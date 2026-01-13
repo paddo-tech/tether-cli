@@ -13,6 +13,7 @@ const icons = {
   lock: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M208,80H176V56a48,48,0,0,0-96,0V80H48A16,16,0,0,0,32,96V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM96,56a32,32,0,0,1,64,0V80H96ZM208,208H48V96H208V208Zm-80-96a28,28,0,0,0-8,54.83V184a8,8,0,0,0,16,0V166.83A28,28,0,0,0,128,112Zm0,40a12,12,0,1,1,12-12A12,12,0,0,1,128,152Z"/></svg>',
   sync: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h28.69L166.34,57.66a72,72,0,0,0-101.89,1.18,8,8,0,0,1-11.31-11.31,88,88,0,0,1,124.52-1.37L208,76.69V48a8,8,0,0,1,16,0Zm-42.34,142.34a72,72,0,0,1-101.89-1.18L49.31,160H78a8,8,0,0,0,0-16H32a8,8,0,0,0-8,8v48a8,8,0,0,0,16,0V171.31l30.34,30.35a88,88,0,0,0,124.52-1.37,8,8,0,0,0-11.31-11.31Z"/></svg>',
   users: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z"/></svg>',
+  folder: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0,39.38,216H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72ZM40,56H92.69l16,16H40ZM216,200H40V88H216Z"/></svg>',
   package: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M223.68,66.15,135.68,18a15.88,15.88,0,0,0-15.36,0l-88,48.17a16,16,0,0,0-8.32,14v95.64a16,16,0,0,0,8.32,14l88,48.17a15.88,15.88,0,0,0,15.36,0l88-48.17a16,16,0,0,0,8.32-14V80.18A16,16,0,0,0,223.68,66.15ZM128,32l80.34,44-29.77,16.3-80.35-44ZM128,120,47.66,76l33.9-18.56,80.34,44ZM40,90l80,43.78v85.79L40,175.82Zm176,85.78-80,43.79V133.82l32-17.51V152a8,8,0,0,0,16,0V107.55L216,90v85.77Z"/></svg>',
   scan: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M224,40V80a8,8,0,0,1-16,0V48H176a8,8,0,0,1,0-16h40A8,8,0,0,1,224,40ZM80,208H48V176a8,8,0,0,0-16,0v40a8,8,0,0,0,8,8H80a8,8,0,0,0,0-16Zm136-40a8,8,0,0,0-8,8v32H176a8,8,0,0,0,0,16h40a8,8,0,0,0,8-8V176A8,8,0,0,0,216,168ZM40,88a8,8,0,0,0,8-8V48H80a8,8,0,0,0,0-16H40a8,8,0,0,0-8,8V80A8,8,0,0,0,40,88Zm128,24a8,8,0,0,0-8-8H96a8,8,0,0,0,0,16h64A8,8,0,0,0,168,112Zm0,32a8,8,0,0,0-8-8H96a8,8,0,0,0,0,16h64A8,8,0,0,0,168,144Z"/></svg>',
   lightning: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor"><path d="M215.79,118.17a8,8,0,0,0-5-5.66L153.18,90.9l14.66-73.33a8,8,0,0,0-13.69-7l-112,120a8,8,0,0,0,3,13l57.63,21.61L88.16,238.43a8,8,0,0,0,13.69,7l112-120A8,8,0,0,0,215.79,118.17ZM109.37,214l10.47-52.38a8,8,0,0,0-5-9.06L62,132.71l84.62-90.66L136.16,94.43a8,8,0,0,0,5,9.06l52.8,19.8Z"/></svg>',
@@ -31,8 +32,13 @@ const features = [
   },
   {
     icon: icons.users,
-    title: 'Team Sync',
-    description: 'Share team configurations with automatic symlink management. Configs seamlessly sync to tool locations like ~/.claude/ for teams.',
+    title: 'Team Secrets',
+    description: 'Share encrypted secrets with your team using age encryption. Map GitHub orgs to auto-share project secrets across machines.',
+  },
+  {
+    icon: icons.folder,
+    title: 'Project Configs',
+    description: 'Sync .env files and IDE settings across machines. Matched by Git remote URL so the same project syncs everywhere.',
   },
   {
     icon: icons.package,
@@ -54,6 +60,7 @@ const features = [
 const comparisonData = [
   { feature: 'Automatic Sync', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'End-to-End Encryption', tether: true, mackup: false, chezmoi: true, manual: false },
+  { feature: 'Project Configs (.env)', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'Package Managers', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'Secret Detection', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'macOS Support', tether: true, mackup: true, chezmoi: true, manual: true },

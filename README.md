@@ -25,12 +25,12 @@ Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, et
 
 - 🔐 **End-to-end encryption** - Dotfiles encrypted with AES-256-GCM before syncing
 - 🔍 **Secret detection** - Automatic scanning for API keys, tokens, and credentials
-- 🔑 **Passphrase-based encryption** - Derive keys from a passphrase you remember
-- 📦 **Package manager support** - Syncs Homebrew formulae, casks (VS Code, Slack, etc.), npm, and pnpm globals
+- 📁 **Project configs** - Sync .env files and IDE settings by Git remote URL
+- 👥 **Team secrets** - Share encrypted secrets using age public-key encryption
+- 📦 **Package manager support** - Syncs Homebrew, npm, pnpm, bun, gem, and uv
 - 🔄 **Automatic syncing** - Background daemon keeps everything in sync
 - 🗂️ **Dotfile management** - Encrypted shell configs synced across machines
 - 🌳 **Git-backed** - Uses private Git repo for versioning and history
-- 🔒 **Privacy-focused** - Encrypted data in Git, keys derived from passphrase
 
 ## Quick Start
 
@@ -174,23 +174,26 @@ Built with Rust for performance, reliability, and single-binary distribution.
 
 ### Roadmap
 
+**v1.2 (Released):**
+- ✅ Team secrets with age encryption
+- ✅ Organization mapping for project secrets
+- ✅ Project config sync (.env, IDE settings)
+- ✅ Config versioning for backwards compatibility
+- ✅ Auto-migrate personal secrets to team
+
 **Completed:**
 - ✅ Core sync functionality (dotfiles + packages)
 - ✅ Homebrew sync with Brewfiles
-- ✅ npm/pnpm global package sync
+- ✅ npm/pnpm/bun/gem/uv package sync
 - ✅ AES-256-GCM encryption for dotfiles
 - ✅ Secret detection (API keys, tokens, etc.)
 - ✅ Passphrase-based key management
 - ✅ Git backend (GitHub, GitLab, self-hosted)
 - ✅ Background daemon with launchd integration
-
-**In Progress:**
-- [ ] Enhanced conflict resolution
-- [ ] Machine-specific overrides
-- [ ] Rollback support
+- ✅ Conflict resolution
+- ✅ Machine-specific overrides
 
 **Planned:**
-- [ ] v1.2 - Additional package managers (cargo, pipx, gem)
 - [ ] v2.0 - Linux support
 - [ ] Public release
 

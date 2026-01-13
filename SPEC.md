@@ -1,7 +1,7 @@
 # Tether CLI - Technical Specification
 
-**Version:** 1.0.0
-**Status:** Draft
+**Version:** 1.2.0
+**Status:** Released
 **Domain:** tether-cli.com
 
 ## Overview
@@ -508,31 +508,34 @@ cargo build --release
 - ✅ CLI commands: init, sync, status, diff
 - ✅ Homebrew distribution
 
-### v1.1 - Polish (1-2 months)
-- Interactive conflict resolution
-- Machine-specific overrides
-- Rollback support
-- Ignore patterns
-- Encrypted dotfile sync
-- Comprehensive error messages
+### v1.1 - Polish (Released)
+- ✅ Interactive conflict resolution
+- ✅ Machine-specific overrides
+- ✅ Rollback support
+- ✅ Ignore patterns
+- ✅ Encrypted dotfile sync
+- ✅ Comprehensive error messages
+- ✅ bun, gem, uv package managers
 
-### v1.2 - Extended Package Managers (1-2 months)
-- cargo (Rust packages)
-- pipx (Python tools)
-- gem (Ruby gems)
-- VS Code extensions sync
+### v1.2 - Team Features (Released)
+- ✅ Team secrets with age encryption
+- ✅ Organization mapping for project secrets
+- ✅ Project config sync (.env, IDE settings by Git remote)
+- ✅ Config versioning for backwards compatibility
+- ✅ Auto-migrate personal secrets to team
+- ✅ `--yes` flag for non-interactive mode
 
-### v2.0 - Multi-Platform (3-4 months)
+### v2.0 - Multi-Platform (Planned)
 - Linux support (Ubuntu, Fedora, Arch)
 - Support for bash, fish shells
 - Alternative sync backends (iCloud, Dropbox)
 - Web dashboard for viewing sync status
 
-### v2.1 - Advanced Features
+### Future
 - Conditional sync rules (only sync on certain machines)
 - Scheduled sync (cron-like)
 - Sync profiles (work, personal, etc.)
-- Team sync (share dotfiles across team members)
+- VS Code extensions sync
 
 ## Success Metrics
 
