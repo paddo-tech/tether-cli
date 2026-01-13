@@ -1,6 +1,7 @@
 mod config;
 mod daemon;
 mod diff;
+mod identity;
 mod ignore;
 mod init;
 mod machines;
@@ -108,6 +109,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: RestoreAction,
     },
+
+    /// Manage age identity for team secrets
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -192,7 +199,23 @@ pub enum RestoreAction {
 }
 
 #[derive(Subcommand)]
+pub enum IdentityAction {
+    /// Generate a new age identity
+    Init,
+    /// Show your public key
+    Show,
+    /// Unlock identity with passphrase
+    Unlock,
+    /// Lock identity (clear cached key)
+    Lock,
+    /// Reset identity (generate new, destroys old)
+    Reset,
+}
+
+#[derive(Subcommand)]
 pub enum TeamAction {
+    /// Interactive team setup wizard
+    Setup,
     /// Add team sync repository
     Add {
         /// Team repository URL
@@ -222,6 +245,145 @@ pub enum TeamAction {
     Disable,
     /// Show team sync status
     Status,
+    /// Manage allowed organizations for team repos
+    Orgs {
+        #[command(subcommand)]
+        action: OrgAction,
+    },
+    /// Manage team secrets (encrypted with age)
+    Secrets {
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
+    /// Manage team files and sync preferences
+    Files {
+        #[command(subcommand)]
+        action: FilesAction,
+    },
+    /// Manage team project secrets
+    Projects {
+        #[command(subcommand)]
+        action: ProjectsAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrgAction {
+    /// Add allowed organization
+    Add {
+        /// GitHub organization name
+        org: String,
+    },
+    /// List allowed organizations
+    List,
+    /// Remove allowed organization
+    Remove {
+        /// GitHub organization name
+        org: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SecretsAction {
+    /// Add a recipient's public key to the team
+    AddRecipient {
+        /// age public key or path to .pub file
+        key: String,
+        /// Name for this recipient (defaults to username)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List team recipients
+    ListRecipients,
+    /// Remove a recipient from the team
+    RemoveRecipient {
+        /// Recipient name
+        name: String,
+    },
+    /// Add or update a secret
+    Set {
+        /// Secret name (e.g., "GITHUB_TOKEN")
+        name: String,
+        /// Secret value (prompts if not provided)
+        #[arg(long)]
+        value: Option<String>,
+    },
+    /// Get a secret value
+    Get {
+        /// Secret name
+        name: String,
+    },
+    /// List all secrets
+    List,
+    /// Remove a secret
+    Remove {
+        /// Secret name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum FilesAction {
+    /// List synced team files
+    List,
+    /// Show local patterns (files never synced)
+    LocalPatterns,
+    /// Reset file to team version (clobber local changes)
+    Reset {
+        /// File to reset
+        file: Option<String>,
+        /// Reset all files
+        #[arg(long)]
+        all: bool,
+    },
+    /// Promote local file to team repository
+    Promote {
+        /// File to promote
+        file: String,
+    },
+    /// Mark file as personal (skip team sync)
+    Ignore {
+        /// File to ignore
+        file: String,
+    },
+    /// Unmark file as personal (resume team sync)
+    Unignore {
+        /// File to unignore
+        file: String,
+    },
+    /// Show diff between local and team version
+    Diff {
+        /// File to diff (all if not specified)
+        file: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectsAction {
+    /// Add a project secret to the team repo
+    Add {
+        /// File to add (e.g., .env)
+        file: String,
+        /// Project path (defaults to current directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List team project secrets
+    List,
+    /// Remove a project secret
+    Remove {
+        /// File to remove
+        file: String,
+        /// Project (normalized URL like github.com/org/repo)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Remove personal project secrets that are now team-owned
+    PurgePersonal {
+        /// Also purge from git history
+        #[arg(long)]
+        history: bool,
+    },
 }
 
 impl Cli {
@@ -263,6 +425,7 @@ impl Cli {
                 ConfigAction::Dotfiles => config::dotfiles().await,
             },
             Commands::Team { action } => match action {
+                TeamAction::Setup => team::setup().await,
                 TeamAction::Add {
                     url,
                     name,
@@ -274,6 +437,49 @@ impl Cli {
                 TeamAction::Enable => team::enable().await,
                 TeamAction::Disable => team::disable().await,
                 TeamAction::Status => team::status().await,
+                TeamAction::Orgs { action } => match action {
+                    OrgAction::Add { org } => team::orgs_add(org).await,
+                    OrgAction::List => team::orgs_list().await,
+                    OrgAction::Remove { org } => team::orgs_remove(org).await,
+                },
+                TeamAction::Secrets { action } => match action {
+                    SecretsAction::AddRecipient { key, name } => {
+                        team::secrets_add_recipient(key, name.as_deref()).await
+                    }
+                    SecretsAction::ListRecipients => team::secrets_list_recipients().await,
+                    SecretsAction::RemoveRecipient { name } => {
+                        team::secrets_remove_recipient(name).await
+                    }
+                    SecretsAction::Set { name, value } => {
+                        team::secrets_set(name, value.as_deref()).await
+                    }
+                    SecretsAction::Get { name } => team::secrets_get(name).await,
+                    SecretsAction::List => team::secrets_list().await,
+                    SecretsAction::Remove { name } => team::secrets_remove(name).await,
+                },
+                TeamAction::Files { action } => match action {
+                    FilesAction::List => team::files_list().await,
+                    FilesAction::LocalPatterns => team::files_local_patterns().await,
+                    FilesAction::Reset { file, all } => {
+                        team::files_reset(file.as_deref(), *all).await
+                    }
+                    FilesAction::Promote { file } => team::files_promote(file).await,
+                    FilesAction::Ignore { file } => team::files_ignore(file).await,
+                    FilesAction::Unignore { file } => team::files_unignore(file).await,
+                    FilesAction::Diff { file } => team::files_diff(file.as_deref()).await,
+                },
+                TeamAction::Projects { action } => match action {
+                    ProjectsAction::Add { file, project } => {
+                        team::projects_add(file, project.as_deref()).await
+                    }
+                    ProjectsAction::List => team::projects_list().await,
+                    ProjectsAction::Remove { file, project } => {
+                        team::projects_remove(file, project.as_deref()).await
+                    }
+                    ProjectsAction::PurgePersonal { history } => {
+                        team::projects_purge_personal(*history).await
+                    }
+                },
             },
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,
             Commands::Unlock => unlock::run().await,
@@ -284,6 +490,13 @@ impl Cli {
                 RestoreAction::File { from, file } => {
                     restore::run(from.as_deref(), file.as_deref()).await
                 }
+            },
+            Commands::Identity { action } => match action {
+                IdentityAction::Init => identity::init().await,
+                IdentityAction::Show => identity::show().await,
+                IdentityAction::Unlock => identity::unlock().await,
+                IdentityAction::Lock => identity::lock().await,
+                IdentityAction::Reset => identity::reset().await,
             },
         }
     }

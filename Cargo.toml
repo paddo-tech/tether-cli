@@ -77,6 +77,9 @@ age = "0.10"
 # Secret detection
 regex = "1.10"
 
+# Text diffing
+similar = "2.6"
+
 # System signals
 libc = "0.2"
 tempfile = "3.8"

@@ -1,6 +1,6 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::sync::{ConflictState, SyncState};
+use crate::sync::{ConflictState, FileState, SyncState};
 use anyhow::Result;
 use chrono::Local;
 use comfy_table::{Attribute, Cell, Color};
@@ -161,45 +161,118 @@ pub async fn run() -> Result<()> {
         println!();
     }
 
-    // Project configs - separate table
+    // Project configs - split by team vs personal
     if !project_configs.is_empty() {
-        let mut project_table = Output::table_minimal();
-        project_table.set_header(vec![
-            Cell::new("Project Configs")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Status")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Modified")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-        ]);
+        // Build org -> team mapping
+        let mut org_to_team: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        if let Some(teams) = &config.teams {
+            for (team_name, team_config) in &teams.teams {
+                if team_config.enabled {
+                    for org in &team_config.orgs {
+                        org_to_team.insert(org.to_lowercase(), team_name.clone());
+                    }
+                }
+            }
+        }
+
+        // Split projects by ownership
+        let mut team_projects: std::collections::HashMap<String, Vec<(&String, &FileState)>> =
+            std::collections::HashMap::new();
+        let mut personal_projects: Vec<(&String, &FileState)> = Vec::new();
 
         for (file, file_state) in &project_configs {
-            let (status, color) = if file_state.synced {
-                (format!("{} Synced", Output::CHECK), Color::Green)
-            } else {
-                (format!("{} Modified", Output::WARN), Color::Yellow)
-            };
-
-            // Strip "project:" prefix for cleaner display
             let display_name = file.strip_prefix("project:").unwrap_or(file);
-
-            project_table.add_row(vec![
-                Cell::new(display_name),
-                Cell::new(status).fg(color),
-                Cell::new(
-                    file_state
-                        .last_modified
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string(),
-                ),
-            ]);
+            // Extract org from path like "github.com/org/repo/..."
+            if let Some(org) = crate::sync::extract_org_from_normalized_url(display_name) {
+                if let Some(team_name) = org_to_team.get(&org.to_lowercase()) {
+                    team_projects
+                        .entry(team_name.clone())
+                        .or_default()
+                        .push((file, file_state));
+                } else {
+                    personal_projects.push((file, file_state));
+                }
+            } else {
+                personal_projects.push((file, file_state));
+            }
         }
-        println!("{project_table}");
-        println!();
+
+        // Show team projects first
+        for (team_name, projects) in &team_projects {
+            let mut project_table = Output::table_minimal();
+            project_table.set_header(vec![
+                Cell::new(format!("Team: {} (project secrets)", team_name))
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("Status")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("Modified")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+            ]);
+
+            for (file, file_state) in projects {
+                let (status, color) = if file_state.synced {
+                    (format!("{} Synced", Output::CHECK), Color::Green)
+                } else {
+                    (format!("{} Modified", Output::WARN), Color::Yellow)
+                };
+                let display_name = (*file).strip_prefix("project:").unwrap_or(file);
+                project_table.add_row(vec![
+                    Cell::new(display_name),
+                    Cell::new(status).fg(color),
+                    Cell::new(
+                        file_state
+                            .last_modified
+                            .with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string(),
+                    ),
+                ]);
+            }
+            println!("{project_table}");
+            println!();
+        }
+
+        // Show personal projects
+        if !personal_projects.is_empty() {
+            let mut project_table = Output::table_minimal();
+            project_table.set_header(vec![
+                Cell::new("Personal Project Configs")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("Status")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("Modified")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+            ]);
+
+            for (file, file_state) in &personal_projects {
+                let (status, color) = if file_state.synced {
+                    (format!("{} Synced", Output::CHECK), Color::Green)
+                } else {
+                    (format!("{} Modified", Output::WARN), Color::Yellow)
+                };
+                let display_name = (*file).strip_prefix("project:").unwrap_or(file);
+                project_table.add_row(vec![
+                    Cell::new(display_name),
+                    Cell::new(status).fg(color),
+                    Cell::new(
+                        file_state
+                            .last_modified
+                            .with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string(),
+                    ),
+                ]);
+            }
+            println!("{project_table}");
+            println!();
+        }
     }
 
     // Packages - minimal table for lists
