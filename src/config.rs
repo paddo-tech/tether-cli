@@ -1,14 +1,33 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Config format version. Bump when making breaking changes that require migration.
+///
+/// Version history:
+/// - v1 (1.0.0+): Initial format. All fields have serde defaults for backwards compat.
+///
+/// When bumping to v2:
+/// 1. Add migration logic in load() before version check
+/// 2. Document what changed and why migration is needed
+/// 3. Freeze v1 semantics - don't add new defaults to v1 fields
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
+fn default_config_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Config format version - prevents older tether from corrupting newer configs
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     pub sync: SyncConfig,
     pub backend: BackendConfig,
     pub packages: PackagesConfig,
     pub dotfiles: DotfilesConfig,
+    #[serde(default)]
     pub security: SecurityConfig,
     #[serde(default)]
     pub merge: MergeConfig,
@@ -53,10 +72,15 @@ pub enum BackendType {
 pub struct PackagesConfig {
     #[serde(default)]
     pub remove_unlisted: bool,
+    #[serde(default = "default_brew_config")]
     pub brew: BrewConfig,
+    #[serde(default = "default_npm_config")]
     pub npm: NpmConfig,
+    #[serde(default = "default_pnpm_config")]
     pub pnpm: PnpmConfig,
+    #[serde(default = "default_bun_config")]
     pub bun: BunConfig,
+    #[serde(default = "default_gem_config")]
     pub gem: GemConfig,
     #[serde(default)]
     pub uv: UvConfig,
@@ -104,6 +128,51 @@ impl Default for UvConfig {
         Self {
             enabled: true,
             sync_versions: false,
+        }
+    }
+}
+
+fn default_brew_config() -> BrewConfig {
+    BrewConfig {
+        enabled: true,
+        sync_casks: true,
+        sync_taps: true,
+    }
+}
+
+fn default_npm_config() -> NpmConfig {
+    NpmConfig {
+        enabled: true,
+        sync_versions: false,
+    }
+}
+
+fn default_pnpm_config() -> PnpmConfig {
+    PnpmConfig {
+        enabled: true,
+        sync_versions: false,
+    }
+}
+
+fn default_bun_config() -> BunConfig {
+    BunConfig {
+        enabled: true,
+        sync_versions: false,
+    }
+}
+
+fn default_gem_config() -> GemConfig {
+    GemConfig {
+        enabled: true,
+        sync_versions: false,
+    }
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            encrypt_dotfiles: true,
+            scan_secrets: true,
         }
     }
 }
@@ -483,12 +552,26 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         let content = std::fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
+        let config: Self = toml::from_str(&content)?;
+
+        if config.config_version > CURRENT_CONFIG_VERSION {
+            bail!(
+                "Config version {} is newer than this tether version supports (max: {}). \
+                 Please upgrade tether: brew upgrade tether",
+                config.config_version,
+                CURRENT_CONFIG_VERSION
+            );
+        }
+
+        Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
+        let mut config = self.clone();
+        config.config_version = CURRENT_CONFIG_VERSION;
+
         let path = Self::config_path()?;
-        let content = toml::to_string_pretty(self)?;
+        let content = toml::to_string_pretty(&config)?;
         crate::sync::atomic_write(&path, content.as_bytes())
     }
 }
@@ -496,6 +579,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             sync: SyncConfig {
                 interval: "5m".to_string(),
                 strategy: ConflictStrategy::LastWriteWins,
@@ -734,5 +818,134 @@ mod tests {
         let parsed: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(config.sync.interval, parsed.sync.interval);
         assert_eq!(config.dotfiles.files.len(), parsed.dotfiles.files.len());
+    }
+
+    #[test]
+    fn test_backwards_compat_minimal_config() {
+        // Minimal config from v1.0.0 - missing security, bun, gem, uv, merge, etc.
+        let old_config = r#"
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc", ".gitconfig"]
+"#;
+        let parsed: Config = toml::from_str(old_config).unwrap();
+        assert_eq!(parsed.sync.interval, "5m");
+        // Missing sections should have defaults
+        assert!(parsed.security.encrypt_dotfiles);
+        assert!(parsed.security.scan_secrets);
+        assert!(parsed.packages.pnpm.enabled);
+        assert!(parsed.packages.bun.enabled);
+        assert!(parsed.packages.gem.enabled);
+        assert!(parsed.packages.uv.enabled);
+        assert_eq!(parsed.dotfiles.files.len(), 2);
+    }
+
+    #[test]
+    fn test_backwards_compat_string_dotfiles() {
+        // Old format used Vec<String> for dotfiles, now uses DotfileEntry
+        let old_config = r#"
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc", ".gitconfig", ".config/nvim/init.lua"]
+"#;
+        let parsed: Config = toml::from_str(old_config).unwrap();
+        assert_eq!(parsed.dotfiles.files.len(), 3);
+        assert_eq!(parsed.dotfiles.files[0].path(), ".zshrc");
+        assert!(parsed.dotfiles.files[0].create_if_missing()); // Default for Simple
+    }
+
+    #[test]
+    fn test_config_version_defaults_to_1() {
+        // Config without version field should default to 1
+        let old_config = r#"
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc"]
+"#;
+        let parsed: Config = toml::from_str(old_config).unwrap();
+        assert_eq!(parsed.config_version, 1);
+    }
+
+    #[test]
+    fn test_config_version_preserved() {
+        let config = r#"
+config_version = 1
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc"]
+"#;
+        let parsed: Config = toml::from_str(config).unwrap();
+        assert_eq!(parsed.config_version, 1);
+    }
+
+    #[test]
+    fn test_config_default_has_current_version() {
+        let config = Config::default();
+        assert_eq!(config.config_version, CURRENT_CONFIG_VERSION);
     }
 }
