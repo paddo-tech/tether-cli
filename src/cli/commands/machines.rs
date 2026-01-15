@@ -1,4 +1,5 @@
 use crate::cli::{Output, Prompt};
+use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
@@ -6,6 +7,12 @@ use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement
 use owo_colors::OwoColorize;
 
 pub async fn list() -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        Output::warning("Machine management not available in team-only mode");
+        return Ok(());
+    }
+
     let sync_path = SyncEngine::sync_path()?;
     let machines = MachineState::list_all(&sync_path)?;
 
@@ -62,6 +69,12 @@ pub async fn list() -> Result<()> {
 }
 
 pub async fn rename(old: &str, new: &str) -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        Output::warning("Machine management not available in team-only mode");
+        return Ok(());
+    }
+
     let sync_path = SyncEngine::sync_path()?;
     let machines_dir = sync_path.join("machines");
 
@@ -107,6 +120,12 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 }
 
 pub async fn remove(name: &str) -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        Output::warning("Machine management not available in team-only mode");
+        return Ok(());
+    }
+
     let state = SyncState::load()?;
 
     if state.machine_id == name {
