@@ -179,6 +179,12 @@ impl DaemonServer {
 
     async fn run_sync(&self) -> Result<()> {
         let config = Config::load()?;
+
+        // No personal features: only sync team repos
+        if !config.has_personal_features() {
+            return self.run_team_only_sync(&config).await;
+        }
+
         let sync_path = SyncEngine::sync_path()?;
         let home =
             home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
@@ -209,7 +215,8 @@ impl DaemonServer {
         let mut new_conflicts = Vec::new();
 
         // Apply remote changes first (with conflict detection)
-        if config.security.encrypt_dotfiles {
+        // Only sync dotfiles if feature enabled
+        if config.features.personal_dotfiles && config.security.encrypt_dotfiles {
             let key = crate::security::get_encryption_key()?;
             for entry in &config.dotfiles.files {
                 let file = entry.path();
@@ -276,105 +283,110 @@ impl DaemonServer {
         // Now sync local changes to remote
         let mut changes_made = false;
 
-        for entry in &config.dotfiles.files {
-            let file = entry.path();
+        // Sync dotfiles to remote (only if feature enabled)
+        if config.features.personal_dotfiles {
+            for entry in &config.dotfiles.files {
+                let file = entry.path();
 
-            // Security: validate path to prevent traversal attacks
-            if !is_safe_dotfile_path(file) {
-                log::warn!("Skipping unsafe dotfile path: {}", file);
-                continue;
-            }
+                // Security: validate path to prevent traversal attacks
+                if !is_safe_dotfile_path(file) {
+                    log::warn!("Skipping unsafe dotfile path: {}", file);
+                    continue;
+                }
 
-            // Skip files with conflicts
-            if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
-                continue;
-            }
+                // Skip files with conflicts
+                if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
+                    continue;
+                }
 
-            let source = home.join(file);
-            if source.exists() {
-                if let Ok(content) = std::fs::read(&source) {
-                    let hash = format!("{:x}", Sha256::digest(&content));
-                    let file_changed = state
-                        .files
-                        .get(file)
-                        .map(|f| f.hash != hash)
-                        .unwrap_or(true);
+                let source = home.join(file);
+                if source.exists() {
+                    if let Ok(content) = std::fs::read(&source) {
+                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let file_changed = state
+                            .files
+                            .get(file)
+                            .map(|f| f.hash != hash)
+                            .unwrap_or(true);
 
-                    if file_changed {
-                        log::info!("File changed: {}", file);
-                        let filename = file.trim_start_matches('.');
+                        if file_changed {
+                            log::info!("File changed: {}", file);
+                            let filename = file.trim_start_matches('.');
 
-                        if config.security.encrypt_dotfiles {
-                            let key = crate::security::get_encryption_key()?;
-                            let encrypted = crate::security::encrypt_file(&content, &key)?;
-                            let dest = dotfiles_dir.join(format!("{}.enc", filename));
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
+                            if config.security.encrypt_dotfiles {
+                                let key = crate::security::get_encryption_key()?;
+                                let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                std::fs::write(&dest, encrypted)?;
+                            } else {
+                                let dest = dotfiles_dir.join(filename);
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                std::fs::write(&dest, &content)?;
                             }
-                            std::fs::write(&dest, encrypted)?;
-                        } else {
-                            let dest = dotfiles_dir.join(filename);
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            std::fs::write(&dest, &content)?;
+
+                            state.update_file(file, hash.clone());
+                            changes_made = true;
                         }
-
-                        state.update_file(file, hash.clone());
-                        changes_made = true;
                     }
                 }
             }
-        }
+        } // end personal_dotfiles feature block
 
         // Import packages (daemon mode: defer casks that need password)
-        let machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
-            .unwrap_or_else(|| MachineState::new(&state.machine_id));
-        let deferred_casks = import_packages(
-            &config,
-            &sync_path,
-            &machine_state,
-            true, // daemon_mode
-            &state.deferred_casks,
-        )
-        .await?;
+        if config.features.personal_packages {
+            let machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
+                .unwrap_or_else(|| MachineState::new(&state.machine_id));
+            let deferred_casks = import_packages(
+                &config,
+                &sync_path,
+                &machine_state,
+                true, // daemon_mode
+                &state.deferred_casks,
+            )
+            .await?;
 
-        // Handle newly deferred casks
-        if !deferred_casks.is_empty() {
-            // Merge with existing deferred casks (dedupe)
-            let mut all_deferred: std::collections::HashSet<_> =
-                state.deferred_casks.iter().cloned().collect();
-            for cask in &deferred_casks {
-                all_deferred.insert(cask.clone());
-            }
-            state.deferred_casks = all_deferred.into_iter().collect();
-            state.deferred_casks.sort();
+            // Handle newly deferred casks
+            if !deferred_casks.is_empty() {
+                // Merge with existing deferred casks (dedupe)
+                let mut all_deferred: std::collections::HashSet<_> =
+                    state.deferred_casks.iter().cloned().collect();
+                for cask in &deferred_casks {
+                    all_deferred.insert(cask.clone());
+                }
+                state.deferred_casks = all_deferred.into_iter().collect();
+                state.deferred_casks.sort();
 
-            // Only notify if list changed (avoid repeated notifications)
-            let hash = format!(
-                "{:x}",
-                Sha256::digest(state.deferred_casks.join(",").as_bytes())
-            );
-            if state.deferred_casks_hash.as_ref() != Some(&hash) {
-                notify_deferred_casks(&state.deferred_casks).ok();
-                state.deferred_casks_hash = Some(hash);
-                log::info!(
-                    "Deferred {} cask{} (require password): {}",
-                    state.deferred_casks.len(),
-                    if state.deferred_casks.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    },
-                    state.deferred_casks.join(", ")
+                // Only notify if list changed (avoid repeated notifications)
+                let hash = format!(
+                    "{:x}",
+                    Sha256::digest(state.deferred_casks.join(",").as_bytes())
                 );
+                if state.deferred_casks_hash.as_ref() != Some(&hash) {
+                    notify_deferred_casks(&state.deferred_casks).ok();
+                    state.deferred_casks_hash = Some(hash);
+                    log::info!(
+                        "Deferred {} cask{} (require password): {}",
+                        state.deferred_casks.len(),
+                        if state.deferred_casks.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        state.deferred_casks.join(", ")
+                    );
+                }
+
+                state.save()?;
             }
 
-            state.save()?;
+            // Sync packages (export)
+            changes_made |= self.sync_packages(&config, &mut state, &sync_path).await?;
         }
-
-        // Sync packages (export)
-        changes_made |= self.sync_packages(&config, &mut state, &sync_path).await?;
 
         // Commit and push if changes made
         if changes_made {
@@ -388,6 +400,50 @@ impl DaemonServer {
             log::debug!("No changes to sync");
         }
 
+        Ok(())
+    }
+
+    /// Team-only sync: only sync team repositories
+    async fn run_team_only_sync(&self, config: &Config) -> Result<()> {
+        let teams = match &config.teams {
+            Some(t) if !t.active.is_empty() => t,
+            _ => {
+                log::debug!("Team-only mode with no teams configured, skipping sync");
+                return Ok(());
+            }
+        };
+
+        // Pull from each active team repo
+        for team_name in &teams.active {
+            let team_config = match teams.teams.get(team_name) {
+                Some(c) if c.enabled => c,
+                _ => continue,
+            };
+
+            let team_repo_dir = Config::team_repo_dir(team_name)?;
+            if !team_repo_dir.exists() {
+                log::warn!("Team '{}' repo not found", team_name);
+                continue;
+            }
+
+            let team_git = GitBackend::open(&team_repo_dir)?;
+            team_git.pull()?;
+            log::debug!("Team '{}' synced", team_name);
+
+            // Push changes if we have write access
+            if !team_config.read_only && team_git.has_changes()? {
+                let state = SyncState::load()?;
+                team_git.commit("Update team configs", &state.machine_id)?;
+                team_git.push()?;
+            }
+        }
+
+        // Sync team project secrets
+        let home =
+            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        crate::cli::commands::sync::sync_team_project_secrets(config, &home).ok();
+
+        log::info!("Team-only sync complete");
         Ok(())
     }
 

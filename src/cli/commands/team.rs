@@ -1277,7 +1277,9 @@ pub async fn orgs_add(org: &str, yes: bool) -> Result<()> {
                         pb.finish_and_clear();
                         Output::error(&format!("Migration failed: {}", e));
                         Output::dim("Personal secrets were NOT deleted (safe).");
-                        Output::dim("Fix the issue and run 'tether team projects migrate' to retry.");
+                        Output::dim(
+                            "Fix the issue and run 'tether team projects migrate' to retry.",
+                        );
                     }
                 }
             } else {
@@ -1445,8 +1447,9 @@ fn migrate_personal_to_team(
     let personal_key = crate::security::get_encryption_key()?;
 
     // Load user identity for verification (test decrypt after encrypt)
-    let identity = crate::security::load_identity(None)
-        .map_err(|_| anyhow::anyhow!("Identity required for migration. Run 'tether identity unlock' first."))?;
+    let identity = crate::security::load_identity(None).map_err(|_| {
+        anyhow::anyhow!("Identity required for migration. Run 'tether identity unlock' first.")
+    })?;
 
     // Load team recipients for re-encryption
     let recipients_dir = team_repo_dir.join("recipients");
@@ -1508,11 +1511,13 @@ fn migrate_personal_to_team(
             let team_encrypted = crate::security::encrypt_to_recipients(&plaintext, &recipients)?;
 
             // Verify encryption by test-decrypting (round-trip check)
-            crate::security::decrypt_with_identity(&team_encrypted, &identity)
-                .map_err(|e| anyhow::anyhow!(
+            crate::security::decrypt_with_identity(&team_encrypted, &identity).map_err(|e| {
+                anyhow::anyhow!(
                     "Verification failed for {}: encrypted file not decryptable: {}",
-                    file_path.display(), e
-                ))?;
+                    file_path.display(),
+                    e
+                )
+            })?;
 
             // Write to team repo
             if let Some(parent) = team_dest_file.parent() {
@@ -1521,8 +1526,9 @@ fn migrate_personal_to_team(
             std::fs::write(&team_dest_file, &team_encrypted)?;
 
             // Verify the team file exists and has content
-            let metadata = std::fs::metadata(&team_dest_file)
-                .map_err(|e| anyhow::anyhow!("Failed to verify {}: {}", team_dest_file.display(), e))?;
+            let metadata = std::fs::metadata(&team_dest_file).map_err(|e| {
+                anyhow::anyhow!("Failed to verify {}: {}", team_dest_file.display(), e)
+            })?;
             if metadata.len() == 0 {
                 anyhow::bail!(
                     "Migration verification failed: {} was written but is empty",
@@ -1540,7 +1546,10 @@ fn migrate_personal_to_team(
     }
 
     if skipped_existing > 0 {
-        Output::dim(&format!("  Skipped {} file(s) already in team repo", skipped_existing));
+        Output::dim(&format!(
+            "  Skipped {} file(s) already in team repo",
+            skipped_existing
+        ));
     }
 
     if migrated_files.is_empty() {

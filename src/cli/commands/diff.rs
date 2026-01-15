@@ -29,6 +29,12 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
         }
     };
 
+    if !config.has_personal_features() {
+        Output::warning("Diff not available without personal features (no personal repo)");
+        Output::info("Use 'tether team files diff' for team file differences");
+        return Ok(());
+    }
+
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
     let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;

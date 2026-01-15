@@ -1,6 +1,6 @@
 use anyhow::Result;
 use inquire::ui::{Color, RenderConfig, StyleSheet, Styled};
-use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
+use inquire::{Confirm, MultiSelect, Password, PasswordDisplayMode, Select, Text};
 
 pub struct Prompt;
 
@@ -43,6 +43,22 @@ impl Prompt {
             .prompt()?;
 
         Ok(options.iter().position(|&x| x == selection).unwrap_or(0))
+    }
+
+    /// Multi-select with default selections. Returns indices of selected options.
+    pub fn multi_select(
+        message: &str,
+        options: Vec<&str>,
+        defaults: &[usize],
+    ) -> Result<Vec<usize>> {
+        let selections = MultiSelect::new(message, options.clone())
+            .with_default(defaults)
+            .prompt()?;
+
+        Ok(selections
+            .iter()
+            .filter_map(|s| options.iter().position(|&x| x == *s))
+            .collect())
     }
 
     pub fn password(message: &str) -> Result<String> {

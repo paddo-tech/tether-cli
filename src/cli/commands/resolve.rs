@@ -7,6 +7,12 @@ use sha2::{Digest, Sha256};
 
 pub async fn run(file: Option<&str>) -> Result<()> {
     let config = Config::load()?;
+
+    if !config.has_personal_features() {
+        Output::warning("Resolve not available without personal features");
+        return Ok(());
+    }
+
     let mut conflict_state = ConflictState::load()?;
 
     if conflict_state.conflicts.is_empty() {

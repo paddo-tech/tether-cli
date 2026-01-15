@@ -1,3 +1,4 @@
+mod collab;
 mod config;
 mod daemon;
 mod diff;
@@ -8,7 +9,7 @@ mod machines;
 mod resolve;
 mod restore;
 mod status;
-mod sync;
+pub mod sync;
 mod team;
 mod unlock;
 mod upgrade;
@@ -40,6 +41,10 @@ pub enum Commands {
         /// Don't start the daemon automatically
         #[arg(long)]
         no_daemon: bool,
+
+        /// Team-only mode: skip personal dotfiles/packages, only use team sync
+        #[arg(long)]
+        team_only: bool,
     },
 
     /// Manually trigger a sync
@@ -119,6 +124,12 @@ pub enum Commands {
         #[command(subcommand)]
         action: IdentityAction,
     },
+
+    /// Manage collaborator-based project secret sharing
+    Collab {
+        #[command(subcommand)]
+        action: CollabAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -186,6 +197,25 @@ pub enum ConfigAction {
     Edit,
     /// Interactive UI for managing files, folders, and patterns
     Dotfiles,
+    /// Manage feature toggles
+    Features {
+        #[command(subcommand)]
+        action: Option<FeaturesAction>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum FeaturesAction {
+    /// Enable a feature
+    Enable {
+        /// Feature name
+        feature: String,
+    },
+    /// Disable a feature
+    Disable {
+        /// Feature name
+        feature: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -214,6 +244,47 @@ pub enum IdentityAction {
     Lock,
     /// Reset identity (generate new, destroys old)
     Reset,
+}
+
+#[derive(Subcommand)]
+pub enum CollabAction {
+    /// Initialize a new collab for the current project
+    Init {
+        /// Project path (defaults to current directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Join an existing collab
+    Join {
+        /// Collab sync repo URL
+        url: String,
+    },
+    /// Add a secret file to the collab
+    Add {
+        /// File to add (e.g., .env)
+        file: String,
+        /// Project path (defaults to current directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Refresh collaborators from GitHub and re-encrypt secrets
+    Refresh {
+        /// Project path (defaults to current directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List all collabs
+    List,
+    /// Add another project to an existing collab
+    AddProject {
+        /// Project path to add
+        project: String,
+    },
+    /// Remove a collab
+    Remove {
+        /// Collab name (interactive if not specified)
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -395,7 +466,11 @@ pub enum ProjectsAction {
 impl Cli {
     pub async fn run(&self) -> Result<()> {
         match &self.command {
-            Commands::Init { repo, no_daemon } => init::run(repo.as_deref(), *no_daemon).await,
+            Commands::Init {
+                repo,
+                no_daemon,
+                team_only,
+            } => init::run(repo.as_deref(), *no_daemon, *team_only).await,
             Commands::Sync { dry_run, force } => sync::run(*dry_run, *force).await,
             Commands::Status => status::run().await,
             Commands::Diff { machine } => diff::run(machine.as_deref()).await,
@@ -429,6 +504,15 @@ impl Cli {
                 ConfigAction::Set { key, value } => config::set(key, value).await,
                 ConfigAction::Edit => config::edit().await,
                 ConfigAction::Dotfiles => config::dotfiles().await,
+                ConfigAction::Features { action } => match action {
+                    None => config::features_list().await,
+                    Some(FeaturesAction::Enable { feature }) => {
+                        config::features_enable(feature).await
+                    }
+                    Some(FeaturesAction::Disable { feature }) => {
+                        config::features_disable(feature).await
+                    }
+                },
             },
             Commands::Team { action } => match action {
                 TeamAction::Setup => team::setup().await,
@@ -504,6 +588,15 @@ impl Cli {
                 IdentityAction::Unlock => identity::unlock().await,
                 IdentityAction::Lock => identity::lock().await,
                 IdentityAction::Reset => identity::reset().await,
+            },
+            Commands::Collab { action } => match action {
+                CollabAction::Init { project } => collab::init(project.as_deref()).await,
+                CollabAction::Join { url } => collab::join(url).await,
+                CollabAction::Add { file, project } => collab::add(file, project.as_deref()).await,
+                CollabAction::Refresh { project } => collab::refresh(project.as_deref()).await,
+                CollabAction::List => collab::list().await,
+                CollabAction::AddProject { project } => collab::add_project(project).await,
+                CollabAction::Remove { name } => collab::remove(name.as_deref()).await,
             },
         }
     }
