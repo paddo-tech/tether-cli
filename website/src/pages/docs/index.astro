@@ -82,12 +82,16 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     <h3>Data Layout</h3>
     <p>Local Tether data lives in <code>~/.tether/</code>:</p>
     <Code code={`~/.tether/
-├── config.toml      # Configuration
+├── config.toml      # Configuration (versioned)
 ├── state.json       # Sync state (hashes, timestamps)
-├── sync/            # Git repository clone
+├── sync/            # Personal sync repo
+├── teams/<name>/    # Team sync repos
+├── collabs/         # Collab project configs
+├── backups/         # File backups
+├── identity.pub     # Age public key (for team secrets)
 ├── daemon.pid       # Daemon process ID
 ├── daemon.log       # Daemon logs
-└── ignore           # Secret scanning patterns`} />
+└── conflicts.json   # Conflict state`} />
     <p>The sync repository structure:</p>
     <Code code={`sync/
 ├── dotfiles/        # Encrypted dotfiles
@@ -169,12 +173,16 @@ tether ignore sync-remove <FILE>`} />
     <Code code={`tether config get <KEY>
 tether config set <KEY> <VALUE>
 tether config edit
-tether config dotfiles`} />
+tether config dotfiles
+tether config features              # List feature toggles
+tether config features enable <F>   # Enable a feature
+tether config features disable <F>  # Disable a feature`} />
     <ul>
       <li><code>get &lt;KEY&gt;</code> — Get config value (supports nested keys like <code>packages.brew.enabled</code>)</li>
       <li><code>set &lt;KEY&gt; &lt;VALUE&gt;</code> — Set config value</li>
       <li><code>edit</code> — Open config in editor</li>
       <li><code>dotfiles</code> — Interactive UI for managing synced files</li>
+      <li><code>features</code> — Manage feature toggles (see <a href="#feature-toggles">Feature Toggles</a>)</li>
     </ul>
 
     <h3 id="cmd-team">tether team</h3>
@@ -220,6 +228,29 @@ tether team projects purge-personal   # Remove personal copies`} />
     <h3 id="cmd-upgrade">tether upgrade</h3>
     <p>Upgrade all installed packages across enabled package managers.</p>
     <Code code="tether upgrade" />
+
+    <h3 id="cmd-restore">tether restore</h3>
+    <p>Restore files from backup.</p>
+    <Code code={`tether restore list              # List available backups
+tether restore file              # Interactive restore
+tether restore file --from <TS>  # Restore from specific timestamp`} />
+
+    <h3 id="cmd-identity">tether identity</h3>
+    <p>Manage age identity for team secrets encryption.</p>
+    <Code code={`tether identity init     # Generate new age identity
+tether identity show     # Show your public key
+tether identity unlock   # Unlock with passphrase
+tether identity lock     # Clear cached key
+tether identity reset    # Generate new (destroys old)`} />
+
+    <h3 id="cmd-collab">tether collab</h3>
+    <p>Share project secrets with GitHub collaborators (requires write access).</p>
+    <Code code={`tether collab init              # Initialize collab for current project
+tether collab join <URL>        # Join existing collab
+tether collab add <FILE>        # Add secret file (e.g., .env)
+tether collab refresh           # Re-encrypt for current collaborators
+tether collab list              # List all collabs
+tether collab remove            # Remove a collab`} />
   </section>
 
   <hr class="my-12 border-surface" />
@@ -302,6 +333,59 @@ enabled = false`} />
 
   <hr class="my-12 border-surface" />
 
+  <!-- Feature Toggles -->
+  <section id="feature-toggles">
+    <h2>Feature Toggles</h2>
+    <p>Control what Tether syncs with feature toggles:</p>
+    <Code code={`tether config features              # List all toggles
+tether config features enable <F>   # Enable a feature
+tether config features disable <F>  # Disable a feature`} />
+
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-surface">
+          <th class="text-left py-2 pr-4">Feature</th>
+          <th class="text-left py-2 pr-4">Default</th>
+          <th class="text-left py-2">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">personal_dotfiles</td>
+          <td class="py-2 pr-4">true</td>
+          <td class="py-2">Sync personal dotfiles (.zshrc, etc.)</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">personal_packages</td>
+          <td class="py-2 pr-4">true</td>
+          <td class="py-2">Sync personal package manifests</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">team_dotfiles</td>
+          <td class="py-2 pr-4">false</td>
+          <td class="py-2">Sync team dotfiles (requires team setup)</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">collab_secrets</td>
+          <td class="py-2 pr-4">false</td>
+          <td class="py-2">Enable collaborator-based secret sharing</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">team_layering</td>
+          <td class="py-2 pr-4">false</td>
+          <td class="py-2">Merge team + personal dotfiles (experimental)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="mt-4">Example: Team-only mode (no personal sync):</p>
+    <Code code={`tether config features disable personal_dotfiles
+tether config features disable personal_packages
+tether config features enable team_dotfiles`} />
+  </section>
+
+  <hr class="my-12 border-surface" />
+
   <!-- Package Managers -->
   <section id="package-managers">
     <h2>Package Managers</h2>
@@ -328,6 +412,16 @@ prettier`} />
 
     <h3>pnpm / bun / gem</h3>
     <p>Same format as npm—one package per line.</p>
+
+    <h3>uv (Python)</h3>
+    <p>Syncs global Python packages installed via <a href="https://github.com/astral-sh/uv" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">uv</a>.</p>
+    <Code code={`# Enable uv sync
+tether config set packages.uv.enabled true
+
+# Manifest: manifests/uv.txt
+ruff
+black
+mypy`} />
   </section>
 
   <hr class="my-12 border-surface" />
