@@ -306,7 +306,10 @@ pub async fn run() -> Result<()> {
             Cell::new("Packages")
                 .add_attribute(Attribute::Bold)
                 .fg(Color::Cyan),
-            Cell::new("Last Sync")
+            Cell::new("Modified")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Upgraded")
                 .add_attribute(Attribute::Bold)
                 .fg(Color::Cyan),
         ]);
@@ -316,10 +319,15 @@ pub async fn run() -> Result<()> {
                 Cell::new(format!("{} {}", Output::CHECK, manager)).fg(Color::Green),
                 Cell::new(
                     pkg_state
-                        .last_sync
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string(),
+                        .last_modified
+                        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                Cell::new(
+                    pkg_state
+                        .last_upgrade
+                        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string()),
                 ),
             ]);
         }

@@ -31,7 +31,14 @@ pub struct FileState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageState {
+    /// When we last checked/synced this package manager
     pub last_sync: DateTime<Utc>,
+    /// When the manifest content last changed
+    #[serde(default)]
+    pub last_modified: Option<DateTime<Utc>>,
+    /// When packages were last installed/upgraded
+    #[serde(default)]
+    pub last_upgrade: Option<DateTime<Utc>>,
     pub hash: String,
 }
 

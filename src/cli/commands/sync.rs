@@ -180,6 +180,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         import_packages(
             &config,
             &sync_path,
+            &mut state,
             &machine_state,
             false, // interactive mode
             &deferred_casks,

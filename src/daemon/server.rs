@@ -341,12 +341,14 @@ impl DaemonServer {
         if config.features.personal_packages {
             let machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
                 .unwrap_or_else(|| MachineState::new(&state.machine_id));
+            let previously_deferred = state.deferred_casks.clone();
             let deferred_casks = import_packages(
                 &config,
                 &sync_path,
+                &mut state,
                 &machine_state,
                 true, // daemon_mode
-                &state.deferred_casks,
+                &previously_deferred,
             )
             .await?;
 
@@ -472,10 +474,14 @@ impl DaemonServer {
                     {
                         std::fs::write(manifests_dir.join("Brewfile"), &manifest)?;
                         use chrono::Utc;
+                        let now = Utc::now();
+                        let existing = state.packages.get("brew");
                         state.packages.insert(
                             "brew".to_string(),
                             crate::sync::state::PackageState {
-                                last_sync: Utc::now(),
+                                last_sync: now,
+                                last_modified: Some(now),
+                                last_upgrade: existing.and_then(|e| e.last_upgrade),
                                 hash,
                             },
                         );
@@ -545,10 +551,14 @@ impl DaemonServer {
             {
                 std::fs::write(manifests_dir.join(filename), &manifest)?;
                 use chrono::Utc;
+                let now = Utc::now();
+                let existing = state.packages.get(name);
                 state.packages.insert(
                     name.to_string(),
                     crate::sync::state::PackageState {
-                        last_sync: Utc::now(),
+                        last_sync: now,
+                        last_modified: Some(now),
+                        last_upgrade: existing.and_then(|e| e.last_upgrade),
                         hash,
                     },
                 );
