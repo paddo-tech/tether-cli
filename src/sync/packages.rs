@@ -55,6 +55,7 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
 pub async fn import_packages(
     config: &Config,
     sync_path: &Path,
+    state: &mut SyncState,
     machine_state: &MachineState,
     daemon_mode: bool,
     previously_deferred: &[String],
@@ -68,13 +69,18 @@ pub async fn import_packages(
 
     // Homebrew - special handling for formulae/casks/taps
     if config.packages.brew.enabled {
-        deferred_casks = import_brew(
+        let (casks, installed) = import_brew(
             &manifests_dir,
             machine_state,
             daemon_mode,
             previously_deferred,
         )
         .await;
+        deferred_casks = casks;
+
+        if installed {
+            update_last_upgrade(state, "brew");
+        }
     }
 
     // Simple package managers (npm, pnpm, bun, gem)
@@ -89,35 +95,53 @@ pub async fn import_packages(
         };
 
         if enabled {
-            import_simple_manager(def, &manifests_dir, machine_state).await;
+            let installed = import_simple_manager(def, &manifests_dir, machine_state).await;
+            if installed {
+                update_last_upgrade(state, def.state_key);
+            }
         }
     }
 
     Ok(deferred_casks)
 }
 
+/// Update last_upgrade timestamp for a package manager
+fn update_last_upgrade(state: &mut SyncState, manager: &str) {
+    let now = chrono::Utc::now();
+    state
+        .packages
+        .entry(manager.to_string())
+        .and_modify(|e| e.last_upgrade = Some(now))
+        .or_insert_with(|| crate::sync::state::PackageState {
+            last_sync: now,
+            last_modified: None,
+            last_upgrade: Some(now),
+            hash: String::new(),
+        });
+}
+
 /// Import brew packages (formulae, casks, taps).
 /// Casks are installed individually to detect which need password.
-/// Returns list of casks that need password (flagged for manual sync).
+/// Returns (deferred_casks, installed_any) - list of casks needing password and whether any packages were installed.
 async fn import_brew(
     manifests_dir: &Path,
     machine_state: &MachineState,
     daemon_mode: bool,
     previously_deferred: &[String],
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let brewfile = manifests_dir.join("Brewfile");
     if !brewfile.exists() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
     let brew = BrewManager::new();
     if !brew.is_available().await {
-        return Vec::new();
+        return (Vec::new(), false);
     }
 
     let manifest = match std::fs::read_to_string(&brewfile) {
         Ok(m) => m,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), false),
     };
 
     // Parse the Brewfile
@@ -183,6 +207,8 @@ async fn import_brew(
         }
     }
 
+    let mut installed_any = false;
+
     // Install formulae via bundle (no password needed)
     if !missing_formulae.is_empty() {
         Output::info(&format!(
@@ -210,8 +236,12 @@ async fn import_brew(
             formulae: missing_formulae,
             casks: Vec::new(),
         };
-        if let Err(e) = brew.import_manifest(&formulae_manifest.generate()).await {
-            Output::warning(&format!("Failed to import formulae: {}", e));
+        if brew
+            .import_manifest(&formulae_manifest.generate())
+            .await
+            .is_ok()
+        {
+            installed_any = true;
         }
     }
 
@@ -231,7 +261,9 @@ async fn import_brew(
 
         for cask in &casks_to_try {
             match brew.install_cask(cask, !daemon_mode).await {
-                Ok(true) => {} // installed successfully
+                Ok(true) => {
+                    installed_any = true;
+                }
                 Ok(false) => {
                     if daemon_mode {
                         // Daemon: needs password - flag for manual sync
@@ -252,18 +284,19 @@ async fn import_brew(
         }
     }
 
-    flagged_casks
+    (flagged_casks, installed_any)
 }
 
 /// Import a simple package manager (one package per line manifest)
+/// Returns true if any packages were installed.
 async fn import_simple_manager(
     def: &PackageManagerDef,
     manifests_dir: &Path,
     machine_state: &MachineState,
-) {
+) -> bool {
     let manifest_path = manifests_dir.join(def.manifest_file);
     if !manifest_path.exists() {
-        return;
+        return false;
     }
 
     // Get the appropriate manager
@@ -273,16 +306,16 @@ async fn import_simple_manager(
         "bun" => Box::new(BunManager::new()),
         "gem" => Box::new(GemManager::new()),
         "uv" => Box::new(UvManager::new()),
-        _ => return,
+        _ => return false,
     };
 
     if !manager.is_available().await {
-        return;
+        return false;
     }
 
     let manifest = match std::fs::read_to_string(&manifest_path) {
         Ok(m) => m,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     let local_packages: HashSet<_> = machine_state
@@ -308,7 +341,7 @@ async fn import_simple_manager(
         .collect();
 
     if missing.is_empty() {
-        return;
+        return false;
     }
 
     Output::info(&format!(
@@ -320,12 +353,16 @@ async fn import_simple_manager(
 
     let filtered_manifest = missing.join("\n") + "\n";
 
-    if let Err(e) = manager.import_manifest(&filtered_manifest).await {
-        Output::warning(&format!(
-            "Failed to import {}: {}",
-            manifest_path.display(),
-            e
-        ));
+    match manager.import_manifest(&filtered_manifest).await {
+        Ok(_) => true,
+        Err(e) => {
+            Output::warning(&format!(
+                "Failed to import {}: {}",
+                manifest_path.display(),
+                e
+            ));
+            false
+        }
     }
 }
 
@@ -407,12 +444,24 @@ fn sync_brew(
         .map(|c| format!("{:x}", Sha256::digest(&c)));
     let changed = file_hash.as_ref() != Some(&hash);
 
-    if changed && !dry_run {
-        std::fs::write(&manifest_path, &manifest)?;
+    if !dry_run {
+        let now = chrono::Utc::now();
+        let existing = state.packages.get("brew");
+
+        if changed {
+            std::fs::write(&manifest_path, &manifest)?;
+        }
+
         state.packages.insert(
             "brew".to_string(),
             PackageState {
-                last_sync: chrono::Utc::now(),
+                last_sync: now,
+                last_modified: if changed {
+                    Some(now)
+                } else {
+                    existing.and_then(|e| e.last_modified)
+                },
+                last_upgrade: existing.and_then(|e| e.last_upgrade),
                 hash,
             },
         );
@@ -446,16 +495,92 @@ fn sync_simple_manager(
         .map(|c| format!("{:x}", Sha256::digest(&c)));
     let changed = file_hash.as_ref() != Some(&hash);
 
-    if changed && !dry_run {
-        std::fs::write(&manifest_path, &manifest)?;
+    if !dry_run {
+        let now = chrono::Utc::now();
+        let existing = state.packages.get(def.state_key);
+
+        if changed {
+            std::fs::write(&manifest_path, &manifest)?;
+        }
+
         state.packages.insert(
             def.state_key.to_string(),
             PackageState {
-                last_sync: chrono::Utc::now(),
+                last_sync: now,
+                last_modified: if changed {
+                    Some(now)
+                } else {
+                    existing.and_then(|e| e.last_modified)
+                },
+                last_upgrade: existing.and_then(|e| e.last_upgrade),
                 hash,
             },
         );
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_last_upgrade_creates_entry() {
+        let mut state = SyncState {
+            machine_id: "test".to_string(),
+            last_sync: chrono::Utc::now(),
+            files: HashMap::new(),
+            packages: HashMap::new(),
+            last_upgrade: None,
+            last_upgrade_with_updates: None,
+            deferred_casks: Vec::new(),
+            deferred_casks_hash: None,
+        };
+
+        assert!(!state.packages.contains_key("brew"));
+
+        update_last_upgrade(&mut state, "brew");
+
+        assert!(state.packages.contains_key("brew"));
+        let pkg_state = state.packages.get("brew").unwrap();
+        assert!(pkg_state.last_upgrade.is_some());
+    }
+
+    #[test]
+    fn test_update_last_upgrade_updates_existing() {
+        let original_time = chrono::Utc::now() - chrono::Duration::hours(1);
+        let original_modified = Some(original_time - chrono::Duration::hours(2));
+
+        let mut state = SyncState {
+            machine_id: "test".to_string(),
+            last_sync: chrono::Utc::now(),
+            files: HashMap::new(),
+            packages: HashMap::new(),
+            last_upgrade: None,
+            last_upgrade_with_updates: None,
+            deferred_casks: Vec::new(),
+            deferred_casks_hash: None,
+        };
+
+        state.packages.insert(
+            "brew".to_string(),
+            PackageState {
+                last_sync: original_time,
+                last_modified: original_modified,
+                last_upgrade: Some(original_time),
+                hash: "existing_hash".to_string(),
+            },
+        );
+
+        update_last_upgrade(&mut state, "brew");
+
+        let pkg_state = state.packages.get("brew").unwrap();
+        // last_upgrade should be updated to now (newer than original)
+        assert!(pkg_state.last_upgrade.unwrap() > original_time);
+        // Other fields preserved via and_modify
+        assert_eq!(pkg_state.last_modified, original_modified);
+        assert_eq!(pkg_state.last_sync, original_time);
+        assert_eq!(pkg_state.hash, "existing_hash");
+    }
 }

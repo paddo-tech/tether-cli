@@ -26,6 +26,25 @@ pub async fn run() -> Result<()> {
     Output::section("Tether Status");
     println!();
 
+    // Features summary (one line)
+    let mut enabled_features = Vec::new();
+    if config.features.personal_dotfiles {
+        enabled_features.push("dotfiles");
+    }
+    if config.features.personal_packages {
+        enabled_features.push("packages");
+    }
+    if config.features.team_dotfiles {
+        enabled_features.push("team");
+    }
+    if config.features.collab_secrets {
+        enabled_features.push("collab");
+    }
+    if !enabled_features.is_empty() {
+        Output::dim(&format!("Features: {}", enabled_features.join(", ")));
+        println!();
+    }
+
     // Daemon status
     let pid = read_daemon_pid()?;
     let (status_label, is_running) = match pid {
@@ -125,8 +144,8 @@ pub async fn run() -> Result<()> {
         .iter()
         .partition(|(file, _)| !file.starts_with("project:"));
 
-    // Dotfiles - minimal table for lists
-    if !dotfiles.is_empty() {
+    // Dotfiles - minimal table for lists (only show if feature enabled)
+    if config.features.personal_dotfiles && !dotfiles.is_empty() {
         let mut files_table = Output::table_minimal();
         files_table.set_header(vec![
             Cell::new("Dotfiles")
@@ -161,7 +180,7 @@ pub async fn run() -> Result<()> {
         }
         println!("{files_table}");
         println!();
-    } else {
+    } else if config.features.personal_dotfiles {
         Output::dim("  No dotfiles synced yet");
         println!();
     }
@@ -280,14 +299,17 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Packages - minimal table for lists
-    if !state.packages.is_empty() {
+    // Packages - minimal table for lists (only show if feature enabled)
+    if config.features.personal_packages && !state.packages.is_empty() {
         let mut packages_table = Output::table_minimal();
         packages_table.set_header(vec![
             Cell::new("Packages")
                 .add_attribute(Attribute::Bold)
                 .fg(Color::Cyan),
-            Cell::new("Last Sync")
+            Cell::new("Modified")
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Cyan),
+            Cell::new("Upgraded")
                 .add_attribute(Attribute::Bold)
                 .fg(Color::Cyan),
         ]);
@@ -297,16 +319,21 @@ pub async fn run() -> Result<()> {
                 Cell::new(format!("{} {}", Output::CHECK, manager)).fg(Color::Green),
                 Cell::new(
                     pkg_state
-                        .last_sync
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string(),
+                        .last_modified
+                        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                Cell::new(
+                    pkg_state
+                        .last_upgrade
+                        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "-".to_string()),
                 ),
             ]);
         }
         println!("{packages_table}");
         println!();
-    } else {
+    } else if config.features.personal_packages {
         Output::dim("  No packages synced yet");
         println!();
     }

@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,11 +19,22 @@ fn default_config_version() -> u32 {
     1
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Config format version - prevents older tether from corrupting newer configs
     #[serde(default = "default_config_version")]
     pub config_version: u32,
+    /// Team-only mode: no personal dotfiles/packages, only team sync
+    /// DEPRECATED: Use features.personal_dotfiles and features.personal_packages instead
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub team_only: bool,
+    /// Feature toggles for what tether should sync
+    #[serde(default)]
+    pub features: FeaturesConfig,
     pub sync: SyncConfig,
     pub backend: BackendConfig,
     pub packages: PackagesConfig,
@@ -37,6 +49,42 @@ pub struct Config {
     pub teams: Option<TeamsConfig>,
     #[serde(default)]
     pub project_configs: ProjectConfigSettings,
+}
+
+/// Feature toggles - what tether should sync
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeaturesConfig {
+    /// Sync personal dotfiles (.zshrc, .gitconfig, etc.)
+    #[serde(default = "default_true")]
+    pub personal_dotfiles: bool,
+
+    /// Sync and upgrade packages (brew, npm, etc.)
+    #[serde(default = "default_true")]
+    pub personal_packages: bool,
+
+    /// Sync team dotfiles (requires team setup)
+    #[serde(default)]
+    pub team_dotfiles: bool,
+
+    /// Share project secrets with collaborators (GitHub write access)
+    #[serde(default)]
+    pub collab_secrets: bool,
+
+    /// Merge team + personal dotfiles (experimental, hidden)
+    #[serde(default)]
+    pub team_layering: bool,
+}
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        Self {
+            personal_dotfiles: true,
+            personal_packages: true,
+            team_dotfiles: false,
+            collab_secrets: false,
+            team_layering: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +443,39 @@ pub struct TeamsConfig {
     /// Allowed GitHub organizations for team repos (empty = no restriction)
     #[serde(default)]
     pub allowed_orgs: Vec<String>,
+    /// Collaborator-based project secret sharing (keyed by collab name)
+    #[serde(default)]
+    pub collabs: HashMap<String, CollabConfig>,
+}
+
+/// Collaborator-based project secret sharing configuration.
+///
+/// Unlike teams which are org-scoped, collabs are repo-scoped.
+/// Collaborators are determined by GitHub write access to the project repo.
+/// One collab repo can serve multiple project repos if they share collaborators.
+///
+/// Security note: Collaborator access is cached locally. Run `tether collab refresh`
+/// to sync with current GitHub permissions. Revoked users retain access until refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollabConfig {
+    /// Sync repo URL for this collaboration
+    pub sync_url: String,
+    /// Projects sharing secrets via this collab (normalized URLs like github.com/user/repo)
+    #[serde(default)]
+    pub projects: Vec<String>,
+    /// Cache of collaborator GitHub usernames (for display)
+    #[serde(default)]
+    pub members_cache: Vec<String>,
+    /// Last collaborator refresh timestamp
+    #[serde(default)]
+    pub last_refresh: Option<DateTime<Utc>>,
+    /// Whether this collab is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Custom deserializer to handle both old (string) and new (array) formats
@@ -549,10 +630,59 @@ impl Config {
             .unwrap_or(false)
     }
 
+    /// Check if any personal features are enabled (dotfiles or packages)
+    pub fn has_personal_features(&self) -> bool {
+        // Legacy team_only flag disables personal features
+        if self.team_only {
+            return false;
+        }
+        self.features.personal_dotfiles || self.features.personal_packages
+    }
+
+    /// Check if any team features are enabled (team dotfiles or collab secrets)
+    pub fn has_team_features(&self) -> bool {
+        self.features.team_dotfiles || self.features.collab_secrets
+    }
+
+    /// Check if personal repo is configured
+    pub fn has_personal_repo(&self) -> bool {
+        !self.backend.url.is_empty()
+    }
+
+    /// Get collab directory for a specific collab name
+    pub fn collab_dir(collab_name: &str) -> Result<PathBuf> {
+        // Defense-in-depth: validate collab name to prevent path traversal
+        if collab_name.is_empty()
+            || collab_name.contains('/')
+            || collab_name.contains('\\')
+            || collab_name.contains("..")
+            || collab_name.starts_with('.')
+        {
+            anyhow::bail!("Invalid collab name: {}", collab_name);
+        }
+        Ok(Self::config_dir()?.join("collabs").join(collab_name))
+    }
+
+    /// Get sync directory for a specific collab
+    pub fn collab_repo_dir(collab_name: &str) -> Result<PathBuf> {
+        Ok(Self::collab_dir(collab_name)?.join("sync"))
+    }
+
+    /// Get collab config for a project (if any)
+    pub fn collab_for_project(&self, normalized_url: &str) -> Option<(String, &CollabConfig)> {
+        let teams = self.teams.as_ref()?;
+        for (name, collab) in &teams.collabs {
+            if collab.enabled && collab.projects.iter().any(|p| p == normalized_url) {
+                return Some((name.clone(), collab));
+            }
+        }
+        None
+    }
+
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         let content = std::fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&content)?;
+        let mut config: Self = toml::from_str(&content)?;
 
         if config.config_version > CURRENT_CONFIG_VERSION {
             bail!(
@@ -561,6 +691,12 @@ impl Config {
                 config.config_version,
                 CURRENT_CONFIG_VERSION
             );
+        }
+
+        // Migrate legacy team_only flag to features
+        if config.team_only {
+            config.features.personal_dotfiles = false;
+            config.features.personal_packages = false;
         }
 
         Ok(config)
@@ -580,6 +716,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
+            team_only: false,
+            features: FeaturesConfig::default(),
             sync: SyncConfig {
                 interval: "5m".to_string(),
                 strategy: ConflictStrategy::LastWriteWins,
@@ -947,5 +1085,80 @@ files = [".zshrc"]
     fn test_config_default_has_current_version() {
         let config = Config::default();
         assert_eq!(config.config_version, CURRENT_CONFIG_VERSION);
+    }
+
+    #[test]
+    fn test_team_only_migration_to_features() {
+        // Legacy config with team_only = true should disable personal features
+        let old_config = r#"
+team_only = true
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = ""
+
+[packages.brew]
+enabled = false
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = false
+sync_versions = false
+
+[dotfiles]
+files = []
+"#;
+        let mut parsed: Config = toml::from_str(old_config).unwrap();
+
+        // Simulate the migration logic from Config::load()
+        if parsed.team_only {
+            parsed.features.personal_dotfiles = false;
+            parsed.features.personal_packages = false;
+        }
+
+        // Verify migration worked
+        assert!(!parsed.has_personal_features());
+        assert!(!parsed.features.personal_dotfiles);
+        assert!(!parsed.features.personal_packages);
+    }
+
+    #[test]
+    fn test_features_default_enabled() {
+        // Fresh config should have personal features enabled by default
+        let config = Config::default();
+        assert!(config.features.personal_dotfiles);
+        assert!(config.features.personal_packages);
+        assert!(!config.features.team_dotfiles);
+        assert!(!config.features.collab_secrets);
+        assert!(!config.features.team_layering);
+        assert!(config.has_personal_features());
+    }
+
+    #[test]
+    fn test_has_personal_features_respects_legacy_flag() {
+        let mut config = Config::default();
+        assert!(config.has_personal_features());
+
+        // Legacy team_only overrides features
+        config.team_only = true;
+        assert!(!config.has_personal_features());
+    }
+
+    #[test]
+    fn test_has_team_features() {
+        let mut config = Config::default();
+        assert!(!config.has_team_features());
+
+        config.features.team_dotfiles = true;
+        assert!(config.has_team_features());
+
+        config.features.team_dotfiles = false;
+        config.features.collab_secrets = true;
+        assert!(config.has_team_features());
     }
 }

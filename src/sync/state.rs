@@ -31,7 +31,14 @@ pub struct FileState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageState {
+    /// When we last checked/synced this package manager
     pub last_sync: DateTime<Utc>,
+    /// When the manifest content last changed
+    #[serde(default)]
+    pub last_modified: Option<DateTime<Utc>>,
+    /// When packages were last installed/upgraded
+    #[serde(default)]
+    pub last_upgrade: Option<DateTime<Utc>>,
     pub hash: String,
 }
 
@@ -456,5 +463,35 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = MachineState::load_from_repo(temp.path(), "nonexistent").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_package_state_timestamps_roundtrip() {
+        let now = Utc::now();
+        let state = PackageState {
+            last_sync: now,
+            last_modified: Some(now),
+            last_upgrade: Some(now),
+            hash: "abc123".to_string(),
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let loaded: PackageState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.last_sync, state.last_sync);
+        assert_eq!(loaded.last_modified, state.last_modified);
+        assert_eq!(loaded.last_upgrade, state.last_upgrade);
+        assert_eq!(loaded.hash, state.hash);
+    }
+
+    #[test]
+    fn test_package_state_missing_timestamps_defaults() {
+        // Simulate old JSON without last_modified/last_upgrade fields
+        let old_json = r#"{"last_sync":"2024-01-01T00:00:00Z","hash":"abc123"}"#;
+        let loaded: PackageState = serde_json::from_str(old_json).unwrap();
+
+        assert!(loaded.last_modified.is_none());
+        assert!(loaded.last_upgrade.is_none());
+        assert_eq!(loaded.hash, "abc123");
     }
 }

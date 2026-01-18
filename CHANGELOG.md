@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-01-18
+
+### Added
+
+- **Collab secrets**: Share project secrets with GitHub collaborators (`tether collab init/join/add/refresh`)
+- **Feature toggles**: Granular control over sync features (`personal_dotfiles`, `personal_packages`, `team_dotfiles`, `collab_secrets`)
+- Package timestamps: Track when manifests were modified and packages upgraded (`tether status`)
+
+### Changed
+
+- Reduced config/state file reloading during sync operations
+
+### Security
+
+- Collab name validation to prevent path traversal attacks
+- Symlink validation in team repos to stay within repo bounds
+
 ## [1.2.0] - 2026-01-13
 
 ### Added

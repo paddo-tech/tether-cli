@@ -1,5 +1,5 @@
 use crate::cli::{Output, Prompt};
-use crate::config::{Config, DotfileEntry};
+use crate::config::{Config, DotfileEntry, FeaturesConfig};
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, Table};
 use inquire::Select as InquireSelect;
@@ -438,4 +438,155 @@ fn manage_dotfile_list(
     }
 
     Ok(changed)
+}
+
+/// List all features and their status
+pub async fn features_list() -> Result<()> {
+    let config = Config::load()?;
+
+    Output::header("Feature Toggles");
+    println!();
+
+    print_feature(
+        "personal_dotfiles",
+        config.features.personal_dotfiles,
+        "Sync shell configs (.zshrc, .gitconfig)",
+    );
+    print_feature(
+        "personal_packages",
+        config.features.personal_packages,
+        "Sync packages (brew, npm, etc.)",
+    );
+    print_feature(
+        "team_dotfiles",
+        config.features.team_dotfiles,
+        "Sync org-based team dotfiles",
+    );
+    print_feature(
+        "collab_secrets",
+        config.features.collab_secrets,
+        "Share project secrets with collaborators",
+    );
+    print_feature(
+        "team_layering",
+        config.features.team_layering,
+        "Merge team + personal dotfiles (experimental)",
+    );
+
+    println!();
+    Output::dim("Enable/disable: tether config features <enable|disable> <feature>");
+
+    Ok(())
+}
+
+fn print_feature(name: &str, enabled: bool, desc: &str) {
+    use owo_colors::OwoColorize;
+
+    let status = if enabled {
+        "enabled".green().to_string()
+    } else {
+        "disabled".dimmed().to_string()
+    };
+
+    println!("  {} [{}]", name.bold(), status);
+    println!("    {}", desc.dimmed());
+}
+
+/// Enable a feature
+pub async fn features_enable(feature: &str) -> Result<()> {
+    let mut config = Config::load()?;
+
+    match set_feature(&mut config.features, feature, true) {
+        Ok(()) => {
+            config.save()?;
+            Output::success(&format!("Enabled {}", feature));
+            show_feature_guidance(feature, true);
+        }
+        Err(e) => Output::error(&e.to_string()),
+    }
+
+    Ok(())
+}
+
+/// Disable a feature
+pub async fn features_disable(feature: &str) -> Result<()> {
+    let mut config = Config::load()?;
+
+    match set_feature(&mut config.features, feature, false) {
+        Ok(()) => {
+            config.save()?;
+            Output::success(&format!("Disabled {}", feature));
+        }
+        Err(e) => Output::error(&e.to_string()),
+    }
+
+    Ok(())
+}
+
+fn set_feature(features: &mut FeaturesConfig, name: &str, enabled: bool) -> Result<()> {
+    match name {
+        "personal_dotfiles" => features.personal_dotfiles = enabled,
+        "personal_packages" => features.personal_packages = enabled,
+        "team_dotfiles" => features.team_dotfiles = enabled,
+        "collab_secrets" => features.collab_secrets = enabled,
+        "team_layering" => {
+            if enabled {
+                Output::warning("team_layering is experimental and may have issues");
+            }
+            features.team_layering = enabled;
+        }
+        _ => return Err(anyhow::anyhow!("Unknown feature: {}. Valid: personal_dotfiles, personal_packages, team_dotfiles, collab_secrets, team_layering", name)),
+    }
+    Ok(())
+}
+
+fn show_feature_guidance(feature: &str, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    let config = Config::load().ok();
+
+    match feature {
+        "team_dotfiles" => {
+            // Check if team is configured
+            let has_team = config
+                .as_ref()
+                .and_then(|c| c.teams.as_ref())
+                .map(|t| !t.active.is_empty())
+                .unwrap_or(false);
+
+            if !has_team {
+                println!();
+                Output::warning("No team configured yet");
+                Output::info("Set up your team:");
+                println!("  tether team setup");
+            }
+        }
+        "collab_secrets" => {
+            println!();
+            Output::info("In a project directory:");
+            println!("  tether collab init");
+        }
+        "team_layering" => {
+            // Check dependencies
+            let team_enabled = config
+                .as_ref()
+                .map(|c| c.features.team_dotfiles)
+                .unwrap_or(false);
+
+            if !team_enabled {
+                println!();
+                Output::warning("team_layering requires team_dotfiles to be enabled");
+            }
+        }
+        "personal_dotfiles" | "personal_packages" => {
+            if config.map(|c| c.backend.url.is_empty()).unwrap_or(true) {
+                println!();
+                Output::info("Set up personal sync repo:");
+                println!("  tether init");
+            }
+        }
+        _ => {}
+    }
 }

@@ -191,4 +191,57 @@ impl GitHubCli {
 
         Ok(format!("git@github.com:{}/{}.git", org, name))
     }
+
+    /// Get collaborators with write/admin access to a repository
+    pub async fn get_collaborators(owner: &str, repo: &str) -> Result<Vec<String>> {
+        let endpoint = format!("repos/{}/{}/collaborators", owner, repo);
+        let output = Command::new("gh")
+            .args([
+                "api",
+                &endpoint,
+                "--jq",
+                r#"[.[] | select(.permissions.push == true or .permissions.admin == true) | .login]"#,
+            ])
+            .output()
+            .await
+            .context("Failed to get collaborators")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to get collaborators: {}", stderr));
+        }
+
+        let json_output = String::from_utf8(output.stdout)?;
+        let collaborators: Vec<String> =
+            serde_json::from_str(&json_output).context("Failed to parse collaborators JSON")?;
+
+        Ok(collaborators)
+    }
+
+    /// Parse owner/repo from a GitHub URL (SSH or HTTPS)
+    pub fn parse_repo_url(url: &str) -> Option<(String, String)> {
+        // SSH format: git@github.com:owner/repo.git
+        if let Some(rest) = url.strip_prefix("git@github.com:") {
+            let rest = rest.trim_end_matches(".git");
+            let parts: Vec<&str> = rest.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                return Some((parts[0].to_string(), parts[1].to_string()));
+            }
+        }
+
+        // HTTPS format: https://github.com/owner/repo.git
+        if url.contains("github.com/") {
+            let rest = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("github.com/")
+                .trim_end_matches(".git");
+            let parts: Vec<&str> = rest.splitn(2, '/').collect();
+            if parts.len() == 2 {
+                return Some((parts[0].to_string(), parts[1].to_string()));
+            }
+        }
+
+        None
+    }
 }

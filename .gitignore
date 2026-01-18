@@ -32,3 +32,4 @@ website/node_modules/
 website/dist/
 website/.astro/
 website/bun.lockb
+*.bun-build

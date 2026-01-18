@@ -16,7 +16,14 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         Output::info("Dry-run mode");
     }
 
-    let mut config = Config::load()?;
+    let config = Config::load()?;
+
+    // No personal features: skip personal sync, only sync teams
+    if !config.has_personal_features() {
+        return run_team_only_sync(&config, dry_run).await;
+    }
+
+    let mut config = config;
 
     // Ensure encryption key is unlocked if encryption is enabled
     if config.security.encrypt_dotfiles && !crate::security::is_unlocked() {
@@ -87,74 +94,75 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         )?;
     }
 
-    // Sync dotfiles (local → Git)
+    // Sync dotfiles (local → Git) - only if personal dotfiles enabled
+    if config.features.personal_dotfiles {
+        // Sync individual dotfiles
+        for entry in &config.dotfiles.files {
+            let file = entry.path();
+            let source = home.join(file);
 
-    // Sync individual dotfiles
-    for entry in &config.dotfiles.files {
-        let file = entry.path();
-        let source = home.join(file);
+            if source.exists() {
+                if let Ok(content) = std::fs::read(&source) {
+                    let hash = format!("{:x}", Sha256::digest(&content));
 
-        if source.exists() {
-            if let Ok(content) = std::fs::read(&source) {
-                let hash = format!("{:x}", Sha256::digest(&content));
+                    let file_changed = state
+                        .files
+                        .get(file)
+                        .map(|f| f.hash != hash)
+                        .unwrap_or(true);
 
-                let file_changed = state
-                    .files
-                    .get(file)
-                    .map(|f| f.hash != hash)
-                    .unwrap_or(true);
+                    if file_changed && !dry_run {
+                        let filename = file.trim_start_matches('.');
 
-                if file_changed && !dry_run {
-                    let filename = file.trim_start_matches('.');
-
-                    if config.security.encrypt_dotfiles {
-                        let key = crate::security::get_encryption_key()?;
-                        let encrypted = crate::security::encrypt_file(&content, &key)?;
-                        let dest = dotfiles_dir.join(format!("{}.enc", filename));
-                        if let Some(parent) = dest.parent() {
-                            std::fs::create_dir_all(parent)?;
+                        if config.security.encrypt_dotfiles {
+                            let key = crate::security::get_encryption_key()?;
+                            let encrypted = crate::security::encrypt_file(&content, &key)?;
+                            let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&dest, encrypted)?;
+                        } else {
+                            let dest = dotfiles_dir.join(filename);
+                            if let Some(parent) = dest.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&dest, &content)?;
                         }
-                        std::fs::write(&dest, encrypted)?;
-                    } else {
-                        let dest = dotfiles_dir.join(filename);
-                        if let Some(parent) = dest.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&dest, &content)?;
+
+                        state.update_file(file, hash.clone());
                     }
-
-                    state.update_file(file, hash.clone());
                 }
             }
         }
-    }
 
-    // Auto-discover directories sourced from shell configs and add to config
-    if !dry_run {
-        let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
-        let mut config_changed = false;
-        for dir in discovered {
-            if !config.dotfiles.dirs.contains(&dir) {
-                Output::info(&format!("Auto-discovered sourced directory: {}", dir));
-                config.dotfiles.dirs.push(dir);
-                config_changed = true;
+        // Auto-discover directories sourced from shell configs and add to config
+        if !dry_run {
+            let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
+            let mut config_changed = false;
+            for dir in discovered {
+                if !config.dotfiles.dirs.contains(&dir) {
+                    Output::info(&format!("Auto-discovered sourced directory: {}", dir));
+                    config.dotfiles.dirs.push(dir);
+                    config_changed = true;
+                }
+            }
+            if config_changed {
+                config.dotfiles.dirs.sort();
+                config.save()?;
             }
         }
-        if config_changed {
-            config.dotfiles.dirs.sort();
-            config.save()?;
+
+        // Sync global config directories
+        if !config.dotfiles.dirs.is_empty() {
+            sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
         }
-    }
 
-    // Sync global config directories
-    if !config.dotfiles.dirs.is_empty() {
-        sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
-    }
-
-    // Sync project-local configs (personal)
-    if config.project_configs.enabled {
-        sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
-    }
+        // Sync project-local configs (personal)
+        if config.project_configs.enabled {
+            sync_project_configs(&config, &mut state, &sync_path, &home, dry_run)?;
+        }
+    } // end personal dotfiles feature block
 
     // Sync team project secrets
     if !dry_run {
@@ -166,12 +174,13 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Import packages from manifests (install missing packages, respecting removed_packages)
     // Interactive mode: install deferred casks from daemon syncs
-    if !dry_run {
+    if config.features.personal_packages && !dry_run {
         let deferred_casks = state.deferred_casks.clone();
 
         import_packages(
             &config,
             &sync_path,
+            &mut state,
             &machine_state,
             false, // interactive mode
             &deferred_casks,
@@ -190,14 +199,18 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     }
 
     // Export package manifests using union of all machine states
-    sync_packages(&config, &mut state, &sync_path, &machine_state, dry_run).await?;
+    if config.features.personal_packages {
+        sync_packages(&config, &mut state, &sync_path, &machine_state, dry_run).await?;
+    }
 
     // Save machine state for cross-machine comparison
     if !dry_run {
         machine_state.save_to_repo(&sync_path)?;
     }
 
-    // Always export tether config (hardcoded, not dependent on config file list)
+    // Always export tether config (hardcoded, not dependent on feature flags)
+    // This ensures config settings (including features) are synced across machines
+    // even when personal features are disabled, allowing remote config changes
     if config.security.encrypt_dotfiles && !dry_run {
         export_tether_config(&sync_path, &home, &mut state)?;
     }
@@ -258,6 +271,11 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
+    // Sync collab secrets (only if feature enabled)
+    if !dry_run && config.features.collab_secrets {
+        sync_collab_secrets(&config, &home)?;
+    }
+
     // Prune old backups
     if let Ok(pruned) = crate::sync::prune_old_backups() {
         if pruned > 0 {
@@ -266,6 +284,209 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     }
 
     Output::success("Synced");
+    Ok(())
+}
+
+/// Sync secrets from collab repos to local projects
+fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
+    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
+
+    let teams = match &config.teams {
+        Some(t) if !t.collabs.is_empty() => t,
+        _ => return Ok(()), // No collabs configured
+    };
+
+    // Discover local projects
+    let project_paths = config.project_configs.search_paths.clone();
+    let search_paths: Vec<PathBuf> = if project_paths.is_empty() {
+        vec![
+            home.join("Projects"),
+            home.join("Code"),
+            home.join("Developer"),
+            home.join("repos"),
+        ]
+    } else {
+        project_paths
+            .iter()
+            .map(|p: &String| {
+                if p.starts_with("~/") {
+                    home.join(p.strip_prefix("~/").unwrap())
+                } else {
+                    PathBuf::from(p)
+                }
+            })
+            .collect()
+    };
+
+    // Build map of normalized_url -> local_path
+    let mut project_map: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
+    for search_path in &search_paths {
+        if search_path.exists() {
+            if let Ok(repos) = find_git_repos(search_path) {
+                for repo in repos {
+                    if let Ok(url) = get_remote_url(&repo) {
+                        let normalized = normalize_remote_url(&url);
+                        project_map.insert(normalized, repo);
+                    }
+                }
+            }
+        }
+    }
+
+    // Load user's identity for decryption
+    let identity = match crate::security::load_identity(None) {
+        Ok(id) => id,
+        Err(_) => return Ok(()), // No identity, can't decrypt
+    };
+
+    // Process each collab
+    for (collab_name, collab_config) in &teams.collabs {
+        if !collab_config.enabled {
+            continue;
+        }
+
+        let collab_dir = match Config::collab_repo_dir(collab_name) {
+            Ok(d) if d.exists() => d,
+            _ => continue,
+        };
+
+        // Pull latest
+        if let Ok(git) = GitBackend::open(&collab_dir) {
+            git.pull().ok();
+        }
+
+        // Walk projects directory
+        let projects_dir = collab_dir.join("projects");
+        if !projects_dir.exists() {
+            continue;
+        }
+
+        for entry in walkdir::WalkDir::new(&projects_dir) {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let path = entry.path();
+            if !path.to_string_lossy().ends_with(".age") {
+                continue;
+            }
+
+            // Extract project URL and filename from path
+            // Path format: projects/github.com/owner/repo/path/to/file.age
+            // The first 3 path components are the project URL (host/owner/repo)
+            // The rest is the file path within the project
+            let rel_path = match path.strip_prefix(&projects_dir) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let components: Vec<_> = rel_path.components().collect();
+            if components.len() < 4 {
+                // Need at least: host, owner, repo, file
+                continue;
+            }
+
+            // First 3 components = project URL (github.com/owner/repo)
+            let project_url = format!(
+                "{}/{}/{}",
+                components[0].as_os_str().to_string_lossy(),
+                components[1].as_os_str().to_string_lossy(),
+                components[2].as_os_str().to_string_lossy()
+            );
+
+            // Rest = file path (may be nested: path/to/file.age)
+            let file_path: PathBuf = components[3..].iter().map(|c| c.as_os_str()).collect();
+            let file_path_str = file_path.to_string_lossy();
+            let filename = file_path_str.trim_end_matches(".age");
+
+            // Check if this project is in our collab's projects list
+            if !collab_config.projects.iter().any(|p| p == &project_url) {
+                continue;
+            }
+
+            // Find local project
+            let local_project = match project_map.get(&project_url) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Decrypt and write
+            let encrypted = match std::fs::read(path) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            match crate::security::decrypt_with_identity(&encrypted, &identity) {
+                Ok(decrypted) => {
+                    // Security: reject paths with traversal patterns
+                    if filename.contains("..") || filename.starts_with('/') {
+                        log::warn!("Path traversal attempt blocked: {}", filename);
+                        continue;
+                    }
+
+                    let dest = local_project.join(filename);
+
+                    // Validate destination stays within project (defense-in-depth)
+                    let canonical_project = match local_project.canonicalize() {
+                        Ok(p) => p,
+                        Err(_) => continue, // Project doesn't exist, skip
+                    };
+
+                    // Create parent directories first so we can canonicalize
+                    if let Some(parent) = dest.parent() {
+                        if std::fs::create_dir_all(parent).is_err() {
+                            continue;
+                        }
+                    }
+
+                    // For new files, check that parent is within project
+                    let check_path = if dest.exists() {
+                        dest.canonicalize().ok()
+                    } else {
+                        dest.parent().and_then(|p| p.canonicalize().ok())
+                    };
+
+                    if let Some(canonical_check) = check_path {
+                        if !canonical_check.starts_with(&canonical_project) {
+                            log::warn!("Path traversal attempt blocked: {}", filename);
+                            continue;
+                        }
+                    }
+
+                    // Only write if content differs
+                    let should_write = if dest.exists() {
+                        std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
+                    } else {
+                        true
+                    };
+
+                    if should_write {
+                        std::fs::write(&dest, decrypted)?;
+                        log::debug!(
+                            "Synced collab secret: {} -> {}",
+                            filename,
+                            local_project.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("not a recipient") || err_str.contains("no matching keys") {
+                        log::debug!("Collab secret {}: not a recipient, skipping", filename);
+                    } else {
+                        log::warn!("Failed to decrypt collab secret {}: {}", filename, e);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -471,7 +692,7 @@ fn decrypt_from_repo(
 
     // Decrypt project-local configs
     if config.project_configs.enabled {
-        decrypt_project_configs(config, sync_path, home, machine_state, &key)?;
+        decrypt_project_configs(config, sync_path, home, machine_state, state, &key)?;
     }
 
     Ok(())
@@ -482,6 +703,7 @@ fn decrypt_project_configs(
     sync_path: &Path,
     home: &Path,
     machine_state: &MachineState,
+    state: &SyncState,
     key: &[u8],
 ) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
@@ -597,11 +819,8 @@ fn decrypt_project_configs(
                                     .map(|c| format!("{:x}", Sha256::digest(c)));
 
                                 // Check if local has changed since last sync
-                                let state = SyncState::load().ok();
-                                let last_synced_hash = state
-                                    .as_ref()
-                                    .and_then(|s| s.files.get(&state_key))
-                                    .map(|f| f.hash.clone());
+                                let last_synced_hash =
+                                    state.files.get(&state_key).map(|f| f.hash.clone());
 
                                 let local_modified =
                                     local_hash.is_some() && local_hash != last_synced_hash;
@@ -1174,7 +1393,7 @@ fn detect_removed_packages(
 }
 
 /// Sync project secrets from team repos to local projects
-fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
+pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
     use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
@@ -1363,5 +1582,57 @@ fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// Team-only sync: skip personal dotfiles/packages, only sync team repos
+async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+
+    let teams = match &config.teams {
+        Some(t) if !t.active.is_empty() => t,
+        _ => {
+            Output::warning("Team-only mode with no teams configured");
+            Output::info("Run 'tether team setup' to add a team");
+            return Ok(());
+        }
+    };
+
+    // Pull from each active team repo
+    for team_name in &teams.active {
+        let team_config = match teams.teams.get(team_name) {
+            Some(c) if c.enabled => c,
+            _ => continue,
+        };
+
+        let team_repo_dir = Config::team_repo_dir(team_name)?;
+        if !team_repo_dir.exists() {
+            Output::warning(&format!("Team '{}' repo not found", team_name));
+            continue;
+        }
+
+        if !dry_run {
+            let team_git = GitBackend::open(&team_repo_dir)?;
+            team_git.pull()?;
+
+            Output::success(&format!("Team '{}' synced", team_name));
+
+            // Push changes if we have write access
+            if !team_config.read_only && team_git.has_changes()? {
+                let state = SyncState::load()?;
+                team_git.commit("Update team configs", &state.machine_id)?;
+                team_git.push()?;
+            }
+        } else {
+            Output::success(&format!("Team '{}' synced", team_name));
+        }
+    }
+
+    // Sync team project secrets to local projects
+    if !dry_run {
+        sync_team_project_secrets(config, &home)?;
+    }
+
+    Output::success("Team sync complete");
     Ok(())
 }

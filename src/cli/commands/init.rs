@@ -1,10 +1,10 @@
 use crate::cli::{Output, Progress, Prompt};
-use crate::config::Config;
+use crate::config::{Config, FeaturesConfig};
 use crate::github::GitHubCli;
 use crate::sync::{GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
 
-pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
+pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result<()> {
     Output::header("Welcome to Tether!");
     Output::dim("Sync your dev environment across machines");
     println!();
@@ -16,15 +16,23 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
     if already_initialized {
         Output::info("Tether is already initialized");
 
-        // Sync first to ensure we don't lose any data
-        Output::info("Running sync to preserve your data...");
-        if let Err(e) = super::sync::run(false, false).await {
-            Output::warning(&format!("Sync failed: {}", e));
-            if !Prompt::confirm(
-                "Continue with reinit anyway? (may lose unsynced changes)",
-                false,
-            )? {
-                return Ok(());
+        // Sync first to ensure we don't lose any data (skip if no personal repo)
+        let existing_config = Config::load().ok();
+        let has_personal = existing_config
+            .as_ref()
+            .map(|c| c.has_personal_repo())
+            .unwrap_or(false);
+
+        if has_personal {
+            Output::info("Running sync to preserve your data...");
+            if let Err(e) = super::sync::run(false, false).await {
+                Output::warning(&format!("Sync failed: {}", e));
+                if !Prompt::confirm(
+                    "Continue with reinit anyway? (may lose unsynced changes)",
+                    false,
+                )? {
+                    return Ok(());
+                }
             }
         }
 
@@ -40,93 +48,180 @@ pub async fn run(repo: Option<&str>, no_daemon: bool) -> Result<()> {
         Config::default()
     };
 
-    // Get repository URL (use existing if reinitializing, unless explicitly provided)
-    let repo_url = if let Some(url) = repo {
-        url.to_string()
-    } else if already_initialized && !config.backend.url.is_empty() {
-        Output::dim(&format!("  Current repo: {}", config.backend.url));
-        if Prompt::confirm("Keep current repository?", true)? {
-            config.backend.url.clone()
+    // Legacy --team-only flag support
+    if team_only {
+        config.features.personal_dotfiles = false;
+        config.features.personal_packages = false;
+        config.features.team_dotfiles = true;
+    } else {
+        // Feature selection prompt
+        let features = select_features(&config.features)?;
+        config.features = features;
+    }
+
+    let needs_personal_repo =
+        config.features.personal_dotfiles || config.features.personal_packages;
+
+    // Personal repo setup (if personal features enabled)
+    if needs_personal_repo {
+        let repo_url = if let Some(url) = repo {
+            url.to_string()
+        } else if already_initialized && !config.backend.url.is_empty() {
+            Output::dim(&format!("  Current repo: {}", config.backend.url));
+            if Prompt::confirm("Keep current repository?", true)? {
+                config.backend.url.clone()
+            } else {
+                setup_repository().await?
+            }
         } else {
             setup_repository().await?
+        };
+
+        if repo_url.is_empty() {
+            Output::error("Repository URL cannot be empty");
+            return Err(anyhow::anyhow!("Repository URL is required"));
         }
-    } else {
-        setup_repository().await?
-    };
 
-    if repo_url.is_empty() {
-        Output::error("Repository URL cannot be empty");
-        return Err(anyhow::anyhow!("Repository URL is required"));
-    }
+        config.backend.url = repo_url.clone();
 
-    // Create .tether directory
-    let tether_dir = Config::config_dir()?;
-    std::fs::create_dir_all(&tether_dir)?;
+        // Create .tether directory
+        let tether_dir = Config::config_dir()?;
+        std::fs::create_dir_all(&tether_dir)?;
 
-    // Clone or pull repository
-    let sync_path = SyncEngine::sync_path()?;
-
-    if sync_path.exists() {
-        let git = GitBackend::open(&sync_path)?;
-        git.pull()?;
-    } else {
-        GitBackend::clone(&repo_url, &sync_path)?;
-    }
-
-    // Update and save config (preserves existing settings)
-    config.backend.url = repo_url;
-    config.save()?;
-
-    // Setup encryption if enabled
-    if config.security.encrypt_dotfiles {
-        if crate::security::has_encryption_key() {
-            Output::info("Encrypted key found. Enter passphrase:");
-            let passphrase = Prompt::password("Passphrase")?;
-            crate::security::unlock_with_passphrase(&passphrase)?;
+        // Clone or pull repository
+        let sync_path = SyncEngine::sync_path()?;
+        if sync_path.exists() {
+            let git = GitBackend::open(&sync_path)?;
+            git.pull()?;
         } else {
-            Output::info("Creating encryption key. Choose a passphrase (min 8 chars).");
-            println!();
-
-            let passphrase = Prompt::password("Passphrase")?;
-            let confirm = Prompt::password("Confirm passphrase")?;
-
-            if passphrase != confirm {
-                return Err(anyhow::anyhow!("Passphrases do not match"));
-            }
-
-            if passphrase.len() < 8 {
-                return Err(anyhow::anyhow!("Passphrase must be at least 8 characters"));
-            }
-
-            let key = crate::security::encryption::generate_key();
-            crate::security::store_encryption_key_with_passphrase(&key, &passphrase)?;
-            crate::security::unlock_with_passphrase(&passphrase)?;
+            GitBackend::clone(&repo_url, &sync_path)?;
         }
+
+        // Create sync repo structure
+        std::fs::create_dir_all(sync_path.join("manifests"))?;
+        std::fs::create_dir_all(sync_path.join("dotfiles"))?;
+        std::fs::create_dir_all(sync_path.join("machines"))?;
+
+        // Setup encryption if enabled
+        if config.security.encrypt_dotfiles {
+            setup_encryption()?;
+        }
+    } else {
+        // No personal features - create minimal .tether directory
+        // Note: We don't clear dotfiles/packages config, just disable syncing
+        // This preserves settings if user re-enables features later
+        let tether_dir = Config::config_dir()?;
+        std::fs::create_dir_all(&tether_dir)?;
+        config.backend.url = String::new();
+        config.security.encrypt_dotfiles = false;
     }
+
+    config.save()?;
 
     // Create initial state
     let state = SyncState::load()?;
     state.save()?;
 
-    // Create sync repo structure
-    std::fs::create_dir_all(sync_path.join("manifests"))?;
-    std::fs::create_dir_all(sync_path.join("dotfiles"))?;
-    std::fs::create_dir_all(sync_path.join("machines"))?;
+    // Initial sync (only if personal features enabled)
+    if needs_personal_repo {
+        super::sync::run(false, false).await?;
+    }
 
-    // Initial sync
-    super::sync::run(false, false).await?;
-
-    // Install daemon for auto-start on login (unless opted out)
+    // Install daemon for auto-sync (unless opted out)
     if !no_daemon {
         if let Err(err) = super::daemon::install().await {
             Output::warning(&format!("Failed to install daemon: {}", err));
         }
     }
 
+    let sync_path = SyncEngine::sync_path()?;
     Output::success("Initialized!");
     println!("  Config: {}", config_path.display());
-    println!("  Sync:   {}", sync_path.display());
+    if needs_personal_repo {
+        println!("  Sync:   {}", sync_path.display());
+    }
 
+    // Follow-up setup for selected features
+    println!();
+
+    if config.features.team_dotfiles {
+        Output::info("Team dotfiles enabled. Set up your team:");
+        println!("  tether team setup");
+        println!();
+    }
+
+    if config.features.collab_secrets {
+        Output::info("Project collaboration enabled. In a project directory:");
+        println!("  tether collab init");
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Prompt user to select features
+fn select_features(current: &FeaturesConfig) -> Result<FeaturesConfig> {
+    let options = vec![
+        "Personal dotfiles (shell, git, etc.)",
+        "Personal packages (brew, npm, etc.)",
+        "Team dotfiles (org-based)",
+        "Project secrets with collaborators",
+    ];
+
+    // Default selections based on current config
+    let mut defaults = Vec::new();
+    if current.personal_dotfiles {
+        defaults.push(0);
+    }
+    if current.personal_packages {
+        defaults.push(1);
+    }
+    if current.team_dotfiles {
+        defaults.push(2);
+    }
+    if current.collab_secrets {
+        defaults.push(3);
+    }
+    // Default to personal dotfiles + packages for new installs
+    if defaults.is_empty() {
+        defaults = vec![0, 1];
+    }
+
+    let selected = Prompt::multi_select("What would you like to sync?", options, &defaults)?;
+
+    Ok(FeaturesConfig {
+        personal_dotfiles: selected.contains(&0),
+        personal_packages: selected.contains(&1),
+        team_dotfiles: selected.contains(&2),
+        collab_secrets: selected.contains(&3),
+        team_layering: current.team_layering, // Preserve hidden setting
+    })
+}
+
+fn setup_encryption() -> Result<()> {
+    if crate::security::has_encryption_key() {
+        Output::info("Encrypted key found. Enter passphrase:");
+        let passphrase = Prompt::password("Passphrase")?;
+        crate::security::unlock_with_passphrase(&passphrase)?;
+    } else {
+        Output::info("Creating encryption key. Choose a passphrase (min 8 chars).");
+        println!();
+
+        let passphrase = Prompt::password("Passphrase")?;
+        let confirm = Prompt::password("Confirm passphrase")?;
+
+        if passphrase != confirm {
+            return Err(anyhow::anyhow!("Passphrases do not match"));
+        }
+
+        if passphrase.len() < 8 {
+            return Err(anyhow::anyhow!("Passphrase must be at least 8 characters"));
+        }
+
+        let key = crate::security::encryption::generate_key();
+        crate::security::store_encryption_key_with_passphrase(&key, &passphrase)?;
+        crate::security::unlock_with_passphrase(&passphrase)?;
+    }
     Ok(())
 }
 
