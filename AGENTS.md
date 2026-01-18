@@ -16,6 +16,27 @@ cargo clippy -- -D warnings  # Lint (must pass before commits)
 cargo fmt                # Format
 ```
 
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `init` | Initialize Tether on this machine |
+| `sync` | Manually trigger a sync |
+| `status` | Show current sync status |
+| `diff` | Show differences between machines |
+| `config` | Manage configuration and feature toggles |
+| `daemon` | Control the background daemon |
+| `machines` | Manage machines in sync network |
+| `ignore` | Manage ignore patterns |
+| `team` | Manage team sync (dotfiles, secrets, projects) |
+| `resolve` | Resolve file conflicts |
+| `unlock` | Unlock encryption key with passphrase |
+| `lock` | Clear cached encryption key |
+| `upgrade` | Upgrade all installed packages |
+| `restore` | Restore files from backup |
+| `identity` | Manage age identity for team secrets |
+| `collab` | Collaborator-based project secret sharing |
+
 ## Source Structure
 
 ```
@@ -27,29 +48,53 @@ src/
 │   │   ├── sync.rs      # tether sync
 │   │   ├── status.rs    # tether status
 │   │   ├── diff.rs      # tether diff
-│   │   ├── config.rs    # tether config
+│   │   ├── config.rs    # tether config (+ features)
 │   │   ├── daemon.rs    # tether daemon
 │   │   ├── machines.rs  # tether machines
 │   │   ├── ignore.rs    # tether ignore
-│   │   └── team.rs      # tether team
+│   │   ├── team.rs      # tether team
+│   │   ├── resolve.rs   # tether resolve
+│   │   ├── unlock.rs    # tether unlock/lock
+│   │   ├── upgrade.rs   # tether upgrade
+│   │   ├── restore.rs   # tether restore
+│   │   ├── identity.rs  # tether identity
+│   │   └── collab.rs    # tether collab
 │   ├── output.rs        # Terminal formatting
+│   ├── progress.rs      # Progress indicators
 │   └── prompts.rs       # Interactive prompts
-├── config.rs            # Config management
+├── config.rs            # Config management (versioned)
 ├── daemon/
+│   ├── mod.rs
 │   └── server.rs        # Background daemon (periodic sync)
 ├── github.rs            # GitHub repo creation via gh CLI
 ├── packages/
+│   ├── mod.rs
 │   ├── manager.rs       # PackageManager trait
-│   ├── brew.rs, npm.rs, pnpm.rs, bun.rs, gem.rs
+│   ├── brew.rs          # Homebrew
+│   ├── npm.rs           # npm
+│   ├── pnpm.rs          # pnpm
+│   ├── bun.rs           # Bun
+│   ├── gem.rs           # RubyGems
+│   └── uv.rs            # Python uv
 ├── security/
+│   ├── mod.rs
 │   ├── encryption.rs    # AES-GCM encryption
 │   ├── keychain.rs      # Key management (passphrase-based)
-│   └── secrets.rs       # Secret detection
+│   ├── secrets.rs       # Secret detection
+│   └── recipients.rs    # Age identity/recipient management
 ├── sync/
+│   ├── mod.rs
 │   ├── engine.rs        # sync_path() helper
 │   ├── git.rs           # Git operations
 │   ├── state.rs         # State tracking
-│   └── team.rs          # Team sync
+│   ├── team.rs          # Team sync
+│   ├── backup.rs        # File backup before overwrite
+│   ├── conflict.rs      # Conflict detection/resolution
+│   ├── discovery.rs     # Dotfile discovery
+│   ├── layers.rs        # Team + personal layer merging
+│   ├── merge.rs         # File merge utilities
+│   └── packages.rs      # Package manifest sync
+├── main.rs
 └── lib.rs
 ```
 
@@ -63,11 +108,38 @@ src/
 - **aes-gcm** - Encryption
 - **age** - Passphrase-based key encryption
 
+## Feature Toggles
+
+Managed via `tether config features`. Available toggles:
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `personal_dotfiles` | true | Sync personal dotfiles |
+| `personal_packages` | true | Sync personal package manifests |
+| `team_dotfiles` | false | Sync team dotfiles |
+| `collab_secrets` | false | Enable collab secret sharing |
+| `team_layering` | false | Merge team + personal dotfiles |
+
 ## Data Layout
 
-`~/.tether/`: config.toml, state.json, sync/, daemon.pid, daemon.log, ignore
+**~/.tether/**
+- `config.toml` - Main config (versioned)
+- `state.json` - Sync state
+- `sync/` - Personal sync repo
+- `teams/<name>/` - Team sync repos
+- `collabs/` - Collab project configs
+- `identity.pub` - Age public key
+- `daemon.pid` - Daemon process ID
+- `daemon.log` - Daemon logs
+- `backups/` - File backups
+- `conflicts.json` - Conflict state
 
-Sync repo: dotfiles/, configs/, manifests/, machines/, projects/
+**Sync repo structure:**
+- `dotfiles/` - Dotfiles
+- `configs/` - App configs
+- `manifests/` - Package manifests
+- `machines/` - Machine-specific state
+- `projects/` - Project secrets
 
 ## Code Quality
 
