@@ -108,27 +108,12 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         }
     } else {
         // No personal features - create minimal .tether directory
+        // Note: We don't clear dotfiles/packages config, just disable syncing
+        // This preserves settings if user re-enables features later
         let tether_dir = Config::config_dir()?;
         std::fs::create_dir_all(&tether_dir)?;
         config.backend.url = String::new();
         config.security.encrypt_dotfiles = false;
-
-        // Disable package managers when personal packages disabled
-        if !config.features.personal_packages {
-            config.packages.brew.enabled = false;
-            config.packages.npm.enabled = false;
-            config.packages.pnpm.enabled = false;
-            config.packages.bun.enabled = false;
-            config.packages.gem.enabled = false;
-            config.packages.uv.enabled = false;
-        }
-
-        // Clear dotfiles when personal dotfiles disabled
-        if !config.features.personal_dotfiles {
-            config.dotfiles.files.clear();
-            config.dotfiles.dirs.clear();
-            config.project_configs.enabled = false;
-        }
     }
 
     config.save()?;

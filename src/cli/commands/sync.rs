@@ -270,8 +270,8 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
-    // Sync collab secrets
-    if !dry_run {
+    // Sync collab secrets (only if feature enabled)
+    if !dry_run && config.features.collab_secrets {
         sync_collab_secrets(&config, &home)?;
     }
 
@@ -377,57 +377,109 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
             }
 
             // Extract project URL and filename from path
-            // Path format: projects/github.com/owner/repo/file.age
-            let rel_path = path.strip_prefix(&projects_dir).ok();
-            let rel_str = rel_path.map(|p| p.to_string_lossy().to_string());
+            // Path format: projects/github.com/owner/repo/path/to/file.age
+            // The first 3 path components are the project URL (host/owner/repo)
+            // The rest is the file path within the project
+            let rel_path = match path.strip_prefix(&projects_dir) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
 
-            if let Some(rel) = rel_str {
-                // Split into project url and filename
-                let parts: Vec<&str> = rel.rsplitn(2, '/').collect();
-                if parts.len() != 2 {
-                    continue;
-                }
-                let filename = parts[0].trim_end_matches(".age");
-                let project_url = parts[1].replace('\\', "/"); // Handle Windows paths
+            let components: Vec<_> = rel_path.components().collect();
+            if components.len() < 4 {
+                // Need at least: host, owner, repo, file
+                continue;
+            }
 
-                // Check if this project is in our collab's projects list
-                if !collab_config.projects.iter().any(|p| p == &project_url) {
-                    continue;
-                }
+            // First 3 components = project URL (github.com/owner/repo)
+            let project_url = format!(
+                "{}/{}/{}",
+                components[0].as_os_str().to_string_lossy(),
+                components[1].as_os_str().to_string_lossy(),
+                components[2].as_os_str().to_string_lossy()
+            );
 
-                // Find local project
-                let local_project = match project_map.get(&project_url) {
-                    Some(p) => p,
-                    None => continue,
-                };
+            // Rest = file path (may be nested: path/to/file.age)
+            let file_path: PathBuf = components[3..].iter().map(|c| c.as_os_str()).collect();
+            let file_path_str = file_path.to_string_lossy();
+            let filename = file_path_str.trim_end_matches(".age");
 
-                // Decrypt and write
-                let encrypted = match std::fs::read(path) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
+            // Check if this project is in our collab's projects list
+            if !collab_config.projects.iter().any(|p| p == &project_url) {
+                continue;
+            }
 
-                match crate::security::decrypt_with_identity(&encrypted, &identity) {
-                    Ok(decrypted) => {
-                        let dest = local_project.join(filename);
-                        // Only write if content differs
-                        let should_write = if dest.exists() {
-                            std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
-                        } else {
-                            true
-                        };
+            // Find local project
+            let local_project = match project_map.get(&project_url) {
+                Some(p) => p,
+                None => continue,
+            };
 
-                        if should_write {
-                            std::fs::write(&dest, decrypted)?;
-                            log::debug!(
-                                "Synced collab secret: {} -> {}",
-                                filename,
-                                local_project.display()
-                            );
+            // Decrypt and write
+            let encrypted = match std::fs::read(path) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            match crate::security::decrypt_with_identity(&encrypted, &identity) {
+                Ok(decrypted) => {
+                    // Security: reject paths with traversal patterns
+                    if filename.contains("..") || filename.starts_with('/') {
+                        log::warn!("Path traversal attempt blocked: {}", filename);
+                        continue;
+                    }
+
+                    let dest = local_project.join(filename);
+
+                    // Validate destination stays within project (defense-in-depth)
+                    let canonical_project = match local_project.canonicalize() {
+                        Ok(p) => p,
+                        Err(_) => continue, // Project doesn't exist, skip
+                    };
+
+                    // Create parent directories first so we can canonicalize
+                    if let Some(parent) = dest.parent() {
+                        if std::fs::create_dir_all(parent).is_err() {
+                            continue;
                         }
                     }
-                    Err(_) => {
-                        // Not a recipient, skip silently
+
+                    // For new files, check that parent is within project
+                    let check_path = if dest.exists() {
+                        dest.canonicalize().ok()
+                    } else {
+                        dest.parent().and_then(|p| p.canonicalize().ok())
+                    };
+
+                    if let Some(canonical_check) = check_path {
+                        if !canonical_check.starts_with(&canonical_project) {
+                            log::warn!("Path traversal attempt blocked: {}", filename);
+                            continue;
+                        }
+                    }
+
+                    // Only write if content differs
+                    let should_write = if dest.exists() {
+                        std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
+                    } else {
+                        true
+                    };
+
+                    if should_write {
+                        std::fs::write(&dest, decrypted)?;
+                        log::debug!(
+                            "Synced collab secret: {} -> {}",
+                            filename,
+                            local_project.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("not a recipient") || err_str.contains("no matching keys") {
+                        log::debug!("Collab secret {}: not a recipient, skipping", filename);
+                    } else {
+                        log::warn!("Failed to decrypt collab secret {}: {}", filename, e);
                     }
                 }
             }
@@ -639,7 +691,7 @@ fn decrypt_from_repo(
 
     // Decrypt project-local configs
     if config.project_configs.enabled {
-        decrypt_project_configs(config, sync_path, home, machine_state, &key)?;
+        decrypt_project_configs(config, sync_path, home, machine_state, state, &key)?;
     }
 
     Ok(())
@@ -650,6 +702,7 @@ fn decrypt_project_configs(
     sync_path: &Path,
     home: &Path,
     machine_state: &MachineState,
+    state: &SyncState,
     key: &[u8],
 ) -> Result<()> {
     use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
@@ -765,11 +818,8 @@ fn decrypt_project_configs(
                                     .map(|c| format!("{:x}", Sha256::digest(c)));
 
                                 // Check if local has changed since last sync
-                                let state = SyncState::load().ok();
-                                let last_synced_hash = state
-                                    .as_ref()
-                                    .and_then(|s| s.files.get(&state_key))
-                                    .map(|f| f.hash.clone());
+                                let last_synced_hash =
+                                    state.files.get(&state_key).map(|f| f.hash.clone());
 
                                 let local_modified =
                                     local_hash.is_some() && local_hash != last_synced_hash;
@@ -1563,18 +1613,17 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
         if !dry_run {
             let team_git = GitBackend::open(&team_repo_dir)?;
             team_git.pull()?;
-        }
 
-        Output::success(&format!("Team '{}' synced", team_name));
+            Output::success(&format!("Team '{}' synced", team_name));
 
-        // Push changes if we have write access
-        if !dry_run && !team_config.read_only {
-            let team_git = GitBackend::open(&team_repo_dir)?;
-            if team_git.has_changes()? {
+            // Push changes if we have write access
+            if !team_config.read_only && team_git.has_changes()? {
                 let state = SyncState::load()?;
                 team_git.commit("Update team configs", &state.machine_id)?;
                 team_git.push()?;
             }
+        } else {
+            Output::success(&format!("Team '{}' synced", team_name));
         }
     }
 

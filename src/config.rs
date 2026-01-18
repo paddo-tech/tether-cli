@@ -651,6 +651,15 @@ impl Config {
 
     /// Get collab directory for a specific collab name
     pub fn collab_dir(collab_name: &str) -> Result<PathBuf> {
+        // Defense-in-depth: validate collab name to prevent path traversal
+        if collab_name.is_empty()
+            || collab_name.contains('/')
+            || collab_name.contains('\\')
+            || collab_name.contains("..")
+            || collab_name.starts_with('.')
+        {
+            anyhow::bail!("Invalid collab name: {}", collab_name);
+        }
         Ok(Self::config_dir()?.join("collabs").join(collab_name))
     }
 
