@@ -516,3 +516,67 @@ fn sync_simple_manager(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_last_upgrade_creates_entry() {
+        let mut state = SyncState {
+            machine_id: "test".to_string(),
+            last_sync: chrono::Utc::now(),
+            files: HashMap::new(),
+            packages: HashMap::new(),
+            last_upgrade: None,
+            last_upgrade_with_updates: None,
+            deferred_casks: Vec::new(),
+            deferred_casks_hash: None,
+        };
+
+        assert!(!state.packages.contains_key("brew"));
+
+        update_last_upgrade(&mut state, "brew");
+
+        assert!(state.packages.contains_key("brew"));
+        let pkg_state = state.packages.get("brew").unwrap();
+        assert!(pkg_state.last_upgrade.is_some());
+    }
+
+    #[test]
+    fn test_update_last_upgrade_updates_existing() {
+        let original_time = chrono::Utc::now() - chrono::Duration::hours(1);
+        let original_modified = Some(original_time - chrono::Duration::hours(2));
+
+        let mut state = SyncState {
+            machine_id: "test".to_string(),
+            last_sync: chrono::Utc::now(),
+            files: HashMap::new(),
+            packages: HashMap::new(),
+            last_upgrade: None,
+            last_upgrade_with_updates: None,
+            deferred_casks: Vec::new(),
+            deferred_casks_hash: None,
+        };
+
+        state.packages.insert(
+            "brew".to_string(),
+            PackageState {
+                last_sync: original_time,
+                last_modified: original_modified,
+                last_upgrade: Some(original_time),
+                hash: "existing_hash".to_string(),
+            },
+        );
+
+        update_last_upgrade(&mut state, "brew");
+
+        let pkg_state = state.packages.get("brew").unwrap();
+        // last_upgrade should be updated to now (newer than original)
+        assert!(pkg_state.last_upgrade.unwrap() > original_time);
+        // Other fields preserved via and_modify
+        assert_eq!(pkg_state.last_modified, original_modified);
+        assert_eq!(pkg_state.last_sync, original_time);
+        assert_eq!(pkg_state.hash, "existing_hash");
+    }
+}
