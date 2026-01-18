@@ -804,3 +804,35 @@ pub async fn remove(collab_name: Option<&str>) -> Result<()> {
     Output::success(&format!("Removed collab '{}'", name));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_collab_name_valid() {
+        assert!(validate_collab_name("my-project").is_ok());
+        assert!(validate_collab_name("project_dotfiles").is_ok());
+        assert!(validate_collab_name("MyProject123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_collab_name_empty() {
+        assert!(validate_collab_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_collab_name_path_traversal() {
+        assert!(validate_collab_name("..").is_err());
+        assert!(validate_collab_name("foo/bar").is_err());
+        assert!(validate_collab_name("foo\\bar").is_err());
+        assert!(validate_collab_name("../etc").is_err());
+        assert!(validate_collab_name("foo/..").is_err());
+    }
+
+    #[test]
+    fn test_validate_collab_name_hidden() {
+        assert!(validate_collab_name(".hidden").is_err());
+        assert!(validate_collab_name(".git").is_err());
+    }
+}
