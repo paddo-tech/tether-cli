@@ -236,7 +236,11 @@ async fn import_brew(
             formulae: missing_formulae,
             casks: Vec::new(),
         };
-        if brew.import_manifest(&formulae_manifest.generate()).await.is_ok() {
+        if brew
+            .import_manifest(&formulae_manifest.generate())
+            .await
+            .is_ok()
+        {
             installed_any = true;
         }
     }
