@@ -37,7 +37,7 @@ use anyhow::Result;
 use std::path::Path;
 
 /// Check if a pattern contains glob metacharacters
-fn is_glob_pattern(pattern: &str) -> bool {
+pub fn is_glob_pattern(pattern: &str) -> bool {
     pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
 }
 

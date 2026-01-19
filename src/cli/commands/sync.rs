@@ -528,7 +528,9 @@ fn decrypt_from_repo(
         }
 
         let pattern = entry.path();
-        let create_if_missing = entry.create_if_missing();
+        // Glob patterns default to create_if_missing = true (sync all matching files from other machines)
+        let create_if_missing =
+            entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
 
         // Expand glob pattern by scanning sync repo for matching .enc files
         let expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
