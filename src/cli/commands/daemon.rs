@@ -87,16 +87,32 @@ pub async fn stop() -> Result<()> {
         }
     }
 
-    for _ in 0..20 {
+    // Graceful: wait up to 10 seconds
+    for _ in 0..50 {
         if !is_process_running(pid) {
             break;
         }
         sleep(Duration::from_millis(200)).await;
     }
 
+    // Force kill if still running
+    if is_process_running(pid) {
+        log::debug!("Daemon did not exit gracefully, sending SIGKILL");
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+
+        // Wait for forced termination
+        for _ in 0..10 {
+            if !is_process_running(pid) {
+                break;
+            }
+            sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    // Final check
     if is_process_running(pid) {
         return Err(anyhow::anyhow!(
-            "Daemon did not exit after signaling. Check logs: {}",
+            "Daemon did not exit after SIGKILL. Check logs: {}",
             paths.log.display()
         ));
     }

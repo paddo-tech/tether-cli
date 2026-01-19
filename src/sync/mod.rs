@@ -36,6 +36,85 @@ pub use team::{
 use anyhow::Result;
 use std::path::Path;
 
+/// Check if a pattern contains glob metacharacters
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
+}
+
+/// Expand glob patterns in dotfile paths.
+/// Returns vec of relative paths (e.g., ".config/gcloud/foo.json").
+/// If pattern has no glob chars, returns it unchanged.
+/// Logs warning if glob pattern matches nothing.
+pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
+    if !is_glob_pattern(pattern) {
+        return vec![pattern.to_string()];
+    }
+
+    let full_pattern = home.join(pattern);
+    match glob::glob(&full_pattern.to_string_lossy()) {
+        Ok(paths) => {
+            let expanded: Vec<String> = paths
+                .filter_map(Result::ok)
+                .filter_map(|p| {
+                    p.strip_prefix(home)
+                        .ok()
+                        .map(|r| r.to_string_lossy().to_string())
+                })
+                .collect();
+            if expanded.is_empty() {
+                log::warn!("Glob pattern '{}' matched no files", pattern);
+                vec![]
+            } else {
+                expanded
+            }
+        }
+        Err(e) => {
+            log::warn!("Invalid glob pattern '{}': {}", pattern, e);
+            vec![]
+        }
+    }
+}
+
+/// Expand glob pattern by scanning what exists in the sync repo's dotfiles dir.
+/// Used during pull to find .enc files matching a pattern.
+/// Logs warning if glob pattern matches nothing.
+pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> {
+    if !is_glob_pattern(pattern) {
+        return vec![pattern.to_string()];
+    }
+
+    // Convert dotfile pattern to enc filename pattern
+    // e.g., ".config/gcloud/*.json" -> "config/gcloud/*.json.enc"
+    let filename_pattern = pattern.trim_start_matches('.');
+    let enc_pattern = format!("{}.enc", filename_pattern);
+
+    let full_pattern = dotfiles_dir.join(&enc_pattern);
+    match glob::glob(&full_pattern.to_string_lossy()) {
+        Ok(paths) => {
+            let expanded: Vec<String> = paths
+                .filter_map(Result::ok)
+                .filter_map(|p| {
+                    p.strip_prefix(dotfiles_dir).ok().and_then(|r| {
+                        let s = r.to_string_lossy();
+                        // Remove .enc suffix and add leading dot
+                        s.strip_suffix(".enc").map(|s| format!(".{}", s))
+                    })
+                })
+                .collect();
+            if expanded.is_empty() {
+                log::warn!("Glob pattern '{}' matched no files in sync repo", pattern);
+                vec![]
+            } else {
+                expanded
+            }
+        }
+        Err(e) => {
+            log::warn!("Invalid glob pattern '{}': {}", pattern, e);
+            vec![]
+        }
+    }
+}
+
 /// Atomically write content to a file by writing to a temp file and renaming.
 /// This prevents file corruption from interrupted writes.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
@@ -54,4 +133,75 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     // Persist atomically renames the temp file to the target
     temp.persist(path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_is_glob_pattern() {
+        assert!(!is_glob_pattern(".bashrc"));
+        assert!(!is_glob_pattern(".config/git/config"));
+        assert!(is_glob_pattern("*.json"));
+        assert!(is_glob_pattern(".config/gcloud/*.json"));
+        assert!(is_glob_pattern("file?.txt"));
+        assert!(is_glob_pattern("[abc].txt"));
+    }
+
+    #[test]
+    fn test_expand_dotfile_glob_no_glob() {
+        let tmp = TempDir::new().unwrap();
+        let result = expand_dotfile_glob(".bashrc", tmp.path());
+        assert_eq!(result, vec![".bashrc"]);
+    }
+
+    #[test]
+    fn test_expand_dotfile_glob_with_matches() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join(".config/gcloud");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("foo.json"), "{}").unwrap();
+        std::fs::write(config_dir.join("bar.json"), "{}").unwrap();
+        std::fs::write(config_dir.join("other.txt"), "").unwrap();
+
+        let mut result = expand_dotfile_glob(".config/gcloud/*.json", tmp.path());
+        result.sort();
+        assert_eq!(result, vec![".config/gcloud/bar.json", ".config/gcloud/foo.json"]);
+    }
+
+    #[test]
+    fn test_expand_dotfile_glob_no_matches() {
+        let tmp = TempDir::new().unwrap();
+        let result = expand_dotfile_glob(".config/nonexistent/*.json", tmp.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_expand_from_sync_repo_no_glob() {
+        let tmp = TempDir::new().unwrap();
+        let result = expand_from_sync_repo(".bashrc", tmp.path());
+        assert_eq!(result, vec![".bashrc"]);
+    }
+
+    #[test]
+    fn test_expand_from_sync_repo_with_matches() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("config/gcloud");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("foo.json.enc"), "encrypted").unwrap();
+        std::fs::write(config_dir.join("bar.json.enc"), "encrypted").unwrap();
+
+        let mut result = expand_from_sync_repo(".config/gcloud/*.json", tmp.path());
+        result.sort();
+        assert_eq!(result, vec![".config/gcloud/bar.json", ".config/gcloud/foo.json"]);
+    }
+
+    #[test]
+    fn test_expand_from_sync_repo_no_matches() {
+        let tmp = TempDir::new().unwrap();
+        let result = expand_from_sync_repo(".config/nonexistent/*.json", tmp.path());
+        assert!(result.is_empty());
+    }
 }
