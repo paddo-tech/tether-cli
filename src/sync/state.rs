@@ -42,6 +42,14 @@ pub struct PackageState {
     pub hash: String,
 }
 
+/// Tracks a checkout of a project on this machine
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckoutInfo {
+    pub path: PathBuf,
+    /// Short hash for identification (first 8 chars of SHA256 of canonical path)
+    pub checkout_id: String,
+}
+
 /// Machine state stored in sync repo for cross-machine comparison
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineState {
@@ -72,6 +80,9 @@ pub struct MachineState {
     /// Project configs ignored on this machine (project_key -> list of relative paths)
     #[serde(default)]
     pub ignored_project_configs: HashMap<String, Vec<String>>,
+    /// Multiple checkouts per project URL (project_key -> list of checkouts)
+    #[serde(default)]
+    pub checkouts: HashMap<String, Vec<CheckoutInfo>>,
 }
 
 impl Default for MachineState {
@@ -99,6 +110,7 @@ impl MachineState {
             ignored_dotfiles: Vec::new(),
             project_configs: HashMap::new(),
             ignored_project_configs: HashMap::new(),
+            checkouts: HashMap::new(),
         }
     }
 
@@ -456,6 +468,68 @@ mod tests {
             Some(&vec!["typescript".to_string()])
         );
         assert_eq!(loaded.files.get(".zshrc"), Some(&"abc123".to_string()));
+    }
+
+    #[test]
+    fn test_checkout_info_roundtrip() {
+        let info = CheckoutInfo {
+            path: PathBuf::from("/Users/test/Projects/repo"),
+            checkout_id: "abc12345".to_string(),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        let loaded: CheckoutInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.path, info.path);
+        assert_eq!(loaded.checkout_id, info.checkout_id);
+    }
+
+    #[test]
+    fn test_machine_state_checkouts_roundtrip() {
+        let temp = TempDir::new().unwrap();
+        let sync_path = temp.path();
+        std::fs::create_dir_all(sync_path.join("machines")).unwrap();
+
+        let mut state = MachineState::new("test-machine");
+        state.checkouts.insert(
+            "github.com/user/repo".to_string(),
+            vec![
+                CheckoutInfo {
+                    path: PathBuf::from("/home/user/work/repo"),
+                    checkout_id: "aabb1122".to_string(),
+                },
+                CheckoutInfo {
+                    path: PathBuf::from("/home/user/personal/repo"),
+                    checkout_id: "ccdd3344".to_string(),
+                },
+            ],
+        );
+
+        state.save_to_repo(sync_path).unwrap();
+
+        let loaded = MachineState::load_from_repo(sync_path, "test-machine")
+            .unwrap()
+            .unwrap();
+
+        let checkouts = loaded.checkouts.get("github.com/user/repo").unwrap();
+        assert_eq!(checkouts.len(), 2);
+        assert_eq!(checkouts[0].checkout_id, "aabb1122");
+        assert_eq!(checkouts[1].checkout_id, "ccdd3344");
+    }
+
+    #[test]
+    fn test_machine_state_checkouts_defaults_empty() {
+        // Simulate loading old state without checkouts field
+        let old_json = r#"{
+            "machine_id": "test",
+            "hostname": "test-host",
+            "last_sync": "2024-01-01T00:00:00Z",
+            "files": {},
+            "packages": {}
+        }"#;
+
+        let loaded: MachineState = serde_json::from_str(old_json).unwrap();
+        assert!(loaded.checkouts.is_empty());
     }
 
     #[test]

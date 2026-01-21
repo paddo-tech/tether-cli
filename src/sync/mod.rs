@@ -19,14 +19,14 @@ pub use conflict::{
 };
 pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;
-pub use git::{extract_org_from_normalized_url, GitBackend};
+pub use git::{checkout_id_from_path, extract_org_from_normalized_url, GitBackend};
 pub use layers::{
     init_layers, list_team_layer_files, map_team_to_personal_name, merge_layers, remerge_all,
     sync_dotfile_with_layers, sync_team_to_layer, LayerSyncResult,
 };
 pub use merge::{detect_file_type, merge_files, FileType};
 pub use packages::{import_packages, sync_packages};
-pub use state::{FileState, MachineState, SyncState};
+pub use state::{CheckoutInfo, FileState, MachineState, SyncState};
 pub use team::{
     default_local_patterns, discover_symlinkable_dirs, extract_org_from_url,
     extract_team_name_from_url, find_team_for_project, get_project_org, glob_match, is_local_file,
@@ -34,7 +34,25 @@ pub use team::{
 };
 
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Get the canonical storage path for a project config file.
+/// Files are stored at ~/.tether/projects/<normalized_url>/<rel_path>
+pub fn canonical_project_file_path(normalized_url: &str, rel_path: &str) -> Result<PathBuf> {
+    // Validate no path traversal in inputs
+    if normalized_url.contains("..") || rel_path.contains("..") {
+        anyhow::bail!("Path traversal not allowed in project path");
+    }
+    if normalized_url.starts_with('/') || rel_path.starts_with('/') {
+        anyhow::bail!("Absolute paths not allowed in project path");
+    }
+
+    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
+    Ok(home
+        .join(".tether/projects")
+        .join(normalized_url)
+        .join(rel_path))
+}
 
 /// Check if a pattern contains glob metacharacters
 pub fn is_glob_pattern(pattern: &str) -> bool {
@@ -168,7 +186,10 @@ mod tests {
 
         let mut result = expand_dotfile_glob(".config/gcloud/*.json", tmp.path());
         result.sort();
-        assert_eq!(result, vec![".config/gcloud/bar.json", ".config/gcloud/foo.json"]);
+        assert_eq!(
+            result,
+            vec![".config/gcloud/bar.json", ".config/gcloud/foo.json"]
+        );
     }
 
     #[test]
@@ -195,7 +216,10 @@ mod tests {
 
         let mut result = expand_from_sync_repo(".config/gcloud/*.json", tmp.path());
         result.sort();
-        assert_eq!(result, vec![".config/gcloud/bar.json", ".config/gcloud/foo.json"]);
+        assert_eq!(
+            result,
+            vec![".config/gcloud/bar.json", ".config/gcloud/foo.json"]
+        );
     }
 
     #[test]

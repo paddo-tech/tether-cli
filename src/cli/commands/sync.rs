@@ -3,13 +3,35 @@ use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
 };
+use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
 use crate::sync::{
     import_packages, sync_packages, GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+/// Build a map of normalized project URLs to all local checkout paths
+fn build_project_map(search_paths: &[PathBuf]) -> HashMap<String, Vec<PathBuf>> {
+    let mut project_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for search_path in search_paths {
+        if !search_path.exists() {
+            continue;
+        }
+        if let Ok(repos) = find_git_repos(search_path) {
+            for repo in repos {
+                if let Ok(url) = get_remote_url(&repo) {
+                    let normalized = normalize_remote_url(&url);
+                    project_map.entry(normalized).or_default().push(repo);
+                }
+            }
+        }
+    }
+
+    project_map
+}
 
 pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     if dry_run {
@@ -299,8 +321,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
 /// Sync secrets from collab repos to local projects
 fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
-    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
-
     let teams = match &config.teams {
         Some(t) if !t.collabs.is_empty() => t,
         _ => return Ok(()), // No collabs configured
@@ -328,21 +348,8 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
             .collect()
     };
 
-    // Build map of normalized_url -> local_path
-    let mut project_map: std::collections::HashMap<String, PathBuf> =
-        std::collections::HashMap::new();
-    for search_path in &search_paths {
-        if search_path.exists() {
-            if let Ok(repos) = find_git_repos(search_path) {
-                for repo in repos {
-                    if let Ok(url) = get_remote_url(&repo) {
-                        let normalized = normalize_remote_url(&url);
-                        project_map.insert(normalized, repo);
-                    }
-                }
-            }
-        }
-    }
+    // Build map of normalized_url -> list of local checkouts
+    let project_map = build_project_map(&search_paths);
 
     // Load user's identity for decryption
     let identity = match crate::security::load_identity(None) {
@@ -420,10 +427,10 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                 continue;
             }
 
-            // Find local project
-            let local_project = match project_map.get(&project_url) {
-                Some(p) => p,
-                None => continue,
+            // Find local checkouts for this project
+            let checkouts = match project_map.get(&project_url) {
+                Some(c) if !c.is_empty() => c,
+                _ => continue,
             };
 
             // Decrypt and write
@@ -440,49 +447,52 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                         continue;
                     }
 
-                    let dest = local_project.join(filename);
+                    // Write to all checkouts of this project
+                    for local_project in checkouts {
+                        let dest = local_project.join(filename);
 
-                    // Validate destination stays within project (defense-in-depth)
-                    let canonical_project = match local_project.canonicalize() {
-                        Ok(p) => p,
-                        Err(_) => continue, // Project doesn't exist, skip
-                    };
+                        // Validate destination stays within project (defense-in-depth)
+                        let canonical_project = match local_project.canonicalize() {
+                            Ok(p) => p,
+                            Err(_) => continue, // Project doesn't exist, skip
+                        };
 
-                    // Create parent directories first so we can canonicalize
-                    if let Some(parent) = dest.parent() {
-                        if std::fs::create_dir_all(parent).is_err() {
-                            continue;
+                        // Create parent directories first so we can canonicalize
+                        if let Some(parent) = dest.parent() {
+                            if std::fs::create_dir_all(parent).is_err() {
+                                continue;
+                            }
                         }
-                    }
 
-                    // For new files, check that parent is within project
-                    let check_path = if dest.exists() {
-                        dest.canonicalize().ok()
-                    } else {
-                        dest.parent().and_then(|p| p.canonicalize().ok())
-                    };
+                        // For new files, check that parent is within project
+                        let check_path = if dest.exists() {
+                            dest.canonicalize().ok()
+                        } else {
+                            dest.parent().and_then(|p| p.canonicalize().ok())
+                        };
 
-                    if let Some(canonical_check) = check_path {
-                        if !canonical_check.starts_with(&canonical_project) {
-                            log::warn!("Path traversal attempt blocked: {}", filename);
-                            continue;
+                        if let Some(canonical_check) = check_path {
+                            if !canonical_check.starts_with(&canonical_project) {
+                                log::warn!("Path traversal attempt blocked: {}", filename);
+                                continue;
+                            }
                         }
-                    }
 
-                    // Only write if content differs
-                    let should_write = if dest.exists() {
-                        std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
-                    } else {
-                        true
-                    };
+                        // Only write if content differs
+                        let should_write = if dest.exists() {
+                            std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
+                        } else {
+                            true
+                        };
 
-                    if should_write {
-                        std::fs::write(&dest, decrypted)?;
-                        log::debug!(
-                            "Synced collab secret: {} -> {}",
-                            filename,
-                            local_project.display()
-                        );
+                        if should_write {
+                            std::fs::write(&dest, &decrypted)?;
+                            log::debug!(
+                                "Synced collab secret: {} -> {}",
+                                filename,
+                                local_project.display()
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -529,8 +539,7 @@ fn decrypt_from_repo(
 
         let pattern = entry.path();
         // Glob patterns default to create_if_missing = true (sync all matching files from other machines)
-        let create_if_missing =
-            entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
+        let create_if_missing = entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
 
         // Expand glob pattern by scanning sync repo for matching .enc files
         let expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
@@ -723,6 +732,72 @@ fn decrypt_from_repo(
     Ok(())
 }
 
+/// Ensure checkout_file is a symlink pointing to canonical_path.
+/// Handles: missing, wrong symlink, real file (migrates to symlink).
+fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    if let Some(parent) = checkout_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let metadata = std::fs::symlink_metadata(checkout_file);
+
+    match metadata {
+        Ok(m) if m.file_type().is_symlink() => {
+            // Already a symlink - check if correct target
+            if let Ok(target) = std::fs::read_link(checkout_file) {
+                if target == canonical_path {
+                    return Ok(()); // Correct symlink exists
+                }
+            }
+            // Wrong target - remove and recreate
+            std::fs::remove_file(checkout_file)?;
+        }
+        Ok(m) if m.file_type().is_dir() => {
+            anyhow::bail!(
+                "Cannot create symlink: directory exists at {}",
+                checkout_file.display()
+            );
+        }
+        Ok(_) => {
+            // Real file exists - migrate content to canonical if newer
+            let checkout_content = std::fs::read(checkout_file)?;
+            let canonical_content = std::fs::read(canonical_path).ok();
+
+            if canonical_content.as_ref() != Some(&checkout_content) {
+                let checkout_mtime = std::fs::metadata(checkout_file)?.modified()?;
+                let canonical_mtime = std::fs::metadata(canonical_path)
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+                if checkout_mtime > canonical_mtime {
+                    // Checkout is newer - write to canonical
+                    if let Some(parent) = canonical_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    crate::sync::atomic_write(canonical_path, &checkout_content)?;
+                }
+            }
+            std::fs::remove_file(checkout_file)?;
+        }
+        Err(_) => {
+            // Doesn't exist - will create symlink below
+        }
+    }
+
+    // Ensure canonical file exists before creating symlink
+    if !canonical_path.exists() {
+        anyhow::bail!(
+            "Cannot create symlink: canonical file does not exist at {}",
+            canonical_path.display()
+        );
+    }
+
+    symlink(canonical_path, checkout_file)?;
+    Ok(())
+}
+
 fn decrypt_project_configs(
     config: &Config,
     sync_path: &Path,
@@ -731,7 +806,6 @@ fn decrypt_project_configs(
     state: &SyncState,
     key: &[u8],
 ) -> Result<()> {
-    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
     use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
 
@@ -743,26 +817,24 @@ fn decrypt_project_configs(
     // Lazy backup dir creation
     let mut backup_dir: Option<PathBuf> = None;
 
-    let mut repo_map = std::collections::HashMap::new();
-    for search_path_str in &config.project_configs.search_paths {
-        let search_path = if let Some(stripped) = search_path_str.strip_prefix("~/") {
-            home.join(stripped)
-        } else {
-            PathBuf::from(search_path_str)
-        };
-
-        if let Ok(repos) = find_git_repos(&search_path) {
-            for repo_path in repos {
-                if let Ok(remote_url) = get_remote_url(&repo_path) {
-                    let normalized = normalize_remote_url(&remote_url);
-                    repo_map.insert(normalized, repo_path);
-                }
+    // Build map of project URLs -> all local checkouts
+    let search_paths: Vec<PathBuf> = config
+        .project_configs
+        .search_paths
+        .iter()
+        .map(|p| {
+            if let Some(stripped) = p.strip_prefix("~/") {
+                home.join(stripped)
+            } else {
+                PathBuf::from(p)
             }
-        }
-    }
+        })
+        .collect();
+
+    let repo_map = build_project_map(&search_paths);
 
     // Find all unique project names from encrypted files
-    let mut projects_in_sync: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut projects_in_sync: HashSet<String> = HashSet::new();
 
     for entry in WalkDir::new(&projects_dir).follow_links(false) {
         let entry = match entry {
@@ -798,94 +870,121 @@ fn decrypt_project_configs(
     for project_name in &projects_in_sync {
         let project_dir = projects_dir.join(project_name);
 
-        if let Some(local_repo_path) = repo_map.get(project_name) {
-            // Process files for this project
-            for file_entry in WalkDir::new(&project_dir).follow_links(false) {
-                let file_entry = match file_entry {
-                    Ok(e) => e,
+        let checkouts = match repo_map.get(project_name) {
+            Some(c) if !c.is_empty() => c,
+            _ => continue,
+        };
+
+        // Process files for this project
+        for file_entry in WalkDir::new(&project_dir).follow_links(false) {
+            let file_entry = match file_entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            if !file_entry.file_type().is_file() {
+                continue;
+            }
+
+            let enc_file = file_entry.path();
+            let enc_file_name = enc_file.to_string_lossy();
+
+            if enc_file_name.ends_with(".enc") {
+                let rel_path = match enc_file.strip_prefix(&project_dir) {
+                    Ok(p) => p,
                     Err(_) => continue,
                 };
+                let rel_path_str = rel_path.to_string_lossy();
+                let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
 
-                if !file_entry.file_type().is_file() {
-                    continue;
+                // Skip if this project config is ignored on this machine
+                if let Some(ignored_paths) = machine_state.ignored_project_configs.get(project_name)
+                {
+                    if ignored_paths.contains(&rel_path_no_enc.to_string()) {
+                        continue;
+                    }
                 }
 
-                let enc_file = file_entry.path();
-                let enc_file_name = enc_file.to_string_lossy();
+                if let Ok(encrypted_content) = std::fs::read(enc_file) {
+                    match crate::security::decrypt_file(&encrypted_content, key) {
+                        Ok(plaintext) => {
+                            let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                            let state_key = format!("project:{}/{}", project_name, rel_path_no_enc);
+                            let canonical_path = crate::sync::canonical_project_file_path(
+                                project_name,
+                                rel_path_no_enc,
+                            )?;
 
-                if enc_file_name.ends_with(".enc") {
-                    let rel_path = match enc_file.strip_prefix(&project_dir) {
-                        Ok(p) => p,
-                        Err(_) => continue,
-                    };
-                    let rel_path_str = rel_path.to_string_lossy();
-                    let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
+                            // Check if any checkout has local modifications
+                            let last_synced_hash =
+                                state.files.get(&state_key).map(|f| f.hash.clone());
+                            let mut has_local_mods = false;
 
-                    // Skip if this project config is ignored on this machine
-                    if let Some(ignored_paths) =
-                        machine_state.ignored_project_configs.get(project_name)
-                    {
-                        if ignored_paths.contains(&rel_path_no_enc.to_string()) {
-                            continue;
-                        }
-                    }
-
-                    if let Ok(encrypted_content) = std::fs::read(enc_file) {
-                        match crate::security::decrypt_file(&encrypted_content, key) {
-                            Ok(plaintext) => {
+                            for local_repo_path in checkouts {
                                 let local_file = local_repo_path.join(rel_path_no_enc);
-                                let state_key =
-                                    format!("project:{}/{}", project_name, rel_path_no_enc);
-
-                                let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
-                                let local_content = std::fs::read(&local_file).ok();
-                                let local_hash = local_content
-                                    .as_ref()
-                                    .map(|c| format!("{:x}", Sha256::digest(c)));
-
-                                // Check if local has changed since last sync
-                                let last_synced_hash =
-                                    state.files.get(&state_key).map(|f| f.hash.clone());
-
-                                let local_modified =
-                                    local_hash.is_some() && local_hash != last_synced_hash;
-
-                                if local_hash.as_ref() != Some(&remote_hash) {
-                                    if local_modified {
-                                        // Local has changes not yet synced - don't overwrite, they'll be pushed
-                                        Output::info(&format!(
-                                            "{}: {} (local changes will be pushed)",
-                                            project_name, rel_path_no_enc
-                                        ));
-                                    } else {
-                                        // Backup before overwriting
-                                        if local_file.exists() {
-                                            if backup_dir.is_none() {
-                                                backup_dir = Some(create_backup_dir()?);
-                                            }
-                                            let backup_path =
-                                                format!("{}/{}", project_name, rel_path_no_enc);
-                                            backup_file(
-                                                backup_dir.as_ref().unwrap(),
-                                                "projects",
-                                                &backup_path,
-                                                &local_file,
-                                            )?;
-                                        }
-                                        // Local unchanged or doesn't exist - safe to write remote
-                                        if let Some(parent) = local_file.parent() {
-                                            std::fs::create_dir_all(parent)?;
-                                        }
-                                        std::fs::write(&local_file, plaintext)?;
+                                // Read actual content (follows symlinks)
+                                if let Ok(local_content) = std::fs::read(&local_file) {
+                                    let local_hash =
+                                        format!("{:x}", Sha256::digest(&local_content));
+                                    if Some(&local_hash) != last_synced_hash.as_ref()
+                                        && local_hash != remote_hash
+                                    {
+                                        has_local_mods = true;
+                                        break;
                                     }
                                 }
                             }
-                            Err(e) => {
-                                Output::warning(&format!(
-                                    "  {}: {} (failed to decrypt: {})",
-                                    project_name, rel_path_no_enc, e
+
+                            if has_local_mods {
+                                Output::info(&format!(
+                                    "{}: {} (local changes will be pushed)",
+                                    project_name, rel_path_no_enc
                                 ));
+                            } else {
+                                // Write decrypted content to canonical location
+                                let canonical_content = std::fs::read(&canonical_path).ok();
+                                let canonical_hash = canonical_content
+                                    .as_ref()
+                                    .map(|c| format!("{:x}", Sha256::digest(c)));
+
+                                if canonical_hash.as_ref() != Some(&remote_hash) {
+                                    // Backup canonical file if it exists and differs
+                                    if canonical_path.exists() {
+                                        if backup_dir.is_none() {
+                                            backup_dir = Some(create_backup_dir()?);
+                                        }
+                                        let backup_path =
+                                            format!("{}/{}", project_name, rel_path_no_enc);
+                                        backup_file(
+                                            backup_dir.as_ref().unwrap(),
+                                            "projects",
+                                            &backup_path,
+                                            &canonical_path,
+                                        )?;
+                                    }
+
+                                    crate::sync::atomic_write(&canonical_path, &plaintext)?;
+                                }
                             }
+
+                            // Create symlinks in all checkouts
+                            for local_repo_path in checkouts {
+                                let checkout_file = local_repo_path.join(rel_path_no_enc);
+                                if let Err(e) = ensure_symlink(&checkout_file, &canonical_path) {
+                                    log::warn!(
+                                        "Failed to create symlink for {}/{}: {}",
+                                        project_name,
+                                        rel_path_no_enc,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            Output::warning(&format!(
+                                "  {}: {} (failed to decrypt: {})",
+                                project_name, rel_path_no_enc, e
+                            ));
                         }
                     }
                 }
@@ -1387,6 +1486,41 @@ async fn build_machine_state(
     for paths in machine_state.project_configs.values_mut() {
         paths.sort();
         paths.dedup();
+    }
+
+    // Track all checkouts of projects on this machine
+    machine_state.checkouts.clear();
+    let search_paths: Vec<PathBuf> = config
+        .project_configs
+        .search_paths
+        .iter()
+        .map(|p| {
+            if let Some(stripped) = p.strip_prefix("~/") {
+                home.join(stripped)
+            } else {
+                PathBuf::from(p)
+            }
+        })
+        .collect();
+
+    let project_map = build_project_map(&search_paths);
+    for (normalized_url, checkouts) in project_map {
+        use crate::sync::git::checkout_id_from_path;
+        use crate::sync::CheckoutInfo;
+
+        let checkout_infos: Vec<CheckoutInfo> = checkouts
+            .into_iter()
+            .map(|path| {
+                let checkout_id = checkout_id_from_path(&path);
+                CheckoutInfo { path, checkout_id }
+            })
+            .collect();
+
+        if !checkout_infos.is_empty() {
+            machine_state
+                .checkouts
+                .insert(normalized_url, checkout_infos);
+        }
     }
 
     Ok(machine_state)

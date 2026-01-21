@@ -300,6 +300,14 @@ pub fn extract_org_from_normalized_url(normalized_url: &str) -> Option<String> {
     }
 }
 
+/// Generate a short checkout ID from a path (first 8 chars of SHA256 of canonical path)
+pub fn checkout_id_from_path(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let hash = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    format!("{:x}", hash)[..8].to_string()
+}
+
 /// Check if a file is gitignored in its repository
 pub fn is_gitignored(file_path: &Path) -> Result<bool> {
     // Get the directory containing the file
@@ -529,5 +537,22 @@ mod tests {
         assert!(!should_skip_dir("lib"));
         assert!(!should_skip_dir("app"));
         assert!(!should_skip_dir("components"));
+    }
+
+    #[test]
+    fn test_checkout_id_from_path() {
+        use std::path::Path;
+
+        // Same path should give same ID
+        let id1 = checkout_id_from_path(Path::new("/tmp/test/repo"));
+        let id2 = checkout_id_from_path(Path::new("/tmp/test/repo"));
+        assert_eq!(id1, id2);
+
+        // Different paths should give different IDs
+        let id3 = checkout_id_from_path(Path::new("/tmp/other/repo"));
+        assert_ne!(id1, id3);
+
+        // ID should be 8 characters
+        assert_eq!(id1.len(), 8);
     }
 }
