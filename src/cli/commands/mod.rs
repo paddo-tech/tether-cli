@@ -6,6 +6,7 @@ mod identity;
 mod ignore;
 mod init;
 mod machines;
+mod packages;
 mod resolve;
 mod restore;
 mod status;
@@ -112,6 +113,13 @@ pub enum Commands {
 
     /// Upgrade all installed packages
     Upgrade,
+
+    /// List and manage installed packages
+    Packages {
+        /// List packages without interactive selection
+        #[arg(long)]
+        list: bool,
+    },
 
     /// Restore files from backup
     Restore {
@@ -576,6 +584,7 @@ impl Cli {
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade => upgrade::run().await,
+            Commands::Packages { list } => packages::run(*list).await,
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,
                 RestoreAction::File { from, file } => {

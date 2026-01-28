@@ -402,6 +402,38 @@ impl PackageManager for BrewManager {
 
         Ok(())
     }
+
+    async fn uninstall(&self, package: &str) -> Result<()> {
+        let output = Command::new("brew")
+            .args(["uninstall", package])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("brew uninstall failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
+    async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
+        let output = Command::new("brew")
+            .args(["uses", "--installed", package])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(vec![]);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
+    }
 }
 
 #[cfg(test)]

@@ -169,4 +169,18 @@ impl PackageManager for UvManager {
 
         Ok(())
     }
+
+    async fn uninstall(&self, package: &str) -> Result<()> {
+        let output = Command::new("uv")
+            .args(["tool", "uninstall", package])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("uv tool uninstall failed: {}", stderr));
+        }
+
+        Ok(())
+    }
 }

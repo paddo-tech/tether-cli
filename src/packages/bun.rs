@@ -215,6 +215,20 @@ impl PackageManager for BunManager {
 
         Ok(())
     }
+
+    async fn uninstall(&self, package: &str) -> Result<()> {
+        let output = Command::new("bun")
+            .args(["remove", "-g", package])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("bun remove failed: {}", stderr));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

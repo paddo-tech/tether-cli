@@ -180,4 +180,18 @@ impl PackageManager for NpmManager {
 
         Ok(())
     }
+
+    async fn uninstall(&self, package: &str) -> Result<()> {
+        let output = Command::new("npm")
+            .args(["uninstall", "-g", package])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("npm uninstall failed: {}", stderr));
+        }
+
+        Ok(())
+    }
 }

@@ -179,4 +179,58 @@ impl PackageManager for GemManager {
 
         Ok(())
     }
+
+    async fn uninstall(&self, package: &str) -> Result<()> {
+        let output = Command::new("gem")
+            .args(["uninstall", package, "-x", "-a"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("gem uninstall failed: {}", stderr));
+        }
+
+        Ok(())
+    }
+
+    async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
+        // gem dependency -R shows reverse dependencies
+        let output = Command::new("gem")
+            .args(["dependency", "-R", package])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(vec![]);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut dependents = Vec::new();
+
+        // Parse output - look for "Used by" section
+        let mut in_used_by = false;
+        for line in stdout.lines() {
+            if line.contains("Used by") {
+                in_used_by = true;
+                continue;
+            }
+            if in_used_by {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || !trimmed.starts_with(' ') {
+                    break;
+                }
+                // Extract gem name (format: "  gemname-version")
+                if let Some(name) = trimmed.split_whitespace().next() {
+                    // Strip version suffix if present
+                    let name = name.split('-').next().unwrap_or(name);
+                    if !name.is_empty() {
+                        dependents.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(dependents)
+    }
 }
