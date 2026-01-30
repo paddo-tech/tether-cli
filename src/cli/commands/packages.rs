@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::collections::HashMap;
 
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
@@ -14,7 +13,13 @@ struct PackageEntry {
     version: Option<String>,
 }
 
-pub async fn run(list_only: bool) -> Result<()> {
+struct ManagerInfo {
+    name: String,
+    display: String,
+    packages: Vec<PackageInfo>,
+}
+
+pub async fn run(list_only: bool, yes: bool) -> Result<()> {
     let managers: Vec<Box<dyn PackageManager>> = vec![
         Box::new(BrewManager::new()),
         Box::new(NpmManager::new()),
@@ -25,7 +30,7 @@ pub async fn run(list_only: bool) -> Result<()> {
     ];
 
     // Collect packages grouped by manager
-    let mut packages_by_manager: HashMap<String, Vec<PackageInfo>> = HashMap::new();
+    let mut manager_infos: Vec<ManagerInfo> = Vec::new();
 
     for manager in &managers {
         if !manager.is_available().await {
@@ -35,7 +40,11 @@ pub async fn run(list_only: bool) -> Result<()> {
         match manager.list_installed().await {
             Ok(packages) => {
                 if !packages.is_empty() {
-                    packages_by_manager.insert(manager.name().to_string(), packages);
+                    manager_infos.push(ManagerInfo {
+                        name: manager.name().to_string(),
+                        display: format!("{} ({} packages)", manager.name(), packages.len()),
+                        packages,
+                    });
                 }
             }
             Err(e) => {
@@ -48,59 +57,42 @@ pub async fn run(list_only: bool) -> Result<()> {
         }
     }
 
-    if packages_by_manager.is_empty() {
+    if manager_infos.is_empty() {
         Output::info("No packages found");
         return Ok(());
     }
 
+    manager_infos.sort_by(|a, b| a.name.cmp(&b.name));
+
     if list_only {
-        print_package_list(&packages_by_manager);
+        print_package_list(&manager_infos);
         return Ok(());
     }
 
     // Interactive mode: first select managers to expand
-    let mut manager_options: Vec<String> = packages_by_manager
-        .iter()
-        .map(|(name, pkgs)| format!("{} ({} packages)", name, pkgs.len()))
-        .collect();
-    manager_options.sort();
+    let option_refs: Vec<&str> = manager_infos.iter().map(|m| m.display.as_str()).collect();
 
-    let option_refs: Vec<&str> = manager_options.iter().map(|s| s.as_str()).collect();
-
-    let selected_managers =
+    let selected_indices =
         match Prompt::multi_select("Select package managers to expand:", option_refs, &[]) {
             Ok(indices) => indices,
             Err(_) => return Ok(()),
         };
 
-    if selected_managers.is_empty() {
+    if selected_indices.is_empty() {
         Output::info("No managers selected");
         return Ok(());
     }
 
-    // Get selected manager names
-    let selected_names: Vec<String> = selected_managers
-        .iter()
-        .map(|&i| {
-            manager_options[i]
-                .split(' ')
-                .next()
-                .unwrap_or("")
-                .to_string()
-        })
-        .collect();
-
     // Build package list from selected managers only
     let mut all_packages: Vec<PackageEntry> = Vec::new();
-    for name in &selected_names {
-        if let Some(pkgs) = packages_by_manager.get(name) {
-            for pkg in pkgs {
-                all_packages.push(PackageEntry {
-                    manager: name.clone(),
-                    name: pkg.name.clone(),
-                    version: pkg.version.clone(),
-                });
-            }
+    for &idx in &selected_indices {
+        let info = &manager_infos[idx];
+        for pkg in &info.packages {
+            all_packages.push(PackageEntry {
+                manager: info.name.clone(),
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+            });
         }
     }
 
@@ -134,33 +126,32 @@ pub async fn run(list_only: bool) -> Result<()> {
     // Process each selected package
     for idx in selected {
         let pkg = &all_packages[idx];
-        uninstall_package(&managers, pkg).await?;
+        uninstall_package(&managers, pkg, yes).await?;
     }
 
     Output::success("Uninstall complete");
     Ok(())
 }
 
-fn print_package_list(packages_by_manager: &HashMap<String, Vec<PackageInfo>>) {
-    let mut managers: Vec<_> = packages_by_manager.keys().collect();
-    managers.sort();
-
-    for manager in managers {
-        if let Some(packages) = packages_by_manager.get(manager) {
-            Output::section(manager);
-            for pkg in packages {
-                let display = match &pkg.version {
-                    Some(v) => format!("{} ({})", pkg.name, v),
-                    None => pkg.name.clone(),
-                };
-                Output::list_item(&display);
-            }
+fn print_package_list(manager_infos: &[ManagerInfo]) {
+    for info in manager_infos {
+        Output::section(&info.name);
+        for pkg in &info.packages {
+            let display = match &pkg.version {
+                Some(v) => format!("{} ({})", pkg.name, v),
+                None => pkg.name.clone(),
+            };
+            Output::list_item(&display);
         }
     }
     println!();
 }
 
-async fn uninstall_package(managers: &[Box<dyn PackageManager>], pkg: &PackageEntry) -> Result<()> {
+async fn uninstall_package(
+    managers: &[Box<dyn PackageManager>],
+    pkg: &PackageEntry,
+    yes: bool,
+) -> Result<()> {
     let manager = managers
         .iter()
         .find(|m| m.name() == pkg.manager)
@@ -176,7 +167,7 @@ async fn uninstall_package(managers: &[Box<dyn PackageManager>], pkg: &PackageEn
             dependents.join(", ")
         ));
 
-        if !Prompt::confirm(&format!("Uninstall {} anyway?", pkg.name), false)? {
+        if !yes && !Prompt::confirm(&format!("Uninstall {} anyway?", pkg.name), false)? {
             Output::dim(&format!("Skipped {}", pkg.name));
             return Ok(());
         }

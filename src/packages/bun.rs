@@ -86,6 +86,11 @@ impl PackageManager for BunManager {
             // Handle scoped packages like @google/gemini-cli@0.18.4
             let (name, version) = parse_package_version(cleaned);
 
+            // Skip invalid entries (e.g. bare "@" from malformed output)
+            if name.is_empty() || name == "@" {
+                continue;
+            }
+
             packages.push(PackageInfo { name, version });
         }
 

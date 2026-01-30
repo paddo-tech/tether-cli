@@ -584,7 +584,7 @@ impl Cli {
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade => upgrade::run().await,
-            Commands::Packages { list } => packages::run(*list).await,
+            Commands::Packages { list } => packages::run(*list, self.yes).await,
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,
                 RestoreAction::File { from, file } => {
