@@ -7,14 +7,6 @@ use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-fn format_diff_line(symbol: &str, status: &str, pkg: &str) -> String {
-    match status {
-        "added" => format!("  {} {}", symbol.green(), pkg),
-        "removed" => format!("  {} {}", symbol.red(), pkg),
-        _ => format!("  {} {}", symbol.yellow(), pkg),
-    }
-}
-
 pub async fn run(machine: Option<&str>) -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
@@ -216,7 +208,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                             "removed" => "-",
                             _ => "~",
                         };
-                        println!("{}", format_diff_line(symbol, &status, &pkg));
+                        Output::diff_line(symbol, &pkg, &status);
                     }
                     println!();
                 }
@@ -282,7 +274,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                     "removed" => "-",
                     _ => "~",
                 };
-                println!("{}", format_diff_line(symbol, &status, &pkg));
+                Output::diff_line(symbol, &pkg, &status);
             }
             println!();
         }
@@ -360,16 +352,19 @@ fn diff_packages(
 }
 
 fn diff_package_lists(remote: &[&str], local: &[&str]) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let remote_set: HashSet<&str> = remote.iter().copied().collect();
+    let local_set: HashSet<&str> = local.iter().copied().collect();
     let mut diff = Vec::new();
 
     for pkg in local {
-        if !remote.contains(pkg) {
+        if !remote_set.contains(pkg) {
             diff.push((pkg.to_string(), "added".to_string()));
         }
     }
 
     for pkg in remote {
-        if !local.contains(pkg) {
+        if !local_set.contains(pkg) {
             diff.push((pkg.to_string(), "removed".to_string()));
         }
     }
@@ -495,7 +490,7 @@ fn show_machine_diff(current: &MachineState, other: &MachineState) -> Result<()>
             println!("{}", format!("{}:", manager).bright_cyan().bold());
             for (pkg, status) in diffs {
                 let symbol = if status == "added" { "+" } else { "-" };
-                println!("{}", format_diff_line(symbol, &status, &pkg));
+                Output::diff_line(symbol, &pkg, &status);
             }
             println!();
         }

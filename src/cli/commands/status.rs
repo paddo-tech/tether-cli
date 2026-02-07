@@ -1,11 +1,9 @@
+use crate::cli::output::relative_time;
 use crate::cli::Output;
 use crate::config::Config;
-use crate::sync::{ConflictState, FileState, SyncState};
+use crate::sync::{ConflictState, SyncState};
 use anyhow::Result;
-use chrono::Local;
-use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
-use std::path::PathBuf;
 
 pub async fn run() -> Result<()> {
     let config = match Config::load() {
@@ -26,7 +24,25 @@ pub async fn run() -> Result<()> {
     Output::section("Tether Status");
     println!();
 
-    // Features summary (one line)
+    // Machine
+    Output::key_value("Machine", &state.machine_id);
+
+    // Last Sync
+    let sync_time = relative_time(state.last_sync);
+    let sync_badge = Output::badge("synced", true);
+    Output::key_value("Last Sync", &format!("{}  {}", sync_time, sync_badge));
+
+    // Daemon status
+    let pid = read_daemon_pid()?;
+    let (status_label, is_running) = match pid {
+        Some(pid) if is_process_running(pid) => (format!("Running (PID {pid})"), true),
+        Some(pid) => (format!("Not running (stale PID {pid})"), false),
+        None => ("Not running".to_string(), false),
+    };
+    let daemon_badge = Output::badge(if is_running { "active" } else { "stopped" }, is_running);
+    Output::key_value("Daemon", &format!("{}  {}", status_label, daemon_badge));
+
+    // Features summary
     let mut enabled_features = Vec::new();
     if config.features.personal_dotfiles {
         enabled_features.push("dotfiles");
@@ -41,102 +57,28 @@ pub async fn run() -> Result<()> {
         enabled_features.push("collab");
     }
     if !enabled_features.is_empty() {
-        Output::dim(&format!("Features: {}", enabled_features.join(", ")));
-        println!();
+        Output::key_value("Features", &enabled_features.join(", "));
     }
-
-    // Daemon status
-    let pid = read_daemon_pid()?;
-    let (status_label, is_running) = match pid {
-        Some(pid) if is_process_running(pid) => (format!("Running (PID {pid})"), true),
-        Some(pid) => (format!("Not running (stale PID {pid})"), false),
-        None => ("Not running".to_string(), false),
-    };
-
-    let mut daemon_table = Output::table_full();
-    daemon_table
-        .set_header(vec![
-            Cell::new("Daemon")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new(""),
-        ])
-        .add_row(vec![
-            Cell::new("Status"),
-            Cell::new(format!("{} {}", Output::DOT, status_label)).fg(if is_running {
-                Color::Green
-            } else {
-                Color::Yellow
-            }),
-        ])
-        .add_row(vec![
-            Cell::new("Log"),
-            Cell::new(daemon_log_path()?.display().to_string()),
-        ]);
-    println!("{daemon_table}");
-    println!();
 
     // Conflicts warning
     let conflict_state = ConflictState::load().unwrap_or_default();
     if !conflict_state.conflicts.is_empty() {
-        let mut conflict_table = Output::table_full();
-        conflict_table.set_header(vec![
-            Cell::new(format!("{}  Conflicts", Output::WARN))
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Red),
-            Cell::new("Detected")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Red),
-        ]);
-
+        println!();
+        println!("  {}", format!("{} Conflicts", Output::WARN).red().bold());
+        Output::divider();
         for conflict in &conflict_state.conflicts {
-            let local_time = conflict.detected_at.with_timezone(&Local);
-            conflict_table.add_row(vec![
-                Cell::new(&conflict.file_path).fg(Color::Yellow),
-                Cell::new(local_time.format("%Y-%m-%d %H:%M").to_string()),
-            ]);
+            let time = relative_time(conflict.detected_at);
+            println!(
+                "  {:<18} {}",
+                conflict.file_path.yellow(),
+                time.bright_black()
+            );
         }
-        println!("{conflict_table}");
         println!(
             "{}",
             "Run 'tether resolve' to fix conflicts".yellow().bold()
         );
-        println!();
     }
-
-    // Sync info
-    let mut sync_table = Output::table_full();
-    sync_table
-        .set_header(vec![
-            Cell::new("Sync")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new(""),
-        ])
-        .add_row(vec![
-            Cell::new("Last Sync"),
-            Cell::new(
-                state
-                    .last_sync
-                    .with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M")
-                    .to_string(),
-            )
-            .fg(Color::Green),
-        ])
-        .add_row(vec![
-            Cell::new("Last Upgrade"),
-            Cell::new(
-                state
-                    .last_upgrade
-                    .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "Never".to_string()),
-            ),
-        ])
-        .add_row(vec![Cell::new("Machine"), Cell::new(&state.machine_id)])
-        .add_row(vec![Cell::new("Backend"), Cell::new(&config.backend.url)]);
-    println!("{sync_table}");
-    println!();
 
     // Split files into dotfiles and project configs
     let (dotfiles, project_configs): (Vec<_>, Vec<_>) = state
@@ -144,50 +86,33 @@ pub async fn run() -> Result<()> {
         .iter()
         .partition(|(file, _)| !file.starts_with("project:"));
 
-    // Dotfiles - minimal table for lists (only show if feature enabled)
+    // Dotfiles
     if config.features.personal_dotfiles && !dotfiles.is_empty() {
-        let mut files_table = Output::table_minimal();
-        files_table.set_header(vec![
-            Cell::new("Dotfiles")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Status")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Modified")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-        ]);
-
+        println!();
+        println!("  {}", "Dotfiles".bright_cyan().bold());
+        Output::divider();
         for (file, file_state) in &dotfiles {
-            let (status, color) = if file_state.synced {
-                (format!("{} Synced", Output::CHECK), Color::Green)
+            let (icon, status) = if file_state.synced {
+                (Output::CHECK.green().to_string(), "Synced".to_string())
             } else {
-                (format!("{} Modified", Output::WARN), Color::Yellow)
+                (Output::WARN.yellow().to_string(), "Modified".to_string())
             };
-
-            files_table.add_row(vec![
-                Cell::new(file),
-                Cell::new(status).fg(color),
-                Cell::new(
-                    file_state
-                        .last_modified
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M")
-                        .to_string(),
-                ),
-            ]);
+            let time = relative_time(file_state.last_modified);
+            println!(
+                "  {:<18} {} {:<10} {}",
+                file,
+                icon,
+                status,
+                time.bright_black()
+            );
         }
-        println!("{files_table}");
-        println!();
     } else if config.features.personal_dotfiles {
-        Output::dim("  No dotfiles synced yet");
         println!();
+        Output::dim("  No dotfiles synced yet");
     }
 
-    // Project configs - split by team vs personal
+    // Project configs
     if !project_configs.is_empty() {
-        // Build org -> team mapping
         let mut org_to_team: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         if let Some(teams) = &config.teams {
@@ -200,14 +125,14 @@ pub async fn run() -> Result<()> {
             }
         }
 
-        // Split projects by ownership
-        let mut team_projects: std::collections::HashMap<String, Vec<(&String, &FileState)>> =
-            std::collections::HashMap::new();
-        let mut personal_projects: Vec<(&String, &FileState)> = Vec::new();
+        let mut team_projects: std::collections::HashMap<
+            String,
+            Vec<(&String, &crate::sync::FileState)>,
+        > = std::collections::HashMap::new();
+        let mut personal_projects: Vec<(&String, &crate::sync::FileState)> = Vec::new();
 
         for (file, file_state) in &project_configs {
             let display_name = file.strip_prefix("project:").unwrap_or(file);
-            // Extract org from path like "github.com/org/repo/..."
             if let Some(org) = crate::sync::extract_org_from_normalized_url(display_name) {
                 if let Some(team_name) = org_to_team.get(&org.to_lowercase()) {
                     team_projects
@@ -222,127 +147,81 @@ pub async fn run() -> Result<()> {
             }
         }
 
-        // Show team projects first
         for (team_name, projects) in &team_projects {
-            let mut project_table = Output::table_minimal();
-            project_table.set_header(vec![
-                Cell::new(format!("Team: {} (project secrets)", team_name))
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Status")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Modified")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-            ]);
-
+            println!();
+            println!(
+                "  {}",
+                format!("Team: {} (project secrets)", team_name)
+                    .bright_cyan()
+                    .bold()
+            );
+            Output::divider();
             for (file, file_state) in projects {
-                let (status, color) = if file_state.synced {
-                    (format!("{} Synced", Output::CHECK), Color::Green)
-                } else {
-                    (format!("{} Modified", Output::WARN), Color::Yellow)
-                };
                 let display_name = (*file).strip_prefix("project:").unwrap_or(file);
-                project_table.add_row(vec![
-                    Cell::new(display_name),
-                    Cell::new(status).fg(color),
-                    Cell::new(
-                        file_state
-                            .last_modified
-                            .with_timezone(&Local)
-                            .format("%Y-%m-%d %H:%M")
-                            .to_string(),
-                    ),
-                ]);
+                let (icon, status) = if file_state.synced {
+                    (Output::CHECK.green().to_string(), "Synced".to_string())
+                } else {
+                    (Output::WARN.yellow().to_string(), "Modified".to_string())
+                };
+                let time = relative_time(file_state.last_modified);
+                println!(
+                    "  {:<18} {} {:<10} {}",
+                    display_name,
+                    icon,
+                    status,
+                    time.bright_black()
+                );
             }
-            println!("{project_table}");
-            println!();
         }
 
-        // Show personal projects
         if !personal_projects.is_empty() {
-            let mut project_table = Output::table_minimal();
-            project_table.set_header(vec![
-                Cell::new("Personal Project Configs")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Status")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-                Cell::new("Modified")
-                    .add_attribute(Attribute::Bold)
-                    .fg(Color::Cyan),
-            ]);
-
-            for (file, file_state) in &personal_projects {
-                let (status, color) = if file_state.synced {
-                    (format!("{} Synced", Output::CHECK), Color::Green)
-                } else {
-                    (format!("{} Modified", Output::WARN), Color::Yellow)
-                };
-                let display_name = (*file).strip_prefix("project:").unwrap_or(file);
-                project_table.add_row(vec![
-                    Cell::new(display_name),
-                    Cell::new(status).fg(color),
-                    Cell::new(
-                        file_state
-                            .last_modified
-                            .with_timezone(&Local)
-                            .format("%Y-%m-%d %H:%M")
-                            .to_string(),
-                    ),
-                ]);
-            }
-            println!("{project_table}");
             println!();
+            println!("  {}", "Personal Project Configs".bright_cyan().bold());
+            Output::divider();
+            for (file, file_state) in &personal_projects {
+                let display_name = (*file).strip_prefix("project:").unwrap_or(file);
+                let (icon, status) = if file_state.synced {
+                    (Output::CHECK.green().to_string(), "Synced".to_string())
+                } else {
+                    (Output::WARN.yellow().to_string(), "Modified".to_string())
+                };
+                let time = relative_time(file_state.last_modified);
+                println!(
+                    "  {:<18} {} {:<10} {}",
+                    display_name,
+                    icon,
+                    status,
+                    time.bright_black()
+                );
+            }
         }
     }
 
-    // Packages - minimal table for lists (only show if feature enabled)
+    // Packages
     if config.features.personal_packages && !state.packages.is_empty() {
-        let mut packages_table = Output::table_minimal();
-        packages_table.set_header(vec![
-            Cell::new("Packages")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Modified")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Upgraded")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-        ]);
-
+        println!();
+        println!("  {}", "Packages".bright_cyan().bold());
+        Output::divider();
         for (manager, pkg_state) in &state.packages {
-            packages_table.add_row(vec![
-                Cell::new(format!("{} {}", Output::CHECK, manager)).fg(Color::Green),
-                Cell::new(
-                    pkg_state
-                        .last_modified
-                        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-                Cell::new(
-                    pkg_state
-                        .last_upgrade
-                        .map(|t| t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-            ]);
+            let time = pkg_state
+                .last_modified
+                .map(relative_time)
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "  {:<18} {} {:<10} {}",
+                manager,
+                Output::CHECK.green(),
+                "Synced",
+                time.bright_black()
+            );
         }
-        println!("{packages_table}");
-        println!();
     } else if config.features.personal_packages {
-        Output::dim("  No packages synced yet");
         println!();
+        Output::dim("  No packages synced yet");
     }
 
+    println!();
     Ok(())
-}
-
-fn daemon_log_path() -> Result<PathBuf> {
-    Ok(Config::config_dir()?.join("daemon.log"))
 }
 
 fn read_daemon_pid() -> Result<Option<u32>> {
@@ -361,10 +240,9 @@ fn read_daemon_pid() -> Result<Option<u32>> {
 fn is_process_running(pid: u32) -> bool {
     unsafe {
         if libc::kill(pid as libc::pid_t, 0) == 0 {
-            true
-        } else {
-            let err = std::io::Error::last_os_error();
-            err.kind() != std::io::ErrorKind::NotFound
+            return true;
         }
+        // ESRCH = no such process, EPERM = exists but no permission
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 }

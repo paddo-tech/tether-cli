@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
 
 pub async fn list() -> Result<()> {
@@ -28,22 +28,19 @@ pub async fn list() -> Result<()> {
     println!("{}", "Synced Machines".bright_cyan().bold());
     println!();
 
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            Cell::new("Machine")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Hostname")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Last Sync")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
-        ]);
+    let mut table = Output::table_full();
+    table.set_header(vec![
+        Cell::new("Machine")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Hostname")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Last Sync")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
+    ]);
 
     for machine in &machines {
         let is_current = &machine.machine_id == current_machine;

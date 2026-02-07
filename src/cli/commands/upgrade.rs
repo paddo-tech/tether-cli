@@ -19,22 +19,32 @@ pub async fn run() -> Result<()> {
         Box::new(UvManager::new()),
     ];
 
-    let mut any_upgraded = false;
-    let mut any_actual_updates = false;
-
-    for manager in &managers {
+    // Determine which managers are available and have packages
+    let mut available: Vec<(usize, usize)> = Vec::new();
+    for (i, manager) in managers.iter().enumerate() {
         if !manager.is_available().await {
             continue;
         }
-
         let packages = manager.list_installed().await?;
         if packages.is_empty() {
             continue;
         }
+        available.push((i, packages.len()));
+    }
 
+    let total = available.len();
+    let mut any_upgraded = false;
+    let mut any_actual_updates = false;
+
+    for (step_num, (i, pkg_count)) in available.iter().enumerate() {
+        let manager = &managers[*i];
         let hash_before = manager.compute_manifest_hash().await.ok();
 
-        println!("  {} ({} packages)...", manager.name(), packages.len());
+        Output::step(
+            step_num + 1,
+            total,
+            &format!("{} ({} packages)", manager.name(), pkg_count),
+        );
         manager.update_all().await?;
         any_upgraded = true;
 
