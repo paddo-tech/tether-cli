@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-02-08
+
+### Added
+
+- Interactive TUI dashboard as default command (`tether` or `tether dashboard`)
+- Daemon start/stop toggle from dashboard (`d` key)
+- Inline config editor in dashboard Config tab (tab 5) with bool toggles and validated text fields
+- Save error feedback in status bar when config write fails
+- `relative_time` helper for human-friendly timestamps
+- `Output::key_value`, `Output::badge`, `Output::divider`, `Output::diff_line` helpers
+
+### Changed
+
+- `tether status` uses compact layout with relative times instead of tables
+- `tether config features` uses `Output::key_value_colored` instead of custom `print_feature`
+- `tether diff` uses `Output::diff_line` and `HashSet` for O(1) package lookups
+- `tether machines` uses `Output::table_full` helper
+- `tether upgrade` shows step counter (e.g. "1/3")
+
 ## [1.6.3] - 2026-02-08
 
 ### Fixed
