@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2] - 2026-02-07
+
+### Fixed
+
+- Daemon sync no longer overwrites local dotfile edits — adds `local_unchanged` guard matching manual sync
+- Daemon now expands glob patterns (e.g. `.config/fish/*`) in both decrypt and local-to-repo phases
+- Daemon respects `ignored_dotfiles` from machine state
+- Daemon clears stale conflicts after successful file apply
+- Daemon backs up files before overwriting with remote content
+
 ## [1.6.1] - 2026-01-30
 
 ### Fixed

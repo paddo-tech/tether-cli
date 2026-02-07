@@ -1,4 +1,4 @@
-use crate::config::{is_safe_dotfile_path, Config};
+use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
 };
@@ -214,52 +214,103 @@ impl DaemonServer {
         let mut conflict_state = ConflictState::load().unwrap_or_default();
         let mut new_conflicts = Vec::new();
 
+        // Load machine state for ignored_dotfiles filtering
+        let machine_state_for_decrypt =
+            MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
+
+        // Lazy backup dir for overwrite protection
+        let mut backup_dir: Option<PathBuf> = None;
+
         // Apply remote changes first (with conflict detection)
         // Only sync dotfiles if feature enabled
         if config.features.personal_dotfiles && config.security.encrypt_dotfiles {
             let key = crate::security::get_encryption_key()?;
             for entry in &config.dotfiles.files {
-                let file = entry.path();
-
                 // Security: validate path to prevent traversal attacks
-                if !is_safe_dotfile_path(file) {
-                    log::warn!("Skipping unsafe dotfile path: {}", file);
+                if !entry.is_safe_path() {
+                    log::warn!("Skipping unsafe dotfile path: {}", entry.path());
                     continue;
                 }
 
-                let filename = file.trim_start_matches('.');
-                let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
+                let pattern = entry.path();
+                let create_if_missing =
+                    entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
 
-                if enc_file.exists() {
-                    if let Ok(encrypted_content) = std::fs::read(&enc_file) {
-                        if let Ok(plaintext) =
-                            crate::security::decrypt_file(&encrypted_content, &key)
-                        {
-                            let local_file = home.join(file);
+                // Expand glob patterns by scanning sync repo for matching .enc files
+                let expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
 
-                            // Skip if file doesn't exist and create_if_missing is false
-                            if !local_file.exists() && !entry.create_if_missing() {
-                                continue;
-                            }
+                for file in expanded {
+                    // Skip files ignored on this machine
+                    if machine_state_for_decrypt
+                        .ignored_dotfiles
+                        .iter()
+                        .any(|f| f == &file)
+                    {
+                        continue;
+                    }
 
-                            let last_synced_hash = state.files.get(file).map(|f| f.hash.as_str());
+                    let filename = file.trim_start_matches('.');
+                    let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
 
-                            if let Some(conflict) =
-                                detect_conflict(file, &local_file, &plaintext, last_synced_hash)
+                    if enc_file.exists() {
+                        if let Ok(encrypted_content) = std::fs::read(&enc_file) {
+                            if let Ok(plaintext) =
+                                crate::security::decrypt_file(&encrypted_content, &key)
                             {
-                                log::warn!("Conflict detected in {}", file);
-                                new_conflicts.push((
-                                    file.to_string(),
-                                    conflict.local_hash,
-                                    conflict.remote_hash,
-                                ));
-                            } else {
-                                // No conflict, safe to apply remote (create parent dirs if needed)
-                                if let Some(parent) = local_file.parent() {
-                                    std::fs::create_dir_all(parent)?;
+                                let local_file = home.join(&file);
+
+                                // Skip if file doesn't exist and create_if_missing is false
+                                if !local_file.exists() && !create_if_missing {
+                                    continue;
                                 }
-                                write_file_secure(&local_file, &plaintext)?;
-                                log::debug!("Applied remote changes to {}", file);
+
+                                let last_synced_hash =
+                                    state.files.get(&file).map(|f| f.hash.as_str());
+
+                                if let Some(conflict) = detect_conflict(
+                                    &file,
+                                    &local_file,
+                                    &plaintext,
+                                    last_synced_hash,
+                                ) {
+                                    log::warn!("Conflict detected in {}", file);
+                                    new_conflicts.push((
+                                        file.to_string(),
+                                        conflict.local_hash,
+                                        conflict.remote_hash,
+                                    ));
+                                } else {
+                                    // No true conflict - preserve local-only changes
+                                    let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                                    let local_hash = std::fs::read(&local_file)
+                                        .ok()
+                                        .map(|c| format!("{:x}", Sha256::digest(&c)));
+                                    let local_unchanged = local_hash.as_deref() == last_synced_hash;
+                                    if local_unchanged && local_hash.as_ref() != Some(&remote_hash)
+                                    {
+                                        // Backup before overwriting
+                                        if local_file.exists() {
+                                            if backup_dir.is_none() {
+                                                backup_dir =
+                                                    Some(crate::sync::create_backup_dir()?);
+                                            }
+                                            crate::sync::backup_file(
+                                                backup_dir.as_ref().unwrap(),
+                                                "dotfiles",
+                                                &file,
+                                                &local_file,
+                                            )?;
+                                        }
+                                        if let Some(parent) = local_file.parent() {
+                                            std::fs::create_dir_all(parent)?;
+                                        }
+                                        write_file_secure(&local_file, &plaintext)?;
+                                        log::debug!("Applied remote changes to {}", file);
+                                    } else if !local_unchanged {
+                                        log::debug!("Preserving local changes to {}", file);
+                                    }
+                                    conflict_state.remove_conflict(&file);
+                                }
                             }
                         }
                     }
@@ -268,11 +319,11 @@ impl DaemonServer {
         }
 
         // Save conflicts and notify
+        for (file, local_hash, remote_hash) in &new_conflicts {
+            conflict_state.add_conflict(file, local_hash, remote_hash);
+        }
+        conflict_state.save()?;
         if !new_conflicts.is_empty() {
-            for (file, local_hash, remote_hash) in &new_conflicts {
-                conflict_state.add_conflict(file, local_hash, remote_hash);
-            }
-            conflict_state.save()?;
             notify_conflicts(new_conflicts.len()).ok();
             log::info!(
                 "{} conflicts detected, user notification sent",
@@ -286,51 +337,54 @@ impl DaemonServer {
         // Sync dotfiles to remote (only if feature enabled)
         if config.features.personal_dotfiles {
             for entry in &config.dotfiles.files {
-                let file = entry.path();
-
                 // Security: validate path to prevent traversal attacks
-                if !is_safe_dotfile_path(file) {
-                    log::warn!("Skipping unsafe dotfile path: {}", file);
+                if !entry.is_safe_path() {
+                    log::warn!("Skipping unsafe dotfile path: {}", entry.path());
                     continue;
                 }
 
-                // Skip files with conflicts
-                if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
-                    continue;
-                }
+                let pattern = entry.path();
+                let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
-                let source = home.join(file);
-                if source.exists() {
-                    if let Ok(content) = std::fs::read(&source) {
-                        let hash = format!("{:x}", Sha256::digest(&content));
-                        let file_changed = state
-                            .files
-                            .get(file)
-                            .map(|f| f.hash != hash)
-                            .unwrap_or(true);
+                for file in expanded {
+                    // Skip files with conflicts (by expanded name)
+                    if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
+                        continue;
+                    }
 
-                        if file_changed {
-                            log::info!("File changed: {}", file);
-                            let filename = file.trim_start_matches('.');
+                    let source = home.join(&file);
+                    if source.exists() {
+                        if let Ok(content) = std::fs::read(&source) {
+                            let hash = format!("{:x}", Sha256::digest(&content));
+                            let file_changed = state
+                                .files
+                                .get(&file)
+                                .map(|f| f.hash != hash)
+                                .unwrap_or(true);
 
-                            if config.security.encrypt_dotfiles {
-                                let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt_file(&content, &key)?;
-                                let dest = dotfiles_dir.join(format!("{}.enc", filename));
-                                if let Some(parent) = dest.parent() {
-                                    std::fs::create_dir_all(parent)?;
+                            if file_changed {
+                                log::info!("File changed: {}", file);
+                                let filename = file.trim_start_matches('.');
+
+                                if config.security.encrypt_dotfiles {
+                                    let key = crate::security::get_encryption_key()?;
+                                    let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                    let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                                    if let Some(parent) = dest.parent() {
+                                        std::fs::create_dir_all(parent)?;
+                                    }
+                                    std::fs::write(&dest, encrypted)?;
+                                } else {
+                                    let dest = dotfiles_dir.join(filename);
+                                    if let Some(parent) = dest.parent() {
+                                        std::fs::create_dir_all(parent)?;
+                                    }
+                                    std::fs::write(&dest, &content)?;
                                 }
-                                std::fs::write(&dest, encrypted)?;
-                            } else {
-                                let dest = dotfiles_dir.join(filename);
-                                if let Some(parent) = dest.parent() {
-                                    std::fs::create_dir_all(parent)?;
-                                }
-                                std::fs::write(&dest, &content)?;
+
+                                state.update_file(&file, hash.clone());
+                                changes_made = true;
                             }
-
-                            state.update_file(file, hash.clone());
-                            changes_made = true;
                         }
                     }
                 }
