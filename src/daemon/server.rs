@@ -1,13 +1,13 @@
 use crate::config::Config;
 use crate::packages::{
-    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager,
+    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
 };
 use crate::sync::{
     detect_conflict, import_packages, notify_conflicts, notify_deferred_casks, ConflictState,
     GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
-use chrono::Local;
+use chrono::{Local, Utc};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +27,11 @@ static DAEMON_MODE: AtomicBool = AtomicBool::new(false);
 /// Check if running in daemon mode
 pub fn is_daemon_mode() -> bool {
     DAEMON_MODE.load(Ordering::Relaxed)
+}
+
+enum TickResult {
+    Continue,
+    Exit,
 }
 
 pub struct DaemonServer {
@@ -79,38 +84,14 @@ impl DaemonServer {
             let mut sync_timer = self.sync_interval();
             let mut sigterm = signal(SignalKind::terminate())?;
             let mut sighup = signal(SignalKind::hangup())?;
-
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
-
-            // Skip first tick (immediate)
             sync_timer.tick().await;
 
             loop {
                 tokio::select! {
                     _ = sync_timer.tick() => {
-                        // Check for binary update before doing work
-                        if self.binary_updated() {
-                            log::info!("Binary updated, exiting for restart");
-                            break;
-                        }
-
-                        log::info!("Running periodic sync...");
-                        if let Err(e) = self.run_sync().await {
-                            log::error!("Sync failed: {}", e);
-                        }
-                        // Check if we should run daily package updates
-                        if self.should_run_update() {
-                            log::info!("Running daily package update...");
-                            if let Err(e) = self.run_package_updates().await {
-                                log::error!("Package update failed: {}", e);
-                            }
-                            // Re-check after upgrades (tether itself may have been updated)
-                            if self.binary_updated() {
-                                log::info!("Binary updated during package upgrade, exiting for restart");
-                                break;
-                            }
-                        }
+                        if let TickResult::Exit = self.run_tick().await { break; }
                     },
                     _ = &mut ctrl_c => {
                         log::info!("Received Ctrl+C, stopping daemon");
@@ -135,35 +116,12 @@ impl DaemonServer {
             let mut sync_timer = self.sync_interval();
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
-
-            // Skip first tick (immediate)
             sync_timer.tick().await;
 
             loop {
                 tokio::select! {
                     _ = sync_timer.tick() => {
-                        // Check for binary update before doing work
-                        if self.binary_updated() {
-                            log::info!("Binary updated, exiting for restart");
-                            break;
-                        }
-
-                        log::info!("Running periodic sync...");
-                        if let Err(e) = self.run_sync().await {
-                            log::error!("Sync failed: {}", e);
-                        }
-                        // Check if we should run daily package updates
-                        if self.should_run_update() {
-                            log::info!("Running daily package update...");
-                            if let Err(e) = self.run_package_updates().await {
-                                log::error!("Package update failed: {}", e);
-                            }
-                            // Re-check after upgrades (tether itself may have been updated)
-                            if self.binary_updated() {
-                                log::info!("Binary updated during package upgrade, exiting for restart");
-                                break;
-                            }
-                        }
+                        if let TickResult::Exit = self.run_tick().await { break; }
                     },
                     _ = &mut ctrl_c => {
                         log::info!("Received Ctrl+C, stopping daemon");
@@ -177,6 +135,32 @@ impl DaemonServer {
         Ok(())
     }
 
+    /// Shared tick logic: sync + conditional package updates + binary update checks
+    async fn run_tick(&mut self) -> TickResult {
+        if self.binary_updated() {
+            log::info!("Binary updated, exiting for restart");
+            return TickResult::Exit;
+        }
+
+        log::info!("Running periodic sync...");
+        if let Err(e) = self.run_sync().await {
+            log::error!("Sync failed: {}", e);
+        }
+
+        if self.should_run_update() {
+            log::info!("Running daily package update...");
+            if let Err(e) = self.run_package_updates().await {
+                log::error!("Package update failed: {}", e);
+            }
+            if self.binary_updated() {
+                log::info!("Binary updated during package upgrade, exiting for restart");
+                return TickResult::Exit;
+            }
+        }
+
+        TickResult::Continue
+    }
+
     async fn run_sync(&self) -> Result<()> {
         let config = Config::load()?;
 
@@ -186,8 +170,7 @@ impl DaemonServer {
         }
 
         let sync_path = SyncEngine::sync_path()?;
-        let home =
-            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let home = crate::home_dir()?;
 
         // Pull latest changes
         log::debug!("Pulling latest changes...");
@@ -255,7 +238,7 @@ impl DaemonServer {
                     if enc_file.exists() {
                         if let Ok(encrypted_content) = std::fs::read(&enc_file) {
                             if let Ok(plaintext) =
-                                crate::security::decrypt_file(&encrypted_content, &key)
+                                crate::security::decrypt(&encrypted_content, &key)
                             {
                                 let local_file = home.join(&file);
 
@@ -368,7 +351,7 @@ impl DaemonServer {
 
                                 if config.security.encrypt_dotfiles {
                                     let key = crate::security::get_encryption_key()?;
-                                    let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                    let encrypted = crate::security::encrypt(&content, &key)?;
                                     let dest = dotfiles_dir.join(format!("{}.enc", filename));
                                     if let Some(parent) = dest.parent() {
                                         std::fs::create_dir_all(parent)?;
@@ -495,8 +478,7 @@ impl DaemonServer {
         }
 
         // Sync team project secrets
-        let home =
-            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let home = crate::home_dir()?;
         crate::cli::commands::sync::sync_team_project_secrets(config, &home).ok();
 
         log::info!("Team-only sync complete");
@@ -527,7 +509,6 @@ impl DaemonServer {
                         .unwrap_or(true)
                     {
                         std::fs::write(manifests_dir.join("Brewfile"), &manifest)?;
-                        use chrono::Utc;
                         let now = Utc::now();
                         let existing = state.packages.get("brew");
                         state.packages.insert(
@@ -546,46 +527,54 @@ impl DaemonServer {
             }
         }
 
-        // npm
-        if config.packages.npm.enabled {
-            changes_made |= self
-                .sync_package_manager(&NpmManager::new(), "npm", "npm.txt", state, &manifests_dir)
-                .await?;
-        }
+        let managers: Vec<(Box<dyn PackageManager>, &str, bool)> = vec![
+            (
+                Box::new(NpmManager::new()),
+                "npm.txt",
+                config.packages.npm.enabled,
+            ),
+            (
+                Box::new(PnpmManager::new()),
+                "pnpm.txt",
+                config.packages.pnpm.enabled,
+            ),
+            (
+                Box::new(BunManager::new()),
+                "bun.txt",
+                config.packages.bun.enabled,
+            ),
+            (
+                Box::new(GemManager::new()),
+                "gems.txt",
+                config.packages.gem.enabled,
+            ),
+            (
+                Box::new(UvManager::new()),
+                "uv.txt",
+                config.packages.uv.enabled,
+            ),
+        ];
 
-        // pnpm
-        if config.packages.pnpm.enabled {
-            changes_made |= self
-                .sync_package_manager(
-                    &PnpmManager::new(),
-                    "pnpm",
-                    "pnpm.txt",
-                    state,
-                    &manifests_dir,
-                )
-                .await?;
-        }
-
-        // bun
-        if config.packages.bun.enabled {
-            changes_made |= self
-                .sync_package_manager(&BunManager::new(), "bun", "bun.txt", state, &manifests_dir)
-                .await?;
-        }
-
-        // gem
-        if config.packages.gem.enabled {
-            changes_made |= self
-                .sync_package_manager(&GemManager::new(), "gem", "gems.txt", state, &manifests_dir)
-                .await?;
+        for (manager, filename, enabled) in &managers {
+            if *enabled {
+                changes_made |= self
+                    .sync_package_manager(
+                        manager.as_ref(),
+                        manager.name(),
+                        filename,
+                        state,
+                        &manifests_dir,
+                    )
+                    .await?;
+            }
         }
 
         Ok(changes_made)
     }
 
-    async fn sync_package_manager<P: PackageManager>(
+    async fn sync_package_manager(
         &self,
-        manager: &P,
+        manager: &dyn PackageManager,
         name: &str,
         filename: &str,
         state: &mut SyncState,
@@ -604,7 +593,6 @@ impl DaemonServer {
                 .unwrap_or(true)
             {
                 std::fs::write(manifests_dir.join(filename), &manifest)?;
-                use chrono::Utc;
                 let now = Utc::now();
                 let existing = state.packages.get(name);
                 state.packages.insert(
@@ -657,82 +645,27 @@ impl DaemonServer {
         let config = Config::load()?;
         let mut any_actual_updates = false;
 
-        if config.packages.brew.enabled {
-            let brew = BrewManager::new();
-            if brew.is_available().await {
-                log::info!("Updating Homebrew packages...");
-                let hash_before = brew.compute_manifest_hash().await.ok();
-                if let Err(e) = brew.update_all().await {
-                    log::error!("Homebrew update failed: {}", e);
-                } else {
-                    let hash_after = brew.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
-                }
-            }
-        }
+        let managers: Vec<(Box<dyn PackageManager>, bool)> = vec![
+            (Box::new(BrewManager::new()), config.packages.brew.enabled),
+            (Box::new(NpmManager::new()), config.packages.npm.enabled),
+            (Box::new(PnpmManager::new()), config.packages.pnpm.enabled),
+            (Box::new(BunManager::new()), config.packages.bun.enabled),
+            (Box::new(GemManager::new()), config.packages.gem.enabled),
+            (Box::new(UvManager::new()), config.packages.uv.enabled),
+        ];
 
-        if config.packages.npm.enabled {
-            let npm = NpmManager::new();
-            if npm.is_available().await {
-                log::info!("Updating npm packages...");
-                let hash_before = npm.compute_manifest_hash().await.ok();
-                if let Err(e) = npm.update_all().await {
-                    log::error!("npm update failed: {}", e);
-                } else {
-                    let hash_after = npm.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
-                }
+        for (manager, enabled) in &managers {
+            if !enabled || !manager.is_available().await {
+                continue;
             }
-        }
-
-        if config.packages.pnpm.enabled {
-            let pnpm = PnpmManager::new();
-            if pnpm.is_available().await {
-                log::info!("Updating pnpm packages...");
-                let hash_before = pnpm.compute_manifest_hash().await.ok();
-                if let Err(e) = pnpm.update_all().await {
-                    log::error!("pnpm update failed: {}", e);
-                } else {
-                    let hash_after = pnpm.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
-                }
-            }
-        }
-
-        if config.packages.bun.enabled {
-            let bun = BunManager::new();
-            if bun.is_available().await {
-                log::info!("Updating bun packages...");
-                let hash_before = bun.compute_manifest_hash().await.ok();
-                if let Err(e) = bun.update_all().await {
-                    log::error!("bun update failed: {}", e);
-                } else {
-                    let hash_after = bun.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
-                }
-            }
-        }
-
-        if config.packages.gem.enabled {
-            let gem = GemManager::new();
-            if gem.is_available().await {
-                log::info!("Updating Ruby gems...");
-                let hash_before = gem.compute_manifest_hash().await.ok();
-                if let Err(e) = gem.update_all().await {
-                    log::error!("gem update failed: {}", e);
-                } else {
-                    let hash_after = gem.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
+            log::info!("Updating {} packages...", manager.name());
+            let hash_before = manager.compute_manifest_hash().await.ok();
+            if let Err(e) = manager.update_all().await {
+                log::error!("{} update failed: {}", manager.name(), e);
+            } else {
+                let hash_after = manager.compute_manifest_hash().await.ok();
+                if hash_before != hash_after {
+                    any_actual_updates = true;
                 }
             }
         }

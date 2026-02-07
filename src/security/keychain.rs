@@ -17,7 +17,7 @@ fn encrypted_key_path() -> Result<PathBuf> {
 
 /// Get the path to the cached decrypted key (local only, not synced)
 fn cached_key_path() -> Result<PathBuf> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether").join("key.cache"))
 }
 

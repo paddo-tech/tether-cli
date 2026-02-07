@@ -47,7 +47,7 @@ pub fn canonical_project_file_path(normalized_url: &str, rel_path: &str) -> Resu
         anyhow::bail!("Absolute paths not allowed in project path");
     }
 
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
+    let home = crate::home_dir()?;
     Ok(home
         .join(".tether/projects")
         .join(normalized_url)

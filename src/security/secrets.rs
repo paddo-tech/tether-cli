@@ -1,6 +1,7 @@
 use anyhow::Result;
 use regex::Regex;
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone)]
 pub enum SecretType {
@@ -124,10 +125,10 @@ impl SecretScanner {
     }
 
     fn redact_line(line: &str) -> String {
-        // Redact potential secret values
-        let redacted = Regex::new(r#"[=:]\s*['"]?([a-zA-Z0-9+/=_\-]{8,})['"]?"#)
-            .unwrap()
-            .replace_all(line, "=***REDACTED***");
+        static REDACT_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r#"[=:]\s*['"]?([a-zA-Z0-9+/=_\-]{8,})['"]?"#).unwrap());
+
+        let redacted = REDACT_RE.replace_all(line, "=***REDACTED***");
 
         // Truncate if too long
         if redacted.len() > 80 {
@@ -145,10 +146,11 @@ impl Default for SecretScanner {
 }
 
 /// Scan a file for potential secrets
+static GLOBAL_SCANNER: LazyLock<SecretScanner> = LazyLock::new(SecretScanner::default);
+
 pub fn scan_for_secrets(file_path: &Path) -> Result<Vec<SecretFinding>> {
     let content = std::fs::read_to_string(file_path)?;
-    let scanner = SecretScanner::new()?;
-    Ok(scanner.scan_content(&content))
+    Ok(GLOBAL_SCANNER.scan_content(&content))
 }
 
 #[cfg(test)]

@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.3] - 2026-02-08
+
+### Fixed
+
+- Daemon now syncs and updates uv packages (was missing from daemon loop)
+- Team project secrets now written to all checkouts, not just the last discovered
+- Gem `get_dependents` no longer truncates names at hyphens
+- `should_skip_dir` no longer prunes `.vscode`/`.idea` during project config scanning
+- `tether diff` now shows bun and gem package differences
+- `is_process_running` correctly checks `ESRCH` instead of `ErrorKind::NotFound`
+- Project state key parsing correctly extracts full `host/org/repo` identifier
+- Secret scanner regex compiled once via `LazyLock` instead of per-call
+
+### Changed
+
+- Package manager trait provides default `export_manifest`/`import_manifest`/`remove_unlisted`
+- Daemon `sync_packages` and `run_package_updates` refactored into loops
+- `build_machine_state` and `show_package_diff` refactored into loops
+- Extracted `run_tick()` to deduplicate unix/non-unix daemon run loop
+- Simplified `deserialize_active_teams` serde visitor to `#[serde(untagged)]` enum
+- Removed trivial `encrypt_file`/`decrypt_file` wrappers
+- Centralized `home_dir()` helper, replacing ~32 inline occurrences
+
 ## [1.6.2] - 2026-02-07
 
 ### Fixed

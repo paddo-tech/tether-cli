@@ -82,7 +82,7 @@ pub async fn stop() -> Result<()> {
     let signal_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     if signal_result != 0 {
         let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::NotFound {
+        if err.raw_os_error() != Some(libc::ESRCH) {
             return Err(anyhow::anyhow!("Failed to stop daemon: {}", err));
         }
     }
@@ -177,8 +177,8 @@ fn is_process_running(pid: u32) -> bool {
         if libc::kill(pid as libc::pid_t, 0) == 0 {
             true
         } else {
-            let err = io::Error::last_os_error();
-            err.kind() != io::ErrorKind::NotFound
+            // ESRCH = no such process
+            io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
         }
     }
 }
@@ -203,7 +203,7 @@ fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
 const LAUNCHD_LABEL: &str = "com.tether.daemon";
 
 fn launchd_plist_path() -> Result<PathBuf> {
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
     Ok(home
         .join("Library")
         .join("LaunchAgents")

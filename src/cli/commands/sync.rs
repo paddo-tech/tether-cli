@@ -60,7 +60,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         crate::security::unlock_with_passphrase(&passphrase)?;
     }
     let sync_path = SyncEngine::sync_path()?;
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
 
     // Pull latest changes from personal repo
     let git = GitBackend::open(&sync_path)?;
@@ -147,7 +147,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                let encrypted = crate::security::encrypt(&content, &key)?;
                                 let dest = dotfiles_dir.join(format!("{}.enc", filename));
                                 if let Some(parent) = dest.parent() {
                                     std::fs::create_dir_all(parent)?;
@@ -555,7 +555,7 @@ fn decrypt_from_repo(
 
             if enc_file.exists() {
                 let encrypted_content = std::fs::read(&enc_file)?;
-                match crate::security::decrypt_file(&encrypted_content, &key) {
+                match crate::security::decrypt(&encrypted_content, &key) {
                     Ok(plaintext) => {
                         let local_file = home.join(&file);
 
@@ -692,7 +692,7 @@ fn decrypt_from_repo(
                     }
 
                     if let Ok(encrypted_content) = std::fs::read(file_path) {
-                        match crate::security::decrypt_file(&encrypted_content, &key) {
+                        match crate::security::decrypt(&encrypted_content, &key) {
                             Ok(plaintext) => {
                                 let local_file = home.join(rel_path_no_enc);
                                 if let Some(parent) = local_file.parent() {
@@ -906,7 +906,7 @@ fn decrypt_project_configs(
                 }
 
                 if let Ok(encrypted_content) = std::fs::read(enc_file) {
-                    match crate::security::decrypt_file(&encrypted_content, key) {
+                    match crate::security::decrypt(&encrypted_content, key) {
                         Ok(plaintext) => {
                             let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
                             let state_key = format!("project:{}/{}", project_name, rel_path_no_enc);
@@ -1008,7 +1008,7 @@ fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
     let key = crate::security::get_encryption_key()?;
     let encrypted_content = std::fs::read(&enc_file)?;
 
-    match crate::security::decrypt_file(&encrypted_content, &key) {
+    match crate::security::decrypt(&encrypted_content, &key) {
         Ok(plaintext) => {
             let local_config_path = home.join(".tether/config.toml");
             let local_content = std::fs::read(&local_config_path).ok();
@@ -1074,14 +1074,14 @@ fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) ->
     // Check if file on disk differs
     let file_hash = std::fs::read(&dest).ok().and_then(|enc| {
         let key = crate::security::get_encryption_key().ok()?;
-        crate::security::decrypt_file(&enc, &key)
+        crate::security::decrypt(&enc, &key)
             .ok()
             .map(|plain| format!("{:x}", Sha256::digest(&plain)))
     });
 
     if file_hash.as_ref() != Some(&hash) {
         let key = crate::security::get_encryption_key()?;
-        let encrypted = crate::security::encrypt_file(&content, &key)?;
+        let encrypted = crate::security::encrypt(&content, &key)?;
         std::fs::write(&dest, encrypted)?;
         state.update_file(".tether/config.toml", hash);
     }
@@ -1138,7 +1138,7 @@ fn sync_directories(
 
                     if config.security.encrypt_dotfiles {
                         let key = crate::security::get_encryption_key()?;
-                        let encrypted = crate::security::encrypt_file(&content, &key)?;
+                        let encrypted = crate::security::encrypt(&content, &key)?;
                         std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
                     } else {
                         std::fs::write(&dest, &content)?;
@@ -1176,7 +1176,7 @@ fn sync_directories(
 
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                let encrypted = crate::security::encrypt(&content, &key)?;
                                 std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
                             } else {
                                 std::fs::write(&dest, &content)?;
@@ -1201,7 +1201,8 @@ fn sync_project_configs(
     dry_run: bool,
 ) -> Result<()> {
     use crate::sync::git::{
-        find_git_repos, get_remote_url, is_gitignored, normalize_remote_url, should_skip_dir,
+        find_git_repos, get_remote_url, is_gitignored, normalize_remote_url,
+        should_skip_dir_for_project_configs,
     };
     use walkdir::WalkDir;
 
@@ -1248,7 +1249,7 @@ fn sync_project_configs(
                         e.file_type().is_file()
                             || e.file_name()
                                 .to_str()
-                                .map(|n| !should_skip_dir(n))
+                                .map(|n| !should_skip_dir_for_project_configs(n))
                                 .unwrap_or(true)
                     });
                 for entry in walker {
@@ -1318,7 +1319,7 @@ fn sync_project_configs(
 
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt_file(&content, &key)?;
+                                let encrypted = crate::security::encrypt(&content, &key)?;
                                 std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
                             } else {
                                 std::fs::write(&dest, &content)?;
@@ -1384,65 +1385,20 @@ async fn build_machine_state(
         }
     }
 
-    // npm
-    if config.packages.npm.enabled {
-        let npm = NpmManager::new();
-        if npm.is_available().await {
-            if let Ok(packages) = npm.list_installed().await {
-                machine_state.packages.insert(
-                    "npm".to_string(),
-                    packages.iter().map(|p| p.name.clone()).collect(),
-                );
-            }
-        }
-    }
+    // Standard managers (same pattern: check enabled, check available, list installed)
+    let managers: Vec<(bool, Box<dyn PackageManager>)> = vec![
+        (config.packages.npm.enabled, Box::new(NpmManager::new())),
+        (config.packages.pnpm.enabled, Box::new(PnpmManager::new())),
+        (config.packages.bun.enabled, Box::new(BunManager::new())),
+        (config.packages.gem.enabled, Box::new(GemManager::new())),
+        (config.packages.uv.enabled, Box::new(UvManager::new())),
+    ];
 
-    // pnpm
-    if config.packages.pnpm.enabled {
-        let pnpm = PnpmManager::new();
-        if pnpm.is_available().await {
-            if let Ok(packages) = pnpm.list_installed().await {
+    for (enabled, manager) in managers {
+        if enabled && manager.is_available().await {
+            if let Ok(packages) = manager.list_installed().await {
                 machine_state.packages.insert(
-                    "pnpm".to_string(),
-                    packages.iter().map(|p| p.name.clone()).collect(),
-                );
-            }
-        }
-    }
-
-    // bun
-    if config.packages.bun.enabled {
-        let bun = BunManager::new();
-        if bun.is_available().await {
-            if let Ok(packages) = bun.list_installed().await {
-                machine_state.packages.insert(
-                    "bun".to_string(),
-                    packages.iter().map(|p| p.name.clone()).collect(),
-                );
-            }
-        }
-    }
-
-    // gem
-    if config.packages.gem.enabled {
-        let gem = GemManager::new();
-        if gem.is_available().await {
-            if let Ok(packages) = gem.list_installed().await {
-                machine_state.packages.insert(
-                    "gem".to_string(),
-                    packages.iter().map(|p| p.name.clone()).collect(),
-                );
-            }
-        }
-    }
-
-    // uv
-    if config.packages.uv.enabled {
-        let uv = UvManager::new();
-        if uv.is_available().await {
-            if let Ok(packages) = uv.list_installed().await {
-                machine_state.packages.insert(
-                    "uv".to_string(),
+                    manager.name().to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
                 );
             }
@@ -1453,7 +1409,7 @@ async fn build_machine_state(
     detect_removed_packages(&mut machine_state, &previous_packages);
 
     // Populate dotfiles list from config (files that exist locally, with glob expansion)
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
     machine_state.dotfiles.clear();
     for entry in &config.dotfiles.files {
         if !entry.is_safe_path() {
@@ -1470,15 +1426,19 @@ async fn build_machine_state(
     machine_state.dotfiles.sort();
 
     // Populate project_configs from state (tracked project files)
+    // State keys are formatted as "project:host/org/repo/rel/path"
+    // The project key is the first 3 path components (host/org/repo)
     machine_state.project_configs.clear();
     for key in state.files.keys() {
         if let Some(rest) = key.strip_prefix("project:") {
-            if let Some((project_key, rel_path)) = rest.split_once('/') {
+            let parts: Vec<&str> = rest.splitn(4, '/').collect();
+            if parts.len() == 4 {
+                let project_key = format!("{}/{}/{}", parts[0], parts[1], parts[2]);
                 machine_state
                     .project_configs
-                    .entry(project_key.to_string())
+                    .entry(project_key)
                     .or_default()
-                    .push(rel_path.to_string());
+                    .push(parts[3].to_string());
             }
         }
     }
@@ -1559,7 +1519,6 @@ fn detect_removed_packages(
 
 /// Sync project secrets from team repos to local projects
 pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
-    use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
     use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
 
@@ -1568,26 +1527,21 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
         None => return Ok(()),
     };
 
-    // Build map of local projects: normalized_url -> local_path
-    let mut local_projects: std::collections::HashMap<String, PathBuf> =
-        std::collections::HashMap::new();
-
-    for search_path_str in &config.project_configs.search_paths {
-        let search_path = if let Some(stripped) = search_path_str.strip_prefix("~/") {
-            home.join(stripped)
-        } else {
-            PathBuf::from(search_path_str)
-        };
-
-        if let Ok(repos) = find_git_repos(&search_path) {
-            for repo_path in repos {
-                if let Ok(remote_url) = get_remote_url(&repo_path) {
-                    let normalized = normalize_remote_url(&remote_url);
-                    local_projects.insert(normalized, repo_path);
-                }
+    // Build map of local projects: normalized_url -> all local checkout paths
+    let search_paths: Vec<PathBuf> = config
+        .project_configs
+        .search_paths
+        .iter()
+        .map(|p| {
+            if let Some(stripped) = p.strip_prefix("~/") {
+                home.join(stripped)
+            } else {
+                PathBuf::from(p)
             }
-        }
-    }
+        })
+        .collect();
+
+    let local_projects = build_project_map(&search_paths);
 
     // Try to load user's identity for decryption
     let identity = match crate::security::load_identity(None) {
@@ -1667,9 +1621,9 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
             }
 
             // Check if we have this project locally
-            let local_project = match local_projects.get(&normalized_url) {
-                Some(p) => p,
-                None => continue,
+            let checkouts = match local_projects.get(&normalized_url) {
+                Some(c) if !c.is_empty() => c,
+                _ => continue,
             };
 
             // Get relative file path (remove .age extension)
@@ -1677,46 +1631,48 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
             let rel_file_str = rel_file_path.to_string_lossy();
             let rel_file_no_age = rel_file_str.trim_end_matches(".age");
 
-            let local_file = local_project.join(rel_file_no_age);
-
-            // Decrypt and write
+            // Decrypt and write to all checkouts
             match std::fs::read(file_path) {
                 Ok(encrypted) => {
                     match crate::security::decrypt_with_identity(&encrypted, &identity) {
                         Ok(decrypted) => {
-                            // Only write if different or doesn't exist
-                            let should_write = if local_file.exists() {
-                                std::fs::read(&local_file)
-                                    .map(|existing| existing != decrypted)
-                                    .unwrap_or(true)
-                            } else {
-                                true
-                            };
+                            for local_project in checkouts {
+                                let local_file = local_project.join(rel_file_no_age);
 
-                            if should_write {
-                                // Backup before overwriting
-                                if local_file.exists() {
-                                    if backup_dir.is_none() {
-                                        backup_dir = Some(create_backup_dir()?);
+                                // Only write if different or doesn't exist
+                                let should_write = if local_file.exists() {
+                                    std::fs::read(&local_file)
+                                        .map(|existing| existing != decrypted)
+                                        .unwrap_or(true)
+                                } else {
+                                    true
+                                };
+
+                                if should_write {
+                                    // Backup before overwriting
+                                    if local_file.exists() {
+                                        if backup_dir.is_none() {
+                                            backup_dir = Some(create_backup_dir()?);
+                                        }
+                                        let backup_path =
+                                            format!("{}/{}", normalized_url, rel_file_no_age);
+                                        backup_file(
+                                            backup_dir.as_ref().unwrap(),
+                                            "team-projects",
+                                            &backup_path,
+                                            &local_file,
+                                        )?;
                                     }
-                                    let backup_path =
-                                        format!("{}/{}", normalized_url, rel_file_no_age);
-                                    backup_file(
-                                        backup_dir.as_ref().unwrap(),
-                                        "team-projects",
-                                        &backup_path,
-                                        &local_file,
-                                    )?;
+                                    if let Some(parent) = local_file.parent() {
+                                        std::fs::create_dir_all(parent)?;
+                                    }
+                                    std::fs::write(&local_file, &decrypted)?;
+                                    Output::success(&format!(
+                                        "Team secret: {} → {}",
+                                        rel_file_no_age,
+                                        local_project.file_name().unwrap().to_string_lossy()
+                                    ));
                                 }
-                                if let Some(parent) = local_file.parent() {
-                                    std::fs::create_dir_all(parent)?;
-                                }
-                                std::fs::write(&local_file, &decrypted)?;
-                                Output::success(&format!(
-                                    "Team secret: {} → {}",
-                                    rel_file_no_age,
-                                    local_project.file_name().unwrap().to_string_lossy()
-                                ));
                             }
                         }
                         Err(e) => {
@@ -1752,7 +1708,7 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
 
 /// Team-only sync: skip personal dotfiles/packages, only sync team repos
 async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
 
     let teams = match &config.teams {
         Some(t) if !t.active.is_empty() => t,

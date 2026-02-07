@@ -20,7 +20,7 @@ pub async fn run(file: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
     let sync_path = SyncEngine::sync_path()?;
     let dotfiles_dir = sync_path.join("dotfiles");
 
@@ -75,7 +75,7 @@ pub async fn run(file: Option<&str>) -> Result<()> {
             let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
             if enc_file.exists() {
                 let encrypted = std::fs::read(&enc_file)?;
-                crate::security::decrypt_file(&encrypted, key.as_ref().unwrap())?
+                crate::security::decrypt(&encrypted, key.as_ref().unwrap())?
             } else {
                 Vec::new()
             }

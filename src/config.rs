@@ -483,59 +483,18 @@ fn deserialize_active_teams<'de, D>(deserializer: D) -> Result<Vec<String>, D::E
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::{self, Visitor};
-    use std::fmt;
-
-    struct ActiveTeamsVisitor;
-
-    impl<'de> Visitor<'de> for ActiveTeamsVisitor {
-        type Value = Vec<String>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a string or array of strings")
-        }
-
-        fn visit_none<E>(self) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(Vec::new())
-        }
-
-        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            deserializer.deserialize_any(self)
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(vec![value.to_string()])
-        }
-
-        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
-        where
-            E: de::Error,
-        {
-            Ok(vec![value])
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut teams = Vec::new();
-            while let Some(team) = seq.next_element::<String>()? {
-                teams.push(team);
-            }
-            Ok(teams)
-        }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Single(String),
+        Multiple(Vec<String>),
     }
 
-    deserializer.deserialize_option(ActiveTeamsVisitor)
+    Ok(match Option::<StringOrVec>::deserialize(deserializer)? {
+        Some(StringOrVec::Single(s)) => vec![s],
+        Some(StringOrVec::Multiple(v)) => v,
+        None => Vec::new(),
+    })
 }
 
 /// Project-local config syncing.
@@ -577,8 +536,7 @@ impl Default for ProjectConfigSettings {
 
 impl Config {
     pub fn config_dir() -> Result<PathBuf> {
-        let home =
-            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let home = crate::home_dir()?;
         Ok(home.join(".tether"))
     }
 

@@ -6,7 +6,7 @@ const MAX_BACKUPS: usize = 5;
 
 /// Get the backups directory
 pub fn backups_dir() -> Result<PathBuf> {
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether/backups"))
 }
 
@@ -110,7 +110,7 @@ pub fn restore_file(timestamp: &str, category: &str, relative_path: &str) -> Res
         anyhow::bail!("Backup file not found: {}/{}", category, relative_path);
     }
 
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
 
     let dest = match category {
         "dotfiles" => home.join(relative_path),

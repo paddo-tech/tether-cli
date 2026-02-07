@@ -134,8 +134,7 @@ impl BrewManager {
 
     /// Get a temporary file path for Brewfile operations
     fn temp_brewfile_path() -> Result<PathBuf> {
-        let home =
-            home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+        let home = crate::home_dir()?;
         Ok(home.join(".tether").join("Brewfile.tmp"))
     }
 

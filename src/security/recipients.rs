@@ -12,19 +12,19 @@ const PUBKEY_FILENAME: &str = "identity.pub";
 
 /// Get path to user's encrypted identity file
 fn identity_path() -> Result<PathBuf> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether").join(IDENTITY_FILENAME))
 }
 
 /// Get path to user's public key file
 fn pubkey_path() -> Result<PathBuf> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether").join(PUBKEY_FILENAME))
 }
 
 /// Get path to cached decrypted identity (local only)
 fn cached_identity_path() -> Result<PathBuf> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether").join("identity.cache"))
 }
 

@@ -245,7 +245,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// Discovers directories in team repo that should be symlinked
 pub fn discover_symlinkable_dirs(team_sync_dir: &Path) -> Result<Vec<SymlinkableDir>> {
     let mut dirs = Vec::new();
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
 
     // Check for common config directories
     let candidates = vec![
