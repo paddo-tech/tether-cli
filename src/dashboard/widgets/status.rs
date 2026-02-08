@@ -9,7 +9,8 @@ pub fn render(
     state: &DashboardState,
     syncing: bool,
     daemon_op: DaemonOp,
-    config_error: bool,
+    flash_error: Option<&str>,
+    uninstalling: Option<&(String, String)>,
 ) {
     let mut spans = vec![Span::styled(
         " Tether ",
@@ -81,13 +82,19 @@ pub fn render(
         ));
     }
 
-    // Config save error
-    if config_error {
+    // Uninstalling
+    if let Some((_, pkg_name)) = uninstalling {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            "save failed!",
-            Style::default().fg(Color::Red).bold(),
+            format!("uninstalling {}...", pkg_name),
+            Style::default().fg(Color::Yellow),
         ));
+    }
+
+    // Flash error
+    if let Some(msg) = flash_error {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(msg, Style::default().fg(Color::Red).bold()));
     }
 
     // Features from config

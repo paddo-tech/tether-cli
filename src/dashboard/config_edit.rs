@@ -1,10 +1,12 @@
-use crate::config::{Config, ConflictStrategy};
+use crate::config::{is_safe_dotfile_path, Config, ConflictStrategy, DotfileEntry};
 use std::sync::LazyLock;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum FieldKind {
     Bool,
     Text,
+    List,
+    DotfileList,
 }
 
 pub struct ConfigField {
@@ -72,6 +74,19 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
             label: "Scan secrets",
             section: "Security",
             kind: FieldKind::Bool,
+        },
+        // Dotfiles
+        ConfigField {
+            key: "dotfiles.files",
+            label: "Dotfiles",
+            section: "Dotfiles",
+            kind: FieldKind::DotfileList,
+        },
+        ConfigField {
+            key: "dotfiles.dirs",
+            label: "Dotfile folders",
+            section: "Dotfiles",
+            kind: FieldKind::List,
         },
         // Packages
         ConfigField {
@@ -165,6 +180,18 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
             section: "Project",
             kind: FieldKind::Bool,
         },
+        ConfigField {
+            key: "project_configs.search_paths",
+            label: "Search paths",
+            section: "Project",
+            kind: FieldKind::List,
+        },
+        ConfigField {
+            key: "project_configs.patterns",
+            label: "File patterns",
+            section: "Project",
+            kind: FieldKind::List,
+        },
     ]
 });
 
@@ -191,6 +218,9 @@ pub fn get_value(config: &Config, idx: usize) -> String {
         // Security
         "encrypt_dotfiles" => config.security.encrypt_dotfiles.to_string(),
         "scan_secrets" => config.security.scan_secrets.to_string(),
+        // Dotfiles
+        "dotfiles.files" => format!("{} items", config.dotfiles.files.len()),
+        "dotfiles.dirs" => format!("{} items", config.dotfiles.dirs.len()),
         // Packages
         "remove_unlisted" => config.packages.remove_unlisted.to_string(),
         "brew.enabled" => config.packages.brew.enabled.to_string(),
@@ -208,6 +238,10 @@ pub fn get_value(config: &Config, idx: usize) -> String {
         "uv.sync_versions" => config.packages.uv.sync_versions.to_string(),
         // Project
         "project_configs.enabled" => config.project_configs.enabled.to_string(),
+        "project_configs.search_paths" => {
+            format!("{} items", config.project_configs.search_paths.len())
+        }
+        "project_configs.patterns" => format!("{} items", config.project_configs.patterns.len()),
         _ => String::new(),
     }
 }
@@ -275,8 +309,102 @@ pub fn toggle(config: &mut Config, idx: usize) -> bool {
         "project_configs.enabled" => {
             config.project_configs.enabled = !config.project_configs.enabled
         }
-        _ => return true,
+        _ => return false,
     }
+    config.save().is_ok()
+}
+
+/// Get items for a List field
+pub fn get_list_items(config: &Config, key: &str) -> Vec<String> {
+    match key {
+        "dotfiles.dirs" => config.dotfiles.dirs.clone(),
+        "project_configs.search_paths" => config.project_configs.search_paths.clone(),
+        "project_configs.patterns" => config.project_configs.patterns.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Get dotfile items as (path, create_if_missing) pairs
+pub fn get_dotfile_items(config: &Config) -> Vec<(String, bool)> {
+    config
+        .dotfiles
+        .files
+        .iter()
+        .map(|e| (e.path().to_string(), e.create_if_missing()))
+        .collect()
+}
+
+/// Add an item to a List field. Returns false on empty, duplicate, or save failure.
+pub fn add_list_item(config: &mut Config, key: &str, value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    let list = match key {
+        "dotfiles.dirs" => &mut config.dotfiles.dirs,
+        "project_configs.search_paths" => &mut config.project_configs.search_paths,
+        "project_configs.patterns" => &mut config.project_configs.patterns,
+        _ => return false,
+    };
+    if list.iter().any(|v| v == value) {
+        return false;
+    }
+    list.push(value.to_string());
+    config.save().is_ok()
+}
+
+/// Remove an item from a List field by index. Returns false on out-of-bounds or save failure.
+pub fn remove_list_item(config: &mut Config, key: &str, index: usize) -> bool {
+    let list = match key {
+        "dotfiles.dirs" => &mut config.dotfiles.dirs,
+        "project_configs.search_paths" => &mut config.project_configs.search_paths,
+        "project_configs.patterns" => &mut config.project_configs.patterns,
+        _ => return false,
+    };
+    if index >= list.len() {
+        return false;
+    }
+    list.remove(index);
+    config.save().is_ok()
+}
+
+/// Add a dotfile entry. Returns false on unsafe path, duplicate, or save failure.
+pub fn add_dotfile(config: &mut Config, path: &str, create_if_missing: bool) -> bool {
+    let path = path.trim();
+    if path.is_empty() || !is_safe_dotfile_path(path) {
+        return false;
+    }
+    if config.dotfiles.files.iter().any(|e| e.path() == path) {
+        return false;
+    }
+    config.dotfiles.files.push(DotfileEntry::WithOptions {
+        path: path.to_string(),
+        create_if_missing,
+    });
+    config.save().is_ok()
+}
+
+/// Remove a dotfile by index. Returns false on out-of-bounds or save failure.
+pub fn remove_dotfile(config: &mut Config, index: usize) -> bool {
+    if index >= config.dotfiles.files.len() {
+        return false;
+    }
+    config.dotfiles.files.remove(index);
+    config.save().is_ok()
+}
+
+/// Toggle create_if_missing for a dotfile entry. Returns false on failure.
+pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> bool {
+    if index >= config.dotfiles.files.len() {
+        return false;
+    }
+    let entry = &config.dotfiles.files[index];
+    let path = entry.path().to_string();
+    let new_create = !entry.create_if_missing();
+    config.dotfiles.files[index] = DotfileEntry::WithOptions {
+        path,
+        create_if_missing: new_create,
+    };
     config.save().is_ok()
 }
 

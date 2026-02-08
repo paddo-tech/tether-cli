@@ -11,8 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Interactive TUI dashboard as default command (`tether` or `tether dashboard`)
 - Daemon start/stop toggle from dashboard (`d` key)
-- Inline config editor in dashboard Config tab (tab 5) with bool toggles and validated text fields
-- Save error feedback in status bar when config write fails
+- Inline config editor with bool toggles, validated text fields, and list editing sub-views (dotfiles, folders, project paths, file patterns)
+- Packages tab with collapsible manager sections showing actual package names
+- Package uninstall from dashboard with confirmation popup and background execution
+- Expandable machines tab showing hostname, OS, dotfiles, per-manager package counts
+- Context-sensitive help overlay with all keybindings
 - `relative_time` helper for human-friendly timestamps
 - `Output::key_value`, `Output::badge`, `Output::divider`, `Output::diff_line` helpers
 

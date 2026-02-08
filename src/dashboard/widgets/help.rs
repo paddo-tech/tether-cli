@@ -1,7 +1,8 @@
+use crate::dashboard::Tab;
 use ratatui::{prelude::*, widgets::*};
 
-pub fn render_bar(f: &mut Frame, area: Rect) {
-    let spans = vec![
+pub fn render_bar(f: &mut Frame, area: Rect, active_tab: Tab) {
+    let mut spans = vec![
         Span::styled(" q", Style::default().fg(Color::Yellow).bold()),
         Span::styled("uit ", Style::default().fg(Color::DarkGray)),
         Span::styled("s", Style::default().fg(Color::Yellow).bold()),
@@ -10,13 +11,34 @@ pub fn render_bar(f: &mut Frame, area: Rect) {
         Span::styled("aemon ", Style::default().fg(Color::DarkGray)),
         Span::styled("r", Style::default().fg(Color::Yellow).bold()),
         Span::styled("efresh ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Tab", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" next tab ", Style::default().fg(Color::DarkGray)),
-        Span::styled("1-5", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" tabs ", Style::default().fg(Color::DarkGray)),
+    ];
+
+    match active_tab {
+        Tab::Config => {
+            spans.extend([
+                Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" edit ", Style::default().fg(Color::DarkGray)),
+            ]);
+        }
+        Tab::Packages => {
+            spans.extend([
+                Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" expand/uninstall ", Style::default().fg(Color::DarkGray)),
+            ]);
+        }
+        Tab::Machines => {
+            spans.extend([
+                Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" expand ", Style::default().fg(Color::DarkGray)),
+            ]);
+        }
+        _ => {}
+    }
+
+    spans.extend([
         Span::styled("?", Style::default().fg(Color::Yellow).bold()),
         Span::styled(" help", Style::default().fg(Color::DarkGray)),
-    ];
+    ]);
 
     let paragraph = Paragraph::new(Line::from(spans));
     f.render_widget(paragraph, area);
@@ -35,7 +57,7 @@ pub fn render_overlay(f: &mut Frame) {
     }
 
     let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 16u16.min(area.height.saturating_sub(4));
+    let height = 22u16.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -74,8 +96,35 @@ pub fn render_overlay(f: &mut Frame) {
         ]),
         Line::from(vec![
             Span::styled("  Enter     ", Style::default().fg(Color::Yellow).bold()),
-            Span::raw("Toggle/edit (Config tab)"),
+            Span::raw("Toggle/edit (Config)"),
         ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Config list sub-view:",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::from(vec![
+            Span::styled("  a         ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Add item"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d         ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Delete item"),
+        ]),
+        Line::from(vec![
+            Span::styled("  t         ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Toggle create (dotfiles)"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  Packages tab:",
+            Style::default().fg(Color::Cyan).bold(),
+        )),
+        Line::from(vec![
+            Span::styled("  Enter     ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Expand/uninstall"),
+        ]),
+        Line::from(""),
         Line::from(vec![
             Span::styled("  ?         ", Style::default().fg(Color::Yellow).bold()),
             Span::raw("Toggle help"),
