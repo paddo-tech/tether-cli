@@ -91,10 +91,7 @@ pub fn build_rows(state: &DashboardState) -> Vec<FileRow> {
                     .and_then(|org| org_to_team.get(&org.to_lowercase()).cloned());
 
                 if let Some(team_name) = team {
-                    team_project_files
-                        .entry(team_name)
-                        .or_default()
-                        .push(entry);
+                    team_project_files.entry(team_name).or_default().push(entry);
                 } else {
                     personal_projects.push(entry);
                 }
@@ -166,11 +163,7 @@ pub fn build_rows(state: &DashboardState) -> Vec<FileRow> {
         // Team project secrets
         if let Some(projects) = team_project_files.remove(team_name) {
             for (path, synced, time) in projects {
-                rows.push(FileRow::File {
-                    path,
-                    synced,
-                    time,
-                });
+                rows.push(FileRow::File { path, synced, time });
             }
         }
     }
@@ -193,11 +186,7 @@ pub fn build_rows(state: &DashboardState) -> Vec<FileRow> {
             count: projects.len(),
         });
         for (path, synced, time) in projects {
-            rows.push(FileRow::File {
-                path,
-                synced,
-                time,
-            });
+            rows.push(FileRow::File { path, synced, time });
         }
     }
 

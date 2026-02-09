@@ -464,9 +464,8 @@ impl DaemonServer {
         }
 
         // Update machine state with current CLI version
-        let mut machine_state =
-            MachineState::load_from_repo(&sync_path, &state.machine_id)?
-                .unwrap_or_else(|| MachineState::new(&state.machine_id));
+        let mut machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
+            .unwrap_or_else(|| MachineState::new(&state.machine_id));
         machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
         machine_state.last_sync = chrono::Utc::now();
         machine_state.save_to_repo(&sync_path)?;
