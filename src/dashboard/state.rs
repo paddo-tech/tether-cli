@@ -57,7 +57,7 @@ impl DashboardState {
 
         match contents.trim().parse::<u32>() {
             Ok(pid) if pid > 0 => {
-                let running = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+                let running = crate::daemon::pid::is_process_running(pid);
                 (Some(pid), running)
             }
             _ => (None, false),

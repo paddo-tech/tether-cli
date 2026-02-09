@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+    WingetManager,
 };
 use crate::sync::{
     detect_conflict, import_packages, notify_conflicts, notify_deferred_casks, ConflictState,
@@ -616,6 +617,19 @@ impl DaemonServer {
             }
         }
 
+        // winget
+        if config.packages.winget.enabled {
+            changes_made |= self
+                .sync_package_manager(
+                    &WingetManager::new(),
+                    "winget",
+                    "winget.txt",
+                    state,
+                    &manifests_dir,
+                )
+                .await?;
+        }
+
         Ok(changes_made)
     }
 
@@ -717,6 +731,38 @@ impl DaemonServer {
             }
         }
 
+        if config.packages.uv.enabled {
+            let uv = crate::packages::UvManager::new();
+            if uv.is_available().await {
+                log::info!("Updating uv packages...");
+                let hash_before = uv.compute_manifest_hash().await.ok();
+                if let Err(e) = uv.update_all().await {
+                    log::error!("uv update failed: {}", e);
+                } else {
+                    let hash_after = uv.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
+                }
+            }
+        }
+
+        if config.packages.winget.enabled {
+            let winget = WingetManager::new();
+            if winget.is_available().await {
+                log::info!("Updating winget packages...");
+                let hash_before = winget.compute_manifest_hash().await.ok();
+                if let Err(e) = winget.update_all().await {
+                    log::error!("winget update failed: {}", e);
+                } else {
+                    let hash_after = winget.compute_manifest_hash().await.ok();
+                    if hash_before != hash_after {
+                        any_actual_updates = true;
+                    }
+                }
+            }
+        }
+
         // Update state
         let mut state = SyncState::load()?;
         let now = chrono::Utc::now();
@@ -756,6 +802,8 @@ fn write_file_secure(path: &Path, contents: &[u8]) -> Result<()> {
     #[cfg(not(unix))]
     {
         std::fs::write(path, contents)?;
+        #[cfg(windows)]
+        crate::security::restrict_file_permissions(path)?;
         Ok(())
     }
 }

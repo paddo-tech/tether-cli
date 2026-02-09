@@ -68,7 +68,11 @@ pub fn store_identity(identity: &age::x25519::Identity, passphrase: &str) -> Res
         file.write_all(&encrypted)?;
     }
     #[cfg(not(unix))]
-    fs::write(&path, &encrypted)?;
+    {
+        fs::write(&path, &encrypted)?;
+        #[cfg(windows)]
+        super::restrict_file_permissions(&path)?;
+    }
 
     // Also store public key for easy sharing
     let pubkey = identity.to_public().to_string();
@@ -145,7 +149,11 @@ fn cache_identity(identity: &age::x25519::Identity) -> Result<()> {
         file.write_all(identity_str.expose_secret().as_bytes())?;
     }
     #[cfg(not(unix))]
-    fs::write(&path, identity_str.expose_secret())?;
+    {
+        fs::write(&path, identity_str.expose_secret())?;
+        #[cfg(windows)]
+        super::restrict_file_permissions(&path)?;
+    }
 
     Ok(())
 }

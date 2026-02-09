@@ -2,6 +2,7 @@ use crate::cli::{Output, Progress, Prompt};
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+    WingetManager,
 };
 use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
 use crate::sync::{
@@ -745,8 +746,6 @@ fn decrypt_from_repo(
 /// Ensure checkout_file is a symlink pointing to canonical_path.
 /// Handles: missing, wrong symlink, real file (migrates to symlink).
 fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
-    use std::os::unix::fs::symlink;
-
     if let Some(parent) = checkout_file.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -804,7 +803,7 @@ fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
         );
     }
 
-    symlink(canonical_path, checkout_file)?;
+    crate::sync::create_symlink(canonical_path, checkout_file)?;
     Ok(())
 }
 
@@ -1167,7 +1166,8 @@ fn sync_directories(
                 if entry.file_type().is_file() {
                     let file_path = entry.path();
                     let rel_to_home = file_path.strip_prefix(home).unwrap_or(file_path);
-                    let state_key = format!("~/{}", rel_to_home.display());
+                    let state_key =
+                        format!("~/{}", rel_to_home.to_string_lossy().replace('\\', "/"));
 
                     if let Ok(content) = std::fs::read(file_path) {
                         let hash = format!("{:x}", Sha256::digest(&content));
@@ -1311,8 +1311,11 @@ fn sync_project_configs(
                         let rel_to_repo = file_path
                             .strip_prefix(&repo_path)
                             .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {}", e))?;
-                        let state_key =
-                            format!("project:{}/{}", normalized_url, rel_to_repo.display());
+                        let state_key = format!(
+                            "project:{}/{}",
+                            normalized_url,
+                            rel_to_repo.to_string_lossy().replace('\\', "/")
+                        );
 
                         let file_changed = state
                             .files
@@ -1410,6 +1413,19 @@ async fn build_machine_state(
             if let Ok(packages) = manager.list_installed().await {
                 machine_state.packages.insert(
                     manager.name().to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // winget
+    if config.packages.winget.enabled {
+        let winget = WingetManager::new();
+        if winget.is_available().await {
+            if let Ok(packages) = winget.list_installed().await {
+                machine_state.packages.insert(
+                    "winget".to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
                 );
             }

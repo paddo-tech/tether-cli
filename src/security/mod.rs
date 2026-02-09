@@ -14,3 +14,30 @@ pub use recipients::{
     load_identity, load_recipients, store_identity, validate_pubkey,
 };
 pub use secrets::{scan_for_secrets, SecretFinding, SecretType};
+
+/// Restrict file permissions to current user only (Windows equivalent of chmod 600)
+#[cfg(windows)]
+pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Result<()> {
+    let path_str = path.to_string_lossy();
+    let username = std::env::var("USERNAME").unwrap_or_else(|_| "".to_string());
+    if username.is_empty() {
+        log::warn!(
+            "USERNAME not set, cannot restrict permissions on {}",
+            path_str
+        );
+        return Ok(());
+    }
+    let output = std::process::Command::new("icacls")
+        .args([
+            &*path_str,
+            "/inheritance:r",
+            "/grant:r",
+            &format!("{username}:F"),
+        ])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::warn!("icacls failed on {}: {}", path_str, stderr.trim());
+    }
+    Ok(())
+}
