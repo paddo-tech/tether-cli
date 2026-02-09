@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "1.7.1"
+version = "1.8.0"
 edition = "2021"
 authors = ["Paddo Tech"]
 description = "Sync your development environment across machines automatically"

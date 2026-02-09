@@ -1,11 +1,12 @@
 use crate::config::Config;
-use crate::sync::{ConflictState, MachineState, SyncEngine, SyncState};
+use crate::sync::{ConflictState, MachineState, SyncEngine, SyncState, TeamManifest};
 
 pub struct DashboardState {
     pub config: Option<Config>,
     pub sync_state: Option<SyncState>,
     pub conflicts: ConflictState,
     pub machines: Vec<MachineState>,
+    pub team_manifest: TeamManifest,
     pub daemon_pid: Option<u32>,
     pub daemon_running: bool,
     pub activity_lines: Vec<String>,
@@ -16,6 +17,7 @@ impl DashboardState {
         let config = Config::load().ok();
         let sync_state = SyncState::load().ok();
         let conflicts = ConflictState::load().unwrap_or_default();
+        let team_manifest = TeamManifest::load().unwrap_or_default();
 
         let machines = sync_state
             .as_ref()
@@ -31,6 +33,7 @@ impl DashboardState {
             sync_state,
             conflicts,
             machines,
+            team_manifest,
             daemon_pid,
             daemon_running,
             activity_lines,

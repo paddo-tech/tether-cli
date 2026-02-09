@@ -107,24 +107,14 @@ impl App {
 
     fn item_count(&self) -> usize {
         match self.active_tab {
-            Tab::Files => self
-                .state
-                .sync_state
-                .as_ref()
-                .map(|s| s.files.len())
-                .unwrap_or(0),
+            Tab::Files => widgets::files::build_rows(&self.state).len(),
             Tab::Packages => {
                 widgets::packages::build_rows(&self.state, self.pkg_expanded.as_deref()).len()
             }
             Tab::Machines => {
                 widgets::machines::build_rows(&self.state, self.machine_expanded.as_deref()).len()
             }
-            Tab::Overview => self
-                .state
-                .sync_state
-                .as_ref()
-                .map(|s| s.files.len())
-                .unwrap_or(0),
+            Tab::Overview => widgets::files::build_rows(&self.state).len(),
             Tab::Config => config_edit::fields().len(),
         }
     }
