@@ -34,7 +34,62 @@ pub use team::{
 };
 
 use anyhow::Result;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+
+pub const CURRENT_SYNC_FORMAT_VERSION: u32 = 1;
+
+/// Check sync repo format version. Creates file if missing, errors if newer than supported.
+pub fn check_sync_format_version(sync_path: &Path) -> Result<()> {
+    let version_file = sync_path.join("format_version");
+    if version_file.exists() {
+        let content = std::fs::read_to_string(&version_file)?;
+        let version: u32 = content
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid format_version file"))?;
+        if version > CURRENT_SYNC_FORMAT_VERSION {
+            anyhow::bail!(
+                "Sync repo format version {} is newer than supported ({}). Run: brew upgrade tether",
+                version,
+                CURRENT_SYNC_FORMAT_VERSION
+            );
+        }
+    } else {
+        std::fs::create_dir_all(sync_path)?;
+        std::fs::write(&version_file, format!("{}\n", CURRENT_SYNC_FORMAT_VERSION))?;
+    }
+    Ok(())
+}
+
+/// Acquire an exclusive lock on ~/.tether/sync.lock.
+/// If `wait` is true (CLI), retries up to 20 times at 100ms intervals.
+/// If `wait` is false (daemon), fails immediately.
+pub fn acquire_sync_lock(wait: bool) -> Result<File> {
+    use fs2::FileExt;
+
+    let lock_path = crate::home_dir()?.join(".tether/sync.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+
+    if wait {
+        for _ in 0..20 {
+            if file.try_lock_exclusive().is_ok() {
+                return Ok(file);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        anyhow::bail!("Could not acquire sync lock after 2 seconds. Another sync may be running.");
+    } else {
+        file.try_lock_exclusive()
+            .map_err(|_| anyhow::anyhow!("Sync already in progress, skipping"))?;
+    }
+    Ok(file)
+}
 
 /// Get the canonical storage path for a project config file.
 /// Files are stored at ~/.tether/projects/<normalized_url>/<rel_path>
@@ -227,5 +282,51 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = expand_from_sync_repo(".config/nonexistent/*.json", tmp.path());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_version_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        check_sync_format_version(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("format_version")).unwrap();
+        assert_eq!(content, format!("{}\n", CURRENT_SYNC_FORMAT_VERSION));
+    }
+
+    #[test]
+    fn test_format_version_accepts_current() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("format_version"),
+            format!("{}\n", CURRENT_SYNC_FORMAT_VERSION),
+        )
+        .unwrap();
+        check_sync_format_version(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn test_format_version_rejects_newer() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("format_version"),
+            format!("{}\n", CURRENT_SYNC_FORMAT_VERSION + 1),
+        )
+        .unwrap();
+        let err = check_sync_format_version(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("brew upgrade tether"));
+    }
+
+    #[test]
+    fn test_format_version_accepts_older() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("format_version"), "0\n").unwrap();
+        check_sync_format_version(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn test_format_version_rejects_invalid() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("format_version"), "abc\n").unwrap();
+        let err = check_sync_format_version(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("Invalid format_version"));
     }
 }

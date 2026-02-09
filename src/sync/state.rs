@@ -58,6 +58,8 @@ pub struct MachineState {
     pub last_sync: DateTime<Utc>,
     #[serde(default)]
     pub os_version: String,
+    #[serde(default)]
+    pub cli_version: String,
     /// File paths and their hashes
     pub files: HashMap<String, String>,
     /// Package manager -> list of installed packages
@@ -103,6 +105,7 @@ impl MachineState {
             hostname,
             last_sync: Utc::now(),
             os_version: String::new(),
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
             files: HashMap::new(),
             packages: HashMap::new(),
             removed_packages: HashMap::new(),
@@ -298,49 +301,33 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // Package name safety tests
     #[test]
     fn test_safe_package_names() {
         assert!(MachineState::is_safe_package_name("git"));
         assert!(MachineState::is_safe_package_name("node-18.x"));
         assert!(MachineState::is_safe_package_name("@angular/cli"));
         assert!(MachineState::is_safe_package_name("python3.11"));
+        assert!(MachineState::is_safe_package_name(&"a".repeat(256)));
     }
 
     #[test]
-    fn test_unsafe_package_name_shell_injection() {
+    fn test_unsafe_package_names_rejected() {
+        // Shell injection
         assert!(!MachineState::is_safe_package_name("git; rm -rf /"));
         assert!(!MachineState::is_safe_package_name("$(whoami)"));
         assert!(!MachineState::is_safe_package_name("pkg`id`"));
         assert!(!MachineState::is_safe_package_name("pkg|cat /etc/passwd"));
         assert!(!MachineState::is_safe_package_name("pkg&background"));
-    }
-
-    #[test]
-    fn test_unsafe_package_name_quotes() {
+        // Quotes/escapes
         assert!(!MachineState::is_safe_package_name("pkg'injection"));
         assert!(!MachineState::is_safe_package_name("pkg\"injection"));
         assert!(!MachineState::is_safe_package_name("pkg\\escape"));
-    }
-
-    #[test]
-    fn test_unsafe_package_name_newlines() {
+        // Newlines
         assert!(!MachineState::is_safe_package_name("pkg\nmalicious"));
         assert!(!MachineState::is_safe_package_name("pkg\rmalicious"));
-    }
-
-    #[test]
-    fn test_unsafe_package_name_empty() {
+        // Empty / too long
         assert!(!MachineState::is_safe_package_name(""));
-    }
-
-    #[test]
-    fn test_unsafe_package_name_too_long() {
-        let long_name = "a".repeat(300);
-        assert!(!MachineState::is_safe_package_name(&long_name));
-
-        let max_len = "a".repeat(256);
-        assert!(MachineState::is_safe_package_name(&max_len));
+        assert!(!MachineState::is_safe_package_name(&"a".repeat(300)));
     }
 
     // Validation tests
@@ -462,6 +449,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded.machine_id, "test-machine");
+        assert_eq!(loaded.cli_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(
             loaded.packages.get("npm"),
             Some(&vec!["typescript".to_string()])
@@ -517,8 +505,14 @@ mod tests {
     }
 
     #[test]
-    fn test_machine_state_checkouts_defaults_empty() {
-        // Simulate loading old state without checkouts field
+    fn test_machine_state_new_has_cli_version() {
+        let state = MachineState::new("test");
+        assert!(!state.cli_version.is_empty());
+        assert_eq!(state.cli_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_machine_state_old_json_defaults_all_optional_fields() {
         let old_json = r#"{
             "machine_id": "test",
             "hostname": "test-host",
@@ -528,7 +522,14 @@ mod tests {
         }"#;
 
         let loaded: MachineState = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.cli_version, "");
+        assert_eq!(loaded.os_version, "");
         assert!(loaded.checkouts.is_empty());
+        assert!(loaded.removed_packages.is_empty());
+        assert!(loaded.dotfiles.is_empty());
+        assert!(loaded.ignored_dotfiles.is_empty());
+        assert!(loaded.project_configs.is_empty());
+        assert!(loaded.ignored_project_configs.is_empty());
     }
 
     #[test]

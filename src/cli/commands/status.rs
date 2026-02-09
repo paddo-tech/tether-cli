@@ -26,6 +26,7 @@ pub async fn run() -> Result<()> {
 
     // Machine
     Output::key_value("Machine", &state.machine_id);
+    Output::key_value("Version", env!("CARGO_PKG_VERSION"));
 
     // Last Sync
     let sync_time = relative_time(state.last_sync);

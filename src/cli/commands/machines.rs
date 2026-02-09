@@ -36,6 +36,9 @@ pub async fn list() -> Result<()> {
         Cell::new("Hostname")
             .add_attribute(Attribute::Bold)
             .fg(Color::Cyan),
+        Cell::new("Version")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
         Cell::new("Last Sync")
             .add_attribute(Attribute::Bold)
             .fg(Color::Cyan),
@@ -47,6 +50,12 @@ pub async fn list() -> Result<()> {
         let marker = if is_current { "(this machine)" } else { "" };
         let local_time = machine.last_sync.with_timezone(&Local);
 
+        let version = if machine.cli_version.is_empty() {
+            "-".to_string()
+        } else {
+            machine.cli_version.clone()
+        };
+
         table.add_row(vec![
             if is_current {
                 Cell::new(&machine.machine_id).fg(Color::Green)
@@ -54,6 +63,7 @@ pub async fn list() -> Result<()> {
                 Cell::new(&machine.machine_id)
             },
             Cell::new(&machine.hostname),
+            Cell::new(version),
             Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
             Cell::new(marker).fg(Color::Green),
         ]);

@@ -102,6 +102,8 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         std::fs::create_dir_all(sync_path.join("dotfiles"))?;
         std::fs::create_dir_all(sync_path.join("machines"))?;
 
+        crate::sync::check_sync_format_version(&sync_path)?;
+
         // Setup encryption if enabled
         if config.security.encrypt_dotfiles {
             setup_encryption()?;

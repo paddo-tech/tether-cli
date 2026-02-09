@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 authors = ["Paddo Tech"]
 description = "Sync your development environment across machines automatically"
@@ -86,6 +86,9 @@ similar = "2.6"
 # System signals
 libc = "0.2"
 tempfile = "3.8"
+
+# File locking
+fs2 = "0.4"
 
 # TUI dashboard
 ratatui = "0.29"

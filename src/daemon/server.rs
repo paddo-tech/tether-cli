@@ -20,6 +20,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use tokio::signal::unix::{signal, SignalKind};
 
 const DEFAULT_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes
+const MAX_LOG_BYTES: u64 = 5_000_000; // 5 MB
 
 /// Thread-safe flag indicating daemon mode (avoids unsafe std::env::set_var in async)
 static DAEMON_MODE: AtomicBool = AtomicBool::new(false);
@@ -135,8 +136,27 @@ impl DaemonServer {
         Ok(())
     }
 
+    /// Rotate daemon.log if it exceeds MAX_LOG_BYTES.
+    /// Copies to .log.1 and truncates in-place to keep the logger's fd valid.
+    fn rotate_log_if_needed(&self) {
+        let log_path = match crate::config::Config::config_dir() {
+            Ok(d) => d.join("daemon.log"),
+            Err(_) => return,
+        };
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > MAX_LOG_BYTES {
+                let backup = log_path.with_extension("log.1");
+                let _ = std::fs::copy(&log_path, &backup);
+                let _ = std::fs::File::create(&log_path); // truncate in-place
+                log::info!("Rotated daemon.log ({} bytes)", meta.len());
+            }
+        }
+    }
+
     /// Shared tick logic: sync + conditional package updates + binary update checks
     async fn run_tick(&mut self) -> TickResult {
+        self.rotate_log_if_needed();
+
         if self.binary_updated() {
             log::info!("Binary updated, exiting for restart");
             return TickResult::Exit;
@@ -162,6 +182,14 @@ impl DaemonServer {
     }
 
     async fn run_sync(&self) -> Result<()> {
+        let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+            Ok(lock) => lock,
+            Err(_) => {
+                log::info!("Sync already in progress, skipping this tick");
+                return Ok(());
+            }
+        };
+
         let config = Config::load()?;
 
         // No personal features: only sync team repos
@@ -176,6 +204,8 @@ impl DaemonServer {
         log::debug!("Pulling latest changes...");
         let git = GitBackend::open(&sync_path)?;
         git.pull()?;
+
+        crate::sync::check_sync_format_version(&sync_path)?;
 
         // Pull from team repo if enabled
         if let Some(team) = &config.team {
@@ -194,7 +224,13 @@ impl DaemonServer {
 
         // Load state and conflict tracking
         let mut state = SyncState::load()?;
-        let mut conflict_state = ConflictState::load().unwrap_or_default();
+        let mut conflict_state = match ConflictState::load() {
+            Ok(state) => state,
+            Err(e) => {
+                log::warn!("Failed to load conflict state: {}", e);
+                ConflictState::default()
+            }
+        };
         let mut new_conflicts = Vec::new();
 
         // Load machine state for ignored_dotfiles filtering
@@ -427,8 +463,17 @@ impl DaemonServer {
             changes_made |= self.sync_packages(&config, &mut state, &sync_path).await?;
         }
 
-        // Commit and push if changes made
-        if changes_made {
+        // Update machine state with current CLI version
+        let mut machine_state =
+            MachineState::load_from_repo(&sync_path, &state.machine_id)?
+                .unwrap_or_else(|| MachineState::new(&state.machine_id));
+        machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
+        machine_state.last_sync = chrono::Utc::now();
+        machine_state.save_to_repo(&sync_path)?;
+
+        // Commit and push if changes made (including machine state updates)
+        let has_changes = git.has_changes()?;
+        if changes_made || has_changes {
             log::info!("Committing changes...");
             git.commit("Auto-sync from daemon", &state.machine_id)?;
             git.push()?;
@@ -442,7 +487,8 @@ impl DaemonServer {
         Ok(())
     }
 
-    /// Team-only sync: only sync team repositories
+    /// Team-only sync: only sync team repositories.
+    /// Note: caller (run_sync) already holds the sync lock.
     async fn run_team_only_sync(&self, config: &Config) -> Result<()> {
         let teams = match &config.teams {
             Some(t) if !t.active.is_empty() => t,
@@ -479,7 +525,9 @@ impl DaemonServer {
 
         // Sync team project secrets
         let home = crate::home_dir()?;
-        crate::cli::commands::sync::sync_team_project_secrets(config, &home).ok();
+        if let Err(e) = crate::cli::commands::sync::sync_team_project_secrets(config, &home) {
+            log::warn!("Failed to sync team project secrets: {}", e);
+        }
 
         log::info!("Team-only sync complete");
         Ok(())

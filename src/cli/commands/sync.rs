@@ -38,6 +38,13 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         Output::info("Dry-run mode");
     }
 
+    // Acquire sync lock (wait up to 2s for other syncs to finish)
+    let _sync_lock = if !dry_run {
+        Some(crate::sync::acquire_sync_lock(true)?)
+    } else {
+        None
+    };
+
     let config = Config::load()?;
 
     // No personal features: skip personal sync, only sync teams
@@ -67,6 +74,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     if !dry_run {
         Output::info("Pulling latest changes...");
         git.pull()?;
+        crate::sync::check_sync_format_version(&sync_path)?;
     }
 
     // Pull from team repo if enabled
@@ -370,7 +378,9 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
 
         // Pull latest
         if let Ok(git) = GitBackend::open(&collab_dir) {
-            git.pull().ok();
+            if let Err(e) = git.pull() {
+                log::warn!("Failed to pull collab '{}': {}", collab_name, e);
+            }
         }
 
         // Walk projects directory
@@ -1346,8 +1356,9 @@ async fn build_machine_state(
     let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Update last_sync time
+    // Update last_sync time and CLI version
     machine_state.last_sync = chrono::Utc::now();
+    machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
 
     // Collect file hashes
     machine_state.files.clear();

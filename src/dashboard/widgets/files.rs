@@ -1,7 +1,7 @@
 use crate::cli::output::relative_time;
 use crate::dashboard::state::DashboardState;
 use ratatui::{prelude::*, widgets::*};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub enum FileRow {
     SectionHeader {
@@ -46,41 +46,139 @@ pub fn build_rows(state: &DashboardState) -> Vec<FileRow> {
         team_files.push((team_name.to_string(), paths));
     }
 
-    // Personal section
+    // Build org -> team_name mapping for project config grouping
+    let org_to_team: HashMap<String, String> = state
+        .config
+        .as_ref()
+        .and_then(|c| c.teams.as_ref())
+        .map(|teams| {
+            let mut map = HashMap::new();
+            for (team_name, team_config) in &teams.teams {
+                if team_config.enabled {
+                    for org in &team_config.orgs {
+                        map.insert(org.to_lowercase(), team_name.clone());
+                    }
+                }
+            }
+            map
+        })
+        .unwrap_or_default();
+
+    // Split sync state files into personal dotfiles, personal projects, and team projects
+    let mut personal_dotfiles = Vec::new();
+    let mut personal_projects = Vec::new();
+    // team_name -> vec of (display_path, synced, time)
+    let mut team_project_files: HashMap<String, Vec<(String, bool, String)>> = HashMap::new();
+
+    if let Some(ss) = &state.sync_state {
+        let mut files: Vec<_> = ss.files.iter().collect();
+        files.sort_by_key(|(path, _)| path.as_str());
+
+        for (path, file_state) in files {
+            if team_paths.contains(path.as_str()) {
+                continue;
+            }
+
+            if let Some(rest) = path.strip_prefix("project:") {
+                let display = rest.to_string();
+                let entry = (
+                    display.clone(),
+                    file_state.synced,
+                    relative_time(file_state.last_modified),
+                );
+
+                let team = crate::sync::extract_org_from_normalized_url(rest)
+                    .and_then(|org| org_to_team.get(&org.to_lowercase()).cloned());
+
+                if let Some(team_name) = team {
+                    team_project_files
+                        .entry(team_name)
+                        .or_default()
+                        .push(entry);
+                } else {
+                    personal_projects.push(entry);
+                }
+            } else {
+                personal_dotfiles.push((
+                    path.to_string(),
+                    file_state.synced,
+                    relative_time(file_state.last_modified),
+                ));
+            }
+        }
+    }
+
+    // Personal dotfiles section
     let personal_url = state
         .config
         .as_ref()
         .map(|c| c.backend.url.clone())
         .unwrap_or_default();
 
-    let personal_files: Vec<_> = match &state.sync_state {
-        Some(ss) => {
-            let mut files: Vec<_> = ss
-                .files
-                .iter()
-                .filter(|(path, _)| !team_paths.contains(path.as_str()))
-                .collect();
-            files.sort_by_key(|(path, _)| path.as_str());
-            files
-        }
-        None => Vec::new(),
-    };
-
+    let personal_count = personal_dotfiles.len() + personal_projects.len();
     rows.push(FileRow::SectionHeader {
         label: "Personal".to_string(),
         url: personal_url,
-        count: personal_files.len(),
+        count: personal_count,
     });
-    for (path, file_state) in &personal_files {
+    for (path, synced, time) in &personal_dotfiles {
         rows.push(FileRow::File {
-            path: path.to_string(),
-            synced: file_state.synced,
-            time: relative_time(file_state.last_modified),
+            path: path.clone(),
+            synced: *synced,
+            time: time.clone(),
+        });
+    }
+    for (path, synced, time) in &personal_projects {
+        rows.push(FileRow::File {
+            path: path.clone(),
+            synced: *synced,
+            time: time.clone(),
         });
     }
 
-    // Team sections
+    // Team dotfile sections (from symlinks)
     for (team_name, paths) in &team_files {
+        let team_url = state
+            .config
+            .as_ref()
+            .and_then(|c| c.teams.as_ref())
+            .and_then(|t| t.teams.get(team_name.as_str()))
+            .map(|tc| tc.url.clone())
+            .unwrap_or_default();
+
+        let project_count = team_project_files
+            .get(team_name)
+            .map(|v| v.len())
+            .unwrap_or(0);
+
+        rows.push(FileRow::SectionHeader {
+            label: format!("Team: {}", team_name),
+            url: team_url,
+            count: paths.len() + project_count,
+        });
+        for path in paths {
+            rows.push(FileRow::File {
+                path: path.clone(),
+                synced: true,
+                time: String::new(),
+            });
+        }
+        // Team project secrets
+        if let Some(projects) = team_project_files.remove(team_name) {
+            for (path, synced, time) in projects {
+                rows.push(FileRow::File {
+                    path,
+                    synced,
+                    time,
+                });
+            }
+        }
+    }
+
+    // Any remaining team project files (team has projects but no symlinks)
+    let mut remaining: Vec<_> = team_project_files.into_iter().collect();
+    remaining.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (team_name, projects) in remaining {
         let team_url = state
             .config
             .as_ref()
@@ -92,13 +190,13 @@ pub fn build_rows(state: &DashboardState) -> Vec<FileRow> {
         rows.push(FileRow::SectionHeader {
             label: format!("Team: {}", team_name),
             url: team_url,
-            count: paths.len(),
+            count: projects.len(),
         });
-        for path in paths {
+        for (path, synced, time) in projects {
             rows.push(FileRow::File {
-                path: path.clone(),
-                synced: true,
-                time: String::new(),
+                path,
+                synced,
+                time,
             });
         }
     }

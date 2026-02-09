@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-02-09
+
+### Added
+
+- Sync repo format versioning with forward-compatibility check
+- CLI version tracking across machines (`tether machines list`, `tether status`)
+- Exclusive file locking to prevent concurrent sync corruption
+- Daemon log rotation (5MB cap)
+- Team project secret grouping in dashboard Files tab
+
+### Fixed
+
+- Silent error swallowing in daemon sync (now logged)
+
 ## [1.8.0] - 2026-02-09
 
 ### Added
