@@ -713,6 +713,10 @@ impl DaemonServer {
             (Box::new(BunManager::new()), config.packages.bun.enabled),
             (Box::new(GemManager::new()), config.packages.gem.enabled),
             (Box::new(UvManager::new()), config.packages.uv.enabled),
+            (
+                Box::new(WingetManager::new()),
+                config.packages.winget.enabled,
+            ),
         ];
 
         for (manager, enabled) in &managers {
@@ -727,22 +731,6 @@ impl DaemonServer {
                 let hash_after = manager.compute_manifest_hash().await.ok();
                 if hash_before != hash_after {
                     any_actual_updates = true;
-                }
-            }
-        }
-
-        if config.packages.winget.enabled {
-            let winget = WingetManager::new();
-            if winget.is_available().await {
-                log::info!("Updating winget packages...");
-                let hash_before = winget.compute_manifest_hash().await.ok();
-                if let Err(e) = winget.update_all().await {
-                    log::error!("winget update failed: {}", e);
-                } else {
-                    let hash_after = winget.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
                 }
             }
         }

@@ -126,6 +126,7 @@ pub async fn import_packages(
 /// Import packages cross-platform using brew ↔ winget mappings.
 /// On Windows: reads Brewfile, maps to winget IDs, installs missing.
 /// On macOS: reads winget.txt, maps to brew formulas/casks, installs missing.
+#[cfg(target_os = "windows")]
 async fn import_cross_platform(
     config: &Config,
     manifests_dir: &Path,
@@ -133,148 +134,182 @@ async fn import_cross_platform(
 ) -> bool {
     use crate::packages::mapping::MappingTable;
 
+    if !config.packages.winget.enabled {
+        return false;
+    }
+
+    let winget = WingetManager::new();
+    if !winget.is_available().await {
+        return false;
+    }
+
+    let Some(manifest) = manifests_dir
+        .join("Brewfile")
+        .exists()
+        .then(|| std::fs::read_to_string(manifests_dir.join("Brewfile")).ok())
+        .flatten()
+    else {
+        return false;
+    };
+
     let table = MappingTable::build(&config.packages.mapping);
-    let mut installed = false;
+    let brew_packages = BrewfilePackages::parse(&manifest);
 
-    // On Windows: read Brewfile → install winget equivalents
-    if cfg!(target_os = "windows") && config.packages.winget.enabled {
-        let winget = WingetManager::new();
-        if winget.is_available().await {
-            if let Some(manifest) = manifests_dir
-                .join("Brewfile")
-                .exists()
-                .then(|| std::fs::read_to_string(manifests_dir.join("Brewfile")).ok())
-                .flatten()
-            {
-                let brew_packages = BrewfilePackages::parse(&manifest);
+    let local_winget: HashSet<String> = machine_state
+        .packages
+        .get("winget")
+        .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
+        .unwrap_or_default();
+    let removed_winget: HashSet<String> = machine_state
+        .removed_packages
+        .get("winget")
+        .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
+        .unwrap_or_default();
 
-                let local_winget: HashSet<String> = machine_state
-                    .packages
-                    .get("winget")
-                    .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
-                    .unwrap_or_default();
-                let removed_winget: HashSet<String> = machine_state
-                    .removed_packages
-                    .get("winget")
-                    .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
-                    .unwrap_or_default();
+    let mut to_install: Vec<String> = Vec::new();
 
-                let mut to_install: Vec<String> = Vec::new();
-
-                for (_brew_name, winget_id) in table.formulae_to_winget(&brew_packages.formulae) {
-                    let id_lower = winget_id.to_lowercase();
-                    if !local_winget.contains(&id_lower) && !removed_winget.contains(&id_lower) {
-                        to_install.push(winget_id.to_string());
-                    }
-                }
-
-                for (_cask_name, winget_id) in table.casks_to_winget(&brew_packages.casks) {
-                    let id_lower = winget_id.to_lowercase();
-                    if !local_winget.contains(&id_lower) && !removed_winget.contains(&id_lower) {
-                        to_install.push(winget_id.to_string());
-                    }
-                }
-
-                if !to_install.is_empty() {
-                    Output::info(&format!(
-                        "Cross-platform: installing {} winget package{} from Brewfile...",
-                        to_install.len(),
-                        if to_install.len() == 1 { "" } else { "s" }
-                    ));
-                    let manifest_str = to_install.join("\n") + "\n";
-                    match winget.import_manifest(&manifest_str).await {
-                        Ok(_) => installed = true,
-                        Err(e) => {
-                            Output::warning(&format!("Cross-platform winget import failed: {}", e))
-                        }
-                    }
-                }
-            }
+    for (_brew_name, winget_id) in table.formulae_to_winget(&brew_packages.formulae) {
+        let id_lower = winget_id.to_lowercase();
+        if !local_winget.contains(&id_lower) && !removed_winget.contains(&id_lower) {
+            to_install.push(winget_id.to_string());
         }
     }
 
-    // On macOS: read winget.txt → install brew equivalents
-    if cfg!(target_os = "macos") && config.packages.brew.enabled {
-        let brew = BrewManager::new();
-        if brew.is_available().await {
-            if let Some(manifest) = manifests_dir
-                .join("winget.txt")
-                .exists()
-                .then(|| std::fs::read_to_string(manifests_dir.join("winget.txt")).ok())
-                .flatten()
-            {
-                let winget_ids: Vec<String> = manifest
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .map(|s| s.trim().to_string())
-                    .collect();
+    for (_cask_name, winget_id) in table.casks_to_winget(&brew_packages.casks) {
+        let id_lower = winget_id.to_lowercase();
+        if !local_winget.contains(&id_lower) && !removed_winget.contains(&id_lower) {
+            to_install.push(winget_id.to_string());
+        }
+    }
 
-                let local_formulae: HashSet<_> = machine_state
-                    .packages
-                    .get("brew_formulae")
-                    .map(|v| v.iter().map(|s| s.as_str()).collect())
-                    .unwrap_or_default();
-                let local_casks: HashSet<_> = machine_state
-                    .packages
-                    .get("brew_casks")
-                    .map(|v| v.iter().map(|s| s.as_str()).collect())
-                    .unwrap_or_default();
-                let removed_formulae: HashSet<_> = machine_state
-                    .removed_packages
-                    .get("brew_formulae")
-                    .map(|v| v.iter().map(|s| s.as_str()).collect())
-                    .unwrap_or_default();
-                let removed_casks: HashSet<_> = machine_state
-                    .removed_packages
-                    .get("brew_casks")
-                    .map(|v| v.iter().map(|s| s.as_str()).collect())
-                    .unwrap_or_default();
+    if to_install.is_empty() {
+        return false;
+    }
 
-                let mut formulae_to_install: Vec<String> = Vec::new();
-                let mut casks_to_install: Vec<String> = Vec::new();
+    Output::info(&format!(
+        "Cross-platform: installing {} winget package{} from Brewfile...",
+        to_install.len(),
+        if to_install.len() == 1 { "" } else { "s" }
+    ));
+    let manifest_str = to_install.join("\n") + "\n";
+    match winget.import_manifest(&manifest_str).await {
+        Ok(_) => true,
+        Err(e) => {
+            Output::warning(&format!("Cross-platform winget import failed: {}", e));
+            false
+        }
+    }
+}
 
-                for (_winget_id, formula) in table.winget_to_formulae(&winget_ids) {
-                    if !local_formulae.contains(formula) && !removed_formulae.contains(formula) {
-                        formulae_to_install.push(formula.to_string());
-                    }
-                }
+#[cfg(target_os = "macos")]
+async fn import_cross_platform(
+    config: &Config,
+    manifests_dir: &Path,
+    machine_state: &MachineState,
+) -> bool {
+    use crate::packages::mapping::MappingTable;
 
-                for (_winget_id, cask) in table.winget_to_casks(&winget_ids) {
-                    if !local_casks.contains(cask) && !removed_casks.contains(cask) {
-                        casks_to_install.push(cask.to_string());
-                    }
-                }
+    if !config.packages.brew.enabled {
+        return false;
+    }
 
-                let total = formulae_to_install.len() + casks_to_install.len();
-                if total > 0 {
-                    Output::info(&format!(
-                        "Cross-platform: installing {} brew package{} from winget manifest...",
-                        total,
-                        if total == 1 { "" } else { "s" }
-                    ));
+    let brew = BrewManager::new();
+    if !brew.is_available().await {
+        return false;
+    }
 
-                    if !formulae_to_install.is_empty() {
-                        let brew_pkgs = BrewfilePackages {
-                            taps: Vec::new(),
-                            formulae: formulae_to_install,
-                            casks: Vec::new(),
-                        };
-                        if brew.import_manifest(&brew_pkgs.generate()).await.is_ok() {
-                            installed = true;
-                        }
-                    }
+    let Some(manifest) = manifests_dir
+        .join("winget.txt")
+        .exists()
+        .then(|| std::fs::read_to_string(manifests_dir.join("winget.txt")).ok())
+        .flatten()
+    else {
+        return false;
+    };
 
-                    for cask in &casks_to_install {
-                        if brew.install_cask(cask, true).await.is_ok() {
-                            installed = true;
-                        }
-                    }
-                }
-            }
+    let table = MappingTable::build(&config.packages.mapping);
+    let winget_ids: Vec<String> = manifest
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    let local_formulae: HashSet<_> = machine_state
+        .packages
+        .get("brew_formulae")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let local_casks: HashSet<_> = machine_state
+        .packages
+        .get("brew_casks")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let removed_formulae: HashSet<_> = machine_state
+        .removed_packages
+        .get("brew_formulae")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let removed_casks: HashSet<_> = machine_state
+        .removed_packages
+        .get("brew_casks")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut formulae_to_install: Vec<String> = Vec::new();
+    let mut casks_to_install: Vec<String> = Vec::new();
+
+    for (_winget_id, formula) in table.winget_to_formulae(&winget_ids) {
+        if !local_formulae.contains(formula) && !removed_formulae.contains(formula) {
+            formulae_to_install.push(formula.to_string());
+        }
+    }
+
+    for (_winget_id, cask) in table.winget_to_casks(&winget_ids) {
+        if !local_casks.contains(cask) && !removed_casks.contains(cask) {
+            casks_to_install.push(cask.to_string());
+        }
+    }
+
+    let total = formulae_to_install.len() + casks_to_install.len();
+    if total == 0 {
+        return false;
+    }
+
+    Output::info(&format!(
+        "Cross-platform: installing {} brew package{} from winget manifest...",
+        total,
+        if total == 1 { "" } else { "s" }
+    ));
+
+    let mut installed = false;
+
+    if !formulae_to_install.is_empty() {
+        let brew_pkgs = BrewfilePackages {
+            taps: Vec::new(),
+            formulae: formulae_to_install,
+            casks: Vec::new(),
+        };
+        if brew.import_manifest(&brew_pkgs.generate()).await.is_ok() {
+            installed = true;
+        }
+    }
+
+    for cask in &casks_to_install {
+        if brew.install_cask(cask, true).await.is_ok() {
+            installed = true;
         }
     }
 
     installed
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+async fn import_cross_platform(
+    _config: &Config,
+    _manifests_dir: &Path,
+    _machine_state: &MachineState,
+) -> bool {
+    false
 }
 
 /// Update last_upgrade timestamp for a package manager
