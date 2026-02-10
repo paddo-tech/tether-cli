@@ -272,7 +272,7 @@ fn generate_plist() -> Result<String> {
 }
 
 pub async fn install() -> Result<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         if let Some(pid) = read_daemon_pid()? {
             if is_process_running(pid) {
@@ -405,7 +405,7 @@ pub async fn install() -> Result<()> {
 }
 
 pub async fn uninstall() -> Result<()> {
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     {
         let output = Command::new("schtasks")
             .args(["/Delete", "/TN", "TetherDaemon", "/F"])

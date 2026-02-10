@@ -369,7 +369,7 @@ fn send_notification(message: &str, subtitle: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(windows)]
 fn send_notification(message: &str, subtitle: &str) -> Result<()> {
     use std::process::Command;
     // Pass values via env vars to avoid PowerShell injection through string interpolation
