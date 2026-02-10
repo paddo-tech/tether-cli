@@ -770,23 +770,26 @@ fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
             );
         }
         Ok(_) => {
-            // Real file exists - migrate content to canonical if newer
+            // Real file exists — on Windows without Developer Mode, create_symlink
+            // falls back to copy, so the file IS the managed copy. If content matches
+            // canonical, no work needed.
             let checkout_content = std::fs::read(checkout_file)?;
             let canonical_content = std::fs::read(canonical_path).ok();
 
-            if canonical_content.as_ref() != Some(&checkout_content) {
-                let checkout_mtime = std::fs::metadata(checkout_file)?.modified()?;
-                let canonical_mtime = std::fs::metadata(canonical_path)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if canonical_content.as_ref() == Some(&checkout_content) {
+                return Ok(()); // Already in sync (likely a copy-mode file on Windows)
+            }
 
-                if checkout_mtime > canonical_mtime {
-                    // Checkout is newer - write to canonical
-                    if let Some(parent) = canonical_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    crate::sync::atomic_write(canonical_path, &checkout_content)?;
+            let checkout_mtime = std::fs::metadata(checkout_file)?.modified()?;
+            let canonical_mtime = std::fs::metadata(canonical_path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+            if checkout_mtime > canonical_mtime {
+                if let Some(parent) = canonical_path.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
+                crate::sync::atomic_write(canonical_path, &checkout_content)?;
             }
             std::fs::remove_file(checkout_file)?;
         }

@@ -50,7 +50,7 @@ pub fn check_sync_format_version(sync_path: &Path) -> Result<()> {
             .map_err(|_| anyhow::anyhow!("Invalid format_version file"))?;
         if version > CURRENT_SYNC_FORMAT_VERSION {
             anyhow::bail!(
-                "Sync repo format version {} is newer than supported ({}). Run: brew upgrade tether",
+                "Sync repo format version {} is newer than supported ({}). Please update tether.",
                 version,
                 CURRENT_SYNC_FORMAT_VERSION
             );
@@ -371,7 +371,7 @@ mod tests {
         )
         .unwrap();
         let err = check_sync_format_version(tmp.path()).unwrap_err();
-        assert!(err.to_string().contains("brew upgrade tether"));
+        assert!(err.to_string().contains("update tether"));
     }
 
     #[test]

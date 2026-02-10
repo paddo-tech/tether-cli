@@ -88,20 +88,21 @@ pub async fn stop() -> Result<()> {
 
     terminate_process(pid)?;
 
-    // Graceful: wait up to 10 seconds
-    for _ in 0..50 {
+    // On Windows, terminate_process already force-kills (no graceful signal available),
+    // so only do the extended wait on Unix where SIGTERM allows graceful shutdown.
+    let wait_rounds = if cfg!(windows) { 10 } else { 50 };
+    for _ in 0..wait_rounds {
         if !is_process_running(pid) {
             break;
         }
         sleep(Duration::from_millis(200)).await;
     }
 
-    // Force kill if still running
+    // Force kill if still running (Unix only — redundant on Windows)
     if is_process_running(pid) {
         log::debug!("Daemon did not exit gracefully, force killing");
         force_kill_process(pid);
 
-        // Wait for forced termination
         for _ in 0..10 {
             if !is_process_running(pid) {
                 break;
@@ -175,18 +176,14 @@ fn terminate_process(pid: u32) -> Result<()> {
 #[cfg(windows)]
 fn terminate_process(pid: u32) -> Result<()> {
     use std::process::Command;
-    // taskkill without /F sends WM_CLOSE — ineffective for detached/console-less processes.
-    // Don't error on failure; stop() will fall through to force_kill_process.
+    // Detached/console-less processes can't receive WM_CLOSE, so use /F directly.
     let output = Command::new("taskkill")
-        .args(["/PID", &pid.to_string()])
+        .args(["/F", "/PID", &pid.to_string()])
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if !stderr.contains("not found") {
-            log::debug!(
-                "Graceful taskkill failed (expected for detached): {}",
-                stderr.trim()
-            );
+            log::debug!("taskkill failed: {}", stderr.trim());
         }
     }
     Ok(())

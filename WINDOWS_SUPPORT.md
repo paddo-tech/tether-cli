@@ -21,7 +21,7 @@
 | Default merge tool | `opendiff` | `code` (VS Code) |
 | Default editor | `nano` | `notepad` |
 | File permissions | `0o600` for secrets | ACL restricted via `icacls` |
-| Process management | `kill`/signals (graceful SIGTERM) | `tasklist`/`taskkill` (force kill only) |
+| Process management | `kill`/signals (graceful SIGTERM) | `tasklist`/`taskkill /F` (no graceful signal for detached processes) |
 | Package manager | Homebrew | WinGet |
 
 ## Architecture notes

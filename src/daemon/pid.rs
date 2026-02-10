@@ -20,8 +20,8 @@ pub fn is_process_running(pid: u32) -> bool {
         if libc::kill(pid as libc::pid_t, 0) == 0 {
             true
         } else {
-            let err = std::io::Error::last_os_error();
-            err.kind() != std::io::ErrorKind::NotFound
+            // EPERM means process exists but we can't signal it
+            std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
         }
     }
 }
