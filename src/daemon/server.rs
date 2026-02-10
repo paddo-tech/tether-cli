@@ -731,22 +731,6 @@ impl DaemonServer {
             }
         }
 
-        if config.packages.uv.enabled {
-            let uv = crate::packages::UvManager::new();
-            if uv.is_available().await {
-                log::info!("Updating uv packages...");
-                let hash_before = uv.compute_manifest_hash().await.ok();
-                if let Err(e) = uv.update_all().await {
-                    log::error!("uv update failed: {}", e);
-                } else {
-                    let hash_after = uv.compute_manifest_hash().await.ok();
-                    if hash_before != hash_after {
-                        any_actual_updates = true;
-                    }
-                }
-            }
-        }
-
         if config.packages.winget.enabled {
             let winget = WingetManager::new();
             if winget.is_available().await {

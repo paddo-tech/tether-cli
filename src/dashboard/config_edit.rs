@@ -173,6 +173,12 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
             section: "Packages",
             kind: FieldKind::Bool,
         },
+        ConfigField {
+            key: "winget.enabled",
+            label: "Winget enabled",
+            section: "Packages",
+            kind: FieldKind::Bool,
+        },
         // Project
         ConfigField {
             key: "project_configs.enabled",
@@ -236,6 +242,7 @@ pub fn get_value(config: &Config, idx: usize) -> String {
         "gem.sync_versions" => config.packages.gem.sync_versions.to_string(),
         "uv.enabled" => config.packages.uv.enabled.to_string(),
         "uv.sync_versions" => config.packages.uv.sync_versions.to_string(),
+        "winget.enabled" => config.packages.winget.enabled.to_string(),
         // Project
         "project_configs.enabled" => config.project_configs.enabled.to_string(),
         "project_configs.search_paths" => {
@@ -306,6 +313,7 @@ pub fn toggle(config: &mut Config, idx: usize) -> bool {
         }
         "uv.enabled" => config.packages.uv.enabled = !config.packages.uv.enabled,
         "uv.sync_versions" => config.packages.uv.sync_versions = !config.packages.uv.sync_versions,
+        "winget.enabled" => config.packages.winget.enabled = !config.packages.winget.enabled,
         "project_configs.enabled" => {
             config.project_configs.enabled = !config.project_configs.enabled
         }

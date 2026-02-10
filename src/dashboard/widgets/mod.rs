@@ -17,6 +17,7 @@ pub fn manager_label(key: &str) -> &str {
         "bun" => "Bun",
         "gem" => "Gem",
         "uv" => "uv",
+        "winget" => "Winget",
         _ => key,
     }
 }

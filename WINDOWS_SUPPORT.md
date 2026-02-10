@@ -8,7 +8,7 @@
 - **Project configs** — Sync project-level configs with symlink support (falls back to copy without Developer Mode)
 - **Team sync** — Symlinks for team configs, copy fallback on Windows
 - **Notifications** — PowerShell toast notifications for sync conflicts
-- **CI** — `macos-latest` + `windows-latest` matrix
+- **CI** — `ubuntu-latest` + `macos-latest` + `windows-latest` matrix
 - **Release** — Signed macOS binaries + Windows `.zip` with SHA256
 
 ## Platform behavior differences
@@ -20,8 +20,8 @@
 | Notifications | AppleScript | PowerShell toast |
 | Default merge tool | `opendiff` | `code` (VS Code) |
 | Default editor | `nano` | `notepad` |
-| File permissions | `0o600` for secrets | Standard ACL (no restriction) |
-| Process management | `kill`/signals | `tasklist`/`taskkill` |
+| File permissions | `0o600` for secrets | ACL restricted via `icacls` |
+| Process management | `kill`/signals (graceful SIGTERM) | `tasklist`/`taskkill` (force kill only) |
 | Package manager | Homebrew | WinGet |
 
 ## Architecture notes
@@ -36,6 +36,5 @@
 ## Known limitations
 
 - No ARM64 Windows build (x86_64 runs under emulation)
-- Cached encryption key (`~/.tether/key.cache`) uses default file permissions on Windows
-- `winget list` parser uses fixed-width column positions — may break with CJK package names or non-English locales
+- `winget list` parser uses fixed-width column positions — handles CJK double-width characters but may break with non-English locales (different header text)
 - No WinGet manifest in release pipeline (users install from GitHub releases)

@@ -19,13 +19,9 @@ pub use secrets::{scan_for_secrets, SecretFinding, SecretType};
 #[cfg(windows)]
 pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Result<()> {
     let path_str = path.to_string_lossy();
-    let username = std::env::var("USERNAME").unwrap_or_else(|_| "".to_string());
+    let username = std::env::var("USERNAME").unwrap_or_default();
     if username.is_empty() {
-        log::warn!(
-            "USERNAME not set, cannot restrict permissions on {}",
-            path_str
-        );
-        return Ok(());
+        anyhow::bail!("USERNAME not set, cannot restrict permissions on {}", path_str);
     }
     let output = std::process::Command::new("icacls")
         .args([
@@ -37,7 +33,7 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Resul
         .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("icacls failed on {}: {}", path_str, stderr.trim());
+        anyhow::bail!("icacls failed on {}: {}", path_str, stderr.trim());
     }
     Ok(())
 }

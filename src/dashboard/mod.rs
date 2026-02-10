@@ -696,6 +696,7 @@ async fn run_uninstall(manager_key: &str, package: &str) -> std::result::Result<
         "bun" => Box::new(BunManager),
         "gem" => Box::new(GemManager),
         "uv" => Box::new(UvManager),
+        "winget" => Box::new(WingetManager),
         _ => return Err(format!("Unknown manager: {}", manager_key)),
     };
 
