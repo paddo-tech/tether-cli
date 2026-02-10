@@ -388,4 +388,49 @@ mod tests {
         let err = check_sync_format_version(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("Invalid format_version"));
     }
+
+    #[test]
+    fn test_create_symlink_file() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("source.txt");
+        let dst = tmp.path().join("link.txt");
+        std::fs::write(&src, "hello").unwrap();
+        create_symlink(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_create_symlink_dir() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("srcdir");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "aaa").unwrap();
+        std::fs::create_dir(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), "bbb").unwrap();
+
+        let dst = tmp.path().join("linkdir");
+        create_symlink(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(),
+            "bbb"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_copy_dir_recursive_respects_max_depth() {
+        let tmp = TempDir::new().unwrap();
+        let mut path = tmp.path().join("d0");
+        std::fs::create_dir(&path).unwrap();
+        for i in 1..=12 {
+            path = path.join(format!("d{}", i));
+            std::fs::create_dir(&path).unwrap();
+        }
+        std::fs::write(path.join("deep.txt"), "deep").unwrap();
+
+        let dst = tmp.path().join("copy");
+        let err = copy_dir_recursive(&tmp.path().join("d0"), &dst, 0).unwrap_err();
+        assert!(err.to_string().contains("max depth"));
+    }
 }
