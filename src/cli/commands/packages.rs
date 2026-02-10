@@ -35,6 +35,10 @@ pub async fn run(list_only: bool, yes: bool) -> Result<()> {
 
     for manager in &managers {
         if !manager.is_available().await {
+            #[cfg(windows)]
+            if manager.name() == "winget" {
+                Output::info("winget not found — install from https://aka.ms/winget to sync Windows packages");
+            }
             continue;
         }
 
