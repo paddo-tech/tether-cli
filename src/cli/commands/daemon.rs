@@ -313,13 +313,14 @@ pub async fn install() -> Result<()> {
 
         // schtasks expects UTF-16 LE with BOM; use random temp file to avoid symlink attacks
         let mut xml_file = tempfile::Builder::new().suffix(".xml").tempfile()?;
-        let xml_path = xml_file.path().to_path_buf();
         let utf16: Vec<u16> = task_xml.encode_utf16().collect();
         let mut bytes = vec![0xFF, 0xFE]; // UTF-16 LE BOM
         for word in &utf16 {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
         std::io::Write::write_all(&mut xml_file, &bytes)?;
+        // Close file handle before schtasks reads it (Windows exclusive lock)
+        let xml_path = xml_file.into_temp_path();
 
         // Remove existing task if present
         let _ = Command::new("schtasks")
@@ -331,7 +332,7 @@ pub async fn install() -> Result<()> {
             .arg(&xml_path)
             .output()?;
 
-        drop(xml_file);
+        drop(xml_path);
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

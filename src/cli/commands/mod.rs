@@ -150,9 +150,9 @@ pub enum DaemonAction {
     Restart,
     /// View daemon logs
     Logs,
-    /// Install launchd service (auto-start on login)
+    /// Install auto-start service (login trigger)
     Install,
-    /// Uninstall launchd service
+    /// Uninstall auto-start service
     Uninstall,
     /// Internal daemon runner
     #[command(hide = true)]
