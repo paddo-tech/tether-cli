@@ -230,7 +230,11 @@ fn slice_by_display_col(s: &str, start: usize, end: usize) -> &str {
 /// Header is ASCII so byte offsets == display columns. Data lines are sliced by display width
 /// to handle non-ASCII package names (e.g., CJK double-width characters).
 fn parse_winget_list(output: &str) -> Vec<PackageInfo> {
-    let lines: Vec<&str> = output.lines().collect();
+    // winget emits \r-based progress spinners; take only content after the last \r per line
+    let lines: Vec<&str> = output
+        .lines()
+        .map(|l| l.rsplit('\r').next().unwrap_or(l))
+        .collect();
 
     // Find the header line containing "Id" and "Version"
     let Some(header_idx) = lines
