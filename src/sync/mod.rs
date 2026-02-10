@@ -34,7 +34,62 @@ pub use team::{
 };
 
 use anyhow::Result;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+
+pub const CURRENT_SYNC_FORMAT_VERSION: u32 = 1;
+
+/// Check sync repo format version. Creates file if missing, errors if newer than supported.
+pub fn check_sync_format_version(sync_path: &Path) -> Result<()> {
+    let version_file = sync_path.join("format_version");
+    if version_file.exists() {
+        let content = std::fs::read_to_string(&version_file)?;
+        let version: u32 = content
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid format_version file"))?;
+        if version > CURRENT_SYNC_FORMAT_VERSION {
+            anyhow::bail!(
+                "Sync repo format version {} is newer than supported ({}). Run: brew upgrade tether",
+                version,
+                CURRENT_SYNC_FORMAT_VERSION
+            );
+        }
+    } else {
+        std::fs::create_dir_all(sync_path)?;
+        std::fs::write(&version_file, format!("{}\n", CURRENT_SYNC_FORMAT_VERSION))?;
+    }
+    Ok(())
+}
+
+/// Acquire an exclusive lock on ~/.tether/sync.lock.
+/// If `wait` is true (CLI), retries up to 20 times at 100ms intervals.
+/// If `wait` is false (daemon), fails immediately.
+pub fn acquire_sync_lock(wait: bool) -> Result<File> {
+    use fs2::FileExt;
+
+    let lock_path = crate::home_dir()?.join(".tether/sync.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+
+    if wait {
+        for _ in 0..20 {
+            if file.try_lock_exclusive().is_ok() {
+                return Ok(file);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        anyhow::bail!("Could not acquire sync lock after 2 seconds. Another sync may be running.");
+    } else {
+        file.try_lock_exclusive()
+            .map_err(|_| anyhow::anyhow!("Sync already in progress, skipping"))?;
+    }
+    Ok(file)
+}
 
 /// Get the canonical storage path for a project config file.
 /// Files are stored at ~/.tether/projects/<normalized_url>/<rel_path>
@@ -43,11 +98,16 @@ pub fn canonical_project_file_path(normalized_url: &str, rel_path: &str) -> Resu
     if normalized_url.contains("..") || rel_path.contains("..") {
         anyhow::bail!("Path traversal not allowed in project path");
     }
-    if normalized_url.starts_with('/') || rel_path.starts_with('/') {
-        anyhow::bail!("Absolute paths not allowed in project path");
+    for s in [normalized_url, rel_path] {
+        if s.starts_with('/') || s.starts_with('\\') {
+            anyhow::bail!("Absolute paths not allowed in project path");
+        }
+        if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
+            anyhow::bail!("Absolute paths not allowed in project path");
+        }
     }
 
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("No home dir"))?;
+    let home = crate::home_dir()?;
     Ok(home
         .join(".tether/projects")
         .join(normalized_url)
@@ -76,7 +136,7 @@ pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
                 .filter_map(|p| {
                     p.strip_prefix(home)
                         .ok()
-                        .map(|r| r.to_string_lossy().to_string())
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
                 })
                 .collect();
             if expanded.is_empty() {
@@ -113,7 +173,7 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
                 .filter_map(Result::ok)
                 .filter_map(|p| {
                     p.strip_prefix(dotfiles_dir).ok().and_then(|r| {
-                        let s = r.to_string_lossy();
+                        let s = r.to_string_lossy().replace('\\', "/");
                         // Remove .enc suffix and add leading dot
                         s.strip_suffix(".enc").map(|s| format!(".{}", s))
                     })
@@ -131,6 +191,60 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
             vec![]
         }
     }
+}
+
+/// Create a symlink. On Windows, falls back to copy if Developer Mode is not enabled.
+#[cfg(unix)]
+pub fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(src, dst)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
+    let result = if src.is_dir() {
+        std::os::windows::fs::symlink_dir(src, dst)
+    } else {
+        std::os::windows::fs::symlink_file(src, dst)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(1314) => {
+            // ERROR_PRIVILEGE_NOT_HELD — need Developer Mode or admin for symlinks
+            if src.is_dir() {
+                copy_dir_recursive(src, dst, 0)?;
+            } else {
+                std::fs::copy(src, dst)?;
+            }
+            log::warn!(
+                "Symlink requires Developer Mode, copied instead: {}",
+                dst.display()
+            );
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(windows)]
+const MAX_COPY_DEPTH: u32 = 10;
+
+#[cfg(windows)]
+fn copy_dir_recursive(src: &Path, dst: &Path, depth: u32) -> Result<()> {
+    if depth > MAX_COPY_DEPTH {
+        anyhow::bail!("Directory copy exceeded max depth ({})", MAX_COPY_DEPTH);
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target, depth + 1)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Atomically write content to a file by writing to a temp file and renaming.
@@ -227,5 +341,51 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = expand_from_sync_repo(".config/nonexistent/*.json", tmp.path());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_format_version_creates_file() {
+        let tmp = TempDir::new().unwrap();
+        check_sync_format_version(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("format_version")).unwrap();
+        assert_eq!(content, format!("{}\n", CURRENT_SYNC_FORMAT_VERSION));
+    }
+
+    #[test]
+    fn test_format_version_accepts_current() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("format_version"),
+            format!("{}\n", CURRENT_SYNC_FORMAT_VERSION),
+        )
+        .unwrap();
+        check_sync_format_version(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn test_format_version_rejects_newer() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("format_version"),
+            format!("{}\n", CURRENT_SYNC_FORMAT_VERSION + 1),
+        )
+        .unwrap();
+        let err = check_sync_format_version(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("brew upgrade tether"));
+    }
+
+    #[test]
+    fn test_format_version_accepts_older() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("format_version"), "0\n").unwrap();
+        check_sync_format_version(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn test_format_version_rejects_invalid() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("format_version"), "abc\n").unwrap();
+        let err = check_sync_format_version(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("Invalid format_version"));
     }
 }

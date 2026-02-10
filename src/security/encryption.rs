@@ -83,16 +83,6 @@ pub fn decrypt(encrypted_data: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     Ok(plaintext)
 }
 
-/// Encrypt a file using the provided key
-pub fn encrypt_file(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    encrypt(plaintext, key)
-}
-
-/// Decrypt a file using the provided key
-pub fn decrypt_file(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    decrypt(ciphertext, key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

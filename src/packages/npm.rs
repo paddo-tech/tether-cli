@@ -23,7 +23,10 @@ impl NpmManager {
     }
 
     async fn run_npm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("npm").args(args).output().await?;
+        let output = Command::new(super::resolve_program("npm"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,95 +86,16 @@ impl PackageManager for NpmManager {
         "npm"
     }
 
-    async fn export_manifest(&self) -> Result<String> {
-        // Get list of installed packages
-        let packages = self.list_installed().await?;
-
-        // Create simple newline-delimited list of package names
-        // Format: package_name (no versions, let npm install latest)
-        let manifest = packages
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(manifest)
-    }
-
-    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
-        // Parse package names from manifest
-        let package_names: Vec<&str> = manifest_content
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .collect();
-
-        if package_names.is_empty() {
-            return Ok(()); // Nothing to install
-        }
-
-        // Get currently installed packages
-        let installed = self.list_installed().await?;
-        let installed_names: std::collections::HashSet<_> =
-            installed.iter().map(|p| p.name.as_str()).collect();
-
-        // Install missing packages
-        for name in package_names {
-            if !installed_names.contains(name) {
-                // Install the package
-                let output = Command::new("npm")
-                    .args(["install", "-g", name])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Log warning but continue with other packages
-                    eprintln!("Warning: Failed to install {}: {}", name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
-        let desired: std::collections::HashSet<&str> = manifest_content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
-
-        if desired.is_empty() {
-            return Ok(());
-        }
-
-        let installed = self.list_installed().await?;
-
-        for pkg in installed {
-            if !desired.contains(pkg.name.as_str()) {
-                let output = Command::new("npm")
-                    .args(["uninstall", "-g", &pkg.name])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
             return Ok(());
         }
 
-        let output = Command::new("npm").args(["update", "-g"]).output().await?;
+        let output = Command::new(super::resolve_program("npm"))
+            .args(["update", "-g"])
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -182,7 +106,7 @@ impl PackageManager for NpmManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("npm")
+        let output = Command::new(super::resolve_program("npm"))
             .args(["uninstall", "-g", package])
             .output()
             .await?;

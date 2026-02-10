@@ -39,7 +39,7 @@ pub async fn get(key: &str) -> Result<()> {
         toml::Value::Table(_) => {
             println!("{}", toml::to_string_pretty(current)?);
         }
-        _ => println!("{:?}", current),
+        toml::Value::Datetime(dt) => println!("{}", dt),
     }
 
     Ok(())
@@ -115,6 +115,8 @@ pub async fn edit() -> Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
         if cfg!(target_os = "macos") {
             "nano".to_string()
+        } else if cfg!(target_os = "windows") {
+            "notepad".to_string()
         } else {
             "vi".to_string()
         }
@@ -442,54 +444,54 @@ fn manage_dotfile_list(
 
 /// List all features and their status
 pub async fn features_list() -> Result<()> {
+    use owo_colors::OwoColorize;
+
     let config = Config::load()?;
 
     Output::header("Feature Toggles");
     println!();
 
-    print_feature(
-        "personal_dotfiles",
-        config.features.personal_dotfiles,
-        "Sync shell configs (.zshrc, .gitconfig)",
-    );
-    print_feature(
-        "personal_packages",
-        config.features.personal_packages,
-        "Sync packages (brew, npm, etc.)",
-    );
-    print_feature(
-        "team_dotfiles",
-        config.features.team_dotfiles,
-        "Sync org-based team dotfiles",
-    );
-    print_feature(
-        "collab_secrets",
-        config.features.collab_secrets,
-        "Share project secrets with collaborators",
-    );
-    print_feature(
-        "team_layering",
-        config.features.team_layering,
-        "Merge team + personal dotfiles (experimental)",
-    );
+    let features = [
+        (
+            "personal_dotfiles",
+            config.features.personal_dotfiles,
+            "Sync shell configs (.zshrc, .gitconfig)",
+        ),
+        (
+            "personal_packages",
+            config.features.personal_packages,
+            "Sync packages (brew, npm, etc.)",
+        ),
+        (
+            "team_dotfiles",
+            config.features.team_dotfiles,
+            "Sync org-based team dotfiles",
+        ),
+        (
+            "collab_secrets",
+            config.features.collab_secrets,
+            "Share project secrets with collaborators",
+        ),
+        (
+            "team_layering",
+            config.features.team_layering,
+            "Merge team + personal dotfiles (experimental)",
+        ),
+    ];
+
+    for (name, enabled, desc) in features {
+        if enabled {
+            Output::key_value_colored(name, "enabled", |v| v.green().to_string());
+        } else {
+            Output::key_value_colored(name, "disabled", |v| v.dimmed().to_string());
+        }
+        println!("    {}", desc.dimmed());
+    }
 
     println!();
     Output::dim("Enable/disable: tether config features <enable|disable> <feature>");
 
     Ok(())
-}
-
-fn print_feature(name: &str, enabled: bool, desc: &str) {
-    use owo_colors::OwoColorize;
-
-    let status = if enabled {
-        "enabled".green().to_string()
-    } else {
-        "disabled".dimmed().to_string()
-    };
-
-    println!("  {} [{}]", name.bold(), status);
-    println!("    {}", desc.dimmed());
 }
 
 /// Enable a feature

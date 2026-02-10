@@ -11,7 +11,10 @@ impl GemManager {
     }
 
     async fn run_gem(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gem").args(args).output().await?;
+        let output = Command::new(super::resolve_program("gem"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,94 +83,13 @@ impl PackageManager for GemManager {
         "gem"
     }
 
-    async fn export_manifest(&self) -> Result<String> {
-        // Get list of installed gems
-        let packages = self.list_installed().await?;
-
-        // Create simple newline-delimited list of gem names
-        let manifest = packages
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(manifest)
-    }
-
-    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
-        // Parse gem names from manifest
-        let gem_names: Vec<&str> = manifest_content
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .collect();
-
-        if gem_names.is_empty() {
-            return Ok(()); // Nothing to install
-        }
-
-        // Get currently installed gems
-        let installed = self.list_installed().await?;
-        let installed_names: std::collections::HashSet<_> =
-            installed.iter().map(|p| p.name.as_str()).collect();
-
-        // Install missing gems
-        for name in gem_names {
-            if !installed_names.contains(name) {
-                // Install the gem to user directory
-                let output = Command::new("gem")
-                    .args(["install", name, "--user-install"])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Log warning but continue with other gems
-                    eprintln!("Warning: Failed to install {}: {}", name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
-        let desired: std::collections::HashSet<&str> = manifest_content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
-
-        if desired.is_empty() {
-            return Ok(());
-        }
-
-        let installed = self.list_installed().await?;
-
-        for pkg in installed {
-            if !desired.contains(pkg.name.as_str()) {
-                let output = Command::new("gem")
-                    .args(["uninstall", &pkg.name, "-x", "-a"])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
             return Ok(());
         }
 
-        let output = Command::new("gem")
+        let output = Command::new(super::resolve_program("gem"))
             .args(["update", "--user-install"])
             .output()
             .await?;
@@ -181,7 +103,7 @@ impl PackageManager for GemManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("gem")
+        let output = Command::new(super::resolve_program("gem"))
             .args(["uninstall", package, "-x", "-a"])
             .output()
             .await?;
@@ -196,7 +118,7 @@ impl PackageManager for GemManager {
 
     async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
         // gem dependency -R shows reverse dependencies
-        let output = Command::new("gem")
+        let output = Command::new(super::resolve_program("gem"))
             .args(["dependency", "-R", package])
             .output()
             .await?;
@@ -222,8 +144,6 @@ impl PackageManager for GemManager {
                 }
                 // Extract gem name (format: "  gemname-version")
                 if let Some(name) = trimmed.split_whitespace().next() {
-                    // Strip version suffix if present
-                    let name = name.split('-').next().unwrap_or(name);
                     if !name.is_empty() {
                         dependents.push(name.to_string());
                     }

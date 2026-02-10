@@ -59,9 +59,6 @@ which = "6.0"
 log = "0.4"
 env_logger = "0.11"
 
-# IPC for daemon
-interprocess = "2.0"
-
 # Async trait
 async-trait = "0.1"
 
@@ -83,9 +80,15 @@ glob = "0.3"
 # Text diffing
 similar = "2.6"
 
-# System signals
-libc = "0.2"
+# Temp files
 tempfile = "3.8"
+
+# File locking
+fs2 = "0.4"
+
+# System signals (Unix only)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.8"

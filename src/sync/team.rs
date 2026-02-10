@@ -245,7 +245,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// Discovers directories in team repo that should be symlinked
 pub fn discover_symlinkable_dirs(team_sync_dir: &Path) -> Result<Vec<SymlinkableDir>> {
     let mut dirs = Vec::new();
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
 
     // Check for common config directories
     let candidates = vec![
@@ -357,39 +357,13 @@ impl SymlinkableDir {
                     std::fs::remove_file(&target_item)?; // Remove old symlink if exists
                 }
 
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(&team_item, &target_item).with_context(|| {
+                super::create_symlink(&team_item, &target_item).with_context(|| {
                     format!(
                         "Failed to create symlink: {} -> {}",
                         target_item.display(),
                         team_item.display()
                     )
                 })?;
-
-                #[cfg(windows)]
-                {
-                    if team_item.is_dir() {
-                        std::os::windows::fs::symlink_dir(&team_item, &target_item).with_context(
-                            || {
-                                format!(
-                                    "Failed to create directory symlink: {} -> {}",
-                                    target_item.display(),
-                                    team_item.display()
-                                )
-                            },
-                        )?;
-                    } else {
-                        std::os::windows::fs::symlink_file(&team_item, &target_item).with_context(
-                            || {
-                                format!(
-                                    "Failed to create file symlink: {} -> {}",
-                                    target_item.display(),
-                                    team_item.display()
-                                )
-                            },
-                        )?;
-                    }
-                }
 
                 manifest.add_symlink(team_name, target_item.clone(), team_item);
                 results.push(SymlinkResult::Created(target_item));
@@ -526,18 +500,8 @@ pub fn resolve_conflict(target: &Path, team_source: &Path) -> Result<ConflictRes
             std::fs::rename(target, &personal_backup).context("Failed to rename personal file")?;
 
             // Create symlink to team config
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(team_source, target)
+            super::create_symlink(team_source, target)
                 .context("Failed to create symlink after renaming personal")?;
-
-            #[cfg(windows)]
-            {
-                if team_source.is_dir() {
-                    std::os::windows::fs::symlink_dir(team_source, target)?;
-                } else {
-                    std::os::windows::fs::symlink_file(team_source, target)?;
-                }
-            }
 
             Output::success(&format!(
                 "Personal file renamed to: {}",
@@ -549,18 +513,8 @@ pub fn resolve_conflict(target: &Path, team_source: &Path) -> Result<ConflictRes
             // Create team symlink with .team suffix
             let team_link = target.with_extension("team");
 
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(team_source, &team_link)
+            super::create_symlink(team_source, &team_link)
                 .context("Failed to create team symlink")?;
-
-            #[cfg(windows)]
-            {
-                if team_source.is_dir() {
-                    std::os::windows::fs::symlink_dir(team_source, &team_link)?;
-                } else {
-                    std::os::windows::fs::symlink_file(team_source, &team_link)?;
-                }
-            }
 
             Output::success(&format!("Team config linked as: {}", team_link.display()));
             Ok(ConflictResolution::TeamRenamed)

@@ -887,7 +887,7 @@ async fn apply_layer_sync(
         detect_file_type, init_layers, sync_dotfile_with_layers, sync_team_to_layer, FileType,
     };
 
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
     let dotfiles_dir = team_repo_dir.join("dotfiles");
 
     Output::info("Setting up team dotfile sync...");
@@ -1159,7 +1159,7 @@ fn remove_gitconfig_include(
 
 /// Clean up all injected source/include lines for a team
 fn cleanup_team_injections(team_name: &str) -> Result<()> {
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
     let team_repo_dir = Config::team_repo_dir(team_name)?;
 
     // Shell files to check
@@ -1504,7 +1504,7 @@ fn migrate_personal_to_team(
 
             // Decrypt personal secret
             let encrypted_content = std::fs::read(file_path)?;
-            let plaintext = crate::security::decrypt_file(&encrypted_content, &personal_key)
+            let plaintext = crate::security::decrypt(&encrypted_content, &personal_key)
                 .map_err(|e| anyhow::anyhow!("Failed to decrypt {}: {}", file_path.display(), e))?;
 
             // Re-encrypt with team recipients
@@ -2202,7 +2202,7 @@ pub async fn files_diff(file: Option<&str>) -> Result<()> {
     use similar::{ChangeTag, TextDiff};
 
     let (team_name, _repo_dir) = get_active_team_repo()?;
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
 
     let files_to_diff = if let Some(f) = file {
         vec![f.to_string()]

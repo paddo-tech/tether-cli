@@ -4,7 +4,7 @@ use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
-    UvManager,
+    UvManager, WingetManager,
 };
 
 struct PackageEntry {
@@ -27,6 +27,7 @@ pub async fn run(list_only: bool, yes: bool) -> Result<()> {
         Box::new(BunManager::new()),
         Box::new(GemManager::new()),
         Box::new(UvManager::new()),
+        Box::new(WingetManager::new()),
     ];
 
     // Collect packages grouped by manager

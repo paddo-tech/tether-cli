@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,7 @@ use crate::sync::merge::{detect_file_type, merge_files, FileType};
 
 /// Get the layers directory (~/.tether/layers)
 pub fn layers_dir() -> Result<PathBuf> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether").join("layers"))
 }
 
@@ -22,7 +22,7 @@ pub fn team_layer_dir(team_name: &str) -> Result<PathBuf> {
 
 /// Get the merged output directory
 pub fn merged_dir() -> Result<PathBuf> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     Ok(home.join(".tether").join("merged"))
 }
 
@@ -91,7 +91,7 @@ pub fn sync_team_to_layer(team_name: &str, team_repo_dotfiles: &Path) -> Result<
 /// Capture personal dotfile to personal layer (if not already captured)
 /// Returns true if captured, false if already exists
 pub fn capture_personal_to_layer(filename: &str) -> Result<bool> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     let personal_file = home.join(filename);
     let layer_file = personal_layer_dir()?.join(filename);
 
@@ -107,7 +107,7 @@ pub fn capture_personal_to_layer(filename: &str) -> Result<bool> {
 
 /// Update personal layer from home directory (for ongoing sync)
 pub fn update_personal_layer(filename: &str) -> Result<()> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     let personal_file = home.join(filename);
     let layer_file = personal_layer_dir()?.join(filename);
 
@@ -150,7 +150,7 @@ pub fn merge_layers(team_name: &str, filename: &str) -> Result<PathBuf> {
 
 /// Apply merged file to home directory
 pub fn apply_merged_to_home(filename: &str) -> Result<()> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     let merged_file = merged_dir()?.join(filename);
     let home_file = home.join(filename);
 
@@ -177,7 +177,7 @@ pub fn apply_merged_to_home(filename: &str) -> Result<()> {
 /// 2. Merge team + personal
 /// 3. Apply to home
 pub fn sync_dotfile_with_layers(team_name: &str, filename: &str) -> Result<LayerSyncResult> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     let team_file = team_layer_dir(team_name)?.join(filename);
     let personal_layer_file = personal_layer_dir()?.join(filename);
     let home_file = home.join(filename);
@@ -271,7 +271,7 @@ pub fn remerge_all(team_name: &str) -> Result<Vec<String>> {
 /// Reset a file to the team version (clobber local changes)
 /// This copies the team version directly to home, bypassing personal layer
 pub fn reset_to_team(team_name: &str, filename: &str) -> Result<()> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     let team_file = team_layer_dir(team_name)?.join(filename);
     let personal_file = personal_layer_dir()?.join(filename);
     let home_file = home.join(filename);
@@ -316,7 +316,7 @@ pub fn reset_all_to_team(team_name: &str) -> Result<Vec<String>> {
 /// Promote a local file to the team repository
 /// This copies the home version to the team repo's dotfiles directory
 pub fn promote_to_team(team_name: &str, filename: &str, team_repo_path: &Path) -> Result<()> {
-    let home = home::home_dir().context("Could not find home directory")?;
+    let home = crate::home_dir()?;
     let home_file = home.join(filename);
 
     if !home_file.exists() {

@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
 
 pub async fn list() -> Result<()> {
@@ -28,27 +28,33 @@ pub async fn list() -> Result<()> {
     println!("{}", "Synced Machines".bright_cyan().bold());
     println!();
 
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            Cell::new("Machine")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Hostname")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("Last Sync")
-                .add_attribute(Attribute::Bold)
-                .fg(Color::Cyan),
-            Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
-        ]);
+    let mut table = Output::table_full();
+    table.set_header(vec![
+        Cell::new("Machine")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Hostname")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Version")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("Last Sync")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
+        Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
+    ]);
 
     for machine in &machines {
         let is_current = &machine.machine_id == current_machine;
         let marker = if is_current { "(this machine)" } else { "" };
         let local_time = machine.last_sync.with_timezone(&Local);
+
+        let version = if machine.cli_version.is_empty() {
+            "-".to_string()
+        } else {
+            machine.cli_version.clone()
+        };
 
         table.add_row(vec![
             if is_current {
@@ -57,6 +63,7 @@ pub async fn list() -> Result<()> {
                 Cell::new(&machine.machine_id)
             },
             Cell::new(&machine.hostname),
+            Cell::new(version),
             Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
             Cell::new(marker).fg(Color::Green),
         ]);

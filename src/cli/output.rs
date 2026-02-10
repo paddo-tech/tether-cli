@@ -88,4 +88,70 @@ impl Output {
             .set_content_arrangement(ContentArrangement::Dynamic);
         table
     }
+
+    pub fn key_value(key: &str, value: &str) {
+        let padded = format!("{:14}", key);
+        println!("  {}  {}", padded.bright_white().bold(), value);
+    }
+
+    pub fn key_value_colored(key: &str, value: &str, color_fn: impl Fn(&str) -> String) {
+        let padded = format!("{:14}", key);
+        println!("  {}  {}", padded.bright_white().bold(), color_fn(value));
+    }
+
+    pub fn divider() {
+        println!(
+            "  {}",
+            "────────────────────────────────────────────".bright_black()
+        );
+    }
+
+    pub fn badge(text: &str, good: bool) -> String {
+        let badge = format!("[{}]", text);
+        if good {
+            badge.green().to_string()
+        } else {
+            badge.red().to_string()
+        }
+    }
+
+    pub fn diff_line(symbol: &str, text: &str, kind: &str) {
+        match kind {
+            "added" => println!("  {} {}", symbol.green(), text),
+            "removed" => println!("  {} {}", symbol.red(), text),
+            _ => println!("  {} {}", symbol.yellow(), text),
+        }
+    }
+}
+
+pub fn relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(dt);
+
+    let seconds = duration.num_seconds();
+    if seconds < 60 {
+        return "just now".to_string();
+    }
+
+    let minutes = duration.num_minutes();
+    if minutes < 60 {
+        return format!("{}m ago", minutes);
+    }
+
+    let hours = duration.num_hours();
+    if hours < 24 {
+        return format!("{}h ago", hours);
+    }
+
+    let days = duration.num_days();
+    if days < 2 {
+        return "yesterday".to_string();
+    }
+    if days < 7 {
+        return format!("{}d ago", days);
+    }
+
+    dt.with_timezone(&chrono::Local)
+        .format("%b %d %H:%M")
+        .to_string()
 }

@@ -82,7 +82,7 @@ pub async fn reset() -> Result<()> {
         }
 
         // Clear existing
-        let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
+        let home = crate::home_dir()?;
         let _ = std::fs::remove_file(home.join(".tether").join("identity.age"));
         let _ = std::fs::remove_file(home.join(".tether").join("identity.pub"));
         let _ = std::fs::remove_file(home.join(".tether").join("identity.cache"));

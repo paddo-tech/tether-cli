@@ -334,43 +334,48 @@ pub fn is_gitignored(file_path: &Path) -> Result<bool> {
 /// Directories to skip when scanning for git repos or project files.
 /// These are typically build artifacts, dependencies, or caches.
 pub fn should_skip_dir(name: &str) -> bool {
-    // Hidden directories
+    should_skip_dir_inner(name, true)
+}
+
+/// Like `should_skip_dir` but allows specific hidden dirs like `.vscode` and `.idea`
+/// that project config scanning needs to traverse.
+pub fn should_skip_dir_for_project_configs(name: &str) -> bool {
+    should_skip_dir_inner(name, false)
+}
+
+fn should_skip_dir_inner(name: &str, skip_all_hidden: bool) -> bool {
     if name.starts_with('.') {
+        if skip_all_hidden {
+            return true;
+        }
+        // Allow project config dirs, skip everything else
+        return !matches!(name, ".vscode" | ".idea" | ".run");
+    }
+
+    if name.ends_with(".egg-info") {
         return true;
     }
 
     matches!(
         name,
-        // Node.js
         "node_modules"
             | "bower_components"
-            // Rust
             | "target"
-            // Python
             | "__pycache__"
-            | ".venv"
             | "venv"
             | "env"
-            | ".eggs"
-            | "*.egg-info"
-            // .NET
             | "bin"
             | "obj"
             | "packages"
-            // Java/Kotlin
             | "build"
             | "out"
-            // Go
             | "vendor"
-            // Ruby
             | "bundle"
-            // General
             | "dist"
             | "coverage"
             | "tmp"
             | "temp"
             | "cache"
-            | ".cache"
     )
 }
 
@@ -537,6 +542,24 @@ mod tests {
         assert!(!should_skip_dir("lib"));
         assert!(!should_skip_dir("app"));
         assert!(!should_skip_dir("components"));
+    }
+
+    #[test]
+    fn test_project_config_skip_allows_ide_dirs() {
+        // Base function skips all hidden dirs
+        assert!(should_skip_dir(".vscode"));
+        assert!(should_skip_dir(".idea"));
+        assert!(should_skip_dir(".run"));
+        // Project config variant allows IDE config dirs
+        assert!(!should_skip_dir_for_project_configs(".vscode"));
+        assert!(!should_skip_dir_for_project_configs(".idea"));
+        assert!(!should_skip_dir_for_project_configs(".run"));
+        // But still skips other hidden dirs
+        assert!(should_skip_dir_for_project_configs(".git"));
+        assert!(should_skip_dir_for_project_configs(".cache"));
+        // And still skips non-hidden build dirs
+        assert!(should_skip_dir_for_project_configs("node_modules"));
+        assert!(should_skip_dir_for_project_configs("target"));
     }
 
     #[test]

@@ -11,7 +11,10 @@ impl UvManager {
     }
 
     async fn run_uv(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("uv").args(args).output().await?;
+        let output = Command::new(super::resolve_program("uv"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -77,87 +80,13 @@ impl PackageManager for UvManager {
         "uv"
     }
 
-    async fn export_manifest(&self) -> Result<String> {
-        let packages = self.list_installed().await?;
-
-        let manifest = packages
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(manifest)
-    }
-
-    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
-        let package_names: Vec<&str> = manifest_content
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .collect();
-
-        if package_names.is_empty() {
-            return Ok(());
-        }
-
-        let installed = self.list_installed().await?;
-        let installed_names: std::collections::HashSet<_> =
-            installed.iter().map(|p| p.name.as_str()).collect();
-
-        for name in package_names {
-            if !installed_names.contains(name) {
-                let output = Command::new("uv")
-                    .args(["tool", "install", name])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Warning: Failed to install {}: {}", name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
-        let desired: std::collections::HashSet<&str> = manifest_content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
-
-        if desired.is_empty() {
-            return Ok(());
-        }
-
-        let installed = self.list_installed().await?;
-
-        for pkg in installed {
-            if !desired.contains(pkg.name.as_str()) {
-                let output = Command::new("uv")
-                    .args(["tool", "uninstall", &pkg.name])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
             return Ok(());
         }
 
-        let output = Command::new("uv")
+        let output = Command::new(super::resolve_program("uv"))
             .args(["tool", "upgrade", "--all"])
             .output()
             .await?;
@@ -171,7 +100,7 @@ impl PackageManager for UvManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("uv")
+        let output = Command::new(super::resolve_program("uv"))
             .args(["tool", "uninstall", package])
             .output()
             .await?;

@@ -22,7 +22,10 @@ impl BunManager {
     }
 
     async fn run_bun(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("bun").args(args).output().await?;
+        let output = Command::new(super::resolve_program("bun"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -117,87 +120,6 @@ impl PackageManager for BunManager {
         "bun"
     }
 
-    async fn export_manifest(&self) -> Result<String> {
-        // Get list of installed packages
-        let packages = self.list_installed().await?;
-
-        // Create simple newline-delimited list of package names
-        let manifest = packages
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(manifest)
-    }
-
-    async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
-        // Parse package names from manifest
-        let package_names: Vec<&str> = manifest_content
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .collect();
-
-        if package_names.is_empty() {
-            return Ok(()); // Nothing to install
-        }
-
-        // Get currently installed packages
-        let installed = self.list_installed().await?;
-        let installed_names: std::collections::HashSet<_> =
-            installed.iter().map(|p| p.name.as_str()).collect();
-
-        // Install missing packages
-        for name in package_names {
-            if !installed_names.contains(name) {
-                // Install the package
-                let output = Command::new("bun")
-                    .args(["add", "-g", name])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Log warning but continue with other packages
-                    eprintln!("Warning: Failed to install {}: {}", name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
-        let desired: std::collections::HashSet<&str> = manifest_content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
-
-        if desired.is_empty() {
-            return Ok(());
-        }
-
-        let installed = self.list_installed().await?;
-
-        for pkg in installed {
-            if !desired.contains(pkg.name.as_str()) {
-                let output = Command::new("bun")
-                    .args(["remove", "-g", &pkg.name])
-                    .output()
-                    .await?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
@@ -207,7 +129,7 @@ impl PackageManager for BunManager {
         // bun update -g is broken (only updates first package)
         // Workaround: reinstall each package to get latest version
         for pkg in packages {
-            let output = Command::new("bun")
+            let output = Command::new(super::resolve_program("bun"))
                 .args(["add", "-g", &pkg.name])
                 .output()
                 .await?;
@@ -222,7 +144,7 @@ impl PackageManager for BunManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("bun")
+        let output = Command::new(super::resolve_program("bun"))
             .args(["remove", "-g", package])
             .output()
             .await?;

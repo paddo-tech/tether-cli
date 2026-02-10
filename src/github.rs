@@ -10,13 +10,23 @@ impl GitHubCli {
         which::which("gh").is_ok()
     }
 
-    /// Install gh CLI via Homebrew
+    /// Install gh CLI via platform package manager
     pub async fn install() -> Result<()> {
-        let output = Command::new("brew")
-            .args(["install", "gh"])
+        let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+            ("brew", &["install", "gh"])
+        } else if cfg!(target_os = "windows") {
+            ("winget", &["install", "--id", "GitHub.cli", "-e"])
+        } else {
+            return Err(anyhow::anyhow!(
+                "Automatic install not supported on this platform. Install gh manually: https://cli.github.com"
+            ));
+        };
+
+        let output = Command::new(cmd)
+            .args(args)
             .output()
             .await
-            .context("Failed to run brew install gh")?;
+            .context(format!("Failed to run {cmd}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

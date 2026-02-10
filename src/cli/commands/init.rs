@@ -102,6 +102,8 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         std::fs::create_dir_all(sync_path.join("dotfiles"))?;
         std::fs::create_dir_all(sync_path.join("machines"))?;
 
+        crate::sync::check_sync_format_version(&sync_path)?;
+
         // Setup encryption if enabled
         if config.security.encrypt_dotfiles {
             setup_encryption()?;
@@ -269,7 +271,14 @@ async fn setup_github_automatic() -> Result<String> {
     if !GitHubCli::is_installed() {
         Output::warning("GitHub CLI (gh) is not installed");
 
-        if Prompt::confirm("Install GitHub CLI via Homebrew?", true)? {
+        let install_method = if cfg!(target_os = "macos") {
+            "Homebrew"
+        } else if cfg!(target_os = "windows") {
+            "winget"
+        } else {
+            "package manager"
+        };
+        if Prompt::confirm(&format!("Install GitHub CLI via {install_method}?"), true)? {
             let pb = Progress::spinner("Installing GitHub CLI...");
             GitHubCli::install().await?;
             Progress::finish_success(&pb, "GitHub CLI installed");

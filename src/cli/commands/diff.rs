@@ -7,14 +7,6 @@ use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-fn format_diff_line(symbol: &str, status: &str, pkg: &str) -> String {
-    match status {
-        "added" => format!("  {} {}", symbol.green(), pkg),
-        "removed" => format!("  {} {}", symbol.red(), pkg),
-        _ => format!("  {} {}", symbol.yellow(), pkg),
-    }
-}
-
 pub async fn run(machine: Option<&str>) -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
@@ -37,7 +29,7 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
 
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
-    let home = home::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
+    let home = crate::home_dir()?;
 
     // Pull latest to ensure we have current remote state
     Output::info("Fetching latest changes...");
@@ -187,12 +179,15 @@ fn show_dotfile_diff(
 }
 
 async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Result<()> {
-    use crate::packages::{BrewManager, NpmManager, PackageManager, PnpmManager, UvManager};
+    use crate::packages::{
+        BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+        WingetManager,
+    };
 
     let manifests_dir = sync_path.join("manifests");
     let mut has_diff = false;
 
-    // Homebrew diff
+    // Homebrew diff (special: uses Brewfile format)
     if config.packages.brew.enabled {
         let brew = BrewManager::new();
         if brew.is_available().await {
@@ -214,7 +209,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                             "removed" => "-",
                             _ => "~",
                         };
-                        println!("{}", format_diff_line(symbol, &status, &pkg));
+                        Output::diff_line(symbol, &pkg, &status);
                     }
                     println!();
                 }
@@ -222,95 +217,95 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
         }
     }
 
-    // npm diff
-    if config.packages.npm.enabled {
-        let npm = NpmManager::new();
-        if npm.is_available().await {
-            let npm_path = manifests_dir.join("npm.txt");
-            if npm_path.exists() {
-                let remote_manifest = std::fs::read_to_string(&npm_path)?;
-                let local_manifest = npm.export_manifest().await?;
+    // Simple manifest managers (line-based .txt files)
+    let simple_managers: Vec<(bool, Box<dyn PackageManager>, &str, &str)> = vec![
+        (
+            config.packages.npm.enabled,
+            Box::new(NpmManager::new()),
+            "npm.txt",
+            "npm",
+        ),
+        (
+            config.packages.pnpm.enabled,
+            Box::new(PnpmManager::new()),
+            "pnpm.txt",
+            "pnpm",
+        ),
+        (
+            config.packages.bun.enabled,
+            Box::new(BunManager::new()),
+            "bun.txt",
+            "bun",
+        ),
+        (
+            config.packages.gem.enabled,
+            Box::new(GemManager::new()),
+            "gems.txt",
+            "gem",
+        ),
+        (
+            config.packages.uv.enabled,
+            Box::new(UvManager::new()),
+            "uv.txt",
+            "uv",
+        ),
+    ];
 
-                let remote_packages: Vec<_> =
-                    remote_manifest.lines().filter(|l| !l.is_empty()).collect();
-                let local_packages: Vec<_> =
-                    local_manifest.lines().filter(|l| !l.is_empty()).collect();
+    for (enabled, manager, filename, label) in simple_managers {
+        if !enabled || !manager.is_available().await {
+            continue;
+        }
+        let manifest_path = manifests_dir.join(filename);
+        if !manifest_path.exists() {
+            continue;
+        }
+        let remote_manifest = std::fs::read_to_string(&manifest_path)?;
+        let local_manifest = manager.export_manifest().await?;
 
-                let diff = diff_package_lists(&remote_packages, &local_packages);
-                if !diff.is_empty() {
-                    has_diff = true;
-                    println!("{}", "npm:".bright_cyan().bold());
-                    for (pkg, status) in diff {
-                        let symbol = match status.as_str() {
-                            "added" => "+",
-                            "removed" => "-",
-                            _ => "~",
-                        };
-                        println!("{}", format_diff_line(symbol, &status, &pkg));
-                    }
-                    println!();
-                }
+        let remote_packages: Vec<_> = remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+        let local_packages: Vec<_> = local_manifest.lines().filter(|l| !l.is_empty()).collect();
+
+        let diff = diff_package_lists(&remote_packages, &local_packages, false);
+        if !diff.is_empty() {
+            has_diff = true;
+            println!("{}", format!("{}:", label).bright_cyan().bold());
+            for (pkg, status) in diff {
+                let symbol = match status.as_str() {
+                    "added" => "+",
+                    "removed" => "-",
+                    _ => "~",
+                };
+                Output::diff_line(symbol, &pkg, &status);
             }
+            println!();
         }
     }
 
-    // pnpm diff
-    if config.packages.pnpm.enabled {
-        let pnpm = PnpmManager::new();
-        if pnpm.is_available().await {
-            let pnpm_path = manifests_dir.join("pnpm.txt");
-            if pnpm_path.exists() {
-                let remote_manifest = std::fs::read_to_string(&pnpm_path)?;
-                let local_manifest = pnpm.export_manifest().await?;
+    // winget diff
+    if config.packages.winget.enabled {
+        let winget = WingetManager::new();
+        if winget.is_available().await {
+            let winget_path = manifests_dir.join("winget.txt");
+            if winget_path.exists() {
+                let remote_manifest = std::fs::read_to_string(&winget_path)?;
+                let local_manifest = winget.export_manifest().await?;
 
                 let remote_packages: Vec<_> =
                     remote_manifest.lines().filter(|l| !l.is_empty()).collect();
                 let local_packages: Vec<_> =
                     local_manifest.lines().filter(|l| !l.is_empty()).collect();
 
-                let diff = diff_package_lists(&remote_packages, &local_packages);
+                let diff = diff_package_lists(&remote_packages, &local_packages, true);
                 if !diff.is_empty() {
                     has_diff = true;
-                    println!("{}", "pnpm:".bright_cyan().bold());
+                    println!("{}", "winget:".bright_cyan().bold());
                     for (pkg, status) in diff {
                         let symbol = match status.as_str() {
                             "added" => "+",
                             "removed" => "-",
                             _ => "~",
                         };
-                        println!("{}", format_diff_line(symbol, &status, &pkg));
-                    }
-                    println!();
-                }
-            }
-        }
-    }
-
-    // uv diff
-    if config.packages.uv.enabled {
-        let uv = UvManager::new();
-        if uv.is_available().await {
-            let uv_path = manifests_dir.join("uv.txt");
-            if uv_path.exists() {
-                let remote_manifest = std::fs::read_to_string(&uv_path)?;
-                let local_manifest = uv.export_manifest().await?;
-
-                let remote_packages: Vec<_> =
-                    remote_manifest.lines().filter(|l| !l.is_empty()).collect();
-                let local_packages: Vec<_> =
-                    local_manifest.lines().filter(|l| !l.is_empty()).collect();
-
-                let diff = diff_package_lists(&remote_packages, &local_packages);
-                if !diff.is_empty() {
-                    has_diff = true;
-                    println!("{}", "uv:".bright_cyan().bold());
-                    for (pkg, status) in diff {
-                        let symbol = match status.as_str() {
-                            "added" => "+",
-                            "removed" => "-",
-                            _ => "~",
-                        };
-                        println!("{}", format_diff_line(symbol, &status, &pkg));
+                        Output::diff_line(symbol, &pkg, &status);
                     }
                     println!();
                 }
@@ -389,17 +384,30 @@ fn diff_packages(
     diff
 }
 
-fn diff_package_lists(remote: &[&str], local: &[&str]) -> Vec<(String, String)> {
+fn diff_package_lists(
+    remote: &[&str],
+    local: &[&str],
+    case_insensitive: bool,
+) -> Vec<(String, String)> {
     let mut diff = Vec::new();
 
+    let contains = |haystack: &[&str], needle: &str| {
+        if case_insensitive {
+            let lower = needle.to_lowercase();
+            haystack.iter().any(|s| s.to_lowercase() == lower)
+        } else {
+            haystack.contains(&needle)
+        }
+    };
+
     for pkg in local {
-        if !remote.contains(pkg) {
+        if !contains(remote, pkg) {
             diff.push((pkg.to_string(), "added".to_string()));
         }
     }
 
     for pkg in remote {
-        if !local.contains(pkg) {
+        if !contains(local, pkg) {
             diff.push((pkg.to_string(), "removed".to_string()));
         }
     }
@@ -525,7 +533,7 @@ fn show_machine_diff(current: &MachineState, other: &MachineState) -> Result<()>
             println!("{}", format!("{}:", manager).bright_cyan().bold());
             for (pkg, status) in diffs {
                 let symbol = if status == "added" { "+" } else { "-" };
-                println!("{}", format_diff_line(symbol, &status, &pkg));
+                Output::diff_line(symbol, &pkg, &status);
             }
             println!();
         }
