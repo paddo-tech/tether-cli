@@ -21,7 +21,10 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Resul
     let path_str = path.to_string_lossy();
     let username = std::env::var("USERNAME").unwrap_or_default();
     if username.is_empty() {
-        anyhow::bail!("USERNAME not set, cannot restrict permissions on {}", path_str);
+        anyhow::bail!(
+            "USERNAME not set, cannot restrict permissions on {}",
+            path_str
+        );
     }
     // Remove all ACEs then grant only current user — ensures no other accounts have access
     let output = std::process::Command::new("icacls")

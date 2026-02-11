@@ -97,7 +97,15 @@ impl PackageManager for WingetManager {
         for id in package_ids {
             if !installed_ids.contains(&id.to_lowercase()) {
                 let output = Command::new(super::resolve_program("winget"))
-                    .args(["install", "--id", id, "-e", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"])
+                    .args([
+                        "install",
+                        "--id",
+                        id,
+                        "-e",
+                        "--disable-interactivity",
+                        "--accept-source-agreements",
+                        "--accept-package-agreements",
+                    ])
                     .output()
                     .await?;
 
@@ -149,7 +157,13 @@ impl PackageManager for WingetManager {
 
     async fn update_all(&self) -> Result<()> {
         let output = Command::new(super::resolve_program("winget"))
-            .args(["upgrade", "--all", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"])
+            .args([
+                "upgrade",
+                "--all",
+                "--disable-interactivity",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+            ])
             .output()
             .await?;
 

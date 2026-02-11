@@ -15,7 +15,18 @@ impl GitHubCli {
         let (cmd, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
             ("brew", &["install", "gh"])
         } else if cfg!(target_os = "windows") {
-            ("winget", &["install", "--id", "GitHub.cli", "-e", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"])
+            (
+                "winget",
+                &[
+                    "install",
+                    "--id",
+                    "GitHub.cli",
+                    "-e",
+                    "--disable-interactivity",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ],
+            )
         } else {
             return Err(anyhow::anyhow!(
                 "Automatic install not supported on this platform. Install gh manually: https://cli.github.com"
