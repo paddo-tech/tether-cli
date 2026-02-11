@@ -28,11 +28,14 @@ pub struct Cli {
     pub yes: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Interactive dashboard
+    Dashboard,
+
     /// Initialize Tether on this machine
     Init {
         /// Git repository URL
@@ -474,6 +477,16 @@ pub enum ProjectsAction {
 impl Cli {
     pub async fn run(&self) -> Result<()> {
         match &self.command {
+            None | Some(Commands::Dashboard) => {
+                tokio::task::spawn_blocking(crate::dashboard::run).await?
+            }
+            Some(cmd) => self.run_command(cmd).await,
+        }
+    }
+
+    async fn run_command(&self, command: &Commands) -> Result<()> {
+        match command {
+            Commands::Dashboard => unreachable!(),
             Commands::Init {
                 repo,
                 no_daemon,

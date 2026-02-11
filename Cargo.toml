@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "1.6.1"
+version = "1.9.1"
 edition = "2021"
 authors = ["Paddo Tech"]
 description = "Sync your development environment across machines automatically"
@@ -85,6 +85,10 @@ tempfile = "3.8"
 
 # File locking
 fs2 = "0.4"
+
+# TUI dashboard
+ratatui = "0.29"
+crossterm = "0.28"
 
 # System signals (Unix only)
 [target.'cfg(unix)'.dependencies]

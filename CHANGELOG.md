@@ -17,6 +17,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform path normalization (forward slashes in sync state)
 - Windows CI test matrix and release builds (`.zip` + SHA256)
 
+## [1.9.1] - 2026-02-10
+
+### Fixed
+
+- Team project configs no longer repeat "local changes will be pushed" every sync
+
+## [1.9.0] - 2026-02-09
+
+### Added
+
+- Sync repo format versioning with forward-compatibility check
+- CLI version tracking across machines (`tether machines list`, `tether status`)
+- Exclusive file locking to prevent concurrent sync corruption
+- Daemon log rotation (5MB cap)
+- Team project secret grouping in dashboard Files tab
+
+### Fixed
+
+- Silent error swallowing in daemon sync (now logged)
+
+## [1.8.0] - 2026-02-09
+
+### Added
+
+- Group files by personal/team sections in dashboard Files tab
+- Show git repo URLs in file section headers
+
+## [1.7.1] - 2026-02-08
+
+### Added
+
+- Config list editing, package browser, and expandable machines in dashboard
+
+## [1.7.0] - 2026-02-08
+
+### Added
+
+- Interactive TUI dashboard as default command (`tether` or `tether dashboard`)
+- Daemon start/stop toggle from dashboard (`d` key)
+- Inline config editor with bool toggles, validated text fields, and list editing sub-views (dotfiles, folders, project paths, file patterns)
+- Packages tab with collapsible manager sections showing actual package names
+- Package uninstall from dashboard with confirmation popup and background execution
+- Expandable machines tab showing hostname, OS, dotfiles, per-manager package counts
+- Context-sensitive help overlay with all keybindings
+- `relative_time` helper for human-friendly timestamps
+- `Output::key_value`, `Output::badge`, `Output::divider`, `Output::diff_line` helpers
+
+### Changed
+
+- `tether status` uses compact layout with relative times instead of tables
+- `tether config features` uses `Output::key_value_colored` instead of custom `print_feature`
+- `tether diff` uses `Output::diff_line` and `HashSet` for O(1) package lookups
+- `tether machines` uses `Output::table_full` helper
+- `tether upgrade` shows step counter (e.g. "1/3")
+
+## [1.6.3] - 2026-02-08
+
+### Fixed
+
+- Daemon now syncs and updates uv packages (was missing from daemon loop)
+- Team project secrets now written to all checkouts, not just the last discovered
+- Gem `get_dependents` no longer truncates names at hyphens
+- `should_skip_dir` no longer prunes `.vscode`/`.idea` during project config scanning
+- `tether diff` now shows bun and gem package differences
+- `is_process_running` correctly checks `ESRCH` instead of `ErrorKind::NotFound`
+- Project state key parsing correctly extracts full `host/org/repo` identifier
+- Secret scanner regex compiled once via `LazyLock` instead of per-call
+
+### Changed
+
+- Package manager trait provides default `export_manifest`/`import_manifest`/`remove_unlisted`
+- Daemon `sync_packages` and `run_package_updates` refactored into loops
+- `build_machine_state` and `show_package_diff` refactored into loops
+- Extracted `run_tick()` to deduplicate unix/non-unix daemon run loop
+- Simplified `deserialize_active_teams` serde visitor to `#[serde(untagged)]` enum
+- Removed trivial `encrypt_file`/`decrypt_file` wrappers
+- Centralized `home_dir()` helper, replacing ~32 inline occurrences
+
+## [1.6.2] - 2026-02-07
+
+### Fixed
+
+- Daemon sync no longer overwrites local dotfile edits — adds `local_unchanged` guard matching manual sync
+- Daemon now expands glob patterns (e.g. `.config/fish/*`) in both decrypt and local-to-repo phases
+- Daemon respects `ignored_dotfiles` from machine state
+- Daemon clears stale conflicts after successful file apply
+- Daemon backs up files before overwriting with remote content
+
 ## [1.6.1] - 2026-01-30
 
 ### Fixed

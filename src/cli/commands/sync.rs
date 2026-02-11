@@ -880,6 +880,13 @@ fn decrypt_project_configs(
 
     // Process each project
     for project_name in &projects_in_sync {
+        // Skip projects that belong to a team (team sync handles those)
+        if let Some(teams) = &config.teams {
+            if crate::sync::find_team_for_project(project_name, &teams.teams).is_some() {
+                continue;
+            }
+        }
+
         let project_dir = projects_dir.join(project_name);
 
         let checkouts = match repo_map.get(project_name) {
