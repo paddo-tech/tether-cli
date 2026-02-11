@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+    WingetManager,
 };
 use crate::sync::{
     detect_conflict, import_packages, notify_conflicts, notify_deferred_casks, ConflictState,
@@ -616,6 +617,19 @@ impl DaemonServer {
             }
         }
 
+        // winget
+        if config.packages.winget.enabled {
+            changes_made |= self
+                .sync_package_manager(
+                    &WingetManager::new(),
+                    "winget",
+                    "winget.txt",
+                    state,
+                    &manifests_dir,
+                )
+                .await?;
+        }
+
         Ok(changes_made)
     }
 
@@ -699,6 +713,10 @@ impl DaemonServer {
             (Box::new(BunManager::new()), config.packages.bun.enabled),
             (Box::new(GemManager::new()), config.packages.gem.enabled),
             (Box::new(UvManager::new()), config.packages.uv.enabled),
+            (
+                Box::new(WingetManager::new()),
+                config.packages.winget.enabled,
+            ),
         ];
 
         for (manager, enabled) in &managers {
@@ -756,6 +774,8 @@ fn write_file_secure(path: &Path, contents: &[u8]) -> Result<()> {
     #[cfg(not(unix))]
     {
         std::fs::write(path, contents)?;
+        #[cfg(windows)]
+        crate::security::restrict_file_permissions(path)?;
         Ok(())
     }
 }

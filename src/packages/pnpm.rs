@@ -12,7 +12,10 @@ impl PnpmManager {
     }
 
     async fn run_pnpm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("pnpm").args(args).output().await?;
+        let output = Command::new(super::resolve_program("pnpm"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -90,7 +93,10 @@ impl PackageManager for PnpmManager {
             return Ok(());
         }
 
-        let output = Command::new("pnpm").args(["update", "-g"]).output().await?;
+        let output = Command::new(super::resolve_program("pnpm"))
+            .args(["update", "-g"])
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -101,7 +107,7 @@ impl PackageManager for PnpmManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("pnpm")
+        let output = Command::new(super::resolve_program("pnpm"))
             .args(["remove", "-g", package])
             .output()
             .await?;

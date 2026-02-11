@@ -22,7 +22,10 @@ impl BunManager {
     }
 
     async fn run_bun(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("bun").args(args).output().await?;
+        let output = Command::new(super::resolve_program("bun"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -126,7 +129,7 @@ impl PackageManager for BunManager {
         // bun update -g is broken (only updates first package)
         // Workaround: reinstall each package to get latest version
         for pkg in packages {
-            let output = Command::new("bun")
+            let output = Command::new(super::resolve_program("bun"))
                 .args(["add", "-g", &pkg.name])
                 .output()
                 .await?;
@@ -141,7 +144,7 @@ impl PackageManager for BunManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("bun")
+        let output = Command::new(super::resolve_program("bun"))
             .args(["remove", "-g", package])
             .output()
             .await?;

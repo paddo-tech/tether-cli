@@ -120,6 +120,11 @@ pub enum BackendType {
 pub struct PackagesConfig {
     #[serde(default)]
     pub remove_unlisted: bool,
+    /// Sync packages across platforms using built-in name mappings (e.g., brew "git" → winget "Git.Git")
+    #[serde(default)]
+    pub cross_platform_sync: bool,
+    #[serde(default)]
+    pub mapping: Vec<crate::packages::mapping::MappingEntry>,
     #[serde(default = "default_brew_config")]
     pub brew: BrewConfig,
     #[serde(default = "default_npm_config")]
@@ -132,6 +137,8 @@ pub struct PackagesConfig {
     pub gem: GemConfig,
     #[serde(default)]
     pub uv: UvConfig,
+    #[serde(default)]
+    pub winget: WingetConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +183,20 @@ impl Default for UvConfig {
         Self {
             enabled: true,
             sync_versions: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WingetConfig {
+    pub enabled: bool,
+}
+
+#[allow(clippy::derivable_impls)] // cfg!(target_os) evaluates at compile time — not derivable cross-platform
+impl Default for WingetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: cfg!(target_os = "windows"),
         }
     }
 }
@@ -273,13 +294,20 @@ pub fn is_safe_dotfile_path(path: &str) -> bool {
     // Strip leading ~/ for validation (it's expanded to home dir)
     let path_to_check = path.strip_prefix("~/").unwrap_or(path);
 
-    // Reject absolute paths
-    if path_to_check.starts_with('/') {
+    // Reject absolute paths (Unix and Windows)
+    if path_to_check.starts_with('/') || path_to_check.starts_with('\\') {
+        return false;
+    }
+    // Reject Windows drive letters (e.g., C:\)
+    if path_to_check.len() >= 2
+        && path_to_check.as_bytes()[0].is_ascii_alphabetic()
+        && path_to_check.as_bytes()[1] == b':'
+    {
         return false;
     }
 
-    // Reject paths with .. components
-    for component in path_to_check.split('/') {
+    // Reject paths with .. components (both / and \ separators)
+    for component in path_to_check.split(&['/', '\\']) {
         if component == ".." {
             return false;
         }
@@ -319,6 +347,8 @@ pub struct MergeConfig {
 fn default_merge_command() -> String {
     if cfg!(target_os = "macos") {
         "opendiff".to_string()
+    } else if cfg!(target_os = "windows") {
+        "code".to_string()
     } else {
         "vimdiff".to_string()
     }
@@ -331,6 +361,14 @@ fn default_merge_args() -> Vec<String> {
             "{remote}".to_string(),
             "-merge".to_string(),
             "{merged}".to_string(),
+        ]
+    } else if cfg!(target_os = "windows") {
+        vec![
+            "--merge".to_string(),
+            "{local}".to_string(),
+            "{remote}".to_string(),
+            "{merged}".to_string(),
+            "--wait".to_string(),
         ]
     } else {
         vec![
@@ -379,10 +417,10 @@ const ALLOWED_MERGE_TOOLS: &[&str] = &[
 impl MergeConfig {
     /// Validates the merge tool command is in the allowlist
     pub fn is_valid_command(&self) -> bool {
-        // Extract base command name (without path)
+        // Extract base command name (without path, handling both / and \)
         let cmd = self
             .command
-            .rsplit('/')
+            .rsplit(&['/', '\\'])
             .next()
             .unwrap_or(&self.command)
             .to_lowercase();
@@ -643,11 +681,17 @@ impl Config {
         let mut config: Self = toml::from_str(&content)?;
 
         if config.config_version > CURRENT_CONFIG_VERSION {
+            let upgrade_hint = if cfg!(target_os = "macos") {
+                "brew upgrade tether"
+            } else {
+                "visit https://github.com/paddo-tech/tether-cli/releases"
+            };
             bail!(
                 "Config version {} is newer than this tether version supports (max: {}). \
-                 Please upgrade tether: brew upgrade tether",
+                 Please upgrade tether: {}",
                 config.config_version,
-                CURRENT_CONFIG_VERSION
+                CURRENT_CONFIG_VERSION,
+                upgrade_hint
             );
         }
 
@@ -686,6 +730,8 @@ impl Default for Config {
             },
             packages: PackagesConfig {
                 remove_unlisted: false,
+                cross_platform_sync: false,
+                mapping: Vec::new(),
                 brew: BrewConfig {
                     enabled: true,
                     sync_casks: true,
@@ -708,6 +754,7 @@ impl Default for Config {
                     sync_versions: false,
                 },
                 uv: UvConfig::default(),
+                winget: WingetConfig::default(),
             },
             dotfiles: DotfilesConfig {
                 files: vec![
@@ -789,6 +836,15 @@ mod tests {
     fn test_unsafe_absolute_path() {
         assert!(!is_safe_dotfile_path("/etc/passwd"));
         assert!(!is_safe_dotfile_path("/Users/foo/.zshrc"));
+        assert!(!is_safe_dotfile_path("C:\\Windows\\System32\\config"));
+        assert!(!is_safe_dotfile_path("D:\\Users\\foo\\.zshrc"));
+        assert!(!is_safe_dotfile_path("\\\\server\\share"));
+    }
+
+    #[test]
+    fn test_unsafe_backslash_traversal() {
+        assert!(!is_safe_dotfile_path("..\\..\\Windows\\System32"));
+        assert!(!is_safe_dotfile_path("foo\\..\\..\\etc\\passwd"));
     }
 
     #[test]
@@ -827,6 +883,12 @@ mod tests {
         let config = MergeConfig {
             command: "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
                 .to_string(),
+            args: vec![],
+        };
+        assert!(config.is_valid_command());
+
+        let config = MergeConfig {
+            command: "C:\\Program Files\\Microsoft VS Code\\bin\\code".to_string(),
             args: vec![],
         };
         assert!(config.is_valid_command());

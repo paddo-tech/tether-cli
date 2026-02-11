@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Windows platform support with winget package manager
+- Cross-platform package mapping for dotfile sync across macOS/Linux/Windows
+- Windows daemon scheduling via Task Scheduler
+- Windows secrets file permissions via `icacls`
+- Symlink fallback to file copy when Windows privileges unavailable
+- Cross-platform path normalization (forward slashes in sync state)
+- Windows CI test matrix and release builds (`.zip` + SHA256)
+
 ## [1.9.1] - 2026-02-10
 
 ### Fixed

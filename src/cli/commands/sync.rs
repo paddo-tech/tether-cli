@@ -2,6 +2,7 @@ use crate::cli::{Output, Progress, Prompt};
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+    WingetManager,
 };
 use crate::sync::git::{find_git_repos, get_remote_url, normalize_remote_url};
 use crate::sync::{
@@ -745,8 +746,6 @@ fn decrypt_from_repo(
 /// Ensure checkout_file is a symlink pointing to canonical_path.
 /// Handles: missing, wrong symlink, real file (migrates to symlink).
 fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
-    use std::os::unix::fs::symlink;
-
     if let Some(parent) = checkout_file.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -771,23 +770,26 @@ fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
             );
         }
         Ok(_) => {
-            // Real file exists - migrate content to canonical if newer
+            // Real file exists — on Windows without Developer Mode, create_symlink
+            // falls back to copy, so the file IS the managed copy. If content matches
+            // canonical, no work needed.
             let checkout_content = std::fs::read(checkout_file)?;
             let canonical_content = std::fs::read(canonical_path).ok();
 
-            if canonical_content.as_ref() != Some(&checkout_content) {
-                let checkout_mtime = std::fs::metadata(checkout_file)?.modified()?;
-                let canonical_mtime = std::fs::metadata(canonical_path)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if canonical_content.as_ref() == Some(&checkout_content) {
+                return Ok(()); // Already in sync (likely a copy-mode file on Windows)
+            }
 
-                if checkout_mtime > canonical_mtime {
-                    // Checkout is newer - write to canonical
-                    if let Some(parent) = canonical_path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    crate::sync::atomic_write(canonical_path, &checkout_content)?;
+            let checkout_mtime = std::fs::metadata(checkout_file)?.modified()?;
+            let canonical_mtime = std::fs::metadata(canonical_path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+
+            if checkout_mtime > canonical_mtime {
+                if let Some(parent) = canonical_path.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
+                crate::sync::atomic_write(canonical_path, &checkout_content)?;
             }
             std::fs::remove_file(checkout_file)?;
         }
@@ -804,7 +806,7 @@ fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
         );
     }
 
-    symlink(canonical_path, checkout_file)?;
+    crate::sync::create_symlink(canonical_path, checkout_file)?;
     Ok(())
 }
 
@@ -1174,7 +1176,8 @@ fn sync_directories(
                 if entry.file_type().is_file() {
                     let file_path = entry.path();
                     let rel_to_home = file_path.strip_prefix(home).unwrap_or(file_path);
-                    let state_key = format!("~/{}", rel_to_home.display());
+                    let state_key =
+                        format!("~/{}", rel_to_home.to_string_lossy().replace('\\', "/"));
 
                     if let Ok(content) = std::fs::read(file_path) {
                         let hash = format!("{:x}", Sha256::digest(&content));
@@ -1318,8 +1321,11 @@ fn sync_project_configs(
                         let rel_to_repo = file_path
                             .strip_prefix(&repo_path)
                             .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {}", e))?;
-                        let state_key =
-                            format!("project:{}/{}", normalized_url, rel_to_repo.display());
+                        let state_key = format!(
+                            "project:{}/{}",
+                            normalized_url,
+                            rel_to_repo.to_string_lossy().replace('\\', "/")
+                        );
 
                         let file_changed = state
                             .files
@@ -1417,6 +1423,19 @@ async fn build_machine_state(
             if let Ok(packages) = manager.list_installed().await {
                 machine_state.packages.insert(
                     manager.name().to_string(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    // winget
+    if config.packages.winget.enabled {
+        let winget = WingetManager::new();
+        if winget.is_available().await {
+            if let Ok(packages) = winget.list_installed().await {
+                machine_state.packages.insert(
+                    "winget".to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
                 );
             }

@@ -41,25 +41,9 @@ impl DashboardState {
     }
 
     fn check_daemon() -> (Option<u32>, bool) {
-        let pid_path = match Config::config_dir() {
-            Ok(d) => d.join("daemon.pid"),
-            Err(_) => return (None, false),
-        };
-
-        if !pid_path.exists() {
-            return (None, false);
-        }
-
-        let contents = match std::fs::read_to_string(&pid_path) {
-            Ok(c) => c,
-            Err(_) => return (None, false),
-        };
-
-        match contents.trim().parse::<u32>() {
-            Ok(pid) if pid > 0 => {
-                let running = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-                (Some(pid), running)
-            }
+        use crate::daemon::pid::{is_process_running, read_daemon_pid};
+        match read_daemon_pid() {
+            Ok(Some(pid)) => (Some(pid), is_process_running(pid)),
             _ => (None, false),
         }
     }

@@ -115,6 +115,8 @@ pub async fn edit() -> Result<()> {
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
         if cfg!(target_os = "macos") {
             "nano".to_string()
+        } else if cfg!(target_os = "windows") {
+            "notepad".to_string()
         } else {
             "vi".to_string()
         }

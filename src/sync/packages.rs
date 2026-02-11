@@ -2,7 +2,7 @@ use crate::cli::Output;
 use crate::config::Config;
 use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, BunManager, GemManager, NpmManager,
-    PackageManager, PnpmManager, UvManager,
+    PackageManager, PnpmManager, UvManager, WingetManager,
 };
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
@@ -46,6 +46,11 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
         state_key: "uv",
         display_name: "uv",
         manifest_file: "uv.txt",
+    },
+    PackageManagerDef {
+        state_key: "winget",
+        display_name: "winget",
+        manifest_file: "winget.txt",
     },
 ];
 
@@ -91,6 +96,7 @@ pub async fn import_packages(
             "bun" => config.packages.bun.enabled,
             "gem" => config.packages.gem.enabled,
             "uv" => config.packages.uv.enabled,
+            "winget" => config.packages.winget.enabled,
             _ => false,
         };
 
@@ -102,7 +108,208 @@ pub async fn import_packages(
         }
     }
 
+    // Cross-platform mapping: brew ↔ winget
+    if config.packages.cross_platform_sync
+        && import_cross_platform(config, &manifests_dir, machine_state).await
+    {
+        let key = if cfg!(target_os = "windows") {
+            "winget"
+        } else {
+            "brew"
+        };
+        update_last_upgrade(state, key);
+    }
+
     Ok(deferred_casks)
+}
+
+/// Import packages cross-platform using brew ↔ winget mappings.
+/// On Windows: reads Brewfile, maps to winget IDs, installs missing.
+/// On macOS: reads winget.txt, maps to brew formulas/casks, installs missing.
+#[cfg(target_os = "windows")]
+async fn import_cross_platform(
+    config: &Config,
+    manifests_dir: &Path,
+    machine_state: &MachineState,
+) -> bool {
+    use crate::packages::mapping::MappingTable;
+
+    if !config.packages.winget.enabled {
+        return false;
+    }
+
+    let winget = WingetManager::new();
+    if !winget.is_available().await {
+        return false;
+    }
+
+    let Some(manifest) = manifests_dir
+        .join("Brewfile")
+        .exists()
+        .then(|| std::fs::read_to_string(manifests_dir.join("Brewfile")).ok())
+        .flatten()
+    else {
+        return false;
+    };
+
+    let table = MappingTable::build(&config.packages.mapping);
+    let brew_packages = BrewfilePackages::parse(&manifest);
+
+    let local_winget: HashSet<String> = machine_state
+        .packages
+        .get("winget")
+        .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
+        .unwrap_or_default();
+    let removed_winget: HashSet<String> = machine_state
+        .removed_packages
+        .get("winget")
+        .map(|v| v.iter().map(|s| s.to_lowercase()).collect())
+        .unwrap_or_default();
+
+    let mut to_install: Vec<String> = Vec::new();
+
+    for (_brew_name, winget_id) in table.formulae_to_winget(&brew_packages.formulae) {
+        let id_lower = winget_id.to_lowercase();
+        if !local_winget.contains(&id_lower) && !removed_winget.contains(&id_lower) {
+            to_install.push(winget_id.to_string());
+        }
+    }
+
+    for (_cask_name, winget_id) in table.casks_to_winget(&brew_packages.casks) {
+        let id_lower = winget_id.to_lowercase();
+        if !local_winget.contains(&id_lower) && !removed_winget.contains(&id_lower) {
+            to_install.push(winget_id.to_string());
+        }
+    }
+
+    if to_install.is_empty() {
+        return false;
+    }
+
+    Output::info(&format!(
+        "Cross-platform: installing {} winget package{} from Brewfile...",
+        to_install.len(),
+        if to_install.len() == 1 { "" } else { "s" }
+    ));
+    let manifest_str = to_install.join("\n") + "\n";
+    match winget.import_manifest(&manifest_str).await {
+        Ok(_) => true,
+        Err(e) => {
+            Output::warning(&format!("Cross-platform winget import failed: {}", e));
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn import_cross_platform(
+    config: &Config,
+    manifests_dir: &Path,
+    machine_state: &MachineState,
+) -> bool {
+    use crate::packages::mapping::MappingTable;
+
+    if !config.packages.brew.enabled {
+        return false;
+    }
+
+    let brew = BrewManager::new();
+    if !brew.is_available().await {
+        return false;
+    }
+
+    let Some(manifest) = manifests_dir
+        .join("winget.txt")
+        .exists()
+        .then(|| std::fs::read_to_string(manifests_dir.join("winget.txt")).ok())
+        .flatten()
+    else {
+        return false;
+    };
+
+    let table = MappingTable::build(&config.packages.mapping);
+    let winget_ids: Vec<String> = manifest
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    let local_formulae: HashSet<_> = machine_state
+        .packages
+        .get("brew_formulae")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let local_casks: HashSet<_> = machine_state
+        .packages
+        .get("brew_casks")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let removed_formulae: HashSet<_> = machine_state
+        .removed_packages
+        .get("brew_formulae")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    let removed_casks: HashSet<_> = machine_state
+        .removed_packages
+        .get("brew_casks")
+        .map(|v| v.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+
+    let mut formulae_to_install: Vec<String> = Vec::new();
+    let mut casks_to_install: Vec<String> = Vec::new();
+
+    for (_winget_id, formula) in table.winget_to_formulae(&winget_ids) {
+        if !local_formulae.contains(formula) && !removed_formulae.contains(formula) {
+            formulae_to_install.push(formula.to_string());
+        }
+    }
+
+    for (_winget_id, cask) in table.winget_to_casks(&winget_ids) {
+        if !local_casks.contains(cask) && !removed_casks.contains(cask) {
+            casks_to_install.push(cask.to_string());
+        }
+    }
+
+    let total = formulae_to_install.len() + casks_to_install.len();
+    if total == 0 {
+        return false;
+    }
+
+    Output::info(&format!(
+        "Cross-platform: installing {} brew package{} from winget manifest...",
+        total,
+        if total == 1 { "" } else { "s" }
+    ));
+
+    let mut installed = false;
+
+    if !formulae_to_install.is_empty() {
+        let brew_pkgs = BrewfilePackages {
+            taps: Vec::new(),
+            formulae: formulae_to_install,
+            casks: Vec::new(),
+        };
+        if brew.import_manifest(&brew_pkgs.generate()).await.is_ok() {
+            installed = true;
+        }
+    }
+
+    for cask in &casks_to_install {
+        if brew.install_cask(cask, true).await.is_ok() {
+            installed = true;
+        }
+    }
+
+    installed
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+async fn import_cross_platform(
+    _config: &Config,
+    _manifests_dir: &Path,
+    _machine_state: &MachineState,
+) -> bool {
+    false
 }
 
 /// Update last_upgrade timestamp for a package manager
@@ -306,6 +513,7 @@ async fn import_simple_manager(
         "bun" => Box::new(BunManager::new()),
         "gem" => Box::new(GemManager::new()),
         "uv" => Box::new(UvManager::new()),
+        "winget" => Box::new(WingetManager::new()),
         _ => return false,
     };
 
@@ -318,16 +526,38 @@ async fn import_simple_manager(
         Err(_) => return false,
     };
 
-    let local_packages: HashSet<_> = machine_state
+    let case_insensitive = def.state_key == "winget";
+
+    let local_packages: HashSet<String> = machine_state
         .packages
         .get(def.state_key)
-        .map(|v| v.iter().cloned().collect())
+        .map(|v| {
+            v.iter()
+                .map(|s| {
+                    if case_insensitive {
+                        s.to_lowercase()
+                    } else {
+                        s.clone()
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
-    let removed_packages: HashSet<_> = machine_state
+    let removed_packages: HashSet<String> = machine_state
         .removed_packages
         .get(def.state_key)
-        .map(|v| v.iter().cloned().collect())
+        .map(|v| {
+            v.iter()
+                .map(|s| {
+                    if case_insensitive {
+                        s.to_lowercase()
+                    } else {
+                        s.clone()
+                    }
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
     // Filter to only missing packages
@@ -335,7 +565,12 @@ async fn import_simple_manager(
         .lines()
         .filter(|line| {
             let pkg = line.trim();
-            !pkg.is_empty() && !removed_packages.contains(pkg) && !local_packages.contains(pkg)
+            let key = if case_insensitive {
+                pkg.to_lowercase()
+            } else {
+                pkg.to_string()
+            };
+            !pkg.is_empty() && !removed_packages.contains(&key) && !local_packages.contains(&key)
         })
         .map(|s| s.to_string())
         .collect();
@@ -405,6 +640,7 @@ pub async fn sync_packages(
             "bun" => config.packages.bun.enabled,
             "gem" => config.packages.gem.enabled,
             "uv" => config.packages.uv.enabled,
+            "winget" => config.packages.winget.enabled,
             _ => false,
         };
 

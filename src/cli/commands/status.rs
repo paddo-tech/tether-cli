@@ -1,6 +1,7 @@
 use crate::cli::output::relative_time;
 use crate::cli::Output;
 use crate::config::Config;
+use crate::daemon::pid::{is_process_running, read_daemon_pid};
 use crate::sync::{ConflictState, SyncState};
 use anyhow::Result;
 use owo_colors::OwoColorize;
@@ -223,27 +224,4 @@ pub async fn run() -> Result<()> {
 
     println!();
     Ok(())
-}
-
-fn read_daemon_pid() -> Result<Option<u32>> {
-    let pid_path = Config::config_dir()?.join("daemon.pid");
-    if !pid_path.exists() {
-        return Ok(None);
-    }
-
-    let contents = std::fs::read_to_string(&pid_path)?;
-    match contents.trim().parse::<u32>() {
-        Ok(pid) if pid > 0 => Ok(Some(pid)),
-        _ => Ok(None),
-    }
-}
-
-fn is_process_running(pid: u32) -> bool {
-    unsafe {
-        if libc::kill(pid as libc::pid_t, 0) == 0 {
-            return true;
-        }
-        // ESRCH = no such process, EPERM = exists but no permission
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
 }

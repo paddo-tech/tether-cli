@@ -50,7 +50,7 @@ pub fn check_sync_format_version(sync_path: &Path) -> Result<()> {
             .map_err(|_| anyhow::anyhow!("Invalid format_version file"))?;
         if version > CURRENT_SYNC_FORMAT_VERSION {
             anyhow::bail!(
-                "Sync repo format version {} is newer than supported ({}). Run: brew upgrade tether",
+                "Sync repo format version {} is newer than supported ({}). Please update tether.",
                 version,
                 CURRENT_SYNC_FORMAT_VERSION
             );
@@ -98,8 +98,13 @@ pub fn canonical_project_file_path(normalized_url: &str, rel_path: &str) -> Resu
     if normalized_url.contains("..") || rel_path.contains("..") {
         anyhow::bail!("Path traversal not allowed in project path");
     }
-    if normalized_url.starts_with('/') || rel_path.starts_with('/') {
-        anyhow::bail!("Absolute paths not allowed in project path");
+    for s in [normalized_url, rel_path] {
+        if s.starts_with('/') || s.starts_with('\\') {
+            anyhow::bail!("Absolute paths not allowed in project path");
+        }
+        if s.len() >= 2 && s.as_bytes()[0].is_ascii_alphabetic() && s.as_bytes()[1] == b':' {
+            anyhow::bail!("Absolute paths not allowed in project path");
+        }
     }
 
     let home = crate::home_dir()?;
@@ -131,7 +136,7 @@ pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
                 .filter_map(|p| {
                     p.strip_prefix(home)
                         .ok()
-                        .map(|r| r.to_string_lossy().to_string())
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
                 })
                 .collect();
             if expanded.is_empty() {
@@ -168,7 +173,7 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
                 .filter_map(Result::ok)
                 .filter_map(|p| {
                     p.strip_prefix(dotfiles_dir).ok().and_then(|r| {
-                        let s = r.to_string_lossy();
+                        let s = r.to_string_lossy().replace('\\', "/");
                         // Remove .enc suffix and add leading dot
                         s.strip_suffix(".enc").map(|s| format!(".{}", s))
                     })
@@ -186,6 +191,60 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
             vec![]
         }
     }
+}
+
+/// Create a symlink. On Windows, falls back to copy if Developer Mode is not enabled.
+#[cfg(unix)]
+pub fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(src, dst)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn create_symlink(src: &Path, dst: &Path) -> Result<()> {
+    let result = if src.is_dir() {
+        std::os::windows::fs::symlink_dir(src, dst)
+    } else {
+        std::os::windows::fs::symlink_file(src, dst)
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(1314) => {
+            // ERROR_PRIVILEGE_NOT_HELD — need Developer Mode or admin for symlinks
+            if src.is_dir() {
+                copy_dir_recursive(src, dst, 0)?;
+            } else {
+                std::fs::copy(src, dst)?;
+            }
+            log::warn!(
+                "Symlink requires Developer Mode, copied instead: {}",
+                dst.display()
+            );
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(windows)]
+const MAX_COPY_DEPTH: u32 = 10;
+
+#[cfg(windows)]
+fn copy_dir_recursive(src: &Path, dst: &Path, depth: u32) -> Result<()> {
+    if depth > MAX_COPY_DEPTH {
+        anyhow::bail!("Directory copy exceeded max depth ({})", MAX_COPY_DEPTH);
+    }
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target, depth + 1)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Atomically write content to a file by writing to a temp file and renaming.
@@ -312,7 +371,7 @@ mod tests {
         )
         .unwrap();
         let err = check_sync_format_version(tmp.path()).unwrap_err();
-        assert!(err.to_string().contains("brew upgrade tether"));
+        assert!(err.to_string().contains("update tether"));
     }
 
     #[test]
@@ -328,5 +387,50 @@ mod tests {
         std::fs::write(tmp.path().join("format_version"), "abc\n").unwrap();
         let err = check_sync_format_version(tmp.path()).unwrap_err();
         assert!(err.to_string().contains("Invalid format_version"));
+    }
+
+    #[test]
+    fn test_create_symlink_file() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("source.txt");
+        let dst = tmp.path().join("link.txt");
+        std::fs::write(&src, "hello").unwrap();
+        create_symlink(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_create_symlink_dir() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("srcdir");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "aaa").unwrap();
+        std::fs::create_dir(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), "bbb").unwrap();
+
+        let dst = tmp.path().join("linkdir");
+        create_symlink(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(),
+            "bbb"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_copy_dir_recursive_respects_max_depth() {
+        let tmp = TempDir::new().unwrap();
+        let mut path = tmp.path().join("d0");
+        std::fs::create_dir(&path).unwrap();
+        for i in 1..=12 {
+            path = path.join(format!("d{}", i));
+            std::fs::create_dir(&path).unwrap();
+        }
+        std::fs::write(path.join("deep.txt"), "deep").unwrap();
+
+        let dst = tmp.path().join("copy");
+        let err = copy_dir_recursive(&tmp.path().join("d0"), &dst, 0).unwrap_err();
+        assert!(err.to_string().contains("max depth"));
     }
 }

@@ -181,6 +181,7 @@ fn show_dotfile_diff(
 async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Result<()> {
     use crate::packages::{
         BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+        WingetManager,
     };
 
     let manifests_dir = sync_path.join("manifests");
@@ -264,7 +265,7 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
         let remote_packages: Vec<_> = remote_manifest.lines().filter(|l| !l.is_empty()).collect();
         let local_packages: Vec<_> = local_manifest.lines().filter(|l| !l.is_empty()).collect();
 
-        let diff = diff_package_lists(&remote_packages, &local_packages);
+        let diff = diff_package_lists(&remote_packages, &local_packages, false);
         if !diff.is_empty() {
             has_diff = true;
             println!("{}", format!("{}:", label).bright_cyan().bold());
@@ -277,6 +278,38 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
                 Output::diff_line(symbol, &pkg, &status);
             }
             println!();
+        }
+    }
+
+    // winget diff
+    if config.packages.winget.enabled {
+        let winget = WingetManager::new();
+        if winget.is_available().await {
+            let winget_path = manifests_dir.join("winget.txt");
+            if winget_path.exists() {
+                let remote_manifest = std::fs::read_to_string(&winget_path)?;
+                let local_manifest = winget.export_manifest().await?;
+
+                let remote_packages: Vec<_> =
+                    remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+                let local_packages: Vec<_> =
+                    local_manifest.lines().filter(|l| !l.is_empty()).collect();
+
+                let diff = diff_package_lists(&remote_packages, &local_packages, true);
+                if !diff.is_empty() {
+                    has_diff = true;
+                    println!("{}", "winget:".bright_cyan().bold());
+                    for (pkg, status) in diff {
+                        let symbol = match status.as_str() {
+                            "added" => "+",
+                            "removed" => "-",
+                            _ => "~",
+                        };
+                        Output::diff_line(symbol, &pkg, &status);
+                    }
+                    println!();
+                }
+            }
         }
     }
 
@@ -351,20 +384,30 @@ fn diff_packages(
     diff
 }
 
-fn diff_package_lists(remote: &[&str], local: &[&str]) -> Vec<(String, String)> {
-    use std::collections::HashSet;
-    let remote_set: HashSet<&str> = remote.iter().copied().collect();
-    let local_set: HashSet<&str> = local.iter().copied().collect();
+fn diff_package_lists(
+    remote: &[&str],
+    local: &[&str],
+    case_insensitive: bool,
+) -> Vec<(String, String)> {
     let mut diff = Vec::new();
 
+    let contains = |haystack: &[&str], needle: &str| {
+        if case_insensitive {
+            let lower = needle.to_lowercase();
+            haystack.iter().any(|s| s.to_lowercase() == lower)
+        } else {
+            haystack.contains(&needle)
+        }
+    };
+
     for pkg in local {
-        if !remote_set.contains(pkg) {
+        if !contains(remote, pkg) {
             diff.push((pkg.to_string(), "added".to_string()));
         }
     }
 
     for pkg in remote {
-        if !local_set.contains(pkg) {
+        if !contains(local, pkg) {
             diff.push((pkg.to_string(), "removed".to_string()));
         }
     }
