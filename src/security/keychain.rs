@@ -1,4 +1,4 @@
-use age::secrecy::Secret;
+use age::secrecy::SecretString;
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{Read, Write};
@@ -24,7 +24,7 @@ fn cached_key_path() -> Result<PathBuf> {
 /// Store the encryption key encrypted with a passphrase
 /// The encrypted key is stored in the sync repo (syncs via git)
 pub fn store_encryption_key_with_passphrase(key: &[u8], passphrase: &str) -> Result<()> {
-    let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
+    let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_owned()));
 
     let mut encrypted = vec![];
     let mut writer = encryptor
@@ -115,16 +115,13 @@ pub fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
 
     let encrypted = fs::read(&path).context("Failed to read encrypted key")?;
 
-    let decryptor = match age::Decryptor::new(&encrypted[..])
-        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?
-    {
-        age::Decryptor::Passphrase(d) => d,
-        _ => return Err(anyhow::anyhow!("Key file not encrypted with passphrase")),
-    };
+    let decryptor = age::Decryptor::new(&encrypted[..])
+        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?;
 
     let mut key = vec![];
+    let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_owned()));
     let mut reader = decryptor
-        .decrypt(&Secret::new(passphrase.to_owned()), None)
+        .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|_| anyhow::anyhow!("Wrong passphrase"))?;
     reader.read_to_end(&mut key)?;
 
@@ -170,20 +167,19 @@ mod tests {
         let passphrase = "test-passphrase-123";
 
         // Encrypt
-        let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
+        let encryptor =
+            age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_owned()));
         let mut encrypted = vec![];
         let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
         writer.write_all(&key).unwrap();
         writer.finish().unwrap();
 
         // Decrypt
-        let decryptor = match age::Decryptor::new(&encrypted[..]).unwrap() {
-            age::Decryptor::Passphrase(d) => d,
-            _ => panic!("Expected passphrase decryptor"),
-        };
+        let decryptor = age::Decryptor::new(&encrypted[..]).unwrap();
         let mut decrypted = vec![];
+        let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_owned()));
         let mut reader = decryptor
-            .decrypt(&Secret::new(passphrase.to_owned()), None)
+            .decrypt(std::iter::once(&identity as &dyn age::Identity))
             .unwrap();
         reader.read_to_end(&mut decrypted).unwrap();
 
@@ -197,18 +193,17 @@ mod tests {
         let wrong_passphrase = "wrong";
 
         // Encrypt
-        let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
+        let encryptor =
+            age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_owned()));
         let mut encrypted = vec![];
         let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
         writer.write_all(&key).unwrap();
         writer.finish().unwrap();
 
         // Decrypt with wrong passphrase
-        let decryptor = match age::Decryptor::new(&encrypted[..]).unwrap() {
-            age::Decryptor::Passphrase(d) => d,
-            _ => panic!("Expected passphrase decryptor"),
-        };
-        let result = decryptor.decrypt(&Secret::new(wrong_passphrase.to_owned()), None);
+        let decryptor = age::Decryptor::new(&encrypted[..]).unwrap();
+        let identity = age::scrypt::Identity::new(SecretString::from(wrong_passphrase.to_owned()));
+        let result = decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity));
 
         assert!(result.is_err());
     }

@@ -1,9 +1,8 @@
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
+    aead::{rand_core::RngCore, Aead, KeyInit, OsRng},
     Aes256Gcm,
 };
 use anyhow::{Context, Result};
-use rand::RngCore;
 
 const NONCE_SIZE: usize = 12; // 96 bits for GCM
 pub const KEY_SIZE: usize = 32; // 256 bits for AES-256

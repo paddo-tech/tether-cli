@@ -1,4 +1,4 @@
-use age::secrecy::{ExposeSecret, Secret};
+use age::secrecy::{ExposeSecret, SecretString};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{Read, Write};
@@ -41,7 +41,7 @@ pub fn get_public_key_from_identity(identity: &age::x25519::Identity) -> String 
 /// Store identity encrypted with passphrase
 pub fn store_identity(identity: &age::x25519::Identity, passphrase: &str) -> Result<()> {
     let identity_str = identity.to_string();
-    let encryptor = age::Encryptor::with_user_passphrase(Secret::new(passphrase.to_owned()));
+    let encryptor = age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_owned()));
 
     let mut encrypted = vec![];
     let mut writer = encryptor
@@ -102,16 +102,13 @@ pub fn load_identity(passphrase: Option<&str>) -> Result<age::x25519::Identity> 
     }
 
     let encrypted = fs::read(&path)?;
-    let decryptor = match age::Decryptor::new(&encrypted[..])
-        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?
-    {
-        age::Decryptor::Passphrase(d) => d,
-        _ => return Err(anyhow::anyhow!("Identity not encrypted with passphrase")),
-    };
+    let decryptor = age::Decryptor::new(&encrypted[..])
+        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?;
 
     let mut identity_str = String::new();
+    let passphrase_identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_owned()));
     let mut reader = decryptor
-        .decrypt(&Secret::new(passphrase.to_owned()), None)
+        .decrypt(std::iter::once(&passphrase_identity as &dyn age::Identity))
         .map_err(|_| anyhow::anyhow!("Wrong passphrase"))?;
     reader.read_to_string(&mut identity_str)?;
 
@@ -219,13 +216,9 @@ pub fn encrypt_to_recipients(
         return Err(anyhow::anyhow!("No recipients specified"));
     }
 
-    let recipients_boxed: Vec<Box<dyn age::Recipient + Send>> = recipients
-        .iter()
-        .map(|r| Box::new(r.clone()) as Box<dyn age::Recipient + Send>)
-        .collect();
-
-    let encryptor = age::Encryptor::with_recipients(recipients_boxed)
-        .ok_or_else(|| anyhow::anyhow!("Failed to create encryptor: no recipients"))?;
+    let encryptor =
+        age::Encryptor::with_recipients(recipients.iter().map(|r| r as &dyn age::Recipient))
+            .map_err(|_| anyhow::anyhow!("Failed to create encryptor: no recipients"))?;
 
     let mut encrypted = vec![];
     let mut writer = encryptor
@@ -241,12 +234,8 @@ pub fn encrypt_to_recipients(
 
 /// Decrypt data with user's identity
 pub fn decrypt_with_identity(data: &[u8], identity: &age::x25519::Identity) -> Result<Vec<u8>> {
-    let decryptor = match age::Decryptor::new(data)
-        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?
-    {
-        age::Decryptor::Recipients(d) => d,
-        _ => return Err(anyhow::anyhow!("Data not encrypted with recipients")),
-    };
+    let decryptor = age::Decryptor::new(data)
+        .map_err(|e| anyhow::anyhow!("Failed to create decryptor: {}", e))?;
 
     let mut decrypted = vec![];
     let mut reader = decryptor
