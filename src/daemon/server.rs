@@ -524,9 +524,13 @@ impl DaemonServer {
 
         // Sync team project secrets
         let home = crate::home_dir()?;
-        if let Err(e) = crate::cli::commands::sync::sync_team_project_secrets(config, &home) {
+        let mut state = SyncState::load()?;
+        if let Err(e) =
+            crate::cli::commands::sync::sync_team_project_secrets(config, &home, &mut state)
+        {
             log::warn!("Failed to sync team project secrets: {}", e);
         }
+        state.save()?;
 
         log::info!("Team-only sync complete");
         Ok(())

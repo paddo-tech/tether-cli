@@ -206,7 +206,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Sync team project secrets
     if !dry_run {
-        sync_team_project_secrets(&config, &home)?;
+        sync_team_project_secrets(&config, &home, &mut state)?;
     }
 
     // Build machine state first (to know what's installed locally + respect removed_packages)
@@ -313,7 +313,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Sync collab secrets (only if feature enabled)
     if !dry_run && config.features.collab_secrets {
-        sync_collab_secrets(&config, &home)?;
+        sync_collab_secrets(&config, &home, &mut state)?;
     }
 
     // Prune old backups
@@ -328,7 +328,9 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 }
 
 /// Sync secrets from collab repos to local projects
-fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
+fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) -> Result<()> {
+    use crate::sync::{backup_file, create_backup_dir};
+
     let teams = match &config.teams {
         Some(t) if !t.collabs.is_empty() => t,
         _ => return Ok(()), // No collabs configured
@@ -364,6 +366,8 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
         Ok(id) => id,
         Err(_) => return Ok(()), // No identity, can't decrypt
     };
+
+    let mut backup_dir: Option<PathBuf> = None;
 
     // Process each collab
     for (collab_name, collab_config) in &teams.collabs {
@@ -457,6 +461,11 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                         continue;
                     }
 
+                    let state_key =
+                        format!("collab-secret:{}/{}/{}", collab_name, project_url, filename);
+                    let last_synced_hash = state.files.get(&state_key).map(|f| f.hash.as_str());
+                    let remote_hash = format!("{:x}", Sha256::digest(&decrypted));
+
                     // Write to all checkouts of this project
                     for local_project in checkouts {
                         let dest = local_project.join(filename);
@@ -488,14 +497,45 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                             }
                         }
 
-                        // Only write if content differs
                         let should_write = if dest.exists() {
-                            std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
+                            let existing = std::fs::read(&dest).unwrap_or_default();
+                            let local_hash = format!("{:x}", Sha256::digest(&existing));
+                            if local_hash == remote_hash {
+                                false // Already in sync
+                            } else {
+                                match last_synced_hash {
+                                    Some(h) => {
+                                        if local_hash == h {
+                                            true
+                                        } else {
+                                            log::info!(
+                                                "Preserving local changes to collab secret: {}/{}",
+                                                project_url,
+                                                filename
+                                            );
+                                            false
+                                        }
+                                    }
+                                    None => true,
+                                }
+                            }
                         } else {
                             true
                         };
 
                         if should_write {
+                            if dest.exists() {
+                                if backup_dir.is_none() {
+                                    backup_dir = Some(create_backup_dir()?);
+                                }
+                                let backup_path = format!("{}/{}", project_url, filename);
+                                backup_file(
+                                    backup_dir.as_ref().unwrap(),
+                                    "collab-secrets",
+                                    &backup_path,
+                                    &dest,
+                                )?;
+                            }
                             std::fs::write(&dest, &decrypted)?;
                             log::debug!(
                                 "Synced collab secret: {} -> {}",
@@ -504,6 +544,8 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                             );
                         }
                     }
+
+                    state.update_file(&state_key, remote_hash);
                 }
                 Err(e) => {
                     let err_str = e.to_string().to_lowercase();
@@ -1536,7 +1578,11 @@ fn detect_removed_packages(
 }
 
 /// Sync project secrets from team repos to local projects
-pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
+pub fn sync_team_project_secrets(
+    config: &Config,
+    home: &Path,
+    state: &mut SyncState,
+) -> Result<()> {
     use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
 
@@ -1654,14 +1700,37 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                 Ok(encrypted) => {
                     match crate::security::decrypt_with_identity(&encrypted, &identity) {
                         Ok(decrypted) => {
+                            let state_key =
+                                format!("team-secret:{}/{}", normalized_url, rel_file_no_age);
+                            let last_synced_hash =
+                                state.files.get(&state_key).map(|f| f.hash.as_str());
+                            let remote_hash = format!("{:x}", Sha256::digest(&decrypted));
+
                             for local_project in checkouts {
                                 let local_file = local_project.join(rel_file_no_age);
 
-                                // Only write if different or doesn't exist
                                 let should_write = if local_file.exists() {
-                                    std::fs::read(&local_file)
-                                        .map(|existing| existing != decrypted)
-                                        .unwrap_or(true)
+                                    let existing = std::fs::read(&local_file).unwrap_or_default();
+                                    let local_hash = format!("{:x}", Sha256::digest(&existing));
+                                    if local_hash == remote_hash {
+                                        false // Already in sync
+                                    } else {
+                                        match last_synced_hash {
+                                            Some(h) => {
+                                                if local_hash == h {
+                                                    true
+                                                } else {
+                                                    log::info!(
+                                                        "Preserving local changes to team secret: {}/{}",
+                                                        normalized_url,
+                                                        rel_file_no_age
+                                                    );
+                                                    false
+                                                }
+                                            }
+                                            None => true,
+                                        }
+                                    }
                                 } else {
                                     true
                                 };
@@ -1692,6 +1761,8 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                                     ));
                                 }
                             }
+
+                            state.update_file(&state_key, remote_hash);
                         }
                         Err(e) => {
                             let err_str = e.to_string().to_lowercase();
@@ -1769,7 +1840,9 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 
     // Sync team project secrets to local projects
     if !dry_run {
-        sync_team_project_secrets(config, &home)?;
+        let mut state = SyncState::load()?;
+        sync_team_project_secrets(config, &home, &mut state)?;
+        state.save()?;
     }
 
     Output::success("Team sync complete");
