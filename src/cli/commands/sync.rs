@@ -118,7 +118,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             &config,
             &sync_path,
             &home,
-            &state,
+            &mut state,
             &machine_state_for_decrypt,
             interactive,
         )?;
@@ -566,7 +566,7 @@ fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
     home: &Path,
-    state: &SyncState,
+    state: &mut SyncState,
     machine_state: &MachineState,
     interactive: bool,
 ) -> Result<()> {
@@ -855,7 +855,7 @@ fn decrypt_project_configs(
     sync_path: &Path,
     home: &Path,
     machine_state: &MachineState,
-    state: &SyncState,
+    state: &mut SyncState,
     key: &[u8],
 ) -> Result<()> {
     use crate::sync::{backup_file, create_backup_dir};
@@ -1025,6 +1025,8 @@ fn decrypt_project_configs(
                                     crate::sync::atomic_write(&canonical_path, &plaintext)?;
                                 }
                             }
+
+                            state.update_file(&state_key, remote_hash);
 
                             // Create symlinks in all checkouts
                             for local_repo_path in checkouts {
