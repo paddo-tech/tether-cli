@@ -995,16 +995,6 @@ fn decrypt_project_configs(
                             }
 
                             if has_local_mods {
-                                // Record local hash so this message doesn't repeat
-                                for local_repo_path in checkouts {
-                                    let local_file = local_repo_path.join(rel_path_no_enc);
-                                    if let Ok(local_content) = std::fs::read(&local_file) {
-                                        let local_hash =
-                                            format!("{:x}", Sha256::digest(&local_content));
-                                        state.update_file(&state_key, local_hash);
-                                        break;
-                                    }
-                                }
                                 Output::info(&format!(
                                     "{}: {} (local changes will be pushed)",
                                     project_name, rel_path_no_enc
