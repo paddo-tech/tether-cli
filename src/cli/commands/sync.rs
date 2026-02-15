@@ -1024,9 +1024,8 @@ fn decrypt_project_configs(
 
                                     crate::sync::atomic_write(&canonical_path, &plaintext)?;
                                 }
+                                state.update_file(&state_key, remote_hash);
                             }
-
-                            state.update_file(&state_key, remote_hash);
 
                             // Create symlinks in all checkouts
                             for local_repo_path in checkouts {
