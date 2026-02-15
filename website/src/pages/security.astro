@@ -65,9 +65,9 @@ import CodeBlock from '../components/CodeBlock.astro';
             </ul>
 
             <div class="mt-4 text-sm">
-              <span class="text-muted font-mono">
-                Source code will be available when repository is open sourced
-              </span>
+              <a href="https://github.com/paddo-tech/tether-cli/tree/main/src/security" target="_blank" rel="noopener noreferrer" class="text-primary hover:text-accent font-mono transition-colors">
+                View source on GitHub &rarr;
+              </a>
             </div>
           </div>
 
@@ -107,9 +107,9 @@ fn encrypt_file(path: &Path, key: &[u8; 32]) -> Result<()> {
             />
 
             <div class="mt-4 text-sm">
-              <span class="text-muted font-mono">
-                Source code will be available when repository is open sourced
-              </span>
+              <a href="https://github.com/paddo-tech/tether-cli/tree/main/src/security" target="_blank" rel="noopener noreferrer" class="text-primary hover:text-accent font-mono transition-colors">
+                View source on GitHub &rarr;
+              </a>
             </div>
           </div>
         </div>
@@ -163,9 +163,9 @@ fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
             />
 
             <div class="mt-4 text-sm">
-              <span class="text-muted font-mono">
-                Source code will be available when repository is open sourced
-              </span>
+              <a href="https://github.com/paddo-tech/tether-cli/tree/main/src/security" target="_blank" rel="noopener noreferrer" class="text-primary hover:text-accent font-mono transition-colors">
+                View source on GitHub &rarr;
+              </a>
             </div>
           </div>
 
@@ -177,7 +177,7 @@ fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
               Cross-Platform Compatible
             </h4>
             <p class="text-muted text-sm">
-              The passphrase-based approach works on any platform — macOS, Linux, or Windows.
+              The passphrase-based approach works across platforms — macOS and Linux.
               Your encrypted key travels with your sync repo, protected by your passphrase.
             </p>
           </div>
@@ -221,9 +221,9 @@ fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
             </div>
 
             <div class="mt-4 text-sm">
-              <span class="text-muted font-mono">
-                Source code will be available when repository is open sourced
-              </span>
+              <a href="https://github.com/paddo-tech/tether-cli/tree/main/src/security" target="_blank" rel="noopener noreferrer" class="text-primary hover:text-accent font-mono transition-colors">
+                View source on GitHub &rarr;
+              </a>
             </div>
           </div>
         </div>
@@ -356,31 +356,25 @@ fn unlock_with_passphrase(passphrase: &str) -> Result<Vec<u8>> {
             </p>
 
             <div class="grid md:grid-cols-2 gap-4">
-              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
-                <div class="font-mono font-semibold text-muted mb-1">encryption.rs</div>
+              <a href="https://github.com/paddo-tech/tether-cli/blob/main/src/security/encryption.rs" target="_blank" rel="noopener noreferrer" class="block p-4 bg-surface rounded-lg border border-primary/20 hover:border-primary/50 transition-colors">
+                <div class="font-mono font-semibold text-primary mb-1">encryption.rs</div>
                 <div class="text-sm text-muted">AES-256-GCM implementation</div>
-              </div>
+              </a>
 
-              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
-                <div class="font-mono font-semibold text-muted mb-1">keychain.rs</div>
+              <a href="https://github.com/paddo-tech/tether-cli/blob/main/src/security/keychain.rs" target="_blank" rel="noopener noreferrer" class="block p-4 bg-surface rounded-lg border border-primary/20 hover:border-primary/50 transition-colors">
+                <div class="font-mono font-semibold text-primary mb-1">keychain.rs</div>
                 <div class="text-sm text-muted">Passphrase-based key management</div>
-              </div>
+              </a>
 
-              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
-                <div class="font-mono font-semibold text-muted mb-1">secret_detection.rs</div>
+              <a href="https://github.com/paddo-tech/tether-cli/blob/main/src/security/secrets.rs" target="_blank" rel="noopener noreferrer" class="block p-4 bg-surface rounded-lg border border-primary/20 hover:border-primary/50 transition-colors">
+                <div class="font-mono font-semibold text-primary mb-1">secrets.rs</div>
                 <div class="text-sm text-muted">Secret scanning patterns</div>
-              </div>
+              </a>
 
-              <div class="block p-4 bg-surface rounded-lg border border-surface opacity-75">
-                <div class="font-mono font-semibold text-muted mb-1">Cargo.toml</div>
+              <a href="https://github.com/paddo-tech/tether-cli/blob/main/Cargo.toml" target="_blank" rel="noopener noreferrer" class="block p-4 bg-surface rounded-lg border border-primary/20 hover:border-primary/50 transition-colors">
+                <div class="font-mono font-semibold text-primary mb-1">Cargo.toml</div>
                 <div class="text-sm text-muted">Dependencies and versions</div>
-              </div>
-            </div>
-
-            <div class="mt-6 text-center">
-              <p class="text-muted font-mono">
-                Repository will be open sourced soon
-              </p>
+              </a>
             </div>
           </div>
         </div>

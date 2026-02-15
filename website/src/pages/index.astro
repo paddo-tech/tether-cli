@@ -28,7 +28,7 @@ const features = [
   {
     icon: icons.sync,
     title: 'Automatic Sync',
-    description: 'Set it once, forget about it. Background daemon automatically syncs changes across all your machines in real-time.',
+    description: 'Set it once, forget about it. Background daemon syncs changes across all your machines every 5 minutes.',
   },
   {
     icon: icons.users,
@@ -43,12 +43,17 @@ const features = [
   {
     icon: icons.package,
     title: 'Package Managers',
-    description: 'Syncs Homebrew formulae, casks (VS Code, Slack, etc.), taps, and npm/pnpm globals. Desktop apps included.',
+    description: 'Syncs Homebrew (formulae, casks, taps), npm, pnpm, bun, gem, and uv globals. Desktop apps included.',
   },
   {
     icon: icons.scan,
     title: 'Secret Detection',
     description: 'Automatically scans for API keys, tokens, and credentials before syncing. Prevents accidental leaks.',
+  },
+  {
+    icon: icons.users,
+    title: 'Collab Secrets',
+    description: 'Share project secrets with GitHub collaborators using age public-key encryption. No separate secret manager needed.',
   },
   {
     icon: icons.lightning,
@@ -65,6 +70,9 @@ const comparisonData = [
   { feature: 'Secret Detection', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'macOS Support', tether: true, mackup: true, chezmoi: true, manual: true },
   { feature: 'Linux Support', tether: 'testing', mackup: true, chezmoi: true, manual: true },
+  { feature: 'Team Secrets', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'Collab Secrets', tether: true, mackup: false, chezmoi: false, manual: false },
+  { feature: 'Backup & Restore', tether: true, mackup: false, chezmoi: false, manual: false },
   { feature: 'Zero Config', tether: true, mackup: true, chezmoi: false, manual: false },
 ];
 ---
@@ -156,6 +164,126 @@ const comparisonData = [
           {features.map((feature) => (
             <FeatureCard {...feature} />
           ))}
+        </div>
+      </div>
+    </section>
+
+    <!-- Dashboard Showcase -->
+    <section class="py-20">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="text-center mb-12">
+          <h2 class="text-3xl sm:text-4xl font-bold font-mono mb-4">
+            Interactive <span class="text-primary">dashboard</span>
+          </h2>
+          <p class="text-muted text-lg max-w-2xl mx-auto">
+            Run <code class="text-primary bg-surface px-2 py-1 rounded font-mono text-sm">tether</code> to launch the TUI. Monitor files, packages, machines, and config — all from your terminal.
+          </p>
+        </div>
+
+        <div class="max-w-4xl mx-auto">
+          <!-- Terminal mockup -->
+          <div class="rounded-xl overflow-hidden shadow-2xl shadow-black/50 border border-[#3b4261]">
+            <!-- Title bar -->
+            <div class="bg-[#24283b] px-4 py-3 flex items-center gap-2">
+              <div class="w-3 h-3 rounded-full bg-[#f7768e]"></div>
+              <div class="w-3 h-3 rounded-full bg-[#e0af68]"></div>
+              <div class="w-3 h-3 rounded-full bg-[#9ece6a]"></div>
+              <span class="flex-1 text-center text-[#565f89] text-xs font-mono">tether</span>
+              <div class="w-[52px]"></div>
+            </div>
+            <!-- Content -->
+            <div class="bg-[#1a1b26] px-3 pt-2 pb-3 font-mono text-[12px] leading-relaxed">
+              <!-- Header -->
+              <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                <span class="px-1.5 py-0.5 bg-[#7aa2f7] text-[#1a1b26] rounded text-[11px] font-bold">Tether</span>
+                <span class="text-[#c0caf5]">My-MacBook.local</span>
+                <span class="text-[#565f89]">daemon:</span>
+                <span class="text-[#9ece6a]">running (4218)</span>
+                <span class="text-[#565f89]">last sync:</span>
+                <span class="text-[#c0caf5]">just now</span>
+                <span class="px-1.5 py-0.5 bg-[#bb9af7] text-[#1a1b26] rounded text-[11px] font-bold">team</span>
+              </div>
+              <!-- Tabs -->
+              <div class="flex gap-0 border-b border-[#3b4261] mb-2 text-[12px]">
+                <span class="px-3 py-1 text-[#7aa2f7] border border-[#3b4261] border-b-[#1a1b26] rounded-t -mb-px"><span class="text-[#7dcfff]">1:</span>Overview</span>
+                <span class="px-3 py-1 text-[#565f89]"><span class="text-[#565f89]">2:</span>Files</span>
+                <span class="px-3 py-1 text-[#565f89]"><span class="text-[#565f89]">3:</span>Packages</span>
+                <span class="px-3 py-1 text-[#565f89]"><span class="text-[#565f89]">4:</span>Machines</span>
+                <span class="px-3 py-1 text-[#565f89]"><span class="text-[#565f89]">5:</span>Config</span>
+              </div>
+              <!-- Two columns -->
+              <div class="grid grid-cols-2 gap-3 mb-2">
+                <!-- Dotfiles -->
+                <div class="border border-[#3b4261] rounded p-2">
+                  <div class="text-[#e0af68] mb-1">── Dotfiles ──</div>
+                  <div class="text-[#7aa2f7] mb-1">Personal <span class="text-[#565f89]">(38)</span> <span class="text-[#545c7e] text-[10px]">git@github.com:user/dotfiles-sync</span></div>
+                  <div class="space-y-0.5">
+                    <div><span class="text-[#9ece6a]">ok</span> <span class="text-[#c0caf5]">.zshrc</span> <span class="text-[#545c7e]">Jan 20 14:32</span></div>
+                    <div><span class="text-[#9ece6a]">ok</span> <span class="text-[#c0caf5]">.gitconfig</span> <span class="text-[#545c7e]">Feb 08 09:15</span></div>
+                    <div><span class="text-[#9ece6a]">ok</span> <span class="text-[#c0caf5]">.config/starship.toml</span> <span class="text-[#545c7e]">Feb 14 11:20</span></div>
+                    <div><span class="text-[#9ece6a]">ok</span> <span class="text-[#c0caf5]">.config/ghostty/config</span> <span class="text-[#545c7e]">Feb 12 16:45</span></div>
+                    <div><span class="text-[#9ece6a]">ok</span> <span class="text-[#c0caf5]">.claude/settings.json</span> <span class="text-[#545c7e]">2h ago</span></div>
+                  </div>
+                </div>
+                <!-- Packages -->
+                <div class="border border-[#3b4261] rounded p-2">
+                  <div class="text-[#e0af68] mb-1">── Packages ──</div>
+                  <div class="space-y-0.5">
+                    <div class="flex justify-between"><span class="text-[#e0af68]">Brew casks</span> <span class="text-[#c0caf5]">22 packages</span></div>
+                    <div class="flex justify-between"><span class="text-[#e0af68]">Brew formulae</span> <span class="text-[#c0caf5]">60 packages</span></div>
+                    <div class="flex justify-between"><span class="text-[#e0af68]">Brew taps</span> <span class="text-[#c0caf5]">10 packages</span></div>
+                    <div class="flex justify-between"><span class="text-[#e0af68]">Bun</span> <span class="text-[#c0caf5]">12 packages</span></div>
+                    <div class="flex justify-between"><span class="text-[#e0af68]">Gem</span> <span class="text-[#c0caf5]">180 packages</span></div>
+                    <div class="flex justify-between"><span class="text-[#e0af68]">npm</span> <span class="text-[#c0caf5]">1 package</span></div>
+                    <div class="flex justify-between"><span class="text-[#e0af68]">uv</span> <span class="text-[#c0caf5]">1 package</span></div>
+                  </div>
+                </div>
+              </div>
+              <!-- Machines -->
+              <div class="border border-[#3b4261] rounded p-2 mb-2">
+                <div class="text-[#e0af68] mb-1">── Machines ──</div>
+                <div><span class="text-[#9ece6a]">&nbsp;*</span> <span class="text-[#c0caf5]">My-MacBook.local</span> <span class="text-[#545c7e]">53f 308p  just now</span></div>
+                <div><span class="text-[#565f89]">&nbsp;&nbsp;</span><span class="text-[#c0caf5]">My-Mac-mini.local</span> <span class="text-[#545c7e]">47f 286p  4m ago</span></div>
+              </div>
+              <!-- Activity -->
+              <div class="border border-[#3b4261] rounded p-2 mb-2">
+                <div class="text-[#e0af68] mb-1">── Activity ──</div>
+                <div class="text-[#9ece6a]">Synced 38 dotfiles and 286 packages</div>
+                <div class="text-[#565f89]">Daemon running — next sync in 5 minutes</div>
+              </div>
+              <!-- Bottom bar -->
+              <div class="flex gap-4">
+                <span><span class="text-[#e0af68] font-bold">q</span><span class="text-[#565f89]">uit</span></span>
+                <span><span class="text-[#e0af68] font-bold">s</span><span class="text-[#565f89]">ync</span></span>
+                <span><span class="text-[#e0af68] font-bold">d</span><span class="text-[#565f89]">aemon</span></span>
+                <span><span class="text-[#e0af68] font-bold">r</span><span class="text-[#565f89]">efresh</span></span>
+                <span><span class="text-[#e0af68] font-bold">?</span> <span class="text-[#565f89]">help</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mt-8 max-w-4xl mx-auto text-center">
+          <div class="bg-surface rounded-lg p-3 border border-surface">
+            <div class="text-primary font-mono font-bold text-sm">Overview</div>
+            <div class="text-muted text-xs mt-1">Files, packages & machines at a glance</div>
+          </div>
+          <div class="bg-surface rounded-lg p-3 border border-surface">
+            <div class="text-primary font-mono font-bold text-sm">Files</div>
+            <div class="text-muted text-xs mt-1">Browse all synced dotfiles</div>
+          </div>
+          <div class="bg-surface rounded-lg p-3 border border-surface">
+            <div class="text-primary font-mono font-bold text-sm">Packages</div>
+            <div class="text-muted text-xs mt-1">Browse & uninstall packages</div>
+          </div>
+          <div class="bg-surface rounded-lg p-3 border border-surface">
+            <div class="text-primary font-mono font-bold text-sm">Machines</div>
+            <div class="text-muted text-xs mt-1">See connected machines</div>
+          </div>
+          <div class="bg-surface rounded-lg p-3 border border-surface">
+            <div class="text-primary font-mono font-bold text-sm">Config</div>
+            <div class="text-muted text-xs mt-1">Edit settings inline</div>
+          </div>
         </div>
       </div>
     </section>
@@ -359,7 +487,7 @@ const comparisonData = [
           </div>
 
           <p class="text-sm text-muted mt-6 font-mono">
-            MIT Licensed • Made with ❤️ by the community
+            MIT Licensed • Made by Paddo Tech
           </p>
         </div>
       </div>

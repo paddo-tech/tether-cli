@@ -15,10 +15,10 @@ import Code from '../../components/Code.astro';
     </p>
     <h3>Key Features</h3>
     <ul>
-      <li><strong>Automatic Sync</strong> — Background daemon watches for changes and syncs in real-time</li>
+      <li><strong>Automatic Sync</strong> — Background daemon syncs changes every 5 minutes</li>
       <li><strong>End-to-End Encryption</strong> — AES-256-GCM encryption with passphrase-protected keys</li>
       <li><strong>Project Configs</strong> — Sync .env files and IDE settings across machines by Git remote</li>
-      <li><strong>Package Manager Support</strong> — Syncs Homebrew, npm, pnpm, bun, and gem packages</li>
+      <li><strong>Package Manager Support</strong> — Syncs Homebrew, npm, pnpm, bun, gem, and uv packages</li>
       <li><strong>Secret Detection</strong> — Prevents accidental syncing of API keys and credentials</li>
       <li><strong>Git-Backed</strong> — Full version history and rollback capabilities</li>
       <li><strong>Team Secrets</strong> — Share encrypted secrets across teams with age encryption</li>
@@ -103,9 +103,115 @@ tether init --repo git@github.com:username/dotfiles.git`} />
 
   <hr class="my-12 border-surface" />
 
+  <!-- Dashboard -->
+  <section id="dashboard">
+    <h2>Dashboard (TUI)</h2>
+    <p>
+      Run <code>tether</code> with no arguments to launch the interactive terminal dashboard.
+    </p>
+    <Code code="tether" />
+    <p>The dashboard has five tabs you can switch between using number keys or arrow keys:</p>
+
+    <h3>Tabs</h3>
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-surface">
+          <th class="text-left py-2 pr-4">Tab</th>
+          <th class="text-left py-2 pr-4">Key</th>
+          <th class="text-left py-2">Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Overview</td>
+          <td class="py-2 pr-4 font-mono text-xs">1</td>
+          <td class="py-2">Dotfiles, packages, machines, and recent activity at a glance</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Files</td>
+          <td class="py-2 pr-4 font-mono text-xs">2</td>
+          <td class="py-2">Browse all synced dotfiles grouped by personal and team sections</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Packages</td>
+          <td class="py-2 pr-4 font-mono text-xs">3</td>
+          <td class="py-2">Collapsible package manager sections with package names. Uninstall packages with confirmation</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Machines</td>
+          <td class="py-2 pr-4 font-mono text-xs">4</td>
+          <td class="py-2">Connected machines with hostname, OS, dotfile count, and per-manager package counts</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Config</td>
+          <td class="py-2 pr-4 font-mono text-xs">5</td>
+          <td class="py-2">Inline config editor with boolean toggles, validated text fields, and list editing</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Keybindings</h3>
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-surface">
+          <th class="text-left py-2 pr-4">Key</th>
+          <th class="text-left py-2">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">q</td>
+          <td class="py-2">Quit dashboard</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">s</td>
+          <td class="py-2">Trigger a manual sync</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">d</td>
+          <td class="py-2">Toggle daemon start/stop</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">r</td>
+          <td class="py-2">Refresh dashboard data</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">?</td>
+          <td class="py-2">Show help overlay with all keybindings</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">1-5</td>
+          <td class="py-2">Switch to tab by number</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Tab</td>
+          <td class="py-2">Next tab</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">↑ ↓ / j k</td>
+          <td class="py-2">Navigate within lists</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Enter</td>
+          <td class="py-2">Expand/collapse sections, confirm actions</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">Esc / Ctrl+c</td>
+          <td class="py-2">Quit dashboard</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="my-12 border-surface" />
+
   <!-- Commands -->
   <section id="commands">
     <h2>Commands</h2>
+
+    <h3 id="cmd-dashboard">tether / tether dashboard</h3>
+    <p>Launch the interactive TUI dashboard. See <a href="#dashboard">Dashboard</a> above for details.</p>
+    <Code code="tether" />
 
     <h3 id="cmd-init">tether init</h3>
     <p>Initialize Tether on this machine.</p>
@@ -242,6 +348,15 @@ tether identity show     # Show your public key
 tether identity unlock   # Unlock with passphrase
 tether identity lock     # Clear cached key
 tether identity reset    # Generate new (destroys old)`} />
+
+    <h3 id="cmd-packages">tether packages</h3>
+    <p>List installed packages across all managers with interactive multi-select uninstall.</p>
+    <Code code={`tether packages             # Interactive mode
+tether packages --list      # Non-interactive list`} />
+    <ul>
+      <li><code>--list</code> — Print packages without interactive UI</li>
+      <li><code>-y</code> — Skip confirmation prompts</li>
+    </ul>
 
     <h3 id="cmd-collab">tether collab</h3>
     <p>Share project secrets with GitHub collaborators (requires write access).</p>

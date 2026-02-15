@@ -8,7 +8,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org/)
 [![macOS Intel](https://img.shields.io/badge/macOS-Intel-success)](https://github.com/paddo-tech/tether-cli/releases)
 [![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-success)](https://github.com/paddo-tech/tether-cli/releases)
-[![Linux](https://img.shields.io/badge/Linux-Coming%20Soon-lightgrey)](https://github.com/paddo-tech/tether-cli)
+[![Linux](https://img.shields.io/badge/Linux-Beta-yellow)](https://github.com/paddo-tech/tether-cli)
 
 [![GitHub Stars](https://img.shields.io/github/stars/paddo-tech/tether-cli?style=social)](https://github.com/paddo-tech/tether-cli)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/paddotech)
@@ -17,20 +17,20 @@
 
 ## What is Tether?
 
-Tether automatically syncs your shell configurations (`.zshrc`, `.gitconfig`, etc.) and globally installed packages across all your machines. Install a package or update your config on one machine, and it's immediately available everywhere.
+Tether syncs your shell configurations (`.zshrc`, `.gitconfig`, etc.) and globally installed packages across all your machines. Update a config or install a package on one machine, and it's available everywhere.
 
-**All your dotfiles are encrypted** before syncing to Git using AES-256-GCM encryption. Your secrets stay secret, even in your private Git repository.
+All dotfiles are **encrypted with AES-256-GCM** before syncing to Git. Your secrets stay secret.
 
 ### Key Features
 
-- 🔐 **End-to-end encryption** - Dotfiles encrypted with AES-256-GCM before syncing
-- 🔍 **Secret detection** - Automatic scanning for API keys, tokens, and credentials
-- 📁 **Project configs** - Sync .env files and IDE settings by Git remote URL
-- 👥 **Team secrets** - Share encrypted secrets using age public-key encryption
-- 📦 **Package manager support** - Syncs Homebrew, npm, pnpm, bun, gem, and uv
-- 🔄 **Automatic syncing** - Background daemon keeps everything in sync
-- 🗂️ **Dotfile management** - Encrypted shell configs synced across machines
-- 🌳 **Git-backed** - Uses private Git repo for versioning and history
+- **End-to-end encryption** - Dotfiles encrypted with AES-256-GCM before syncing
+- **Secret detection** - Automatic scanning for API keys, tokens, and credentials
+- **Project configs** - Sync .env files and IDE settings by Git remote URL
+- **Team sync** - Share dotfiles, secrets, and project configs with age public-key encryption
+- **Collab secrets** - Collaborator-based project secret sharing using GitHub permissions
+- **Package sync** - Homebrew, npm, pnpm, bun, gem, and uv
+- **Background daemon** - Automatic periodic sync every 5 minutes
+- **Git-backed** - Private Git repo for versioning and history
 
 ## Quick Start
 
@@ -41,215 +41,149 @@ brew tap paddo-tech/tap && brew install tether-cli
 # Initialize (interactive setup)
 tether init
 
-# That's it! The daemon will keep everything in sync automatically.
+# The daemon keeps everything in sync automatically
 ```
 
 ## Use Cases
 
-### Scenario 1: Multiple Machines
-You have a laptop for work and a desktop at home. Install a CLI tool on one machine, and it's automatically installed on the other.
+### Multiple Machines
+Laptop at work, desktop at home. Install a CLI tool on one machine, it's automatically on the other.
 
-### Scenario 2: New Machine Setup
-Got a new machine? Run `tether init` and all your dotfiles and packages are restored in minutes.
+### New Machine Setup
+Run `tether init` and all your dotfiles and packages are restored in minutes.
 
-### Scenario 3: Team Standardization
-Share a sync repo across your team to maintain consistent development environments.
+### Team Standardization
+Share a sync repo across your team for consistent development environments, shared secrets, and project configs.
 
-## What Gets Synced?
+## What Gets Synced
 
 ### Dotfiles (Encrypted)
-- `.zshrc` (shell configuration) - **Encrypted with AES-256-GCM**
-- `.gitconfig` (Git settings) - **Encrypted with AES-256-GCM**
-- `.zprofile` (optional) - **Encrypted with AES-256-GCM**
-- Custom dotfiles (configurable) - **All encrypted**
-
-**How it works:**
-- Local: Dotfiles stored as plaintext in `~/` (so your shell can read them)
-- Git: Dotfiles stored encrypted as `.enc` files
-- Encryption key: Derived from your passphrase using age encryption
+- `.zshrc`, `.gitconfig`, `.zprofile`, and custom dotfiles
+- Stored encrypted as `.enc` files in Git, plaintext locally for your shell
+- Encryption key derived from your passphrase using age encryption
 
 ### Packages (Plaintext)
-- **Homebrew Formulae** - CLI tools like git, ripgrep, node
-- **Homebrew Casks** - Desktop apps like VS Code, Slack, Docker, Spotify
-- **Homebrew Taps** - Custom repositories
-- **npm** - Global packages
-- **pnpm** - Global packages
-- **bun** - Global packages
+- **Homebrew** - Formulae, casks, and taps
+- **npm** / **pnpm** / **bun** - Global packages
 - **gem** - Ruby gems
-
-**Note:** Package manifests are not encrypted since package names are not sensitive.
+- **uv** - Python packages
 
 ## Commands
 
 ```bash
-tether init          # Set up Tether on this machine
-tether sync          # Manually trigger a sync
-tether status        # Show current sync status
-tether diff          # Show differences between machines
-tether daemon        # Control background daemon
-tether machines      # Manage connected machines
-tether rollback      # Revert to previous state
+tether                   # Interactive dashboard
+tether init              # Set up Tether on this machine
+tether sync              # Manually trigger a sync
+tether status            # Show current sync status
+tether diff              # Show differences between machines
+tether config            # Manage configuration and feature toggles
+tether daemon            # Control the background daemon
+tether machines          # Manage connected machines
+tether ignore            # Manage ignore patterns
+tether team              # Manage team sync (dotfiles, secrets, projects)
+tether collab            # Collaborator-based project secret sharing
+tether resolve           # Resolve file conflicts
+tether unlock / lock     # Manage encryption key
+tether upgrade           # Upgrade all installed packages
+tether packages          # List and manage installed packages
+tether restore           # Restore files from backup
+tether identity          # Manage age identity for team secrets
 ```
 
-See [SPEC.md](SPEC.md) for comprehensive documentation.
+## Security
 
-## Security Features
+### Encryption
+All dotfiles are encrypted with **AES-256-GCM** (authenticated encryption) before being stored in Git. Fresh random nonce for each encryption, tamper detection built-in.
 
-### 🔐 Encryption
-All dotfiles are encrypted using **AES-256-GCM** (authenticated encryption) before being stored in Git:
-- **Algorithm:** AES-256-GCM (industry standard)
-- **Key Size:** 256-bit encryption keys
-- **Authenticated:** Tamper detection built-in
-- **Unique:** Fresh random nonce for each encryption
+### Secret Detection
+Scans for AWS keys, GitHub tokens, API keys, SSH private keys, passwords, database URLs, bearer tokens, and high-entropy strings before syncing.
 
-### 🔍 Secret Detection
-Tether automatically scans your dotfiles for sensitive data before syncing:
-- **AWS keys** (access keys, secret keys)
-- **GitHub tokens** (PATs, OAuth tokens)
-- **API keys** (generic pattern matching)
-- **Private keys** (SSH, RSA, OpenSSH)
-- **Passwords** (plaintext passwords in configs)
-- **Database URLs** (with embedded credentials)
-- **High-entropy strings** (potential secrets)
+### Key Management
+Passphrase-based encryption. Set a passphrase on your first machine, enter the same passphrase on others. No cloud services or platform-specific keychains required.
 
-When secrets are detected, Tether warns you and shows what was found (redacted). Your secrets are then safely encrypted before syncing.
-
-### 🔑 Key Management
-Encryption keys are derived from a **passphrase**:
-- **First machine:** Enter a passphrase to generate your encryption key
-- **Subsequent machines:** Enter the same passphrase to unlock
-- **Portable:** Works on any machine - no platform-specific keychain needed
-- **Secure:** Keys derived using age encryption, never stored in Git
-
-### 🔒 Privacy
-- **Encrypted at rest:** Dotfiles stored as `.enc` files in Git
-- **Plaintext locally:** Your shell reads plaintext `~/.zshrc` normally
-- **No external services:** Keys derived from your passphrase, data in your Git repo
-- **Full control:** You own the Git repo and your passphrase
+### Privacy
+- Encrypted at rest in Git, plaintext locally
+- No external services -- data stays in your Git repo
+- You own the repo and your passphrase
 
 ## How It Works
 
-1. **Install** - `brew install tether-cli`
-2. **Initialize** - Point Tether to your private Git repo; set a passphrase for encryption
-3. **Scan** - Tether scans your dotfiles for secrets (API keys, tokens, etc.)
-4. **Encrypt** - Dotfiles are encrypted with AES-256-GCM using key derived from passphrase
-5. **Sync** - Encrypted dotfiles and package manifests pushed to Git
-6. **Propagate** - Other machines pull encrypted data from Git
-7. **Decrypt** - Other machines decrypt dotfiles using the same passphrase
-8. **Apply** - Plaintext dotfiles written locally; packages installed automatically
+1. **Initialize** - Point Tether to your private Git repo; set a passphrase
+2. **Scan** - Dotfiles scanned for secrets (API keys, tokens, etc.)
+3. **Encrypt** - Dotfiles encrypted with AES-256-GCM
+4. **Sync** - Encrypted dotfiles and package manifests pushed to Git
+5. **Propagate** - Other machines pull, decrypt, and apply
 
 ## Architecture
 
 Built with Rust for performance, reliability, and single-binary distribution.
 
 ```
-┌─────────────────┐
-│   File Watcher  │  Monitors dotfiles for changes
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Security Module │  Scans for secrets, encrypts with AES-256-GCM
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Sync Engine   │  Handles Git operations, conflict resolution
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Package Mgrs   │  Interfaces with brew (Brewfiles), npm, pnpm
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Git Backend   │  Your private repo (dotfiles encrypted)
-└─────────────────┘
++-----------------+
+|   File Watcher  |  Monitors dotfiles for changes
++--------+--------+
+         |
+         v
++-----------------+
+| Security Module |  Scans for secrets, encrypts with AES-256-GCM
++--------+--------+
+         |
+         v
++-----------------+
+|   Sync Engine   |  Handles Git operations, conflict resolution
++--------+--------+
+         |
+         v
++-----------------+
+|  Package Mgrs   |  brew, npm, pnpm, bun, gem, uv
++--------+--------+
+         |
+         v
++-----------------+
+|   Git Backend   |  Your private repo (dotfiles encrypted)
++-----------------+
 ```
-
-## Development Status
-
-🚧 **Currently in active development**
-
-### Roadmap
-
-**v1.2 (Released):**
-- ✅ Team secrets with age encryption
-- ✅ Organization mapping for project secrets
-- ✅ Project config sync (.env, IDE settings)
-- ✅ Config versioning for backwards compatibility
-- ✅ Auto-migrate personal secrets to team
-
-**Completed:**
-- ✅ Core sync functionality (dotfiles + packages)
-- ✅ Homebrew sync with Brewfiles
-- ✅ npm/pnpm/bun/gem/uv package sync
-- ✅ AES-256-GCM encryption for dotfiles
-- ✅ Secret detection (API keys, tokens, etc.)
-- ✅ Passphrase-based key management
-- ✅ Git backend (GitHub, GitLab, self-hosted)
-- ✅ Background daemon with launchd integration
-- ✅ Conflict resolution
-- ✅ Machine-specific overrides
-
-**Planned:**
-- [ ] v2.0 - Linux support
-- [ ] Public release
-
-See [SPEC.md](SPEC.md) for detailed roadmap.
-
-## Documentation
-
-- [SPEC.md](SPEC.md) - Complete technical specification
-- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines *(coming soon)*
-- [CHANGELOG.md](CHANGELOG.md) - Version history
 
 ## Technology
 
 - **Language:** Rust
-- **CLI Framework:** clap
-- **Async Runtime:** tokio
-- **File Watching:** notify
-- **Git Operations:** git2
-- **Encryption:** aes-gcm (AES-256-GCM)
-- **Key derivation:** age (passphrase-based encryption)
-- **Secret Detection:** regex (pattern matching)
-- **Randomness:** rand (cryptographic RNG)
+- **CLI:** clap
+- **Async:** tokio
+- **Git:** git2
+- **Encryption:** aes-gcm (AES-256-GCM), age (passphrase-based)
+- **Secret Detection:** regex pattern matching
 
 ## FAQ
 
-**Q: Is my data secure?**
-A: Yes. All dotfiles are encrypted with AES-256-GCM before being stored in Git. Encryption keys are derived from your passphrase (never stored in Git). Tether also scans for secrets (API keys, tokens) and warns you before syncing. Even if someone gains access to your Git repo, they cannot decrypt your dotfiles without your passphrase.
+**Is my data secure?**
+Yes. All dotfiles are encrypted with AES-256-GCM before Git storage. Keys are derived from your passphrase, never stored in Git. Even with repo access, dotfiles can't be decrypted without your passphrase.
 
-**Q: How does encryption key sync work?**
-A: Tether uses passphrase-based encryption. On your first machine, you set a passphrase that derives your encryption key. On other machines, enter the same passphrase to unlock. No cloud services required.
+**How does key sync work?**
+Passphrase-based. Set a passphrase on your first machine, enter the same one on others. No cloud services required.
 
-**Q: What if I don't want encryption?**
-A: You can disable it in `~/.tether/config.toml` by setting `encrypt_dotfiles = false`. However, we strongly recommend keeping encryption enabled, especially if your dotfiles contain API keys or tokens.
+**Can I disable encryption?**
+Set `encrypt_dotfiles = false` in `~/.tether/config.toml`. Not recommended if your dotfiles contain secrets.
 
-**Q: What secrets does Tether detect?**
-A: AWS keys, GitHub tokens, API keys, SSH private keys, passwords, database URLs, bearer tokens, and high-entropy strings that might be secrets. When detected, Tether warns you before syncing.
+**What about different packages on different machines?**
+Use ignore patterns or machine-specific overrides.
 
-**Q: What if I have different packages on different machines intentionally?**
-A: Use ignore patterns or machine-specific overrides. Tether is flexible.
+**Does this work with multiple shells?**
+Tether syncs any dotfile you configure. Default discovery targets zsh files, but you can add any shell's config files.
 
-**Q: Does this work with multiple shells?**
-A: v1.0 focuses on zsh. Support for bash, fish, and others is planned for v2.0.
+**Can I use this with my team?**
+Yes. Team sync supports shared dotfiles, encrypted secrets with age, and project config sharing. Use `tether team setup` to get started.
 
-**Q: Can I use this with my team?**
-A: Yes! Share a sync repo to maintain consistent environments across your team. All team members use the same passphrase to access encrypted dotfiles.
-
-**Q: What happens when I'm offline?**
-A: Changes are queued locally and synced when you're back online. Nothing is lost.
+**What happens offline?**
+Changes are queued locally and synced when you're back online.
 
 ## Repository Structure
 
-This is a monorepo containing:
 - **`/src`** - Tether CLI source code (Rust)
 - **`/website`** - Marketing website (Astro.js) at [tether-cli.com](https://tether-cli.com)
 
-See `/website/README.md` for website development instructions.
+## Documentation
+
+- [CHANGELOG.md](CHANGELOG.md) - Version history
 
 ## License
 
@@ -261,8 +195,4 @@ Built by [Paddo Tech](https://github.com/paddo-tech)
 
 ## Contributing
 
-This project will be open-sourced once it reaches v1.0. Contributions, issues, and feature requests will be welcome!
-
----
-
-**Follow development:** ⭐ Star this repo to get notified when we go public!
+Contributions, issues, and feature requests are welcome. See the [issues page](https://github.com/paddo-tech/tether-cli/issues) to get started.
