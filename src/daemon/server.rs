@@ -3,19 +3,16 @@ use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
 };
 use crate::sync::{
-    detect_conflict, import_packages, notify_conflicts, notify_deferred_casks, ConflictState,
-    GitBackend, MachineState, SyncEngine, SyncState,
+    import_packages, notify_deferred_casks, GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
-use chrono::{Local, Utc};
+use chrono::Local;
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::time::Interval;
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -190,7 +187,7 @@ impl DaemonServer {
             }
         };
 
-        let config = Config::load()?;
+        let mut config = Config::load()?;
 
         // No personal features: only sync team repos
         if !config.has_personal_features() {
@@ -222,136 +219,34 @@ impl DaemonServer {
         let dotfiles_dir = sync_path.join("dotfiles");
         std::fs::create_dir_all(&dotfiles_dir)?;
 
-        // Load state and conflict tracking
-        let mut state = SyncState::load()?;
-        let mut conflict_state = match ConflictState::load() {
-            Ok(state) => state,
-            Err(e) => {
-                log::warn!("Failed to load conflict state: {}", e);
-                ConflictState::default()
+        // Import remote config before using it
+        if config.security.encrypt_dotfiles {
+            if let Some(new_config) =
+                crate::cli::commands::sync::sync_tether_config(&sync_path, &home)?
+            {
+                config = new_config;
             }
-        };
-        let mut new_conflicts = Vec::new();
+        }
 
-        // Load machine state for ignored_dotfiles filtering
+        // Load state and machine state
+        let mut state = SyncState::load()?;
         let machine_state_for_decrypt =
             MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
 
-        // Lazy backup dir for overwrite protection
-        let mut backup_dir: Option<PathBuf> = None;
-
-        // Apply remote changes first (with conflict detection)
-        // Only sync dotfiles if feature enabled
-        if config.features.personal_dotfiles && config.security.encrypt_dotfiles {
-            let key = crate::security::get_encryption_key()?;
-            for entry in &config.dotfiles.files {
-                // Security: validate path to prevent traversal attacks
-                if !entry.is_safe_path() {
-                    log::warn!("Skipping unsafe dotfile path: {}", entry.path());
-                    continue;
-                }
-
-                let pattern = entry.path();
-                let create_if_missing =
-                    entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
-
-                // Expand glob patterns by scanning sync repo for matching .enc files
-                let expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
-
-                for file in expanded {
-                    // Skip files ignored on this machine
-                    if machine_state_for_decrypt
-                        .ignored_dotfiles
-                        .iter()
-                        .any(|f| f == &file)
-                    {
-                        continue;
-                    }
-
-                    let filename = file.trim_start_matches('.');
-                    let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
-
-                    if enc_file.exists() {
-                        if let Ok(encrypted_content) = std::fs::read(&enc_file) {
-                            if let Ok(plaintext) =
-                                crate::security::decrypt(&encrypted_content, &key)
-                            {
-                                let local_file = home.join(&file);
-
-                                // Skip if file doesn't exist and create_if_missing is false
-                                if !local_file.exists() && !create_if_missing {
-                                    continue;
-                                }
-
-                                let last_synced_hash =
-                                    state.files.get(&file).map(|f| f.hash.as_str());
-
-                                if let Some(conflict) = detect_conflict(
-                                    &file,
-                                    &local_file,
-                                    &plaintext,
-                                    last_synced_hash,
-                                ) {
-                                    log::warn!("Conflict detected in {}", file);
-                                    new_conflicts.push((
-                                        file.to_string(),
-                                        conflict.local_hash,
-                                        conflict.remote_hash,
-                                    ));
-                                } else {
-                                    // No true conflict - preserve local-only changes
-                                    let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
-                                    let local_hash = std::fs::read(&local_file)
-                                        .ok()
-                                        .map(|c| format!("{:x}", Sha256::digest(&c)));
-                                    let local_unchanged = local_hash.as_deref() == last_synced_hash;
-                                    if local_unchanged && local_hash.as_ref() != Some(&remote_hash)
-                                    {
-                                        // Backup before overwriting
-                                        if local_file.exists() {
-                                            if backup_dir.is_none() {
-                                                backup_dir =
-                                                    Some(crate::sync::create_backup_dir()?);
-                                            }
-                                            crate::sync::backup_file(
-                                                backup_dir.as_ref().unwrap(),
-                                                "dotfiles",
-                                                &file,
-                                                &local_file,
-                                            )?;
-                                        }
-                                        if let Some(parent) = local_file.parent() {
-                                            std::fs::create_dir_all(parent)?;
-                                        }
-                                        write_file_secure(&local_file, &plaintext)?;
-                                        log::debug!("Applied remote changes to {}", file);
-                                    } else if !local_unchanged {
-                                        log::debug!("Preserving local changes to {}", file);
-                                    }
-                                    conflict_state.remove_conflict(&file);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Save conflicts and notify
-        for (file, local_hash, remote_hash) in &new_conflicts {
-            conflict_state.add_conflict(file, local_hash, remote_hash);
-        }
-        conflict_state.save()?;
-        if !new_conflicts.is_empty() {
-            notify_conflicts(new_conflicts.len()).ok();
-            log::info!(
-                "{} conflicts detected, user notification sent",
-                new_conflicts.len()
-            );
+        // Apply remote changes (dotfiles, config dirs, project configs)
+        if config.security.encrypt_dotfiles {
+            crate::cli::commands::sync::decrypt_from_repo(
+                &config,
+                &sync_path,
+                &home,
+                &mut state,
+                &machine_state_for_decrypt,
+                false,
+            )?;
         }
 
         // Now sync local changes to remote
-        let mut changes_made = false;
+        let conflict_state = crate::sync::ConflictState::load().unwrap_or_default();
 
         // Sync dotfiles to remote (only if feature enabled)
         if config.features.personal_dotfiles {
@@ -402,18 +297,54 @@ impl DaemonServer {
                                 }
 
                                 state.update_file(&file, hash.clone());
-                                changes_made = true;
                             }
                         }
                     }
                 }
             }
+            // Auto-discover directories sourced from shell configs
+            let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
+            let mut config_changed = false;
+            for dir in discovered {
+                if !config.dotfiles.dirs.contains(&dir) {
+                    log::info!("Auto-discovered sourced directory: {}", dir);
+                    config.dotfiles.dirs.push(dir);
+                    config_changed = true;
+                }
+            }
+            if config_changed {
+                config.dotfiles.dirs.sort();
+                config.save()?;
+            }
+
+            // Sync global config directories
+            if !config.dotfiles.dirs.is_empty() {
+                crate::cli::commands::sync::sync_directories(
+                    &config, &mut state, &sync_path, &home, false,
+                )?;
+            }
+
+            // Sync project-local configs
+            if config.project_configs.enabled {
+                crate::cli::commands::sync::sync_project_configs(
+                    &config, &mut state, &sync_path, &home, false,
+                )?;
+            }
         } // end personal_dotfiles feature block
+
+        // Sync team project secrets
+        if let Err(e) =
+            crate::cli::commands::sync::sync_team_project_secrets(&config, &home, &mut state)
+        {
+            log::warn!("Failed to sync team project secrets: {}", e);
+        }
+
+        // Build machine state (packages, dotfiles, project configs, checkouts)
+        let mut machine_state =
+            crate::cli::commands::sync::build_machine_state(&config, &state, &sync_path).await?;
 
         // Import packages (daemon mode: defer casks that need password)
         if config.features.personal_packages {
-            let machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
-                .unwrap_or_else(|| MachineState::new(&state.machine_id));
             let previously_deferred = state.deferred_casks.clone();
             let deferred_casks = import_packages(
                 &config,
@@ -459,29 +390,93 @@ impl DaemonServer {
                 state.save()?;
             }
 
-            // Sync packages (export)
-            changes_made |= self.sync_packages(&config, &mut state, &sync_path).await?;
+            // Rebuild machine state after import to capture newly installed packages
+            machine_state =
+                crate::cli::commands::sync::build_machine_state(&config, &state, &sync_path)
+                    .await?;
         }
 
-        // Update machine state with current CLI version
-        let mut machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
-            .unwrap_or_else(|| MachineState::new(&state.machine_id));
-        machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
-        machine_state.last_sync = chrono::Utc::now();
+        // Export package manifests using union of all machine states
+        if config.features.personal_packages {
+            crate::sync::sync_packages(&config, &mut state, &sync_path, &machine_state, false)
+                .await?;
+        }
+
+        // Save machine state
         machine_state.save_to_repo(&sync_path)?;
 
-        // Commit and push if changes made (including machine state updates)
+        // Export tether config to sync repo
+        if config.security.encrypt_dotfiles {
+            crate::cli::commands::sync::export_tether_config(&sync_path, &home, &mut state)?;
+        }
+
+        // Commit and push if changes made
         let has_changes = git.has_changes()?;
-        if changes_made || has_changes {
+        if has_changes {
             log::info!("Committing changes...");
             git.commit("Auto-sync from daemon", &state.machine_id)?;
             git.push()?;
-            state.mark_synced();
-            state.save()?;
             log::info!("Sync complete - changes pushed");
         } else {
             log::debug!("No changes to sync");
         }
+
+        state.mark_synced();
+
+        // Push team repo changes (if write access enabled)
+        if let Some(team) = &config.team {
+            if team.enabled && !team.read_only {
+                let team_sync_dir = Config::team_sync_dir()?;
+                if team_sync_dir.exists() {
+                    let team_git = GitBackend::open(&team_sync_dir)?;
+                    if team_git.has_changes()? {
+                        let dotfiles_dir = team_sync_dir.join("dotfiles");
+                        if dotfiles_dir.exists() {
+                            for entry in std::fs::read_dir(&dotfiles_dir)? {
+                                let entry = entry?;
+                                if entry.file_type()?.is_file() {
+                                    if let Ok(findings) =
+                                        crate::security::scan_for_secrets(&entry.path())
+                                    {
+                                        if !findings.is_empty() {
+                                            log::error!(
+                                                "Team push blocked: {} contains {} secret(s)",
+                                                entry.file_name().to_string_lossy(),
+                                                findings.len()
+                                            );
+                                            anyhow::bail!(
+                                                "Cannot push secrets to team repo. Remove sensitive data first."
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        team_git.commit("Update team configs", &state.machine_id)?;
+                        team_git.push()?;
+                    }
+                }
+            }
+        }
+
+        // Sync collab secrets
+        if config.features.collab_secrets {
+            if let Err(e) =
+                crate::cli::commands::sync::sync_collab_secrets(&config, &home, &mut state)
+            {
+                log::warn!("Failed to sync collab secrets: {}", e);
+            }
+        }
+
+        // Prune old backups
+        if let Ok(pruned) = crate::sync::prune_old_backups() {
+            if pruned > 0 {
+                log::debug!("Pruned {} old backup(s)", pruned);
+            }
+        }
+
+        // Always save state
+        state.save()?;
 
         Ok(())
     }
@@ -534,133 +529,6 @@ impl DaemonServer {
 
         log::info!("Team-only sync complete");
         Ok(())
-    }
-
-    async fn sync_packages(
-        &self,
-        config: &Config,
-        state: &mut SyncState,
-        sync_path: &Path,
-    ) -> Result<bool> {
-        let manifests_dir = sync_path.join("manifests");
-        std::fs::create_dir_all(&manifests_dir)?;
-
-        let mut changes_made = false;
-
-        // Homebrew
-        if config.packages.brew.enabled {
-            let brew = BrewManager::new();
-            if brew.is_available().await {
-                if let Ok(manifest) = brew.export_manifest().await {
-                    let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
-                    if state
-                        .packages
-                        .get("brew")
-                        .map(|p| p.hash != hash)
-                        .unwrap_or(true)
-                    {
-                        std::fs::write(manifests_dir.join("Brewfile"), &manifest)?;
-                        let now = Utc::now();
-                        let existing = state.packages.get("brew");
-                        state.packages.insert(
-                            "brew".to_string(),
-                            crate::sync::state::PackageState {
-                                last_sync: now,
-                                last_modified: Some(now),
-                                last_upgrade: existing.and_then(|e| e.last_upgrade),
-                                hash,
-                            },
-                        );
-                        changes_made = true;
-                        log::info!("Brewfile updated");
-                    }
-                }
-            }
-        }
-
-        let managers: Vec<(Box<dyn PackageManager>, &str, bool)> = vec![
-            (
-                Box::new(NpmManager::new()),
-                "npm.txt",
-                config.packages.npm.enabled,
-            ),
-            (
-                Box::new(PnpmManager::new()),
-                "pnpm.txt",
-                config.packages.pnpm.enabled,
-            ),
-            (
-                Box::new(BunManager::new()),
-                "bun.txt",
-                config.packages.bun.enabled,
-            ),
-            (
-                Box::new(GemManager::new()),
-                "gems.txt",
-                config.packages.gem.enabled,
-            ),
-            (
-                Box::new(UvManager::new()),
-                "uv.txt",
-                config.packages.uv.enabled,
-            ),
-        ];
-
-        for (manager, filename, enabled) in &managers {
-            if *enabled {
-                changes_made |= self
-                    .sync_package_manager(
-                        manager.as_ref(),
-                        manager.name(),
-                        filename,
-                        state,
-                        &manifests_dir,
-                    )
-                    .await?;
-            }
-        }
-
-        Ok(changes_made)
-    }
-
-    async fn sync_package_manager(
-        &self,
-        manager: &dyn PackageManager,
-        name: &str,
-        filename: &str,
-        state: &mut SyncState,
-        manifests_dir: &Path,
-    ) -> Result<bool> {
-        if !manager.is_available().await {
-            return Ok(false);
-        }
-
-        if let Ok(manifest) = manager.export_manifest().await {
-            let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
-            if state
-                .packages
-                .get(name)
-                .map(|p| p.hash != hash)
-                .unwrap_or(true)
-            {
-                std::fs::write(manifests_dir.join(filename), &manifest)?;
-                let now = Utc::now();
-                let existing = state.packages.get(name);
-                state.packages.insert(
-                    name.to_string(),
-                    crate::sync::state::PackageState {
-                        last_sync: now,
-                        last_modified: Some(now),
-                        last_upgrade: existing.and_then(|e| e.last_upgrade),
-                        hash,
-                    },
-                );
-                log::info!("{} manifest updated", name);
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
     }
 
     /// Check if we should run daily package updates (once per 24h, catches up on missed runs)
@@ -743,23 +611,67 @@ impl Default for DaemonServer {
     }
 }
 
-/// Write file with secure permissions (0o600 on Unix)
-fn write_file_secure(path: &Path, contents: &[u8]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        std::io::Write::write_all(&mut file, contents)?;
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_daemon_mode_flag_default_false() {
+        // Reset to known state (other tests may have set it)
+        DAEMON_MODE.store(false, Ordering::Relaxed);
+        assert!(!is_daemon_mode());
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, contents)?;
-        Ok(())
+
+    #[test]
+    fn test_daemon_mode_flag_set_true() {
+        DAEMON_MODE.store(true, Ordering::Relaxed);
+        assert!(is_daemon_mode());
+        // Reset
+        DAEMON_MODE.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_daemon_server_default_interval() {
+        let server = DaemonServer::new();
+        assert_eq!(server.sync_interval, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_daemon_server_initial_state() {
+        let server = DaemonServer::new();
+        assert!(server.last_update_date.is_none());
+        assert!(!server.binary_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_binary_updated_false_when_unchanged() {
+        let server = DaemonServer::new();
+        // Binary hasn't changed since construction
+        assert!(!server.binary_updated());
+    }
+
+    #[test]
+    fn test_binary_updated_false_when_no_mtime() {
+        let server = DaemonServer {
+            sync_interval: Duration::from_secs(300),
+            last_update_date: None,
+            binary_path: PathBuf::from("/nonexistent/binary"),
+            binary_mtime: None,
+        };
+        assert!(!server.binary_updated());
+    }
+
+    #[test]
+    fn test_binary_updated_detects_newer_mtime() {
+        use std::time::SystemTime;
+
+        let server = DaemonServer {
+            sync_interval: Duration::from_secs(300),
+            last_update_date: None,
+            binary_path: std::env::current_exe().unwrap(),
+            // Set start mtime to epoch so current binary is always "newer"
+            binary_mtime: Some(SystemTime::UNIX_EPOCH),
+        };
+        assert!(server.binary_updated());
     }
 }

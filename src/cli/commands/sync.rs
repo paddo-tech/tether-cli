@@ -265,9 +265,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             git.push()?;
             pb.finish_and_clear();
         }
-
-        state.mark_synced();
-        state.save()?;
     }
 
     // Check and push team repo changes (if write access enabled)
@@ -323,12 +320,17 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
+    if !dry_run {
+        state.mark_synced();
+        state.save()?;
+    }
+
     Output::success("Synced");
     Ok(())
 }
 
 /// Sync secrets from collab repos to local projects
-fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) -> Result<()> {
+pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) -> Result<()> {
     use crate::sync::{backup_file, create_backup_dir};
 
     let teams = match &config.teams {
@@ -536,7 +538,7 @@ fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) -> R
                                     &dest,
                                 )?;
                             }
-                            std::fs::write(&dest, &decrypted)?;
+                            write_decrypted(&dest, &decrypted)?;
                             log::debug!(
                                 "Synced collab secret: {} -> {}",
                                 filename,
@@ -562,7 +564,18 @@ fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) -> R
     Ok(())
 }
 
-fn decrypt_from_repo(
+/// Write decrypted content with secure permissions (0o600 on Unix)
+fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
     home: &Path,
@@ -642,7 +655,7 @@ fn decrypt_from_repo(
                                                 &local_file,
                                             )?;
                                         }
-                                        std::fs::write(&local_file, &plaintext)?;
+                                        write_decrypted(&local_file, &plaintext)?;
                                         conflict_state.remove_conflict(&file);
                                     }
                                     ConflictResolution::Merged => {
@@ -688,7 +701,7 @@ fn decrypt_from_repo(
                                         &local_file,
                                     )?;
                                 }
-                                std::fs::write(&local_file, plaintext)?;
+                                write_decrypted(&local_file, &plaintext)?;
                             }
                             conflict_state.remove_conflict(&file);
                         }
@@ -760,7 +773,7 @@ fn decrypt_from_repo(
                                     .map(|c| format!("{:x}", Sha256::digest(&c)));
                                 let local_unchanged = local_hash.as_deref() == last_synced_hash;
                                 if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
-                                    std::fs::write(&local_file, plaintext)?;
+                                    write_decrypted(&local_file, &plaintext)?;
                                 }
                             }
                             Err(e) => {
@@ -1023,6 +1036,14 @@ fn decrypt_project_configs(
                                     }
 
                                     crate::sync::atomic_write(&canonical_path, &plaintext)?;
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        std::fs::set_permissions(
+                                            &canonical_path,
+                                            std::fs::Permissions::from_mode(0o600),
+                                        )?;
+                                    }
                                 }
                                 state.update_file(&state_key, remote_hash);
                             }
@@ -1058,7 +1079,7 @@ fn decrypt_project_configs(
 /// Sync tether config from remote (always, independent of config file list)
 /// Only applies remote if local config hasn't changed since last sync (to avoid overwriting local edits)
 /// Returns Some(config) if remote config was applied, None otherwise
-fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
+pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
     let enc_file = sync_path.join("dotfiles/tether/config.toml.enc");
 
     if !enc_file.exists() {
@@ -1116,7 +1137,7 @@ fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
 }
 
 /// Export tether config to sync repo (always, independent of config file list)
-fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) -> Result<()> {
+pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) -> Result<()> {
     let config_path = home.join(".tether/config.toml");
 
     if !config_path.exists() {
@@ -1149,7 +1170,7 @@ fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) ->
     Ok(())
 }
 
-fn sync_directories(
+pub fn sync_directories(
     config: &Config,
     state: &mut SyncState,
     sync_path: &Path,
@@ -1253,7 +1274,7 @@ fn sync_directories(
     Ok(())
 }
 
-fn sync_project_configs(
+pub fn sync_project_configs(
     config: &Config,
     state: &mut SyncState,
     sync_path: &Path,
@@ -1397,7 +1418,7 @@ fn sync_project_configs(
 }
 
 /// Build machine state for cross-machine comparison
-async fn build_machine_state(
+pub async fn build_machine_state(
     config: &Config,
     state: &SyncState,
     sync_path: &Path,
@@ -1754,7 +1775,7 @@ pub fn sync_team_project_secrets(
                                     if let Some(parent) = local_file.parent() {
                                         std::fs::create_dir_all(parent)?;
                                     }
-                                    std::fs::write(&local_file, &decrypted)?;
+                                    write_decrypted(&local_file, &decrypted)?;
                                     Output::success(&format!(
                                         "Team secret: {} → {}",
                                         rel_file_no_age,
@@ -1848,4 +1869,83 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 
     Output::success("Team sync complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_write_decrypted_creates_file_with_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("secret.env");
+        let content = b"API_KEY=hunter2";
+
+        write_decrypted(&path, content).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_decrypted_sets_secure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("secret.env");
+
+        write_decrypted(&path, b"secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_decrypted_overwrites_existing_and_fixes_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("secret.env");
+
+        // Create file with permissive permissions
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_decrypted(&path, b"new secret").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new secret");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn test_write_decrypted_empty_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("empty");
+
+        write_decrypted(&path, b"").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
+
+    #[test]
+    fn test_write_decrypted_fails_missing_parent() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("nonexistent_dir").join("file");
+
+        assert!(write_decrypted(&path, b"data").is_err());
+    }
+
+    #[test]
+    fn test_write_decrypted_binary_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("binary");
+        let content: Vec<u8> = (0..=255).collect();
+
+        write_decrypted(&path, &content).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
 }
