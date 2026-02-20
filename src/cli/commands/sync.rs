@@ -701,6 +701,9 @@ pub fn decrypt_from_repo(
                                         &local_file,
                                     )?;
                                 }
+                                if let Some(parent) = local_file.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
                                 write_decrypted(&local_file, &plaintext)?;
                             }
                             conflict_state.remove_conflict(&file);
