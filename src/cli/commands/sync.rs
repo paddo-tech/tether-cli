@@ -161,12 +161,16 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                                     std::fs::create_dir_all(parent)?;
                                 }
                                 std::fs::write(&dest, encrypted)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(&source, &dest);
                             } else {
                                 let dest = dotfiles_dir.join(filename);
                                 if let Some(parent) = dest.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
                                 std::fs::write(&dest, &content)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(&source, &dest);
                             }
 
                             state.update_file(&file, hash.clone());
@@ -564,6 +568,22 @@ pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) 
     Ok(())
 }
 
+/// Copy owner executable bit from source to dest.
+/// Git tracks this bit, so it travels across machines via the sync repo.
+#[cfg(unix)]
+fn preserve_executable_bit(source: &Path, dest: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let is_exec = std::fs::metadata(source)
+        .map(|m| m.permissions().mode() & 0o100 != 0)
+        .unwrap_or(false);
+    if is_exec {
+        if let Ok(meta) = std::fs::metadata(dest) {
+            let mode = meta.permissions().mode() | 0o100;
+            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode));
+        }
+    }
+}
+
 /// Write decrypted content with secure permissions (0o600 on Unix)
 fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
     std::fs::write(path, contents)?;
@@ -656,6 +676,8 @@ pub fn decrypt_from_repo(
                                             )?;
                                         }
                                         write_decrypted(&local_file, &plaintext)?;
+                                        #[cfg(unix)]
+                                        preserve_executable_bit(&enc_file, &local_file);
                                         conflict_state.remove_conflict(&file);
                                     }
                                     ConflictResolution::Merged => {
@@ -705,6 +727,8 @@ pub fn decrypt_from_repo(
                                     std::fs::create_dir_all(parent)?;
                                 }
                                 write_decrypted(&local_file, &plaintext)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(&enc_file, &local_file);
                             }
                             conflict_state.remove_conflict(&file);
                         }
@@ -777,6 +801,8 @@ pub fn decrypt_from_repo(
                                 let local_unchanged = local_hash.as_deref() == last_synced_hash;
                                 if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
                                     write_decrypted(&local_file, &plaintext)?;
+                                    #[cfg(unix)]
+                                    preserve_executable_bit(file_path, &local_file);
                                 }
                             }
                             Err(e) => {
@@ -1047,6 +1073,8 @@ fn decrypt_project_configs(
                                             std::fs::Permissions::from_mode(0o600),
                                         )?;
                                     }
+                                    #[cfg(unix)]
+                                    preserve_executable_bit(enc_file, &canonical_path);
                                 }
                                 state.update_file(&state_key, remote_hash);
                             }
@@ -1223,9 +1251,14 @@ pub fn sync_directories(
                     if config.security.encrypt_dotfiles {
                         let key = crate::security::get_encryption_key()?;
                         let encrypted = crate::security::encrypt(&content, &key)?;
-                        std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                        let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
+                        std::fs::write(&enc_dest, encrypted)?;
+                        #[cfg(unix)]
+                        preserve_executable_bit(&expanded_path, &enc_dest);
                     } else {
                         std::fs::write(&dest, &content)?;
+                        #[cfg(unix)]
+                        preserve_executable_bit(&expanded_path, &dest);
                     }
 
                     state.update_file(dir_path, hash);
@@ -1261,9 +1294,14 @@ pub fn sync_directories(
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
                                 let encrypted = crate::security::encrypt(&content, &key)?;
-                                std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                                let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
+                                std::fs::write(&enc_dest, encrypted)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &enc_dest);
                             } else {
                                 std::fs::write(&dest, &content)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &dest);
                             }
 
                             state.update_file(&state_key, hash);
@@ -1404,9 +1442,14 @@ pub fn sync_project_configs(
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
                                 let encrypted = crate::security::encrypt(&content, &key)?;
-                                std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                                let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
+                                std::fs::write(&enc_dest, encrypted)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &enc_dest);
                             } else {
                                 std::fs::write(&dest, &content)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &dest);
                             }
 
                             state.update_file(&state_key, hash);
@@ -1950,5 +1993,45 @@ mod tests {
         write_decrypted(&path, &content).unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_preserve_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("script.sh");
+        let dest = temp.path().join("script.sh.enc");
+
+        std::fs::write(&source, b"#!/bin/sh").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&dest, b"encrypted").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        preserve_executable_bit(&source, &dest);
+
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o744);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_preserve_executable_bit_not_set() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("config");
+        let dest = temp.path().join("config.enc");
+
+        std::fs::write(&source, b"key=value").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&dest, b"encrypted").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        preserve_executable_bit(&source, &dest);
+
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
     }
 }
