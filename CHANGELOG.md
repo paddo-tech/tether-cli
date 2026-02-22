@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dashboard: file history viewer with inline diffs and restore support
 - Dashboard: deleted file detection across profile and flat layouts
 - Dashboard: profile picker for machine assignment
+- Auto-cleanup of legacy `dotfiles/` tree once all machines are upgraded
+- Tether config moved from `dotfiles/tether/` to `configs/tether/` to avoid dotfile path collisions
 
 ### Fixed
 

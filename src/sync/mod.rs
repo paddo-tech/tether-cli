@@ -147,6 +147,56 @@ pub fn migrate_repo_to_profiled(
     Ok(migrated_any)
 }
 
+/// Minimum CLI version that uses `profiles/` layout.
+const PROFILES_MIN_VERSION: &str = "1.11.0";
+
+/// Remove legacy `dotfiles/` tree once all machines are on >= 1.11.0.
+/// Safe because: profiled files now live under `profiles/`, tether config under `configs/tether/`.
+pub fn cleanup_legacy_dotfiles(sync_path: &std::path::Path) -> anyhow::Result<bool> {
+    let dotfiles_dir = sync_path.join("dotfiles");
+    if !dotfiles_dir.exists() {
+        return Ok(false);
+    }
+
+    let machines = crate::sync::state::MachineState::list_all(sync_path)?;
+    if machines.is_empty() {
+        return Ok(false);
+    }
+    for m in &machines {
+        if m.cli_version.is_empty() || !version_gte(&m.cli_version, PROFILES_MIN_VERSION) {
+            return Ok(false);
+        }
+    }
+
+    // Migrate tether config to configs/tether/ if it only exists in dotfiles/tether/
+    let legacy_config = dotfiles_dir.join("tether/config.toml.enc");
+    let new_config = sync_path.join("configs/tether/config.toml.enc");
+    if legacy_config.exists() && !new_config.exists() {
+        if let Some(parent) = new_config.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&legacy_config, &new_config)?;
+    }
+
+    std::fs::remove_dir_all(&dotfiles_dir)?;
+    Ok(true)
+}
+
+/// Simple semver comparison: is `version` >= `min`?
+fn version_gte(version: &str, min: &str) -> bool {
+    let parse = |s: &str| -> (u32, u32, u32) {
+        // Strip pre-release suffix (e.g., "1.11.0-beta.1" -> "1.11.0")
+        let base = s.split('-').next().unwrap_or(s);
+        let mut parts = base.split('.').filter_map(|p| p.parse::<u32>().ok());
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    };
+    parse(version) >= parse(min)
+}
+
 /// Check sync repo format version. Creates file if missing, errors if newer than supported.
 pub fn check_sync_format_version(sync_path: &Path) -> Result<()> {
     let version_file = sync_path.join("format_version");
@@ -803,5 +853,109 @@ mod tests {
 
         let result = resolve_dotfile_repo_path(sync_path, ".zshrc", true, "dev", false);
         assert_eq!(result, "profiles/dev/zshrc.enc");
+    }
+
+    #[test]
+    fn test_version_gte() {
+        assert!(version_gte("1.11.0", "1.11.0"));
+        assert!(version_gte("1.12.0", "1.11.0"));
+        assert!(version_gte("2.0.0", "1.11.0"));
+        assert!(!version_gte("1.10.0", "1.11.0"));
+        assert!(!version_gte("1.9.9", "1.11.0"));
+        assert!(version_gte("1.11.0-beta.1", "1.11.0"));
+        assert!(!version_gte("", "1.11.0"));
+    }
+
+    #[test]
+    fn test_cleanup_legacy_skips_when_old_machine() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // Create machine states: one old, one new
+        let machines_dir = sync_path.join("machines");
+        std::fs::create_dir_all(&machines_dir).unwrap();
+        std::fs::write(
+            machines_dir.join("new-mac.json"),
+            r#"{"machine_id":"new-mac","hostname":"h","last_sync":"2026-01-01T00:00:00Z","cli_version":"1.11.0","files":{},"packages":{}}"#,
+        ).unwrap();
+        std::fs::write(
+            machines_dir.join("old-mac.json"),
+            r#"{"machine_id":"old-mac","hostname":"h","last_sync":"2026-01-01T00:00:00Z","cli_version":"1.10.0","files":{},"packages":{}}"#,
+        ).unwrap();
+
+        // Create legacy flat files
+        let dotfiles_dir = sync_path.join("dotfiles");
+        std::fs::create_dir_all(&dotfiles_dir).unwrap();
+        std::fs::write(dotfiles_dir.join("zshrc.enc"), "data").unwrap();
+
+        let cleaned = cleanup_legacy_dotfiles(sync_path).unwrap();
+        assert!(!cleaned);
+        assert!(dotfiles_dir.join("zshrc.enc").exists());
+    }
+
+    #[test]
+    fn test_cleanup_legacy_runs_when_all_upgraded() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // Both machines on >= 1.11.0
+        let machines_dir = sync_path.join("machines");
+        std::fs::create_dir_all(&machines_dir).unwrap();
+        std::fs::write(
+            machines_dir.join("mac-a.json"),
+            r#"{"machine_id":"mac-a","hostname":"h","last_sync":"2026-01-01T00:00:00Z","cli_version":"1.11.0","files":{},"packages":{}}"#,
+        ).unwrap();
+        std::fs::write(
+            machines_dir.join("mac-b.json"),
+            r#"{"machine_id":"mac-b","hostname":"h","last_sync":"2026-01-01T00:00:00Z","cli_version":"1.12.0","files":{},"packages":{}}"#,
+        ).unwrap();
+
+        // Create legacy files: flat + old profiled + tether config
+        let dotfiles_dir = sync_path.join("dotfiles");
+        std::fs::create_dir_all(dotfiles_dir.join("dev")).unwrap();
+        std::fs::create_dir_all(dotfiles_dir.join("tether")).unwrap();
+        std::fs::write(dotfiles_dir.join("zshrc.enc"), "flat").unwrap();
+        std::fs::write(dotfiles_dir.join("dev/zshrc.enc"), "old-profiled").unwrap();
+        std::fs::write(dotfiles_dir.join("tether/config.toml.enc"), "config").unwrap();
+
+        let cleaned = cleanup_legacy_dotfiles(sync_path).unwrap();
+        assert!(cleaned);
+
+        // Entire dotfiles/ dir removed
+        assert!(!dotfiles_dir.exists());
+        // Tether config migrated to configs/tether/
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("configs/tether/config.toml.enc")).unwrap(),
+            "config"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_legacy_skips_tether_config_migration_if_already_exists() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        let machines_dir = sync_path.join("machines");
+        std::fs::create_dir_all(&machines_dir).unwrap();
+        std::fs::write(
+            machines_dir.join("mac.json"),
+            r#"{"machine_id":"mac","hostname":"h","last_sync":"2026-01-01T00:00:00Z","cli_version":"1.11.0","files":{},"packages":{}}"#,
+        ).unwrap();
+
+        // Legacy and new config both exist — new should win
+        let dotfiles_dir = sync_path.join("dotfiles/tether");
+        std::fs::create_dir_all(&dotfiles_dir).unwrap();
+        std::fs::write(dotfiles_dir.join("config.toml.enc"), "old").unwrap();
+
+        let new_dir = sync_path.join("configs/tether");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        std::fs::write(new_dir.join("config.toml.enc"), "new").unwrap();
+
+        cleanup_legacy_dotfiles(sync_path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("configs/tether/config.toml.enc")).unwrap(),
+            "new"
+        );
     }
 }

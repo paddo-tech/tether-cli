@@ -416,10 +416,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 if let Some(ref mut config) = app.state.config {
                     if let Some(ref sync_state) = app.state.sync_state {
                         let machine_id = sync_state.machine_id.clone();
-                        if selected == 0 {
-                            // "(none)" option
-                            config.machine_profiles.remove(&machine_id);
-                        } else if selected < app.profile_picker_options.len() {
+                        if selected < app.profile_picker_options.len() {
                             let profile_name = app.profile_picker_options[selected].clone();
                             config.machine_profiles.insert(machine_id, profile_name);
                         }
@@ -670,12 +667,9 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
     // Machines tab: p opens profile picker
     if app.active_tab == Tab::Machines && key.code == KeyCode::Char('p') {
         if let Some(ref config) = app.state.config {
-            let mut options = vec!["(none)".to_string()];
             let mut names: Vec<&str> = config.profiles.keys().map(|s| s.as_str()).collect();
             names.sort();
-            for name in &names {
-                options.push(name.to_string());
-            }
+            let options: Vec<String> = names.iter().map(|s| s.to_string()).collect();
             // Set cursor to current profile
             let current = app
                 .state
@@ -683,7 +677,6 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 .as_ref()
                 .and_then(|s| config.machine_profiles.get(&s.machine_id))
                 .and_then(|p| names.iter().position(|n| *n == p.as_str()))
-                .map(|i| i + 1) // +1 for "(none)"
                 .unwrap_or(0);
             app.profile_picker_options = options;
             app.profile_picker_cursor = current;
@@ -1238,9 +1231,10 @@ fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
     let area = f.area();
     let title = " Profile (this machine) ";
     let max_option_len = options.iter().map(|o| o.len()).max().unwrap_or(10);
-    let min_width = (max_option_len + 10).max(title.len() + 2);
+    let hint = "  New: tether machines profile create <name>";
+    let min_width = (max_option_len + 10).max(title.len() + 2).max(hint.len() + 4);
     let width = (min_width as u16).min(area.width.saturating_sub(4));
-    let height = ((options.len() + 4) as u16).min(area.height.saturating_sub(2));
+    let height = ((options.len() + 5) as u16).min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -1269,6 +1263,10 @@ fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
         Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
         Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
     ]));
+    text.push(Line::from(Span::styled(
+        "  New: tether machines profile create <name>",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let paragraph = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()

@@ -93,9 +93,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
-    let dotfiles_dir = sync_path.join("dotfiles");
-    std::fs::create_dir_all(&dotfiles_dir)?;
-
     // Always sync tether config first (hardcoded, not dependent on config)
     // This ensures config changes from other machines are applied before using config
     if config.security.encrypt_dotfiles && !dry_run {
@@ -678,6 +675,11 @@ pub fn decrypt_from_repo(
         log::warn!("Repo migration failed: {}", e);
     }
 
+    // Clean up legacy flat/old-profiled files once all machines are upgraded
+    if let Err(e) = crate::sync::cleanup_legacy_dotfiles(sync_path) {
+        log::warn!("Legacy cleanup failed: {}", e);
+    }
+
     for entry in config.effective_dotfiles(machine_id) {
         // Validate path before expansion to prevent traversal attacks
         if !entry.is_safe_path() {
@@ -701,7 +703,7 @@ pub fn decrypt_from_repo(
             vec![]
         };
         // Also check flat dir for un-migrated files
-        if expanded.is_empty() {
+        if expanded.is_empty() && dotfiles_dir.exists() {
             expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
         }
 
@@ -1314,7 +1316,9 @@ fn decrypt_project_configs(
 /// Only applies remote if local config hasn't changed since last sync (to avoid overwriting local edits)
 /// Returns Some(config) if remote config was applied, None otherwise
 pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
-    let enc_file = sync_path.join("dotfiles/tether/config.toml.enc");
+    let new_path = sync_path.join("configs/tether/config.toml.enc");
+    let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
+    let enc_file = if new_path.exists() { new_path } else { legacy_path };
 
     if !enc_file.exists() {
         return Ok(None);
@@ -1381,7 +1385,7 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
     let content = std::fs::read(&config_path)?;
     let hash = format!("{:x}", Sha256::digest(&content));
 
-    let dest_dir = sync_path.join("dotfiles/tether");
+    let dest_dir = sync_path.join("configs/tether");
     std::fs::create_dir_all(&dest_dir)?;
 
     let dest = dest_dir.join("config.toml.enc");

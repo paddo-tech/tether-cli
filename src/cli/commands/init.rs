@@ -99,7 +99,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
         // Create sync repo structure
         std::fs::create_dir_all(sync_path.join("manifests"))?;
-        std::fs::create_dir_all(sync_path.join("dotfiles"))?;
+        std::fs::create_dir_all(sync_path.join("profiles"))?;
         std::fs::create_dir_all(sync_path.join("machines"))?;
 
         crate::sync::check_sync_format_version(&sync_path)?;

@@ -216,9 +216,6 @@ impl DaemonServer {
             }
         }
 
-        let dotfiles_dir = sync_path.join("dotfiles");
-        std::fs::create_dir_all(&dotfiles_dir)?;
-
         // Import remote config before using it
         if config.security.encrypt_dotfiles {
             if let Some(new_config) =
