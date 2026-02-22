@@ -108,6 +108,16 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         if config.security.encrypt_dotfiles {
             setup_encryption()?;
         }
+
+        // Load synced config from repo to discover existing profiles
+        if let Some(synced) = load_synced_config(&sync_path) {
+            for (k, v) in synced.profiles {
+                config.profiles.entry(k).or_insert(v);
+            }
+            for (k, v) in synced.machine_profiles {
+                config.machine_profiles.entry(k).or_insert(v);
+            }
+        }
     } else {
         // No personal features - create minimal .tether directory
         // Note: We don't clear dotfiles/packages config, just disable syncing
@@ -270,6 +280,59 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Try to load config from the synced repo (encrypted).
+/// Returns None if file doesn't exist or encryption is not set up yet.
+fn load_synced_config(sync_path: &std::path::Path) -> Option<Config> {
+    let new_path = sync_path.join("configs/tether/config.toml.enc");
+    let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
+    let enc_file = if new_path.exists() {
+        new_path
+    } else {
+        legacy_path
+    };
+
+    if !enc_file.exists() {
+        return None;
+    }
+
+    let key = match crate::security::get_encryption_key() {
+        Ok(k) => k,
+        Err(_) => return None, // no key yet (fresh setup) — not an error
+    };
+
+    let encrypted = match std::fs::read(&enc_file) {
+        Ok(data) => data,
+        Err(e) => {
+            Output::warning(&format!("Could not read synced config: {}", e));
+            return None;
+        }
+    };
+
+    let plaintext = match crate::security::decrypt(&encrypted, &key) {
+        Ok(p) => p,
+        Err(e) => {
+            Output::warning(&format!("Could not decrypt synced config: {}", e));
+            return None;
+        }
+    };
+
+    let toml_str = match std::str::from_utf8(&plaintext) {
+        Ok(s) => s,
+        Err(_) => {
+            Output::warning("Synced config is not valid UTF-8");
+            return None;
+        }
+    };
+
+    match toml::from_str(toml_str) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            Output::warning(&format!("Could not parse synced config: {}", e));
+            None
+        }
+    }
 }
 
 fn setup_encryption() -> Result<()> {
