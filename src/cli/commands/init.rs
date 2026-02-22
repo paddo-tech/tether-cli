@@ -258,19 +258,18 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
             Output::error(&format!("Invalid profile name: '{}'", name));
             return Ok(());
         }
-        // Ensure "dev" profile exists as a base to clone
-        if config.profiles.is_empty() {
-            config.migrate_v1_to_v2();
-        }
         if !config.profiles.contains_key(&name) {
-            // Clone dev profile as starting point
-            if let Some(dev) = config.profiles.get("dev").cloned() {
-                config.profiles.insert(name.clone(), dev);
-            } else {
-                config
-                    .profiles
-                    .insert(name.clone(), crate::config::ProfileConfig::default());
-            }
+            // Clone dotfiles/dirs from dev (or default), but detect packages locally
+            let base = config.profiles.get("dev").cloned().unwrap_or_default();
+            let packages = detect_local_managers();
+            config.profiles.insert(
+                name.clone(),
+                crate::config::ProfileConfig {
+                    dotfiles: base.dotfiles,
+                    dirs: base.dirs,
+                    packages,
+                },
+            );
         }
         config
             .machine_profiles
@@ -332,6 +331,23 @@ fn load_synced_config(sync_path: &std::path::Path) -> Option<Config> {
             None
         }
     }
+}
+
+/// Detect which package managers are installed on this machine.
+fn detect_local_managers() -> Vec<String> {
+    let checks: &[(&str, &str)] = &[
+        ("brew", "brew"),
+        ("npm", "npm"),
+        ("pnpm", "pnpm"),
+        ("bun", "bun"),
+        ("gem", "gem"),
+        ("uv", "uv"),
+    ];
+    checks
+        .iter()
+        .filter(|(_, bin)| which::which(bin).is_ok())
+        .map(|(name, _)| name.to_string())
+        .collect()
 }
 
 fn setup_encryption() -> Result<()> {
