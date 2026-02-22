@@ -406,22 +406,19 @@ pub async fn profile_edit(name: &str) -> Result<()> {
     let mut new_dotfiles = Vec::new();
     for idx in &selected {
         let path = &all_dotfiles[*idx];
-        // Preserve existing shared flag if it was set
         let existing_shared = profile
             .dotfiles
             .iter()
             .find(|e| e.path() == path)
             .map(|e| e.shared())
             .unwrap_or(false);
-        if existing_shared {
-            new_dotfiles.push(crate::config::ProfileDotfileEntry::WithOptions {
-                path: path.clone(),
-                shared: true,
-                create_if_missing: false,
-            });
-        } else {
-            new_dotfiles.push(crate::config::ProfileDotfileEntry::Simple(path.clone()));
-        }
+        let default_shared = existing_shared || path == ".gitconfig" || path == ".gitignore_global";
+        let shared = Prompt::confirm(&format!("Share {} across profiles?", path), default_shared)?;
+        new_dotfiles.push(crate::config::ProfileDotfileEntry::WithOptions {
+            path: path.clone(),
+            shared,
+            create_if_missing: false,
+        });
     }
 
     // Package managers

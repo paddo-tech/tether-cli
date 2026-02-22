@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.6] - 2026-02-23
+
+### Added
+
+- Graceful shared↔profile dotfile migration during sync (git mv preserves history)
+- Dashboard `t` key to toggle shared flag on dotfiles
+- Profile edit prompts for shared flag per dotfile
+- Profile name shown in `tether status`
+
+### Fixed
+
+- New profiles start empty instead of cloning dev's dotfile list
+
 ## [1.11.5] - 2026-02-23
 
 ### Fixed

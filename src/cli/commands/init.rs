@@ -259,15 +259,13 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
             return Ok(());
         }
         if !config.profiles.contains_key(&name) {
-            // Clone dotfiles/dirs from dev (or default), but detect packages locally
-            let base = config.profiles.get("dev").cloned().unwrap_or_default();
-            let packages = detect_local_managers();
+            // Start empty — first sync exports local dotfiles, packages detected locally
             config.profiles.insert(
                 name.clone(),
                 crate::config::ProfileConfig {
-                    dotfiles: base.dotfiles,
-                    dirs: base.dirs,
-                    packages,
+                    dotfiles: vec![],
+                    dirs: vec![],
+                    packages: detect_local_managers(),
                 },
             );
         }

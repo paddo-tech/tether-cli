@@ -165,6 +165,16 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
             for file in expanded {
+                if !dry_run {
+                    crate::sync::migrate_dotfile_shared_change(
+                        &sync_path,
+                        &file,
+                        config.security.encrypt_dotfiles,
+                        &upload_profile,
+                        shared,
+                    )?;
+                }
+
                 let source = home.join(&file);
 
                 if source.exists() {

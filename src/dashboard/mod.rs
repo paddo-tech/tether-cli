@@ -846,6 +846,43 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             refresh_files_expanded(app);
             app.last_refresh = Instant::now();
         }
+        KeyCode::Char('t') => {
+            if app.active_tab == Tab::Files {
+                let rows = widgets::files::build_rows(&app.state, &app.files);
+                if app.files.cursor < rows.len() {
+                    if let widgets::files::FileRow::File { path, .. } = &rows[app.files.cursor] {
+                        let path = path.clone();
+                        if let (Some(ref mut config), Some(ref ss)) =
+                            (&mut app.state.config, &app.state.sync_state)
+                        {
+                            let ok = config_edit::toggle_profile_dotfile_shared(
+                                config,
+                                &ss.machine_id,
+                                &path,
+                            );
+                            if ok {
+                                app.flash_message = Some((
+                                    Instant::now(),
+                                    format!(
+                                        "{} shared: {}",
+                                        path,
+                                        if config.is_dotfile_shared(&ss.machine_id, &path) {
+                                            "on"
+                                        } else {
+                                            "off"
+                                        }
+                                    ),
+                                ));
+                                app.state = DashboardState::load();
+                                app.files.deleted = load_deleted_files(&app.state);
+                                refresh_files_expanded(app);
+                                app.last_refresh = Instant::now();
+                            }
+                        }
+                    }
+                }
+            }
+        }
         KeyCode::Char('R') => {
             if app.active_tab == Tab::Files {
                 let rows = widgets::files::build_rows(&app.state, &app.files);

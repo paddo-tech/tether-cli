@@ -361,6 +361,57 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
     }
 }
 
+/// Migrate a dotfile between shared and profile-specific paths when its shared flag changes.
+/// Uses `git mv` to preserve history, falling back to `fs::rename` if the file isn't tracked.
+/// Returns `true` if any file was moved or cleaned up.
+pub fn migrate_dotfile_shared_change(
+    sync_path: &Path,
+    dotfile: &str,
+    encrypted: bool,
+    profile: &str,
+    shared: bool,
+) -> Result<bool> {
+    let target = dotfile_to_repo_path_profiled(dotfile, encrypted, profile, shared);
+    // Compute the opposite path (where the file lived before the flag changed)
+    let old = if shared {
+        // Now shared → was profile-specific
+        dotfile_to_repo_path_profiled(dotfile, encrypted, profile, false)
+    } else {
+        // Now profile-specific → was shared
+        dotfile_to_repo_path_profiled(dotfile, encrypted, profile, true)
+    };
+
+    let old_full = sync_path.join(&old);
+    let target_full = sync_path.join(&target);
+
+    if old_full.exists() && !target_full.exists() {
+        // Move old → target, preferring git mv for history preservation
+        if let Some(parent) = target_full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let git_mv = std::process::Command::new("git")
+            .args(["mv", &old, &target])
+            .current_dir(sync_path)
+            .output();
+        match git_mv {
+            Ok(output) if output.status.success() => {}
+            _ => {
+                // git mv can fail if the file isn't tracked, git isn't installed, etc.
+                // Plain rename + add_all at commit time will reconcile the index.
+                log::debug!("git mv failed for {old} -> {target}, falling back to rename");
+                std::fs::rename(&old_full, &target_full)?;
+            }
+        }
+        Ok(true)
+    } else if old_full.exists() && target_full.exists() {
+        // Both exist (race: another machine already wrote target) — remove stale old
+        std::fs::remove_file(&old_full)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Atomically write content to a file by writing to a temp file and renaming.
 /// This prevents file corruption from interrupted writes.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
@@ -974,6 +1025,127 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(sync_path.join("configs/tether/config.toml.enc")).unwrap(),
             "new"
+        );
+    }
+
+    #[test]
+    fn test_migrate_shared_change_profile_to_shared() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // File currently at profiles/dev/ (was profile-specific), now shared=true
+        let old_dir = sync_path.join("profiles/dev");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("zshrc.enc"), "content").unwrap();
+
+        let moved = migrate_dotfile_shared_change(sync_path, ".zshrc", true, "dev", true).unwrap();
+        assert!(moved);
+        assert!(!sync_path.join("profiles/dev/zshrc.enc").exists());
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("profiles/shared/zshrc.enc")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_migrate_shared_change_shared_to_profile() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // File at profiles/shared/ (was shared), now shared=false
+        let old_dir = sync_path.join("profiles/shared");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("zshrc.enc"), "content").unwrap();
+
+        let moved = migrate_dotfile_shared_change(sync_path, ".zshrc", true, "dev", false).unwrap();
+        assert!(moved);
+        assert!(!sync_path.join("profiles/shared/zshrc.enc").exists());
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("profiles/dev/zshrc.enc")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_migrate_shared_change_both_exist_removes_old() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // Both paths exist (race condition)
+        std::fs::create_dir_all(sync_path.join("profiles/dev")).unwrap();
+        std::fs::create_dir_all(sync_path.join("profiles/shared")).unwrap();
+        std::fs::write(sync_path.join("profiles/dev/zshrc.enc"), "old").unwrap();
+        std::fs::write(sync_path.join("profiles/shared/zshrc.enc"), "new").unwrap();
+
+        let moved = migrate_dotfile_shared_change(sync_path, ".zshrc", true, "dev", true).unwrap();
+        assert!(moved);
+        // Old (profile-specific) removed, target (shared) untouched
+        assert!(!sync_path.join("profiles/dev/zshrc.enc").exists());
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("profiles/shared/zshrc.enc")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn test_migrate_shared_change_noop_when_no_old() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // No old file exists
+        let moved = migrate_dotfile_shared_change(sync_path, ".zshrc", true, "dev", true).unwrap();
+        assert!(!moved);
+    }
+
+    #[test]
+    fn test_migrate_shared_change_noop_when_only_target() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        // Only target exists (already migrated)
+        std::fs::create_dir_all(sync_path.join("profiles/shared")).unwrap();
+        std::fs::write(sync_path.join("profiles/shared/zshrc.enc"), "data").unwrap();
+
+        let moved = migrate_dotfile_shared_change(sync_path, ".zshrc", true, "dev", true).unwrap();
+        assert!(!moved);
+    }
+
+    #[test]
+    fn test_migrate_shared_change_nested_path() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        let old_dir = sync_path.join("profiles/dev/config/nvim");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("init.lua.enc"), "nvim-config").unwrap();
+
+        let moved =
+            migrate_dotfile_shared_change(sync_path, ".config/nvim/init.lua", true, "dev", true)
+                .unwrap();
+        assert!(moved);
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("profiles/shared/config/nvim/init.lua.enc"))
+                .unwrap(),
+            "nvim-config"
+        );
+    }
+
+    #[test]
+    fn test_migrate_shared_change_unencrypted() {
+        let tmp = TempDir::new().unwrap();
+        let sync_path = tmp.path();
+
+        let old_dir = sync_path.join("profiles/shared");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join(".zshrc"), "plain").unwrap();
+
+        let moved =
+            migrate_dotfile_shared_change(sync_path, ".zshrc", false, "dev", false).unwrap();
+        assert!(moved);
+        assert!(!sync_path.join("profiles/shared/.zshrc").exists());
+        assert_eq!(
+            std::fs::read_to_string(sync_path.join("profiles/dev/.zshrc")).unwrap(),
+            "plain"
         );
     }
 }

@@ -38,6 +38,8 @@ pub fn render_bar(f: &mut Frame, area: Rect, active_tab: Tab) {
             spans.extend([
                 Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
                 Span::styled(" expand/diff ", Style::default().fg(Color::DarkGray)),
+                Span::styled("t", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" shared ", Style::default().fg(Color::DarkGray)),
                 Span::styled("R", Style::default().fg(Color::Yellow).bold()),
                 Span::styled("estore ", Style::default().fg(Color::DarkGray)),
             ]);
@@ -67,7 +69,7 @@ pub fn render_overlay(f: &mut Frame) {
     }
 
     let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 28u16.min(area.height.saturating_sub(4));
+    let height = 29u16.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup_area = Rect::new(x, y, width, height);
@@ -116,6 +118,10 @@ pub fn render_overlay(f: &mut Frame) {
         Line::from(vec![
             Span::styled("  Enter     ", Style::default().fg(Color::Yellow).bold()),
             Span::raw("Expand section/file/history/diff"),
+        ]),
+        Line::from(vec![
+            Span::styled("  t         ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Toggle shared across profiles"),
         ]),
         Line::from(vec![
             Span::styled("  R         ", Style::default().fg(Color::Yellow).bold()),

@@ -12,6 +12,7 @@ pub enum FileRow {
     },
     File {
         path: String,
+        shared: bool,
         synced: bool,
         time: String,
         repo_path: String,
@@ -35,10 +36,12 @@ pub enum FileRow {
     },
 }
 
+type FileEntry = (String, bool, bool, String, String);
+
 struct SectionData {
     label: String,
     url: String,
-    files: Vec<(String, bool, String, String)>, // (display_path, synced, time, repo_path)
+    files: Vec<FileEntry>, // (display_path, shared, synced, time, repo_path)
 }
 
 fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
@@ -94,8 +97,7 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
 
     let mut personal_dotfiles = Vec::new();
     let mut personal_projects = Vec::new();
-    let mut team_project_files: HashMap<String, Vec<(String, bool, String, String)>> =
-        HashMap::new();
+    let mut team_project_files: HashMap<String, Vec<FileEntry>> = HashMap::new();
 
     if let Some(ss) = &state.sync_state {
         let mut files: Vec<_> = ss.files.iter().collect();
@@ -124,6 +126,7 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
                 };
                 let entry = (
                     display,
+                    false,
                     file_state.synced,
                     relative_time(file_state.last_modified),
                     repo_path,
@@ -159,6 +162,7 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
                 };
                 personal_dotfiles.push((
                     path.to_string(),
+                    shared,
                     file_state.synced,
                     relative_time(file_state.last_modified),
                     repo_path,
@@ -192,9 +196,9 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
             .map(|tc| tc.url.clone())
             .unwrap_or_default();
 
-        let mut files: Vec<(String, bool, String, String)> = paths
+        let mut files: Vec<FileEntry> = paths
             .iter()
-            .map(|p| (p.clone(), true, String::new(), String::new()))
+            .map(|p| (p.clone(), false, true, String::new(), String::new()))
             .collect();
 
         if let Some(projects) = team_project_files.remove(team_name) {
@@ -245,9 +249,10 @@ pub fn build_rows(state: &DashboardState, ft: &FilesTabState) -> Vec<FileRow> {
         });
 
         if !is_collapsed {
-            for (path, synced, time, repo_path) in &section.files {
+            for (path, shared, synced, time, repo_path) in &section.files {
                 rows.push(FileRow::File {
                     path: path.clone(),
+                    shared: *shared,
                     synced: *synced,
                     time: time.clone(),
                     repo_path: repo_path.clone(),
@@ -306,9 +311,10 @@ pub fn build_overview_rows(state: &DashboardState) -> Vec<FileRow> {
             url: section.url,
             count: section.files.len(),
         });
-        for (path, synced, time, repo_path) in section.files {
+        for (path, shared, synced, time, repo_path) in section.files {
             rows.push(FileRow::File {
                 path,
+                shared,
                 synced,
                 time,
                 repo_path,
@@ -395,6 +401,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
             }
             FileRow::File {
                 path,
+                shared,
                 synced,
                 time,
                 repo_path,
@@ -423,6 +430,12 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                     Span::styled(" ", Style::default().bg(bg)),
                     Span::styled(path, Style::default().fg(Color::White).bg(bg)),
                 ];
+                if *shared {
+                    spans.push(Span::styled(
+                        " [shared]",
+                        Style::default().fg(Color::DarkGray).bg(bg),
+                    ));
+                }
                 if !time.is_empty() {
                     spans.push(Span::styled("  ", Style::default().bg(bg)));
                     spans.push(Span::styled(

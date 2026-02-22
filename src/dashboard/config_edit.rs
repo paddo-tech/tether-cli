@@ -408,6 +408,29 @@ pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> bool {
     config.save().is_ok()
 }
 
+/// Toggle shared flag for a profile dotfile by path. Returns false on failure.
+pub fn toggle_profile_dotfile_shared(config: &mut Config, machine_id: &str, path: &str) -> bool {
+    use crate::config::ProfileDotfileEntry;
+
+    let profile_name = config.profile_name(machine_id).to_string();
+    let profile = match config.profiles.get_mut(&profile_name) {
+        Some(p) => p,
+        None => return false,
+    };
+    let entry = match profile.dotfiles.iter_mut().find(|e| e.path() == path) {
+        Some(e) => e,
+        None => return false,
+    };
+    let new_shared = !entry.shared();
+    let entry_path = entry.path().to_string();
+    *entry = ProfileDotfileEntry::WithOptions {
+        path: entry_path,
+        shared: new_shared,
+        create_if_missing: entry.create_if_missing(),
+    };
+    config.save().is_ok()
+}
+
 /// Validate interval format: number followed by s/m/h (e.g. "5m", "30s", "1h")
 fn is_valid_interval(val: &str) -> bool {
     if val.len() < 2 {
