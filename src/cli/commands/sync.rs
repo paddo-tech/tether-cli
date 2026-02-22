@@ -104,9 +104,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     let mut state = SyncState::load()?;
 
     // Auto-assign machine to "dev" profile on first run after v2 migration
-    if !config.profiles.is_empty()
-        && !config.machine_profiles.contains_key(&state.machine_id)
-    {
+    if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
         config
             .machine_profiles
             .insert(state.machine_id.clone(), "dev".to_string());
@@ -1318,7 +1316,11 @@ fn decrypt_project_configs(
 pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
     let new_path = sync_path.join("configs/tether/config.toml.enc");
     let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
-    let enc_file = if new_path.exists() { new_path } else { legacy_path };
+    let enc_file = if new_path.exists() {
+        new_path
+    } else {
+        legacy_path
+    };
 
     if !enc_file.exists() {
         return Ok(None);

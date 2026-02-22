@@ -64,7 +64,6 @@ pub async fn list() -> Result<()> {
             .as_deref()
             .unwrap_or(config.profile_name(&machine.machine_id));
 
-
         table.add_row(vec![
             if is_current {
                 Cell::new(&machine.machine_id).fg(Color::Green)

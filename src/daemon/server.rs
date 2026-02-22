@@ -229,9 +229,7 @@ impl DaemonServer {
         let mut state = SyncState::load()?;
 
         // Auto-assign machine to "dev" profile on first run after v2 migration
-        if !config.profiles.is_empty()
-            && !config.machine_profiles.contains_key(&state.machine_id)
-        {
+        if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
             config
                 .machine_profiles
                 .insert(state.machine_id.clone(), "dev".to_string());

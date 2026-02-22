@@ -1232,7 +1232,9 @@ fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
     let title = " Profile (this machine) ";
     let max_option_len = options.iter().map(|o| o.len()).max().unwrap_or(10);
     let hint = "  New: tether machines profile create <name>";
-    let min_width = (max_option_len + 10).max(title.len() + 2).max(hint.len() + 4);
+    let min_width = (max_option_len + 10)
+        .max(title.len() + 2)
+        .max(hint.len() + 4);
     let width = (min_width as u16).min(area.width.saturating_sub(4));
     let height = ((options.len() + 5) as u16).min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -1291,13 +1293,8 @@ fn load_deleted_files(state: &DashboardState) -> HashMap<String, Vec<String>> {
         Err(_) => return deleted,
     };
 
-    let mut tracked = git
-        .list_tracked_files("profiles/")
-        .unwrap_or_default();
-    tracked.extend(
-        git.list_tracked_files("dotfiles/")
-            .unwrap_or_default(),
-    );
+    let mut tracked = git.list_tracked_files("profiles/").unwrap_or_default();
+    tracked.extend(git.list_tracked_files("dotfiles/").unwrap_or_default());
 
     let ss = match &state.sync_state {
         Some(s) => s,
