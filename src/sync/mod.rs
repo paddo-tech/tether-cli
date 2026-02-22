@@ -117,6 +117,12 @@ pub fn migrate_repo_to_profiled(
     config: &crate::config::Config,
     machine_id: &str,
 ) -> anyhow::Result<bool> {
+    // Only migrate from flat layout if profiles/ doesn't exist yet.
+    // Once profiles/ exists, machines populate their profile dirs via normal export.
+    if !is_pre_migration_repo(sync_path) {
+        return Ok(false);
+    }
+
     let encrypted = config.security.encrypt_dotfiles;
     let profile_name = config.profile_name(machine_id);
     let mut migrated_any = false;
@@ -744,21 +750,20 @@ mod tests {
         std::fs::write(dotfiles_dir.join("gitconfig.enc"), "g").unwrap();
         std::fs::write(dotfiles_dir.join("bashrc.enc"), "b").unwrap();
 
-        // Machine A migrates
+        // Machine A migrates first (creates profiles/)
         let a = migrate_repo_to_profiled(sync_path, &config, "machine-a").unwrap();
         assert!(a);
         assert!(sync_path.join("profiles/dev/zshrc.enc").exists());
         assert!(sync_path.join("profiles/dev/gitconfig.enc").exists());
 
-        // Machine B migrates
+        // Machine B: migration is a no-op since profiles/ now exists.
+        // In practice, machine B populates profiles/server/ via normal export.
         let b = migrate_repo_to_profiled(sync_path, &config, "machine-b").unwrap();
-        assert!(b);
-        assert!(sync_path.join("profiles/server/bashrc.enc").exists());
+        assert!(!b);
 
-        // Cross-profile isolation: dev doesn't have server files, vice versa
+        // Cross-profile isolation: dev files migrated, server dir doesn't exist yet
         assert!(!sync_path.join("profiles/dev/bashrc.enc").exists());
-        assert!(!sync_path.join("profiles/server/zshrc.enc").exists());
-        assert!(!sync_path.join("profiles/server/gitconfig.enc").exists());
+        assert!(!sync_path.join("profiles/server").exists());
 
         // Flat files untouched
         assert!(dotfiles_dir.join("zshrc.enc").exists());

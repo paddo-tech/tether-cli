@@ -97,9 +97,8 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
             GitBackend::clone(&repo_url, &sync_path)?;
         }
 
-        // Create sync repo structure
+        // Create sync repo structure (profiles/ created by migration or export)
         std::fs::create_dir_all(sync_path.join("manifests"))?;
-        std::fs::create_dir_all(sync_path.join("profiles"))?;
         std::fs::create_dir_all(sync_path.join("machines"))?;
 
         crate::sync::check_sync_format_version(&sync_path)?;
