@@ -28,6 +28,7 @@ All dotfiles are **encrypted with AES-256-GCM** before syncing to Git. Your secr
 - **Project configs** - Sync .env files and IDE settings by Git remote URL
 - **Team sync** - Share dotfiles, secrets, and project configs with age public-key encryption
 - **Collab secrets** - Collaborator-based project secret sharing using GitHub permissions
+- **Machine profiles** - Per-machine dotfile and package control with named profiles
 - **Package sync** - Homebrew, npm, pnpm, bun, gem, and uv
 - **Background daemon** - Automatic periodic sync every 5 minutes
 - **Git-backed** - Private Git repo for versioning and history
@@ -78,7 +79,7 @@ tether status            # Show current sync status
 tether diff              # Show differences between machines
 tether config            # Manage configuration and feature toggles
 tether daemon            # Control the background daemon
-tether machines          # Manage connected machines
+tether machines          # Manage machines and profiles
 tether ignore            # Manage ignore patterns
 tether team              # Manage team sync (dotfiles, secrets, projects)
 tether collab            # Collaborator-based project secret sharing
@@ -86,7 +87,8 @@ tether resolve           # Resolve file conflicts
 tether unlock / lock     # Manage encryption key
 tether upgrade           # Upgrade all installed packages
 tether packages          # List and manage installed packages
-tether restore           # Restore files from backup
+tether restore           # Restore files from backup or git history
+tether history           # Show file change history
 tether identity          # Manage age identity for team secrets
 ```
 
@@ -165,7 +167,7 @@ Passphrase-based. Set a passphrase on your first machine, enter the same one on 
 Set `encrypt_dotfiles = false` in `~/.tether/config.toml`. Not recommended if your dotfiles contain secrets.
 
 **What about different packages on different machines?**
-Use ignore patterns or machine-specific overrides.
+Use machine profiles to control which dotfiles and packages sync to each machine. Create profiles like "work" and "personal" with `tether machines profile create`.
 
 **Does this work with multiple shells?**
 Tether syncs any dotfile you configure. Default discovery targets zsh files, but you can add any shell's config files.

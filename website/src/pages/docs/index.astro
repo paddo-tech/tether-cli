@@ -17,6 +17,7 @@ import Code from '../../components/Code.astro';
     <ul>
       <li><strong>Automatic Sync</strong> — Background daemon syncs changes every 5 minutes</li>
       <li><strong>End-to-End Encryption</strong> — AES-256-GCM encryption with passphrase-protected keys</li>
+      <li><strong>Machine Profiles</strong> — Per-machine control over which dotfiles and packages sync</li>
       <li><strong>Project Configs</strong> — Sync .env files and IDE settings across machines by Git remote</li>
       <li><strong>Package Manager Support</strong> — Syncs Homebrew, npm, pnpm, bun, gem, and uv packages</li>
       <li><strong>Secret Detection</strong> — Prevents accidental syncing of API keys and credentials</li>
@@ -94,8 +95,9 @@ tether init --repo git@github.com:username/dotfiles.git`} />
 └── conflicts.json   # Conflict state`} />
     <p>The sync repository structure:</p>
     <Code code={`sync/
-├── dotfiles/        # Encrypted dotfiles
-├── configs/         # Config directories
+├── profiles/<name>/ # Profile-specific dotfiles (encrypted)
+├── dotfiles/        # Flat-layout dotfiles (legacy/shared)
+├── configs/         # App configs (tether config, etc.)
 ├── projects/        # Project-local configs
 ├── manifests/       # Package manifests
 └── machines/        # Per-machine state`} />
@@ -130,7 +132,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Files</td>
           <td class="py-2 pr-4 font-mono text-xs">2</td>
-          <td class="py-2">Browse all synced dotfiles grouped by personal and team sections</td>
+          <td class="py-2">Browse synced dotfiles with file history viewer, inline diffs, and restore</td>
         </tr>
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Packages</td>
@@ -140,7 +142,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Machines</td>
           <td class="py-2 pr-4 font-mono text-xs">4</td>
-          <td class="py-2">Connected machines with hostname, OS, dotfile count, and per-manager package counts</td>
+          <td class="py-2">Connected machines with profile assignments, hostname, OS, and package counts</td>
         </tr>
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Config</td>
@@ -194,6 +196,14 @@ tether init --repo git@github.com:username/dotfiles.git`} />
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Enter</td>
           <td class="py-2">Expand/collapse sections, confirm actions</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">p</td>
+          <td class="py-2">Open profile picker (assign profile to this machine)</td>
+        </tr>
+        <tr class="border-b border-surface/50">
+          <td class="py-2 pr-4 font-mono text-xs">h</td>
+          <td class="py-2">View file history (Files tab)</td>
         </tr>
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Esc / Ctrl+c</td>
@@ -253,12 +263,17 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     </ul>
 
     <h3 id="cmd-machines">tether machines</h3>
-    <p>Manage machines in sync network.</p>
-    <Code code="tether machines <list|rename|remove>" />
+    <p>Manage machines and profiles in sync network.</p>
+    <Code code="tether machines <list|rename|remove|profile>" />
     <ul>
-      <li><code>list</code> — List all machines</li>
+      <li><code>list</code> — List all machines with profile assignments</li>
       <li><code>rename &lt;OLD&gt; &lt;NEW&gt;</code> — Rename a machine</li>
       <li><code>remove &lt;NAME&gt;</code> — Remove a machine</li>
+      <li><code>profile set &lt;PROFILE&gt;</code> — Assign a profile to this machine</li>
+      <li><code>profile unset</code> — Remove profile assignment</li>
+      <li><code>profile create &lt;NAME&gt;</code> — Create a new profile</li>
+      <li><code>profile edit &lt;NAME&gt;</code> — Edit profile dotfile/package config</li>
+      <li><code>profile list</code> — List all profiles and assignments</li>
     </ul>
 
     <h3 id="cmd-ignore">tether ignore</h3>
@@ -335,11 +350,17 @@ tether team projects purge-personal   # Remove personal copies`} />
     <p>Upgrade all installed packages across enabled package managers.</p>
     <Code code="tether upgrade" />
 
+    <h3 id="cmd-history">tether history</h3>
+    <p>Show file change history from the sync repo.</p>
+    <Code code={`tether history                   # Show recent changes
+tether history <FILE>            # Show history for a specific file`} />
+
     <h3 id="cmd-restore">tether restore</h3>
-    <p>Restore files from backup.</p>
+    <p>Restore files from backup or git history.</p>
     <Code code={`tether restore list              # List available backups
 tether restore file              # Interactive restore
-tether restore file --from <TS>  # Restore from specific timestamp`} />
+tether restore file --from <TS>  # Restore from specific timestamp
+tether restore git               # Restore dotfiles from git history`} />
 
     <h3 id="cmd-identity">tether identity</h3>
     <p>Manage age identity for team secrets encryption.</p>
@@ -444,6 +465,37 @@ enabled = false`} />
         </tr>
       </tbody>
     </table>
+  </section>
+
+  <hr class="my-12 border-surface" />
+
+  <!-- Machine Profiles -->
+  <section id="machine-profiles">
+    <h2>Machine Profiles</h2>
+    <p>
+      Profiles let you control which dotfiles and packages sync to each machine. For example, a "work" profile might include IDE configs that your "server" profile doesn't need.
+    </p>
+
+    <h3>Creating Profiles</h3>
+    <Code code={`tether machines profile create work
+tether machines profile create server`} />
+
+    <h3>Assigning a Profile</h3>
+    <Code code={`# Assign to current machine
+tether machines profile set work
+
+# View assignments
+tether machines profile list`} />
+
+    <h3>Editing Profile Config</h3>
+    <Code code="tether machines profile edit work" />
+    <p>Each profile has its own dotfile and package lists. Dotfiles are stored under <code>profiles/&lt;name&gt;/</code> in the sync repo.</p>
+
+    <h3>Cross-Profile Discovery</h3>
+    <p>When syncing, Tether detects dotfiles in other profiles and offers to adopt them into yours via an interactive prompt.</p>
+
+    <h3>Migration</h3>
+    <p>Existing flat-layout dotfiles (stored in <code>dotfiles/</code>) are automatically migrated to profile directories on first sync after upgrading.</p>
   </section>
 
   <hr class="my-12 border-surface" />
