@@ -700,8 +700,11 @@ pub fn decrypt_from_repo(
         } else {
             vec![]
         };
-        // Also check flat dir for un-migrated files
-        if expanded.is_empty() && dotfiles_dir.exists() {
+        // Also check flat dir for un-migrated files (only if profiles/ doesn't exist yet)
+        if expanded.is_empty()
+            && dotfiles_dir.exists()
+            && crate::sync::is_pre_migration_repo(sync_path)
+        {
             expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
         }
 

@@ -77,8 +77,14 @@ pub fn dotfile_to_repo_path_profiled(
     }
 }
 
+/// Whether the sync repo is still using the pre-profiles flat layout.
+pub fn is_pre_migration_repo(sync_path: &Path) -> bool {
+    !sync_path.join("profiles").exists()
+}
+
 /// Try to read a dotfile from the sync repo, checking profile path first then flat fallback.
 /// Returns the path that exists, or the profile path if neither exists.
+/// Only falls back to flat layout if profiles/ dir doesn't exist (pre-migration repo).
 pub fn resolve_dotfile_repo_path(
     sync_path: &std::path::Path,
     dotfile: &str,
@@ -90,10 +96,13 @@ pub fn resolve_dotfile_repo_path(
     if sync_path.join(&profiled).exists() {
         return profiled;
     }
-    // Fallback to flat layout for un-migrated repos
-    let flat = dotfile_to_repo_path(dotfile, encrypted);
-    if sync_path.join(&flat).exists() {
-        return flat;
+    // Only fall back to flat layout for un-migrated repos (no profiles/ dir yet).
+    // Once profiles/ exists, flat files are leftovers and shouldn't bleed across profiles.
+    if is_pre_migration_repo(sync_path) {
+        let flat = dotfile_to_repo_path(dotfile, encrypted);
+        if sync_path.join(&flat).exists() {
+            return flat;
+        }
     }
     // Default to profiled path (for new writes)
     profiled
@@ -414,16 +423,20 @@ mod tests {
         let result = resolve_dotfile_repo_path(sync_path, ".zshrc", true, "dev", false);
         assert_eq!(result, "profiles/dev/zshrc.enc");
 
-        // Create flat file: should fallback to it
+        // Flat file only (no profiles/ dir = pre-migration): should fallback
         let flat_dir = sync_path.join("dotfiles");
         std::fs::create_dir_all(&flat_dir).unwrap();
         std::fs::write(flat_dir.join("zshrc.enc"), "data").unwrap();
         let result = resolve_dotfile_repo_path(sync_path, ".zshrc", true, "dev", false);
         assert_eq!(result, "dotfiles/zshrc.enc");
 
-        // Create profiled file: should prefer it
+        // Once profiles/ exists, flat fallback is skipped
         let prof_dir = sync_path.join("profiles/dev");
         std::fs::create_dir_all(&prof_dir).unwrap();
+        let result = resolve_dotfile_repo_path(sync_path, ".zshrc", true, "dev", false);
+        assert_eq!(result, "profiles/dev/zshrc.enc");
+
+        // Profiled file exists: returns it
         std::fs::write(prof_dir.join("zshrc.enc"), "data").unwrap();
         let result = resolve_dotfile_repo_path(sync_path, ".zshrc", true, "dev", false);
         assert_eq!(result, "profiles/dev/zshrc.enc");
