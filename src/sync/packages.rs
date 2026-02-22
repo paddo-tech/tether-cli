@@ -65,10 +65,11 @@ pub async fn import_packages(
         return Ok(Vec::new());
     }
 
+    let mid = &machine_state.machine_id;
     let mut deferred_casks = Vec::new();
 
     // Homebrew - special handling for formulae/casks/taps
-    if config.packages.brew.enabled {
+    if config.is_manager_enabled(mid, "brew") {
         let (casks, installed) = import_brew(
             &manifests_dir,
             machine_state,
@@ -85,16 +86,7 @@ pub async fn import_packages(
 
     // Simple package managers (npm, pnpm, bun, gem)
     for def in SIMPLE_MANAGERS {
-        let enabled = match def.state_key {
-            "npm" => config.packages.npm.enabled,
-            "pnpm" => config.packages.pnpm.enabled,
-            "bun" => config.packages.bun.enabled,
-            "gem" => config.packages.gem.enabled,
-            "uv" => config.packages.uv.enabled,
-            _ => false,
-        };
-
-        if enabled {
+        if config.is_manager_enabled(mid, def.state_key) {
             let installed = import_simple_manager(def, &manifests_dir, machine_state).await;
             if installed {
                 update_last_upgrade(state, def.state_key);

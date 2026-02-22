@@ -230,6 +230,17 @@ impl DaemonServer {
 
         // Load state and machine state
         let mut state = SyncState::load()?;
+
+        // Auto-assign machine to "dev" profile on first run after v2 migration
+        if !config.profiles.is_empty()
+            && !config.machine_profiles.contains_key(&state.machine_id)
+        {
+            config
+                .machine_profiles
+                .insert(state.machine_id.clone(), "dev".to_string());
+            let _ = config.save();
+        }
+
         let machine_state_for_decrypt =
             MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
 
@@ -250,7 +261,10 @@ impl DaemonServer {
 
         // Sync dotfiles to remote (only if feature enabled)
         if config.features.personal_dotfiles {
-            for entry in &config.dotfiles.files {
+            let daemon_machine_id = state.machine_id.clone();
+            let daemon_profile = config.profile_name(&daemon_machine_id).to_string();
+
+            for entry in config.effective_dotfiles(&daemon_machine_id) {
                 // Security: validate path to prevent traversal attacks
                 if !entry.is_safe_path() {
                     log::warn!("Skipping unsafe dotfile path: {}", entry.path());
@@ -258,6 +272,7 @@ impl DaemonServer {
                 }
 
                 let pattern = entry.path();
+                let shared = config.is_dotfile_shared(&daemon_machine_id, pattern);
                 let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
                 for file in expanded {
@@ -278,18 +293,29 @@ impl DaemonServer {
 
                             if file_changed {
                                 log::info!("File changed: {}", file);
-                                let filename = file.trim_start_matches('.');
 
                                 if config.security.encrypt_dotfiles {
                                     let key = crate::security::get_encryption_key()?;
                                     let encrypted = crate::security::encrypt(&content, &key)?;
-                                    let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                                    let repo_path = crate::sync::dotfile_to_repo_path_profiled(
+                                        &file,
+                                        true,
+                                        &daemon_profile,
+                                        shared,
+                                    );
+                                    let dest = sync_path.join(&repo_path);
                                     if let Some(parent) = dest.parent() {
                                         std::fs::create_dir_all(parent)?;
                                     }
                                     std::fs::write(&dest, encrypted)?;
                                 } else {
-                                    let dest = dotfiles_dir.join(filename);
+                                    let repo_path = crate::sync::dotfile_to_repo_path_profiled(
+                                        &file,
+                                        false,
+                                        &daemon_profile,
+                                        shared,
+                                    );
+                                    let dest = sync_path.join(&repo_path);
                                     if let Some(parent) = dest.parent() {
                                         std::fs::create_dir_all(parent)?;
                                     }
@@ -303,10 +329,18 @@ impl DaemonServer {
                 }
             }
             // Auto-discover directories sourced from shell configs
-            let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
+            let effective = config.effective_dotfiles(&daemon_machine_id);
+            let discovered = crate::sync::discover_sourced_dirs(&home, &effective);
             let mut config_changed = false;
             for dir in discovered {
-                if !config.dotfiles.dirs.contains(&dir) {
+                let current_profile = config.profile_name(&daemon_machine_id).to_string();
+                if let Some(profile) = config.profiles.get_mut(&current_profile) {
+                    if !profile.dirs.contains(&dir) {
+                        log::info!("Auto-discovered sourced directory: {}", dir);
+                        profile.dirs.push(dir);
+                        config_changed = true;
+                    }
+                } else if !config.dotfiles.dirs.contains(&dir) {
                     log::info!("Auto-discovered sourced directory: {}", dir);
                     config.dotfiles.dirs.push(dir);
                     config_changed = true;
@@ -314,13 +348,21 @@ impl DaemonServer {
             }
             if config_changed {
                 config.dotfiles.dirs.sort();
+                for profile in config.profiles.values_mut() {
+                    profile.dirs.sort();
+                }
                 config.save()?;
             }
 
             // Sync global config directories
-            if !config.dotfiles.dirs.is_empty() {
+            if !config.effective_dirs(&daemon_machine_id).is_empty() {
                 crate::cli::commands::sync::sync_directories(
-                    &config, &mut state, &sync_path, &home, false,
+                    &config,
+                    &daemon_machine_id,
+                    &mut state,
+                    &sync_path,
+                    &home,
+                    false,
                 )?;
             }
 

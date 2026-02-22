@@ -8,12 +8,11 @@ use std::path::PathBuf;
 ///
 /// Version history:
 /// - v1 (1.0.0+): Initial format. All fields have serde defaults for backwards compat.
-///
-/// When bumping to v2:
-/// 1. Add migration logic in load() before version check
-/// 2. Document what changed and why migration is needed
-/// 3. Freeze v1 semantics - don't add new defaults to v1 fields
-pub const CURRENT_CONFIG_VERSION: u32 = 1;
+/// - v2 (1.11.0+): Profiles become source of truth with per-profile dotfile storage.
+///   ProfileConfig gains dotfiles (Vec<ProfileDotfileEntry>), dirs (Vec<String>),
+///   packages (Vec<String>). Old ProfilePackagesConfig removed.
+///   Migration: creates "dev" profile from global dotfiles/dirs/packages.
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
 fn default_config_version() -> u32 {
     1
@@ -49,6 +48,12 @@ pub struct Config {
     pub teams: Option<TeamsConfig>,
     #[serde(default)]
     pub project_configs: ProjectConfigSettings,
+    /// Machine-to-profile assignments (machine_id -> profile_name)
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub machine_profiles: HashMap<String, String>,
+    /// Named profiles that restrict what a machine syncs
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub profiles: HashMap<String, ProfileConfig>,
 }
 
 /// Feature toggles - what tether should sync
@@ -293,6 +298,67 @@ pub fn is_safe_dotfile_path(path: &str) -> bool {
     true
 }
 
+/// A dotfile entry within a profile — extends DotfileEntry with `shared` flag.
+/// Shared dotfiles are stored in `profiles/shared/` and auto-propagate across profiles.
+/// Profile-specific dotfiles are stored in `profiles/<profile>/` with independent copies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProfileDotfileEntry {
+    /// Simple string path (defaults: shared=false, create_if_missing=false)
+    Simple(String),
+    /// Object with explicit options
+    WithOptions {
+        path: String,
+        #[serde(default)]
+        shared: bool,
+        #[serde(default)]
+        create_if_missing: bool,
+    },
+}
+
+impl ProfileDotfileEntry {
+    pub fn path(&self) -> &str {
+        match self {
+            ProfileDotfileEntry::Simple(p) => p,
+            ProfileDotfileEntry::WithOptions { path, .. } => path,
+        }
+    }
+
+    pub fn shared(&self) -> bool {
+        match self {
+            ProfileDotfileEntry::Simple(_) => false,
+            ProfileDotfileEntry::WithOptions { shared, .. } => *shared,
+        }
+    }
+
+    pub fn create_if_missing(&self) -> bool {
+        match self {
+            ProfileDotfileEntry::Simple(_) => false,
+            ProfileDotfileEntry::WithOptions {
+                create_if_missing, ..
+            } => *create_if_missing,
+        }
+    }
+
+    /// Convert to DotfileEntry (dropping shared flag)
+    pub fn to_dotfile_entry(&self) -> DotfileEntry {
+        match self {
+            ProfileDotfileEntry::Simple(p) => DotfileEntry::WithOptions {
+                path: p.clone(),
+                create_if_missing: false,
+            },
+            ProfileDotfileEntry::WithOptions {
+                path,
+                create_if_missing,
+                ..
+            } => DotfileEntry::WithOptions {
+                path: path.clone(),
+                create_if_missing: *create_if_missing,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DotfilesConfig {
     pub files: Vec<DotfileEntry>,
@@ -534,6 +600,22 @@ impl Default for ProjectConfigSettings {
     }
 }
 
+/// A named profile controlling what a machine syncs.
+/// Profiles are the source of truth in config v2.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    /// Dotfiles to sync (with optional shared/create_if_missing flags)
+    #[serde(default)]
+    pub dotfiles: Vec<ProfileDotfileEntry>,
+    /// Directories to sync
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dirs: Vec<String>,
+    /// Enabled package managers (e.g., ["brew", "npm", "pnpm"])
+    /// Empty = all globally-enabled managers
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
+}
+
 impl Config {
     pub fn config_dir() -> Result<PathBuf> {
         let home = crate::home_dir()?;
@@ -607,6 +689,125 @@ impl Config {
         !self.backend.url.is_empty()
     }
 
+    /// Get the profile name for a machine. Defaults to "dev" if unassigned.
+    pub fn profile_name(&self, machine_id: &str) -> &str {
+        self.machine_profiles
+            .get(machine_id)
+            .map(|s| s.as_str())
+            .unwrap_or("dev")
+    }
+
+    /// Get the profile assigned to a machine, if any
+    pub fn machine_profile(&self, machine_id: &str) -> Option<&ProfileConfig> {
+        self.profiles.get(self.profile_name(machine_id))
+    }
+
+    /// Get effective dotfiles for a machine as DotfileEntry vec.
+    /// Profile dotfiles take priority; falls back to global dotfiles.files.
+    pub fn effective_dotfiles(&self, machine_id: &str) -> Vec<DotfileEntry> {
+        if let Some(profile) = self.machine_profile(machine_id) {
+            if !profile.dotfiles.is_empty() {
+                return profile
+                    .dotfiles
+                    .iter()
+                    .map(|e| e.to_dotfile_entry())
+                    .collect();
+            }
+        }
+        self.dotfiles.files.clone()
+    }
+
+    /// Get profile dotfile entries (with shared flag) for a machine.
+    pub fn profile_dotfiles(&self, machine_id: &str) -> Option<&[ProfileDotfileEntry]> {
+        let profile = self.machine_profile(machine_id)?;
+        if profile.dotfiles.is_empty() {
+            None
+        } else {
+            Some(&profile.dotfiles)
+        }
+    }
+
+    /// Get effective dirs for a machine (profile takes priority, then global)
+    pub fn effective_dirs(&self, machine_id: &str) -> &[String] {
+        if let Some(profile) = self.machine_profile(machine_id) {
+            if !profile.dirs.is_empty() {
+                return &profile.dirs;
+            }
+        }
+        &self.dotfiles.dirs
+    }
+
+    /// Check if a package manager is enabled for a machine.
+    /// Global config must enable it AND profile must include it (if profile has packages list).
+    pub fn is_manager_enabled(&self, machine_id: &str, manager: &str) -> bool {
+        let global_enabled = match manager {
+            "brew" | "brew_formulae" | "brew_casks" | "brew_taps" => self.packages.brew.enabled,
+            "npm" => self.packages.npm.enabled,
+            "pnpm" => self.packages.pnpm.enabled,
+            "bun" => self.packages.bun.enabled,
+            "gem" => self.packages.gem.enabled,
+            "uv" => self.packages.uv.enabled,
+            _ => true,
+        };
+        if !global_enabled {
+            return false;
+        }
+
+        // Normalize brew sub-types to "brew"
+        let base = match manager {
+            "brew_formulae" | "brew_casks" | "brew_taps" => "brew",
+            other => other,
+        };
+
+        if let Some(profile) = self.machine_profile(machine_id) {
+            if !profile.packages.is_empty() {
+                return profile.packages.iter().any(|m| m == base);
+            }
+        }
+
+        true
+    }
+
+    /// Check if a dotfile is shared in the given machine's profile.
+    pub fn is_dotfile_shared(&self, machine_id: &str, dotfile_path: &str) -> bool {
+        if let Some(entries) = self.profile_dotfiles(machine_id) {
+            for entry in entries {
+                if entry.path() == dotfile_path {
+                    return entry.shared();
+                }
+            }
+        }
+        false
+    }
+
+    /// Validate a profile name is safe for filesystem use.
+    /// Rejects empty, path-traversal, dot-prefixed, and reserved names.
+    pub fn is_safe_profile_name(name: &str) -> bool {
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains("..")
+            || name.starts_with('.')
+        {
+            return false;
+        }
+        // Reserved names that conflict with repo structure
+        let reserved = [
+            "shared",
+            "tether",
+            "dotfiles",
+            "manifests",
+            "machines",
+            "configs",
+            "projects",
+            "profiles",
+        ];
+        if reserved.contains(&name) {
+            return false;
+        }
+        true
+    }
+
     /// Get collab directory for a specific collab name
     pub fn collab_dir(collab_name: &str) -> Result<PathBuf> {
         // Defense-in-depth: validate collab name to prevent path traversal
@@ -639,7 +840,7 @@ impl Config {
 
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         let mut config: Self = toml::from_str(&content)?;
 
         if config.config_version > CURRENT_CONFIG_VERSION {
@@ -657,7 +858,62 @@ impl Config {
             config.features.personal_packages = false;
         }
 
+        // v1 → v2 migration: create "dev" profile from global dotfiles/dirs/packages
+        if config.config_version < 2 && config.profiles.is_empty() {
+            config.migrate_v1_to_v2();
+            config.config_version = CURRENT_CONFIG_VERSION;
+            // Best-effort save (don't fail load if save fails)
+            let _ = config.save();
+        }
+
         Ok(config)
+    }
+
+    /// Migrate v1 config to v2: create "dev" profile from global settings.
+    pub fn migrate_v1_to_v2(&mut self) {
+        // Build package manager list from global config
+        let mut packages = Vec::new();
+        if self.packages.brew.enabled {
+            packages.push("brew".to_string());
+        }
+        if self.packages.npm.enabled {
+            packages.push("npm".to_string());
+        }
+        if self.packages.pnpm.enabled {
+            packages.push("pnpm".to_string());
+        }
+        if self.packages.bun.enabled {
+            packages.push("bun".to_string());
+        }
+        if self.packages.gem.enabled {
+            packages.push("gem".to_string());
+        }
+        if self.packages.uv.enabled {
+            packages.push("uv".to_string());
+        }
+
+        // Convert global dotfiles to ProfileDotfileEntry (preserving create_if_missing)
+        let dotfiles: Vec<ProfileDotfileEntry> = self
+            .dotfiles
+            .files
+            .iter()
+            .map(|entry| ProfileDotfileEntry::WithOptions {
+                path: entry.path().to_string(),
+                shared: false,
+                create_if_missing: entry.create_if_missing(),
+            })
+            .collect();
+
+        let dev_profile = ProfileConfig {
+            dotfiles,
+            dirs: self.dotfiles.dirs.clone(),
+            packages,
+        };
+
+        self.profiles.insert("dev".to_string(), dev_profile);
+
+        // Assign all unassigned machines to "dev"
+        // (machines already in machine_profiles keep their existing assignment)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -750,6 +1006,8 @@ impl Default for Config {
             team: None,
             teams: None,
             project_configs: ProjectConfigSettings::default(),
+            machine_profiles: HashMap::new(),
+            profiles: HashMap::new(),
         }
     }
 }
@@ -1108,6 +1366,277 @@ files = []
     }
 
     #[test]
+    fn test_effective_dotfiles_with_profile() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "server".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::Simple(".zshrc".to_string())],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+
+        let files = config.effective_dotfiles("my-server");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path(), ".zshrc");
+
+        // Unassigned machines get "dev" profile (which may or may not exist)
+        // If "dev" doesn't exist, falls through to global
+        let other = config.effective_dotfiles("my-laptop");
+        assert_eq!(other.len(), config.dotfiles.files.len());
+    }
+
+    #[test]
+    fn test_is_manager_enabled_with_profile() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "server".to_string(),
+            ProfileConfig {
+                dotfiles: vec![],
+                dirs: vec![],
+                packages: vec!["brew".to_string()],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+
+        assert!(config.is_manager_enabled("my-server", "brew"));
+        assert!(!config.is_manager_enabled("my-server", "npm"));
+        // Unassigned machine defaults to "dev"; no dev profile = all global enabled
+        assert!(config.is_manager_enabled("my-laptop", "npm"));
+
+        // Profile with empty packages list = all globally-enabled managers
+        config.profiles.insert(
+            "minimal".to_string(),
+            ProfileConfig {
+                dotfiles: vec![],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("other-box".to_string(), "minimal".to_string());
+        assert!(config.is_manager_enabled("other-box", "brew"));
+    }
+
+    #[test]
+    fn test_is_dotfile_shared() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "dev".to_string(),
+            ProfileConfig {
+                dotfiles: vec![
+                    ProfileDotfileEntry::Simple(".zshrc".to_string()),
+                    ProfileDotfileEntry::WithOptions {
+                        path: ".gitconfig".to_string(),
+                        shared: true,
+                        create_if_missing: false,
+                    },
+                ],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-mac".to_string(), "dev".to_string());
+
+        assert!(!config.is_dotfile_shared("my-mac", ".zshrc"));
+        assert!(config.is_dotfile_shared("my-mac", ".gitconfig"));
+        assert!(!config.is_dotfile_shared("my-mac", ".bashrc"));
+    }
+
+    #[test]
+    fn test_config_with_profiles_roundtrip() {
+        let toml_str = r#"
+config_version = 2
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc", ".gitconfig"]
+
+[machine_profiles]
+my-server = "server"
+
+[profiles.server]
+dotfiles = [".zshrc"]
+packages = ["brew"]
+"#;
+        let parsed: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            parsed.machine_profiles.get("my-server"),
+            Some(&"server".to_string())
+        );
+        let profile = parsed.profiles.get("server").unwrap();
+        assert_eq!(profile.dotfiles.len(), 1);
+        assert_eq!(profile.packages, vec!["brew"]);
+
+        // Helpers work
+        assert_eq!(parsed.effective_dotfiles("my-server").len(), 1);
+        assert!(!parsed.is_manager_enabled("my-server", "npm"));
+        assert!(parsed.is_manager_enabled("my-server", "brew"));
+    }
+
+    #[test]
+    fn test_backwards_compat_no_profiles() {
+        // Config without profiles should parse fine
+        let old_config = r#"
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc"]
+"#;
+        let parsed: Config = toml::from_str(old_config).unwrap();
+        assert!(parsed.machine_profiles.is_empty());
+        assert!(parsed.profiles.is_empty());
+        // effective_dotfiles falls through to global (no "dev" profile)
+        assert_eq!(parsed.effective_dotfiles("any").len(), 1);
+    }
+
+    #[test]
+    fn test_profile_name_defaults_to_dev() {
+        let config = Config::default();
+        assert_eq!(config.profile_name("any-machine"), "dev");
+    }
+
+    #[test]
+    fn test_profile_name_respects_assignment() {
+        let mut config = Config::default();
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+        assert_eq!(config.profile_name("my-server"), "server");
+        assert_eq!(config.profile_name("other"), "dev");
+    }
+
+    #[test]
+    fn test_v1_to_v2_migration() {
+        let mut config = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config.profiles.clear();
+        config.dotfiles.files = vec![
+            DotfileEntry::Simple(".gitconfig".to_string()),
+            DotfileEntry::WithOptions {
+                path: ".zshrc".to_string(),
+                create_if_missing: false,
+            },
+        ];
+        config.dotfiles.dirs = vec![".config/karabiner".to_string()];
+
+        config.migrate_v1_to_v2();
+
+        assert!(config.profiles.contains_key("dev"));
+        let dev = config.profiles.get("dev").unwrap();
+        assert_eq!(dev.dotfiles.len(), 2);
+        assert_eq!(dev.dotfiles[0].path(), ".gitconfig");
+        assert!(dev.dotfiles[0].create_if_missing()); // Simple -> preserves create_if_missing=true
+        assert_eq!(dev.dotfiles[1].path(), ".zshrc");
+        assert!(!dev.dotfiles[1].shared());
+        assert!(!dev.dotfiles[1].create_if_missing()); // WithOptions preserves false
+        assert_eq!(dev.dirs, vec![".config/karabiner"]);
+        // All managers enabled in default config
+        assert!(dev.packages.contains(&"brew".to_string()));
+        assert!(dev.packages.contains(&"npm".to_string()));
+    }
+
+    #[test]
+    fn test_profile_dotfile_entry_shared() {
+        let entry = ProfileDotfileEntry::WithOptions {
+            path: ".gitconfig".to_string(),
+            shared: true,
+            create_if_missing: false,
+        };
+        assert!(entry.shared());
+        assert_eq!(entry.path(), ".gitconfig");
+
+        let simple = ProfileDotfileEntry::Simple(".zshrc".to_string());
+        assert!(!simple.shared());
+    }
+
+    #[test]
+    fn test_profile_dotfile_entry_toml_roundtrip() {
+        let toml_str = r#"
+config_version = 2
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = ""
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = []
+
+[profiles.dev]
+dotfiles = [
+    ".zshrc",
+    { path = ".gitconfig", shared = true },
+    { path = ".config/nvim/init.lua", create_if_missing = true },
+]
+packages = ["brew", "npm"]
+"#;
+        let parsed: Config = toml::from_str(toml_str).unwrap();
+        let dev = parsed.profiles.get("dev").unwrap();
+        assert_eq!(dev.dotfiles.len(), 3);
+        assert_eq!(dev.dotfiles[0].path(), ".zshrc");
+        assert!(!dev.dotfiles[0].shared());
+        assert_eq!(dev.dotfiles[1].path(), ".gitconfig");
+        assert!(dev.dotfiles[1].shared());
+        assert!(dev.dotfiles[2].create_if_missing());
+        assert_eq!(dev.packages, vec!["brew", "npm"]);
+    }
+
+    #[test]
     fn test_has_team_features() {
         let mut config = Config::default();
         assert!(!config.has_team_features());
@@ -1118,5 +1647,310 @@ files = []
         config.features.team_dotfiles = false;
         config.features.collab_secrets = true;
         assert!(config.has_team_features());
+    }
+
+    #[test]
+    fn test_v1_config_toml_migrates_on_parse() {
+        let v1_toml = r#"
+config_version = 1
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = "git@github.com:user/dotfiles.git"
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [
+    ".gitconfig",
+    { path = ".zshrc", create_if_missing = false },
+]
+dirs = [".config/karabiner"]
+"#;
+        let mut config: Config = toml::from_str(v1_toml).unwrap();
+        assert_eq!(config.config_version, 1);
+        assert!(config.profiles.is_empty());
+
+        config.migrate_v1_to_v2();
+
+        let dev = config.profiles.get("dev").unwrap();
+        assert_eq!(dev.dotfiles.len(), 2);
+        assert_eq!(dev.dotfiles[0].path(), ".gitconfig");
+        // Simple(".gitconfig") → create_if_missing preserved as true
+        assert!(dev.dotfiles[0].create_if_missing());
+        assert_eq!(dev.dotfiles[1].path(), ".zshrc");
+        // WithOptions{false} → preserved as false
+        assert!(!dev.dotfiles[1].create_if_missing());
+        assert_eq!(dev.dirs, vec![".config/karabiner"]);
+    }
+
+    #[test]
+    fn test_v1_with_disabled_managers_migrates_correctly() {
+        let v1_toml = r#"
+config_version = 1
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = ""
+
+[packages]
+remove_unlisted = false
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = false
+sync_versions = false
+
+[packages.pnpm]
+enabled = true
+sync_versions = false
+
+[packages.bun]
+enabled = true
+sync_versions = false
+
+[packages.gem]
+enabled = true
+sync_versions = false
+
+[packages.uv]
+enabled = false
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc"]
+"#;
+        let mut config: Config = toml::from_str(v1_toml).unwrap();
+        config.migrate_v1_to_v2();
+
+        let dev = config.profiles.get("dev").unwrap();
+        assert!(dev.packages.contains(&"brew".to_string()));
+        assert!(!dev.packages.contains(&"npm".to_string()));
+        assert!(!dev.packages.contains(&"uv".to_string()));
+        assert!(dev.packages.contains(&"pnpm".to_string()));
+    }
+
+    #[test]
+    fn test_v1_with_existing_machine_profiles_preserved() {
+        let mut config = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config.profiles.clear();
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+        config.dotfiles.files = vec![DotfileEntry::Simple(".zshrc".to_string())];
+
+        config.migrate_v1_to_v2();
+
+        // "dev" profile created
+        assert!(config.profiles.contains_key("dev"));
+        // "server" profile NOT auto-created (only "dev" is)
+        assert!(!config.profiles.contains_key("server"));
+        // machine_profiles unchanged
+        assert_eq!(
+            config.machine_profiles.get("my-server"),
+            Some(&"server".to_string())
+        );
+        // Dangling profile reference: effective_dotfiles falls through to global
+        assert_eq!(
+            config.effective_dotfiles("my-server").len(),
+            config.dotfiles.files.len()
+        );
+    }
+
+    #[test]
+    fn test_effective_dotfiles_post_migration() {
+        let mut config = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config.profiles.clear();
+        config.dotfiles.files = vec![
+            DotfileEntry::Simple(".gitconfig".to_string()),
+            DotfileEntry::WithOptions {
+                path: ".zshrc".to_string(),
+                create_if_missing: false,
+            },
+        ];
+
+        let original_paths: Vec<String> = config
+            .dotfiles
+            .files
+            .iter()
+            .map(|e| e.path().to_string())
+            .collect();
+
+        config.migrate_v1_to_v2();
+
+        // Any unassigned machine defaults to "dev" profile
+        let effective = config.effective_dotfiles("any-machine");
+        let effective_paths: Vec<String> = effective.iter().map(|e| e.path().to_string()).collect();
+        assert_eq!(effective_paths, original_paths);
+    }
+
+    #[test]
+    fn test_is_manager_enabled_post_migration() {
+        // All managers enabled
+        let mut config = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config.profiles.clear();
+        config.migrate_v1_to_v2();
+        assert!(config.is_manager_enabled("any", "brew"));
+        assert!(config.is_manager_enabled("any", "npm"));
+
+        // npm disabled globally
+        let mut config2 = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config2.profiles.clear();
+        config2.packages.npm.enabled = false;
+        config2.migrate_v1_to_v2();
+        // Global disable takes precedence even though profile has packages list
+        assert!(!config2.is_manager_enabled("any", "npm"));
+        assert!(config2.is_manager_enabled("any", "brew"));
+    }
+
+    #[test]
+    fn test_v1_migration_idempotent() {
+        let mut config = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config.profiles.clear();
+        config.dotfiles.files = vec![DotfileEntry::Simple(".zshrc".to_string())];
+
+        config.migrate_v1_to_v2();
+        let dev_first = config.profiles.get("dev").unwrap().clone();
+
+        // Calling again overwrites "dev" with same content
+        config.migrate_v1_to_v2();
+        let dev_second = config.profiles.get("dev").unwrap();
+
+        assert_eq!(config.profiles.len(), 1);
+        assert_eq!(dev_first.dotfiles.len(), dev_second.dotfiles.len());
+        assert_eq!(dev_first.packages, dev_second.packages);
+    }
+
+    #[test]
+    fn test_v2_config_with_empty_profiles_no_migration() {
+        // v2 config with no profiles should NOT trigger migration in load()
+        // (the guard is: config_version < 2 && profiles.is_empty())
+        let v2_toml = r#"
+config_version = 2
+
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = ""
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+
+[packages.npm]
+enabled = true
+sync_versions = false
+
+[dotfiles]
+files = [".zshrc"]
+"#;
+        let config: Config = toml::from_str(v2_toml).unwrap();
+        assert_eq!(config.config_version, 2);
+        // No "dev" profile auto-created — v2 with empty profiles is valid
+        assert!(config.profiles.is_empty());
+        // effective_dotfiles falls through to global
+        assert_eq!(config.effective_dotfiles("any").len(), 1);
+    }
+
+    #[test]
+    fn test_v1_empty_dotfiles_migration() {
+        let mut config = Config {
+            config_version: 1,
+            ..Default::default()
+        };
+        config.profiles.clear();
+        config.dotfiles.files = vec![];
+        config.dotfiles.dirs = vec![];
+
+        config.migrate_v1_to_v2();
+
+        let dev = config.profiles.get("dev").unwrap();
+        assert!(dev.dotfiles.is_empty());
+        assert!(dev.dirs.is_empty());
+        // Packages still populated from global config
+        assert!(!dev.packages.is_empty());
+
+        // effective_dotfiles returns empty (profile exists with empty dotfiles → uses profile)
+        let effective = config.effective_dotfiles("any");
+        assert!(effective.is_empty());
+    }
+
+    #[test]
+    fn test_is_manager_enabled_brew_subtypes_with_profile() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "dev".to_string(),
+            ProfileConfig {
+                dotfiles: vec![],
+                dirs: vec![],
+                packages: vec!["brew".to_string()],
+            },
+        );
+
+        // brew sub-types normalize to "brew" for profile matching
+        assert!(config.is_manager_enabled("any", "brew_formulae"));
+        assert!(config.is_manager_enabled("any", "brew_casks"));
+        assert!(config.is_manager_enabled("any", "brew_taps"));
+        // npm not in profile packages
+        assert!(!config.is_manager_enabled("any", "npm"));
+    }
+
+    #[test]
+    fn test_profile_name_validation() {
+        assert!(!Config::is_safe_profile_name(""));
+        assert!(!Config::is_safe_profile_name("../etc"));
+        assert!(!Config::is_safe_profile_name("shared"));
+        assert!(!Config::is_safe_profile_name("tether"));
+        assert!(!Config::is_safe_profile_name(".hidden"));
+        assert!(!Config::is_safe_profile_name("a/b"));
+        assert!(!Config::is_safe_profile_name("a\\b"));
+        // Repo root dir names are reserved
+        assert!(!Config::is_safe_profile_name("dotfiles"));
+        assert!(!Config::is_safe_profile_name("manifests"));
+        assert!(!Config::is_safe_profile_name("machines"));
+        assert!(!Config::is_safe_profile_name("configs"));
+        assert!(!Config::is_safe_profile_name("projects"));
+        assert!(!Config::is_safe_profile_name("profiles"));
+        assert!(Config::is_safe_profile_name("dev"));
+        assert!(Config::is_safe_profile_name("my-server"));
+        assert!(Config::is_safe_profile_name("workstation_01"));
     }
 }

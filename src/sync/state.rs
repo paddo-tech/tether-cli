@@ -85,6 +85,9 @@ pub struct MachineState {
     /// Multiple checkouts per project URL (project_key -> list of checkouts)
     #[serde(default)]
     pub checkouts: HashMap<String, Vec<CheckoutInfo>>,
+    /// Profile assigned to this machine (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl Default for MachineState {
@@ -114,6 +117,7 @@ impl MachineState {
             project_configs: HashMap::new(),
             ignored_project_configs: HashMap::new(),
             checkouts: HashMap::new(),
+            profile: None,
         }
     }
 

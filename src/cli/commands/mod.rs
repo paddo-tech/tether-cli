@@ -2,6 +2,7 @@ mod collab;
 mod config;
 mod daemon;
 mod diff;
+mod history;
 mod identity;
 mod ignore;
 mod init;
@@ -141,6 +142,15 @@ pub enum Commands {
         #[command(subcommand)]
         action: CollabAction,
     },
+
+    /// Show file change history from sync repo
+    History {
+        /// Dotfile path (e.g., .zshrc)
+        file: String,
+        /// Maximum number of entries to show
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand)]
@@ -170,6 +180,34 @@ pub enum MachineAction {
     Rename { old: String, new: String },
     /// Remove a machine from sync
     Remove { name: String },
+    /// Manage machine profile assignment
+    Profile {
+        #[command(subcommand)]
+        action: MachineProfileAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MachineProfileAction {
+    /// Assign a profile to this machine
+    Set {
+        /// Profile name (must exist in config)
+        profile: String,
+    },
+    /// Remove profile assignment from this machine
+    Unset,
+    /// Create a new profile (interactive wizard)
+    Create {
+        /// Profile name
+        name: String,
+    },
+    /// Edit an existing profile
+    Edit {
+        /// Profile name
+        name: String,
+    },
+    /// List all profiles
+    List,
 }
 
 #[derive(Subcommand)]
@@ -240,6 +278,14 @@ pub enum RestoreAction {
         from: Option<String>,
         /// File to restore (e.g., dotfiles/.zshrc)
         file: Option<String>,
+    },
+    /// Restore a dotfile from git history
+    Git {
+        /// Dotfile path (e.g., .zshrc)
+        file: String,
+        /// Commit hash (interactive picker if omitted)
+        #[arg(long)]
+        commit: Option<String>,
     },
 }
 
@@ -508,6 +554,13 @@ impl Cli {
                 MachineAction::List => machines::list().await,
                 MachineAction::Rename { old, new } => machines::rename(old, new).await,
                 MachineAction::Remove { name } => machines::remove(name).await,
+                MachineAction::Profile { action } => match action {
+                    MachineProfileAction::Set { profile } => machines::profile_set(profile).await,
+                    MachineProfileAction::Unset => machines::profile_unset().await,
+                    MachineProfileAction::Create { name } => machines::profile_create(name).await,
+                    MachineProfileAction::Edit { name } => machines::profile_edit(name).await,
+                    MachineProfileAction::List => machines::profile_list().await,
+                },
             },
             Commands::Ignore { action } => match action {
                 IgnoreAction::Add { pattern } => ignore::add(pattern).await,
@@ -603,6 +656,9 @@ impl Cli {
                 RestoreAction::File { from, file } => {
                     restore::run(from.as_deref(), file.as_deref()).await
                 }
+                RestoreAction::Git { file, commit } => {
+                    restore::git_restore(file, commit.as_deref()).await
+                }
             },
             Commands::Identity { action } => match action {
                 IdentityAction::Init => identity::init().await,
@@ -611,6 +667,7 @@ impl Cli {
                 IdentityAction::Lock => identity::lock().await,
                 IdentityAction::Reset => identity::reset().await,
             },
+            Commands::History { file, limit } => history::run(file, *limit).await,
             Commands::Collab { action } => match action {
                 CollabAction::Init { project } => collab::init(project.as_deref()).await,
                 CollabAction::Join { url } => collab::join(url).await,

@@ -106,6 +106,16 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     let mut state = SyncState::load()?;
 
+    // Auto-assign machine to "dev" profile on first run after v2 migration
+    if !config.profiles.is_empty()
+        && !config.machine_profiles.contains_key(&state.machine_id)
+    {
+        config
+            .machine_profiles
+            .insert(state.machine_id.clone(), "dev".to_string());
+        config.save()?;
+    }
+
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
         MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
@@ -124,10 +134,31 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         )?;
     }
 
+    // Interactive mode: offer files from other profiles
+    if interactive && !dry_run && config.features.personal_dotfiles {
+        let machine_id_for_prompt = state.machine_id.clone();
+        if let Ok(true) = prompt_new_items(&mut config, &machine_id_for_prompt, &sync_path) {
+            // Config changed, dotfile list expanded — re-decrypt for newly added files
+            if config.security.encrypt_dotfiles {
+                decrypt_from_repo(
+                    &config,
+                    &sync_path,
+                    &home,
+                    &mut state,
+                    &machine_state_for_decrypt,
+                    interactive,
+                )?;
+            }
+        }
+    }
+
     // Sync dotfiles (local → Git) - only if personal dotfiles enabled
     if config.features.personal_dotfiles {
+        let machine_id = state.machine_id.clone();
+        let upload_profile = config.profile_name(&machine_id).to_string();
+
         // Sync individual dotfiles (with glob expansion)
-        for entry in &config.dotfiles.files {
+        for entry in config.effective_dotfiles(&machine_id) {
             // Validate path before expansion to prevent traversal attacks
             if !entry.is_safe_path() {
                 Output::warning(&format!("Skipping unsafe dotfile path: {}", entry.path()));
@@ -135,6 +166,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             }
 
             let pattern = entry.path();
+            let shared = config.is_dotfile_shared(&machine_id, pattern);
             let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
             for file in expanded {
@@ -151,20 +183,30 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                             .unwrap_or(true);
 
                         if file_changed && !dry_run {
-                            let filename = file.trim_start_matches('.');
-
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt(&content, &key)?;
-                                let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                                let encrypted_data = crate::security::encrypt(&content, &key)?;
+                                let repo_path = crate::sync::dotfile_to_repo_path_profiled(
+                                    &file,
+                                    true,
+                                    &upload_profile,
+                                    shared,
+                                );
+                                let dest = sync_path.join(&repo_path);
                                 if let Some(parent) = dest.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
-                                std::fs::write(&dest, encrypted)?;
+                                std::fs::write(&dest, encrypted_data)?;
                                 #[cfg(unix)]
                                 preserve_executable_bit(&source, &dest);
                             } else {
-                                let dest = dotfiles_dir.join(filename);
+                                let repo_path = crate::sync::dotfile_to_repo_path_profiled(
+                                    &file,
+                                    false,
+                                    &upload_profile,
+                                    shared,
+                                );
+                                let dest = sync_path.join(&repo_path);
                                 if let Some(parent) = dest.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
@@ -182,10 +224,19 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
         // Auto-discover directories sourced from shell configs and add to config
         if !dry_run {
-            let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
+            let effective = config.effective_dotfiles(&machine_id);
+            let discovered = crate::sync::discover_sourced_dirs(&home, &effective);
             let mut config_changed = false;
             for dir in discovered {
-                if !config.dotfiles.dirs.contains(&dir) {
+                // Push to current profile's dirs (or global if no profile)
+                let current_profile = config.profile_name(&machine_id).to_string();
+                if let Some(profile) = config.profiles.get_mut(&current_profile) {
+                    if !profile.dirs.contains(&dir) {
+                        Output::info(&format!("Auto-discovered sourced directory: {}", dir));
+                        profile.dirs.push(dir);
+                        config_changed = true;
+                    }
+                } else if !config.dotfiles.dirs.contains(&dir) {
                     Output::info(&format!("Auto-discovered sourced directory: {}", dir));
                     config.dotfiles.dirs.push(dir);
                     config_changed = true;
@@ -193,13 +244,17 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             }
             if config_changed {
                 config.dotfiles.dirs.sort();
+                for profile in config.profiles.values_mut() {
+                    profile.dirs.sort();
+                }
                 config.save()?;
             }
         }
 
         // Sync global config directories
-        if !config.dotfiles.dirs.is_empty() {
-            sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
+        let effective_dirs = config.effective_dirs(&machine_id);
+        if !effective_dirs.is_empty() {
+            sync_directories(&config, &machine_id, &mut state, &sync_path, &home, dry_run)?;
         }
 
         // Sync project-local configs (personal)
@@ -615,7 +670,15 @@ pub fn decrypt_from_repo(
     // Create backup directory for this sync (lazily - only if needed)
     let mut backup_dir: Option<PathBuf> = None;
 
-    for entry in &config.dotfiles.files {
+    let machine_id = &state.machine_id.clone();
+    let profile_name = config.profile_name(machine_id).to_string();
+
+    // Migrate flat repo to profiled layout on first sync after config v2 migration
+    if let Err(e) = crate::sync::migrate_repo_to_profiled(sync_path, config, machine_id) {
+        log::warn!("Repo migration failed: {}", e);
+    }
+
+    for entry in config.effective_dotfiles(machine_id) {
         // Validate path before expansion to prevent traversal attacks
         if !entry.is_safe_path() {
             Output::warning(&format!("Skipping unsafe dotfile path: {}", entry.path()));
@@ -626,8 +689,21 @@ pub fn decrypt_from_repo(
         // Glob patterns default to create_if_missing = true (sync all matching files from other machines)
         let create_if_missing = entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
 
+        let shared = config.is_dotfile_shared(machine_id, pattern);
+
         // Expand glob pattern by scanning sync repo for matching .enc files
-        let expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
+        // Check both profiled and flat dirs for backwards compat
+        let subdir = if shared { "shared" } else { &profile_name };
+        let profiled_dir = sync_path.join("profiles").join(subdir);
+        let mut expanded = if profiled_dir.exists() {
+            crate::sync::expand_from_sync_repo(pattern, &profiled_dir)
+        } else {
+            vec![]
+        };
+        // Also check flat dir for un-migrated files
+        if expanded.is_empty() {
+            expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
+        }
 
         for file in expanded {
             // Skip if this dotfile is ignored on this machine
@@ -635,8 +711,15 @@ pub fn decrypt_from_repo(
                 continue;
             }
 
-            let filename = file.trim_start_matches('.');
-            let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
+            // Resolve repo path: profile dir first, flat fallback
+            let repo_path = crate::sync::resolve_dotfile_repo_path(
+                sync_path,
+                &file,
+                true, // encrypted
+                &profile_name,
+                shared,
+            );
+            let enc_file = sync_path.join(&repo_path);
 
             if enc_file.exists() {
                 let encrypted_content = std::fs::read(&enc_file)?;
@@ -824,6 +907,126 @@ pub fn decrypt_from_repo(
     }
 
     Ok(())
+}
+
+/// During interactive sync, scan other profiles for files not in the current profile.
+/// Offers to add selected files to the current profile as profile-specific copies.
+/// Returns true if config was modified.
+pub fn prompt_new_items(config: &mut Config, machine_id: &str, sync_path: &Path) -> Result<bool> {
+    let encrypted = config.security.encrypt_dotfiles;
+    let current_profile = config.profile_name(machine_id).to_string();
+    let profiles_dir = sync_path.join("profiles");
+
+    // Gather current profile's dotfile paths
+    let current_paths: std::collections::HashSet<String> = config
+        .effective_dotfiles(machine_id)
+        .iter()
+        .map(|e| e.path().to_string())
+        .collect();
+
+    // Scan other profile directories for .enc files
+    // Only consider directories that are known profile names (not flat-layout subdirs like config/)
+    let known_profiles: std::collections::HashSet<&str> =
+        config.profiles.keys().map(|s| s.as_str()).collect();
+
+    let mut candidates: Vec<(String, String)> = Vec::new(); // (dotfile_path, source_profile)
+
+    if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            // Skip current profile and shared (shared is already accessible)
+            if dir_name == current_profile || dir_name == "shared" {
+                continue;
+            }
+            // Only scan known profile directories
+            if !known_profiles.contains(dir_name.as_str()) {
+                continue;
+            }
+
+            // Walk this profile dir recursively for .enc files
+            for file in walkdir::WalkDir::new(entry.path())
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+            {
+                let fname = file.path().to_string_lossy().to_string();
+                if encrypted && fname.ends_with(".enc") {
+                    if let Ok(rel) = file.path().strip_prefix(entry.path()) {
+                        let rel_str = rel.to_string_lossy();
+                        let name = rel_str.trim_end_matches(".enc");
+                        let dotfile = format!(".{}", name);
+                        if !current_paths.contains(&dotfile) {
+                            candidates.push((dotfile, dir_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+
+    candidates.sort();
+    candidates.dedup_by(|a, b| a.0 == b.0);
+
+    let options: Vec<String> = candidates
+        .iter()
+        .map(|(path, profile)| format!("{} (from {})", path, profile))
+        .collect();
+    let options_ref: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+
+    let selected = Prompt::multi_select(
+        "New files from other profiles — add to yours?",
+        options_ref,
+        &[],
+    )?;
+
+    if selected.is_empty() {
+        return Ok(false);
+    }
+
+    // Add selected files to current profile
+    let profile = config.profiles.entry(current_profile.clone()).or_default();
+
+    for idx in selected {
+        let (dotfile_path, source_profile) = &candidates[idx];
+        profile
+            .dotfiles
+            .push(crate::config::ProfileDotfileEntry::Simple(
+                dotfile_path.clone(),
+            ));
+
+        // Copy the file from source profile to current profile
+        let src_repo_path = crate::sync::dotfile_to_repo_path_profiled(
+            dotfile_path,
+            encrypted,
+            source_profile,
+            false,
+        );
+        let dst_repo_path = crate::sync::dotfile_to_repo_path_profiled(
+            dotfile_path,
+            encrypted,
+            &current_profile,
+            false,
+        );
+        let src = sync_path.join(&src_repo_path);
+        let dst = sync_path.join(&dst_repo_path);
+        if src.exists() && !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+
+    config.save()?;
+    Ok(true)
 }
 
 /// Ensure checkout_file is a symlink pointing to canonical_path.
@@ -1203,6 +1406,7 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
 
 pub fn sync_directories(
     config: &Config,
+    machine_id: &str,
     state: &mut SyncState,
     sync_path: &Path,
     home: &Path,
@@ -1213,7 +1417,7 @@ pub fn sync_directories(
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
 
-    for dir_path in &config.dotfiles.dirs {
+    for dir_path in config.effective_dirs(machine_id) {
         // Validate path is safe (security: prevents path traversal via synced config)
         if !crate::config::is_safe_dotfile_path(dir_path) {
             Output::warning(&format!("  {} (unsafe path, skipping)", dir_path));
@@ -1473,9 +1677,10 @@ pub async fn build_machine_state(
     let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Update last_sync time and CLI version
+    // Update last_sync time, CLI version, and profile
     machine_state.last_sync = chrono::Utc::now();
     machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
+    machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
 
     // Collect file hashes
     machine_state.files.clear();
@@ -1489,8 +1694,9 @@ pub async fn build_machine_state(
     let previous_packages = machine_state.packages.clone();
     machine_state.packages.clear();
 
+    let mid = &state.machine_id;
     // Homebrew
-    if config.packages.brew.enabled {
+    if config.is_manager_enabled(mid, "brew") {
         let brew = BrewManager::new();
         if brew.is_available().await {
             // Get formulae
@@ -1515,11 +1721,26 @@ pub async fn build_machine_state(
 
     // Standard managers (same pattern: check enabled, check available, list installed)
     let managers: Vec<(bool, Box<dyn PackageManager>)> = vec![
-        (config.packages.npm.enabled, Box::new(NpmManager::new())),
-        (config.packages.pnpm.enabled, Box::new(PnpmManager::new())),
-        (config.packages.bun.enabled, Box::new(BunManager::new())),
-        (config.packages.gem.enabled, Box::new(GemManager::new())),
-        (config.packages.uv.enabled, Box::new(UvManager::new())),
+        (
+            config.is_manager_enabled(mid, "npm"),
+            Box::new(NpmManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "pnpm"),
+            Box::new(PnpmManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "bun"),
+            Box::new(BunManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "gem"),
+            Box::new(GemManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "uv"),
+            Box::new(UvManager::new()),
+        ),
     ];
 
     for (enabled, manager) in managers {
@@ -1539,7 +1760,7 @@ pub async fn build_machine_state(
     // Populate dotfiles list from config (files that exist locally, with glob expansion)
     let home = crate::home_dir()?;
     machine_state.dotfiles.clear();
-    for entry in &config.dotfiles.files {
+    for entry in config.effective_dotfiles(&state.machine_id) {
         if !entry.is_safe_path() {
             continue;
         }

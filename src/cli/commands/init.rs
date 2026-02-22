@@ -118,6 +118,11 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         config.security.encrypt_dotfiles = false;
     }
 
+    // Profile assignment
+    if needs_personal_repo {
+        assign_profile_during_init(&mut config)?;
+    }
+
     config.save()?;
 
     // Create initial state
@@ -198,6 +203,73 @@ fn select_features(current: &FeaturesConfig) -> Result<FeaturesConfig> {
         collab_secrets: selected.contains(&3),
         team_layering: current.team_layering, // Preserve hidden setting
     })
+}
+
+/// Assign a profile to the current machine during init.
+fn assign_profile_during_init(config: &mut Config) -> Result<()> {
+    let state = SyncState::load()?;
+    let machine_id = &state.machine_id;
+
+    // Already assigned
+    if config.machine_profiles.contains_key(machine_id) {
+        return Ok(());
+    }
+
+    if config.profiles.is_empty() {
+        // No profiles exist yet — v1->v2 migration should have created "dev"
+        // but if it hasn't (e.g., fresh init), create it now
+        config.migrate_v1_to_v2();
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), "dev".to_string());
+        return Ok(());
+    }
+
+    // Profiles exist — let user pick
+    let mut names: Vec<&str> = config.profiles.keys().map(|s| s.as_str()).collect();
+    names.sort();
+    let mut options: Vec<&str> = names.clone();
+    options.push("Create new");
+
+    let idx = Prompt::select("Assign a profile to this machine", options.clone(), 0)?;
+
+    if idx < names.len() {
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), names[idx].to_string());
+        Output::success(&format!("Assigned profile '{}'", names[idx]));
+    } else {
+        // Create new
+        let name = Prompt::input("Profile name", None)?;
+        if name.is_empty() {
+            Output::warning("Skipping profile creation");
+            return Ok(());
+        }
+        if !Config::is_safe_profile_name(&name) {
+            Output::error(&format!("Invalid profile name: '{}'", name));
+            return Ok(());
+        }
+        // Ensure "dev" profile exists as a base to clone
+        if config.profiles.is_empty() {
+            config.migrate_v1_to_v2();
+        }
+        if !config.profiles.contains_key(&name) {
+            // Clone dev profile as starting point
+            if let Some(dev) = config.profiles.get("dev").cloned() {
+                config.profiles.insert(name.clone(), dev);
+            } else {
+                config
+                    .profiles
+                    .insert(name.clone(), crate::config::ProfileConfig::default());
+            }
+        }
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), name.clone());
+        Output::success(&format!("Created and assigned profile '{}'", name));
+    }
+
+    Ok(())
 }
 
 fn setup_encryption() -> Result<()> {

@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-02-22
+
+### Added
+
+- Machine profiles: assign named profiles to machines for per-machine dotfile/package control
+- Profile-aware sync: dotfiles stored under `profiles/<profile>/` with automatic flat-layout migration
+- `tether machines profile` subcommands: set, unset, create, edit, list
+- `tether history` command: show file change history from sync repo
+- `tether restore git` command: restore dotfiles from git history
+- Cross-profile discovery: interactive prompt to adopt dotfiles from other profiles
+- Dashboard: file history viewer with inline diffs and restore support
+- Dashboard: deleted file detection across profile and flat layouts
+- Dashboard: profile picker for machine assignment
+
+### Fixed
+
+- `tether diff` and `tether resolve` now use profile-aware repo paths
+- Glob patterns in dotfile config (e.g., `.claude/commands/*.md`) correctly migrate from flat to profiled layout
+
 ## [1.10.0] - 2026-02-21
 
 ### Added

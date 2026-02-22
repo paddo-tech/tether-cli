@@ -11,6 +11,7 @@ pub enum MachineRow {
         file_count: usize,
         pkg_count: usize,
         last_sync: String,
+        profile: Option<String>,
     },
     Detail {
         label: String,
@@ -38,6 +39,17 @@ pub fn build_rows(state: &DashboardState, expanded: Option<&str>) -> Vec<Machine
             file_count,
             pkg_count,
             last_sync: relative_time(m.last_sync),
+            profile: Some(
+                m.profile
+                    .clone()
+                    .or_else(|| {
+                        state
+                            .config
+                            .as_ref()
+                            .map(|c| c.profile_name(&m.machine_id).to_string())
+                    })
+                    .unwrap_or_else(|| "dev".to_string()),
+            ),
         });
 
         if expanded == Some(m.machine_id.as_str()) {
@@ -132,6 +144,7 @@ pub fn render(
                 file_count,
                 pkg_count,
                 last_sync,
+                profile,
                 ..
             } => {
                 let is_expanded = expanded == Some(machine_id.as_str());
@@ -172,10 +185,17 @@ pub fn render(
                     Style::default().fg(Color::DarkGray)
                 };
 
+                let profile_span = if let Some(p) = profile {
+                    Span::styled(format!(" [{}]", p), dim_style)
+                } else {
+                    Span::styled("", dim_style)
+                };
+
                 let line = Line::from(vec![
                     Span::styled(format!("  {} ", arrow), name_style),
                     Span::styled(marker, marker_style),
                     Span::styled(machine_id, name_style),
+                    profile_span,
                     Span::styled(format!("  {}f {}p", file_count, pkg_count), dim_style),
                     Span::styled(format!("  {}", last_sync), dim_style),
                     Span::styled(" ".repeat(inner_area.width as usize), bg_style),

@@ -152,6 +152,12 @@ pub async fn run_daemon() -> Result<()> {
     let mut server = DaemonServer::new();
     let pid = std::process::id();
     log::info!("Daemon process starting (PID {pid})");
+
+    // Write PID file so dashboard/CLI can detect the running daemon
+    if let Ok(paths) = DaemonPaths::new() {
+        let _ = fs::write(&paths.pid, pid.to_string());
+    }
+
     let result = server.run().await;
     if let Err(err) = cleanup_pid_file(Some(pid)) {
         log::warn!("Failed to clean up daemon pid file: {err}");
