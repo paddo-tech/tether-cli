@@ -20,6 +20,9 @@ pub struct SyncState {
     /// Hash of deferred_casks for change detection (notify once)
     #[serde(default)]
     pub deferred_casks_hash: Option<String>,
+    /// Dotfile paths dismissed when prompted to import from other profiles
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub dismissed_imports: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +274,7 @@ impl SyncState {
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
+            dismissed_imports: std::collections::HashSet::new(),
         }
     }
 

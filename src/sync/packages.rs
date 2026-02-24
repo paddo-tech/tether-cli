@@ -528,6 +528,7 @@ mod tests {
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
+            dismissed_imports: std::collections::HashSet::new(),
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -553,6 +554,7 @@ mod tests {
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
+            dismissed_imports: std::collections::HashSet::new(),
         };
 
         state.packages.insert(

@@ -25,7 +25,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
         if has_personal {
             Output::info("Running sync to preserve your data...");
-            if let Err(e) = super::sync::run(false, false).await {
+            if let Err(e) = super::sync::run(false, false, false).await {
                 Output::warning(&format!("Sync failed: {}", e));
                 if !Prompt::confirm(
                     "Continue with reinit anyway? (may lose unsynced changes)",
@@ -140,7 +140,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
     // Initial sync (only if personal features enabled)
     if needs_personal_repo {
-        super::sync::run(false, false).await?;
+        super::sync::run(false, false, false).await?;
     }
 
     // Install daemon for auto-sync (unless opted out)

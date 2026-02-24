@@ -33,7 +33,7 @@ fn build_project_map(search_paths: &[PathBuf]) -> HashMap<String, Vec<PathBuf>> 
     project_map
 }
 
-pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
+pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
     if dry_run {
         Output::info("Dry-run mode");
     }
@@ -131,8 +131,13 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Interactive mode: offer files from other profiles
     if interactive && !dry_run && config.features.personal_dotfiles {
+        if rediscover {
+            state.dismissed_imports.clear();
+        }
         let machine_id_for_prompt = state.machine_id.clone();
-        if let Ok(true) = prompt_new_items(&mut config, &machine_id_for_prompt, &sync_path) {
+        if let Ok(true) =
+            prompt_new_items(&mut config, &machine_id_for_prompt, &sync_path, &mut state)
+        {
             // Config changed, dotfile list expanded — re-decrypt for newly added files
             if config.security.encrypt_dotfiles {
                 decrypt_from_repo(
@@ -925,7 +930,12 @@ pub fn decrypt_from_repo(
 /// During interactive sync, scan other profiles for files not in the current profile.
 /// Offers to add selected files to the current profile as profile-specific copies.
 /// Returns true if config was modified.
-pub fn prompt_new_items(config: &mut Config, machine_id: &str, sync_path: &Path) -> Result<bool> {
+pub fn prompt_new_items(
+    config: &mut Config,
+    machine_id: &str,
+    sync_path: &Path,
+    state: &mut crate::sync::state::SyncState,
+) -> Result<bool> {
     let encrypted = config.security.encrypt_dotfiles;
     let current_profile = config.profile_name(machine_id).to_string();
     let profiles_dir = sync_path.join("profiles");
@@ -981,12 +991,15 @@ pub fn prompt_new_items(config: &mut Config, machine_id: &str, sync_path: &Path)
         }
     }
 
+    candidates.sort();
+    candidates.dedup_by(|a, b| a.0 == b.0);
+
+    // Filter out previously dismissed files
+    candidates.retain(|(path, _)| !state.dismissed_imports.contains(path));
+
     if candidates.is_empty() {
         return Ok(false);
     }
-
-    candidates.sort();
-    candidates.dedup_by(|a, b| a.0 == b.0);
 
     let options: Vec<String> = candidates
         .iter()
@@ -994,14 +1007,35 @@ pub fn prompt_new_items(config: &mut Config, machine_id: &str, sync_path: &Path)
         .collect();
     let options_ref: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
 
-    let selected = Prompt::multi_select(
+    let selected = match Prompt::multi_select(
         "New files from other profiles — add to yours?",
         options_ref,
         &[],
-    )?;
+    ) {
+        Ok(sel) => sel,
+        Err(_) => {
+            // Cancelled — dismiss all candidates
+            for (path, _) in &candidates {
+                state.dismissed_imports.insert(path.clone());
+            }
+            return Ok(false);
+        }
+    };
 
     if selected.is_empty() {
+        // Selected nothing — dismiss all candidates
+        for (path, _) in &candidates {
+            state.dismissed_imports.insert(path.clone());
+        }
         return Ok(false);
+    }
+
+    // Dismiss non-selected files so we don't re-prompt
+    let selected_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
+    for (i, (path, _)) in candidates.iter().enumerate() {
+        if !selected_set.contains(&i) {
+            state.dismissed_imports.insert(path.clone());
+        }
     }
 
     // Add selected files to current profile
