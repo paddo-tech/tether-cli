@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.8] - 2026-03-09
+
+### Fixed
+
+- Directory-based dotfiles (`dotfiles.dirs`) now appear in dashboard Files tab
+- Deleted file detection includes `configs/` tracked files
+
 ## [1.11.7] - 2026-02-24
 
 ### Fixed

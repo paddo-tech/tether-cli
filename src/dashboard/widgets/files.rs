@@ -108,10 +108,9 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
                 continue;
             }
 
-            // Skip non-dotfile entries (team secrets, collab secrets, tether config, dirs)
+            // Skip non-dotfile entries (team secrets, collab secrets, tether config)
             if path.starts_with("team-secret:")
                 || path.starts_with("collab-secret:")
-                || path.starts_with("~/")
                 || path.starts_with(".tether/")
             {
                 continue;
@@ -140,6 +139,19 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
                 } else {
                     personal_projects.push(entry);
                 }
+            } else if let Some(rel) = path.strip_prefix("~/") {
+                let repo_path = if encrypted {
+                    format!("configs/{}.enc", rel)
+                } else {
+                    format!("configs/{}", rel)
+                };
+                personal_dotfiles.push((
+                    path.to_string(),
+                    false,
+                    file_state.synced,
+                    relative_time(file_state.last_modified),
+                    repo_path,
+                ));
             } else {
                 // Build repo path: use profile-aware path if possible, flat fallback
                 let machine_id = state

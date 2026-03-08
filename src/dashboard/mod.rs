@@ -15,6 +15,27 @@ use std::time::{Duration, Instant};
 
 use state::DashboardState;
 
+pub struct ImportItem {
+    path: String,
+    source_profile: String,
+}
+
+pub struct ImportPickerState {
+    items: Vec<ImportItem>,
+    cursor: usize,
+}
+
+pub struct PkgImportItem {
+    manager_key: String,
+    name: String,
+    sources: Vec<String>,
+}
+
+pub struct PkgImportPickerState {
+    items: Vec<PkgImportItem>,
+    cursor: usize,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
     Overview,
@@ -122,6 +143,15 @@ pub struct App {
     profile_picker_cursor: usize,
     // Files tab state
     files: FilesTabState,
+    file_delete_confirm: Option<String>,
+    file_import_picker: Option<ImportPickerState>,
+    // Package import state
+    pkg_import_picker: Option<PkgImportPickerState>,
+    pkg_install_confirm: Option<(String, String)>,
+    installing: Option<(String, String)>,
+    install_rx: Option<std::sync::mpsc::Receiver<std::result::Result<(), String>>>,
+    // Background package refresh on startup
+    pkg_refresh_rx: Option<std::sync::mpsc::Receiver<HashMap<String, Vec<String>>>>,
 }
 
 impl App {
@@ -201,7 +231,38 @@ pub fn run() -> Result<()> {
         profile_picker_options: Vec::new(),
         profile_picker_cursor: 0,
         files: FilesTabState::new(files_deleted),
+        file_delete_confirm: None,
+        file_import_picker: None,
+        pkg_import_picker: None,
+        pkg_install_confirm: None,
+        installing: None,
+        install_rx: None,
+        pkg_refresh_rx: None,
     };
+
+    // Spawn background thread to collect live package data
+    {
+        let config = app.state.config.clone();
+        let machine_id = app
+            .state
+            .sync_state
+            .as_ref()
+            .map(|s| s.machine_id.clone())
+            .unwrap_or_default();
+        if let Some(config) = config {
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.pkg_refresh_rx = Some(rx);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                if let Ok(rt) = rt {
+                    let packages = rt.block_on(collect_local_packages(&config, &machine_id));
+                    let _ = tx.send(packages);
+                }
+            });
+        }
+    }
 
     let _guard = TerminalGuard;
     enable_raw_mode()?;
@@ -274,6 +335,84 @@ pub fn run() -> Result<()> {
                 }
                 app.uninstalling = None;
                 app.uninstall_rx = None;
+            }
+        }
+
+        // Check install result
+        if let Some(ref rx) = app.install_rx {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(()) => {
+                        if let Some((ref manager_key, ref pkg_name)) = app.installing {
+                            app.flash_message =
+                                Some((Instant::now(), format!("installed {}", pkg_name)));
+                            // Remove from removed_packages so sync doesn't uninstall it
+                            remove_from_removed_packages(&app.state, manager_key, pkg_name);
+                            // Remove from import picker if still open
+                            if let Some(ref mut picker) = app.pkg_import_picker {
+                                picker.items.retain(|i| {
+                                    !(i.manager_key == *manager_key && i.name == *pkg_name)
+                                });
+                                if picker.items.is_empty() {
+                                    app.pkg_import_picker = None;
+                                } else if picker.cursor >= picker.items.len() {
+                                    picker.cursor = picker.items.len().saturating_sub(1);
+                                }
+                            }
+                        }
+                        // Trigger sync
+                        if !app.syncing {
+                            let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
+                            if let Ok(child) = std::process::Command::new(exe)
+                                .arg("sync")
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .spawn()
+                            {
+                                app.syncing = true;
+                                app.sync_child = Some(child);
+                            }
+                        }
+                    }
+                    Err(msg) => {
+                        app.flash_error =
+                            Some((Instant::now(), format!("install failed: {}", msg)));
+                    }
+                }
+                app.installing = None;
+                app.install_rx = None;
+            }
+        }
+
+        // Check background package refresh
+        if let Some(ref rx) = app.pkg_refresh_rx {
+            if let Ok(packages) = rx.try_recv() {
+                let current_machine_id = app
+                    .state
+                    .sync_state
+                    .as_ref()
+                    .map(|s| s.machine_id.as_str())
+                    .unwrap_or("");
+                if let Some(machine) = app
+                    .state
+                    .machines
+                    .iter_mut()
+                    .find(|m| m.machine_id == current_machine_id)
+                {
+                    machine.packages = packages;
+                    // Persist so disk reloads (auto-refresh, r key) keep live data
+                    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
+                        let _ = machine.save_to_repo(&sync_path);
+                    }
+                } else if !current_machine_id.is_empty() {
+                    let mut ms = crate::sync::MachineState::new(current_machine_id);
+                    ms.packages = packages;
+                    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
+                        let _ = ms.save_to_repo(&sync_path);
+                    }
+                    app.state.machines.push(ms);
+                }
+                app.pkg_refresh_rx = None;
             }
         }
 
@@ -388,6 +527,164 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 app.files.restore_confirm = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // File delete confirmation popup
+    if app.file_delete_confirm.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                if let Some(path) = app.file_delete_confirm.take() {
+                    if let (Some(ref mut config), Some(ref ss)) =
+                        (&mut app.state.config, &app.state.sync_state)
+                    {
+                        let ok = config_edit::remove_profile_dotfile(config, &ss.machine_id, &path);
+                        if ok {
+                            app.flash_message = Some((Instant::now(), format!("removed {}", path)));
+                            app.state = DashboardState::load();
+                            app.files.deleted = load_deleted_files(&app.state);
+                            refresh_files_expanded(app);
+                            app.last_refresh = Instant::now();
+                            // Clamp cursor
+                            let new_rows = widgets::files::build_rows(&app.state, &app.files);
+                            if app.files.cursor >= new_rows.len() {
+                                app.files.cursor = new_rows.len().saturating_sub(1);
+                            }
+                            // Trigger sync
+                            if !app.syncing {
+                                let exe =
+                                    std::env::current_exe().unwrap_or_else(|_| "tether".into());
+                                if let Ok(child) = std::process::Command::new(exe)
+                                    .arg("sync")
+                                    .stdout(std::process::Stdio::null())
+                                    .stderr(std::process::Stdio::null())
+                                    .spawn()
+                                {
+                                    app.syncing = true;
+                                    app.sync_child = Some(child);
+                                }
+                            }
+                        } else {
+                            app.flash_error = Some((Instant::now(), "remove failed".into()));
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                app.file_delete_confirm = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // File import picker popup
+    if let Some(ref mut picker) = app.file_import_picker {
+        match key.code {
+            KeyCode::Esc => {
+                app.file_import_picker = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let max = picker.items.len().saturating_sub(1);
+                if picker.cursor < max {
+                    picker.cursor += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                picker.cursor = picker.cursor.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if !picker.items.is_empty() && picker.cursor < picker.items.len() {
+                    let item = picker.items.remove(picker.cursor);
+                    if let (Some(ref mut config), Some(ref ss)) =
+                        (&mut app.state.config, &app.state.sync_state)
+                    {
+                        let ok =
+                            config_edit::add_profile_dotfile(config, &ss.machine_id, &item.path);
+                        if ok {
+                            // Clear from dismissed_imports
+                            if let Ok(mut sync_state) = crate::sync::SyncState::load() {
+                                sync_state.dismissed_imports.remove(&item.path);
+                                let _ = sync_state.save();
+                            }
+                            app.flash_message =
+                                Some((Instant::now(), format!("imported {}", item.path)));
+                            app.state = DashboardState::load();
+                            app.files.deleted = load_deleted_files(&app.state);
+                            refresh_files_expanded(app);
+                            app.last_refresh = Instant::now();
+                        } else {
+                            app.flash_error = Some((Instant::now(), "import failed".into()));
+                        }
+                    }
+                    // Clamp cursor
+                    if let Some(ref mut picker) = app.file_import_picker {
+                        if picker.items.is_empty() {
+                            app.file_import_picker = None;
+                        } else if picker.cursor >= picker.items.len() {
+                            picker.cursor = picker.items.len().saturating_sub(1);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Package install confirmation popup
+    if app.pkg_install_confirm.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                if let Some((manager_key, pkg_name)) = app.pkg_install_confirm.take() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let mk = manager_key.clone();
+                    let pn = pkg_name.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        let result = match rt {
+                            Ok(rt) => rt.block_on(async { run_install(&mk, &pn).await }),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        let _ = tx.send(result);
+                    });
+                    app.installing = Some((manager_key, pkg_name));
+                    app.install_rx = Some(rx);
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                app.pkg_install_confirm = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Package import picker popup
+    if let Some(ref mut picker) = app.pkg_import_picker {
+        match key.code {
+            KeyCode::Esc => {
+                app.pkg_import_picker = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let max = picker.items.len().saturating_sub(1);
+                if picker.cursor < max {
+                    picker.cursor += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                picker.cursor = picker.cursor.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if !picker.items.is_empty() && picker.cursor < picker.items.len() {
+                    let item = &picker.items[picker.cursor];
+                    app.pkg_install_confirm = Some((item.manager_key.clone(), item.name.clone()));
+                }
             }
             _ => {}
         }
@@ -908,6 +1205,135 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 }
             }
         }
+        KeyCode::Char('x') => {
+            if app.active_tab == Tab::Files {
+                let rows = widgets::files::build_rows(&app.state, &app.files);
+                if app.files.cursor < rows.len() {
+                    if let widgets::files::FileRow::File { path, .. } = &rows[app.files.cursor] {
+                        // Only allow on personal dotfiles — walk backwards to find section
+                        let is_personal = rows[..=app.files.cursor]
+                            .iter()
+                            .rev()
+                            .find_map(|r| {
+                                if let widgets::files::FileRow::SectionHeader { label, .. } = r {
+                                    Some(label.starts_with("Personal"))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(false);
+                        if is_personal {
+                            app.file_delete_confirm = Some(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char('i') => {
+            if app.active_tab == Tab::Files {
+                // Build import list from other profiles
+                if let Some(ref config) = app.state.config {
+                    if let Some(ref ss) = app.state.sync_state {
+                        let current_profile = config.profile_name(&ss.machine_id).to_string();
+                        let current_paths: HashSet<String> = config
+                            .profiles
+                            .get(&current_profile)
+                            .map(|p| p.dotfiles.iter().map(|e| e.path().to_string()).collect())
+                            .unwrap_or_default();
+                        let mut seen = HashSet::new();
+                        let mut items = Vec::new();
+                        let mut profiles: Vec<_> = config.profiles.keys().collect();
+                        profiles.sort();
+                        for name in profiles {
+                            if *name == current_profile {
+                                continue;
+                            }
+                            if let Some(profile) = config.profiles.get(name) {
+                                for entry in &profile.dotfiles {
+                                    let path = entry.path().to_string();
+                                    if !current_paths.contains(&path) && seen.insert(path.clone()) {
+                                        items.push(ImportItem {
+                                            path,
+                                            source_profile: name.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if !items.is_empty() {
+                            app.file_import_picker = Some(ImportPickerState { items, cursor: 0 });
+                        }
+                    }
+                }
+            } else if app.active_tab == Tab::Packages && app.installing.is_none() {
+                // Build package import list from other machines
+                let current_machine_id = app
+                    .state
+                    .sync_state
+                    .as_ref()
+                    .map(|s| s.machine_id.clone())
+                    .unwrap_or_default();
+                let current_machine = app
+                    .state
+                    .machines
+                    .iter()
+                    .find(|m| m.machine_id == current_machine_id);
+                let current_pkgs: HashMap<String, HashSet<String>> = current_machine
+                    .map(|m| {
+                        m.packages
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let removed: HashMap<String, HashSet<String>> = current_machine
+                    .map(|m| {
+                        m.removed_packages
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut pkg_map: HashMap<(String, String), Vec<String>> = HashMap::new();
+                for machine in &app.state.machines {
+                    if machine.machine_id == current_machine_id {
+                        continue;
+                    }
+                    for (manager_key, packages) in &machine.packages {
+                        if manager_key == "brew_taps" {
+                            continue;
+                        }
+                        let current_set = current_pkgs.get(manager_key);
+                        let removed_set = removed.get(manager_key);
+                        for pkg in packages {
+                            let has = current_set.map(|s| s.contains(pkg)).unwrap_or(false);
+                            let was_removed = removed_set.map(|s| s.contains(pkg)).unwrap_or(false);
+                            if !has && !was_removed {
+                                pkg_map
+                                    .entry((manager_key.clone(), pkg.clone()))
+                                    .or_default()
+                                    .push(machine.machine_id.clone());
+                            }
+                        }
+                    }
+                }
+
+                let mut items: Vec<PkgImportItem> = pkg_map
+                    .into_iter()
+                    .map(|((manager_key, name), sources)| PkgImportItem {
+                        manager_key,
+                        name,
+                        sources,
+                    })
+                    .collect();
+                items.sort_by(|a, b| a.manager_key.cmp(&b.manager_key).then(a.name.cmp(&b.name)));
+
+                if !items.is_empty() {
+                    app.pkg_import_picker = Some(PkgImportPickerState { items, cursor: 0 });
+                }
+            }
+        }
         KeyCode::Tab => {
             let tabs = Tab::all();
             let current = tabs.iter().position(|t| *t == app.active_tab).unwrap_or(0);
@@ -1030,6 +1456,110 @@ async fn run_uninstall(manager_key: &str, package: &str) -> std::result::Result<
     manager.uninstall(package).await.map_err(|e| e.to_string())
 }
 
+async fn run_install(manager_key: &str, package: &str) -> std::result::Result<(), String> {
+    use crate::packages::*;
+
+    if manager_key == "brew_casks" {
+        return BrewManager
+            .install_cask(package, false)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+
+    let manager: Box<dyn PackageManager> = match manager_key {
+        "brew_formulae" => Box::new(BrewManager),
+        "npm" => Box::new(NpmManager),
+        "pnpm" => Box::new(PnpmManager),
+        "bun" => Box::new(BunManager),
+        "gem" => Box::new(GemManager),
+        "uv" => Box::new(UvManager),
+        _ => return Err(format!("Unknown manager: {}", manager_key)),
+    };
+
+    manager
+        .install(&PackageInfo {
+            name: package.to_string(),
+            version: None,
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn collect_local_packages(
+    config: &crate::config::Config,
+    machine_id: &str,
+) -> HashMap<String, Vec<String>> {
+    use crate::packages::*;
+
+    let mut packages = HashMap::new();
+
+    if config.is_manager_enabled(machine_id, "brew") {
+        let brew = BrewManager::new();
+        if brew.is_available().await {
+            if let Ok(formulae) = brew.list_installed().await {
+                packages.insert(
+                    "brew_formulae".to_string(),
+                    formulae.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+            if let Ok(casks) = brew.list_installed_casks().await {
+                packages.insert("brew_casks".to_string(), casks);
+            }
+            if let Ok(taps) = brew.list_taps().await {
+                packages.insert("brew_taps".to_string(), taps);
+            }
+        }
+    }
+
+    let managers: Vec<(&str, Box<dyn PackageManager>)> = vec![
+        ("npm", Box::new(NpmManager::new())),
+        ("pnpm", Box::new(PnpmManager::new())),
+        ("bun", Box::new(BunManager::new())),
+        ("gem", Box::new(GemManager::new())),
+        ("uv", Box::new(UvManager::new())),
+    ];
+
+    for (key, manager) in managers {
+        if config.is_manager_enabled(machine_id, key) && manager.is_available().await {
+            if let Ok(pkgs) = manager.list_installed().await {
+                packages.insert(
+                    manager.name().to_string(),
+                    pkgs.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    packages
+}
+
+fn remove_from_removed_packages(state: &DashboardState, manager_key: &str, pkg_name: &str) {
+    let current_machine_id = state
+        .sync_state
+        .as_ref()
+        .map(|s| s.machine_id.as_str())
+        .unwrap_or("");
+    if current_machine_id.is_empty() {
+        return;
+    }
+    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
+        let machines_dir = sync_path.join("machines");
+        let path = machines_dir.join(format!("{}.json", current_machine_id));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(mut machine) = serde_json::from_str::<crate::sync::MachineState>(&content) {
+                if let Some(removed) = machine.removed_packages.get_mut(manager_key) {
+                    removed.retain(|p| p != pkg_name);
+                    if removed.is_empty() {
+                        machine.removed_packages.remove(manager_key);
+                    }
+                    let _ = machine.save_to_repo(&sync_path);
+                }
+            }
+        }
+    }
+}
+
 fn run_restore(
     app: &App,
     dotfile_path: &str,
@@ -1112,6 +1642,223 @@ fn render_restore_popup(f: &mut Frame, dotfile_path: &str, short_hash: &str) {
     f.render_widget(paragraph, popup_area);
 }
 
+fn render_file_delete_popup(f: &mut Frame, path: &str) {
+    let area = f.area();
+    let msg = format!("Remove {} from profile?", path);
+    let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
+    let height = 5u16.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  y", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("n/Esc", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let paragraph = ratatui::widgets::Paragraph::new(text).block(
+        ratatui::widgets::Block::default()
+            .title(" Remove ")
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(Style::default().fg(Color::Red)),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+fn render_file_import_popup(f: &mut Frame, picker: &ImportPickerState) {
+    let area = f.area();
+    let title = " Import file from profile ";
+    let max_item_len = picker
+        .items
+        .iter()
+        .map(|i| i.path.len() + i.source_profile.len() + 3)
+        .max()
+        .unwrap_or(20);
+    let min_width = max_item_len.max(title.len() + 2).max(40) + 6;
+    let width = (min_width as u16).min(area.width.saturating_sub(4));
+    let max_visible = 15usize;
+    let visible = picker.items.len().min(max_visible);
+    let height = ((visible + 5) as u16).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let scroll = if picker.cursor >= max_visible {
+        picker.cursor - max_visible + 1
+    } else {
+        0
+    };
+
+    let mut text = vec![Line::from("")];
+    for (i, item) in picker
+        .items
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(max_visible)
+    {
+        let marker = if i == picker.cursor { "> " } else { "  " };
+        let style = if i == picker.cursor {
+            Style::default().fg(Color::White).bg(Color::DarkGray).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        text.push(Line::from(vec![
+            Span::styled(format!("  {}{}", marker, item.path), style),
+            Span::styled(
+                format!(" [{}]", item.source_profile),
+                if i == picker.cursor {
+                    Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+        ]));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled("  j/k", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" import  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let paragraph = ratatui::widgets::Paragraph::new(text).block(
+        ratatui::widgets::Block::default()
+            .title(title)
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+fn render_pkg_import_popup(f: &mut Frame, picker: &PkgImportPickerState) {
+    let area = f.area();
+    let title = " Import package ";
+    let max_item_len = picker
+        .items
+        .iter()
+        .map(|i| {
+            let sources = i.sources.join(", ");
+            i.name.len() + widgets::manager_label(&i.manager_key).len() + sources.len() + 6
+        })
+        .max()
+        .unwrap_or(20);
+    let min_width = max_item_len.max(title.len() + 2).max(40) + 6;
+    let width = (min_width as u16).min(area.width.saturating_sub(4));
+    let max_visible = 15usize;
+    let visible = picker.items.len().min(max_visible);
+    let height = ((visible + 5) as u16).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let scroll = if picker.cursor >= max_visible {
+        picker.cursor - max_visible + 1
+    } else {
+        0
+    };
+
+    let mut text = vec![Line::from("")];
+    for (i, item) in picker
+        .items
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(max_visible)
+    {
+        let marker = if i == picker.cursor { "> " } else { "  " };
+        let label = widgets::manager_label(&item.manager_key);
+        let sources = item.sources.join(", ");
+        let style = if i == picker.cursor {
+            Style::default().fg(Color::White).bg(Color::DarkGray).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let dim = if i == picker.cursor {
+            Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        text.push(Line::from(vec![
+            Span::styled(format!("  {}{}", marker, item.name), style),
+            Span::styled(format!(" ({}) ", label), dim),
+            Span::styled(format!("[{}]", sources), dim),
+        ]));
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(vec![
+        Span::styled("  j/k", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" install  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    let paragraph = ratatui::widgets::Paragraph::new(text).block(
+        ratatui::widgets::Block::default()
+            .title(title)
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
+fn render_install_popup(f: &mut Frame, manager_key: &str, pkg_name: &str) {
+    let area = f.area();
+    let label = widgets::manager_label(manager_key);
+    let msg = format!("Install {} ({})?", pkg_name, label);
+    let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
+    let height = 5u16.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup_area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let text = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  y", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
+            Span::styled("n/Esc", Style::default().fg(Color::Yellow).bold()),
+            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let paragraph = ratatui::widgets::Paragraph::new(text).block(
+        ratatui::widgets::Block::default()
+            .title(" Install ")
+            .borders(ratatui::widgets::Borders::ALL)
+            .border_style(Style::default().fg(Color::Green)),
+    );
+    f.render_widget(paragraph, popup_area);
+}
+
 fn draw(f: &mut Frame, app: &App) {
     let main_chunks = Layout::vertical([
         Constraint::Length(3),
@@ -1137,6 +1884,7 @@ fn draw(f: &mut Frame, app: &App) {
         app.daemon_op,
         flash,
         app.uninstalling.as_ref(),
+        app.installing.as_ref(),
     );
 
     // Tab bar
@@ -1225,6 +1973,26 @@ fn draw(f: &mut Frame, app: &App) {
     // Restore confirmation popup
     if let Some((ref dotfile_path, _, ref short_hash)) = app.files.restore_confirm {
         render_restore_popup(f, dotfile_path, short_hash);
+    }
+
+    // File delete confirmation popup
+    if let Some(ref path) = app.file_delete_confirm {
+        render_file_delete_popup(f, path);
+    }
+
+    // File import picker popup
+    if let Some(ref picker) = app.file_import_picker {
+        render_file_import_popup(f, picker);
+    }
+
+    // Package install confirmation popup
+    if let Some((ref manager_key, ref pkg_name)) = app.pkg_install_confirm {
+        render_install_popup(f, manager_key, pkg_name);
+    }
+
+    // Package import picker popup
+    if let Some(ref picker) = app.pkg_import_picker {
+        render_pkg_import_popup(f, picker);
     }
 }
 
@@ -1332,6 +2100,7 @@ fn load_deleted_files(state: &DashboardState) -> HashMap<String, Vec<String>> {
 
     let mut tracked = git.list_tracked_files("profiles/").unwrap_or_default();
     tracked.extend(git.list_tracked_files("dotfiles/").unwrap_or_default());
+    tracked.extend(git.list_tracked_files("configs/").unwrap_or_default());
 
     let ss = match &state.sync_state {
         Some(s) => s,
@@ -1354,17 +2123,30 @@ fn load_deleted_files(state: &DashboardState) -> HashMap<String, Vec<String>> {
 
     let mut state_repo_paths: HashSet<String> = HashSet::new();
     for path in ss.files.keys() {
-        if !path.starts_with("project:") {
+        if path.starts_with("project:")
+            || path.starts_with("team-secret:")
+            || path.starts_with("collab-secret:")
+            || path.starts_with(".tether/")
+        {
+            continue;
+        }
+        let repo_path = if let Some(rel) = path.strip_prefix("~/") {
+            if encrypted {
+                format!("configs/{}.enc", rel)
+            } else {
+                format!("configs/{}", rel)
+            }
+        } else {
             let shared = config_ref
                 .map(|c| c.is_dotfile_shared(machine_id, path))
                 .unwrap_or(false);
-            let repo_path = if let Some(ref sp) = sync_path_opt {
+            if let Some(ref sp) = sync_path_opt {
                 crate::sync::resolve_dotfile_repo_path(sp, path, encrypted, profile, shared)
             } else {
                 crate::sync::dotfile_to_repo_path(path, encrypted)
-            };
-            state_repo_paths.insert(repo_path);
-        }
+            }
+        };
+        state_repo_paths.insert(repo_path);
     }
 
     for repo_file in &tracked {
@@ -1410,6 +2192,14 @@ fn repo_path_to_dotfile_with_profiles(
     encrypted: bool,
     profile_names: &HashSet<String>,
 ) -> String {
+    if let Some(rest) = repo_path.strip_prefix("configs/") {
+        let name = if encrypted {
+            rest.strip_suffix(".enc").unwrap_or(rest)
+        } else {
+            rest
+        };
+        return format!("~/{}", name);
+    }
     let name = repo_path
         .strip_prefix("profiles/")
         .or_else(|| repo_path.strip_prefix("dotfiles/"))
