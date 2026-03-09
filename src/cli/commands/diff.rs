@@ -389,26 +389,36 @@ fn diff_package_lists(
     local: &[&str],
     case_insensitive: bool,
 ) -> Vec<(String, String)> {
+    use std::collections::HashSet;
     let mut diff = Vec::new();
 
-    let contains = |haystack: &[&str], needle: &str| {
-        if case_insensitive {
-            let lower = needle.to_lowercase();
-            haystack.iter().any(|s| s.to_lowercase() == lower)
-        } else {
-            haystack.contains(&needle)
-        }
-    };
+    if case_insensitive {
+        let remote_set: HashSet<String> = remote.iter().map(|s| s.to_lowercase()).collect();
+        let local_set: HashSet<String> = local.iter().map(|s| s.to_lowercase()).collect();
 
-    for pkg in local {
-        if !contains(remote, pkg) {
-            diff.push((pkg.to_string(), "added".to_string()));
+        for pkg in local {
+            if !remote_set.contains(&pkg.to_lowercase()) {
+                diff.push((pkg.to_string(), "added".to_string()));
+            }
         }
-    }
+        for pkg in remote {
+            if !local_set.contains(&pkg.to_lowercase()) {
+                diff.push((pkg.to_string(), "removed".to_string()));
+            }
+        }
+    } else {
+        let remote_set: HashSet<&str> = remote.iter().copied().collect();
+        let local_set: HashSet<&str> = local.iter().copied().collect();
 
-    for pkg in remote {
-        if !contains(local, pkg) {
-            diff.push((pkg.to_string(), "removed".to_string()));
+        for pkg in local {
+            if !remote_set.contains(pkg) {
+                diff.push((pkg.to_string(), "added".to_string()));
+            }
+        }
+        for pkg in remote {
+            if !local_set.contains(pkg) {
+                diff.push((pkg.to_string(), "removed".to_string()));
+            }
         }
     }
 
