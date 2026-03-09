@@ -98,7 +98,8 @@ pub async fn stop() -> Result<()> {
         sleep(Duration::from_millis(200)).await;
     }
 
-    // Force kill if still running (Unix only — redundant on Windows)
+    // Force kill if still running (Unix only — on Windows terminate_process already uses /F)
+    #[cfg(unix)]
     if is_process_running(pid) {
         log::debug!("Daemon did not exit gracefully, force killing");
         force_kill_process(pid);
@@ -151,8 +152,22 @@ pub async fn logs() -> Result<()> {
 }
 
 pub async fn run_daemon() -> Result<()> {
-    let mut server = DaemonServer::new();
+    let paths = DaemonPaths::new()?;
     let pid = std::process::id();
+
+    // Single-instance guard: exit if another daemon is already running
+    if let Some(existing_pid) = read_daemon_pid()? {
+        if existing_pid != pid && is_process_running(existing_pid) {
+            log::warn!("Another daemon is already running (PID {existing_pid}), exiting");
+            return Ok(());
+        }
+    }
+
+    // Write PID file so both `start()` and scheduled task get protection
+    fs::create_dir_all(&paths.dir)?;
+    fs::write(&paths.pid, pid.to_string())?;
+
+    let mut server = DaemonServer::new();
     log::info!("Daemon process starting (PID {pid})");
     let result = server.run().await;
     if let Err(err) = cleanup_pid_file(Some(pid)) {
