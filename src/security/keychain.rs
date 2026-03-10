@@ -69,12 +69,10 @@ fn cache_key(key: &[u8]) -> Result<()> {
             .open(&path)?;
         file.write_all(key)?;
     }
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, key)?;
-        #[cfg(windows)]
-        super::restrict_file_permissions(&path)?;
-    }
+    #[cfg(windows)]
+    super::write_file_secure(&path, key)?;
+    #[cfg(not(any(unix, windows)))]
+    fs::write(&path, key)?;
 
     Ok(())
 }

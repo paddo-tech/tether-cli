@@ -240,9 +240,10 @@ fn slice_by_display_col(s: &str, start: usize, end: usize) -> &str {
     &s[byte_start..byte_end]
 }
 
-/// Parse `winget list` fixed-width column output by reading column positions from the header.
-/// Header is ASCII so byte offsets == display columns. Data lines are sliced by display width
-/// to handle non-ASCII package names (e.g., CJK double-width characters).
+/// Parse `winget list` fixed-width column output.
+/// Column positions are derived from the separator line (dashes with spaces), which is
+/// locale-independent. Data lines are sliced by display width to handle non-ASCII
+/// package names (e.g., CJK double-width characters).
 fn parse_winget_list(output: &str) -> Vec<PackageInfo> {
     // winget emits \r-based progress spinners; take only content after the last \r per line
     let lines: Vec<&str> = output
@@ -250,29 +251,45 @@ fn parse_winget_list(output: &str) -> Vec<PackageInfo> {
         .map(|l| l.rsplit('\r').next().unwrap_or(l))
         .collect();
 
-    // Find the header line containing "Id" and "Version"
-    let Some(header_idx) = lines
-        .iter()
-        .position(|l| l.contains("Id") && l.contains("Version"))
-    else {
+    // Find the separator line (all dashes). This is locale-independent.
+    let Some(sep_idx) = lines.iter().position(|l| {
+        let trimmed = l.trim();
+        !trimmed.is_empty() && trimmed.chars().all(|c| c == '-')
+    }) else {
         return Vec::new();
     };
-    let header = lines[header_idx];
 
-    // Header is ASCII, so byte offset == display column
-    let Some(id_col) = header.find("Id") else {
+    // The header is the line before the separator. Derive column positions from it
+    // using display-width columns (not byte offsets) to handle non-ASCII headers.
+    // Column boundaries: a space followed by a non-space, preceded by at least 2 spaces.
+    if sep_idx == 0 {
         return Vec::new();
+    }
+    let header = lines[sep_idx - 1];
+    let col_starts: Vec<usize> = {
+        let mut starts = vec![0usize]; // first column always starts at 0
+        let chars: Vec<char> = header.chars().collect();
+        let mut col = 0;
+        let mut prev_was_space = false;
+        let mut prev2_was_space = false;
+        for &c in &chars {
+            if c != ' ' && prev_was_space && prev2_was_space {
+                starts.push(col);
+            }
+            prev2_was_space = prev_was_space;
+            prev_was_space = c == ' ';
+            col += display_width(c);
+        }
+        starts
     };
-    let version_col = header.find("Version").unwrap_or(header.len());
 
-    // Find the separator line (dashes) after header
-    let data_start = lines
-        .iter()
-        .enumerate()
-        .skip(header_idx + 1)
-        .find(|(_, l)| l.starts_with('-'))
-        .map(|(i, _)| i + 1)
-        .unwrap_or(header_idx + 1);
+    // Need at least 3 columns: Name, Id, Version
+    if col_starts.len() < 3 {
+        return Vec::new();
+    }
+    let id_col = col_starts[1];
+    let version_col = col_starts[2];
+    let data_start = sep_idx + 1;
 
     let mut packages = Vec::new();
     for line in lines.iter().skip(data_start) {
@@ -347,6 +364,21 @@ Git                 Git.Git           2.43.0   winget";
     fn test_parse_winget_list_no_header() {
         let packages = parse_winget_list("some random output\nwith no header");
         assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn test_parse_winget_list_localized_headers() {
+        // Japanese locale: headers are translated but separator line is universal
+        let output = "\
+名前                            ID                          バージョン 利用可能  ソース
+-----------------------------------------------------------------------------------------------
+Git                             Git.Git                     2.43.0    2.44.0    winget
+Visual Studio Code              Microsoft.VisualStudioCode  1.87.0              winget";
+
+        let packages = parse_winget_list(output);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "Git.Git");
+        assert_eq!(packages[1].name, "Microsoft.VisualStudioCode");
     }
 
     #[test]

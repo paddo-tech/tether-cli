@@ -15,18 +15,30 @@ pub use recipients::{
 };
 pub use secrets::{scan_for_secrets, SecretFinding, SecretType};
 
-/// Restrict file permissions to current user only (Windows equivalent of chmod 600)
+/// Write sensitive data to a file with restricted permissions, avoiding TOCTOU.
+/// On Unix: opens with mode 0o600 atomically.
+/// On Windows: writes to a temp file, restricts ACLs, then renames into place.
+#[cfg(windows)]
+pub(crate) fn write_file_secure(
+    path: &std::path::Path,
+    contents: &[u8],
+) -> anyhow::Result<()> {
+    let dir = path.parent().unwrap_or(path);
+    std::fs::create_dir_all(dir)?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(&mut &*tmp.as_file(), contents)?;
+    restrict_file_permissions(tmp.path())?;
+    tmp.persist(path)?;
+    Ok(())
+}
+
+/// Restrict file permissions to current user only (Windows equivalent of chmod 600).
+/// Uses the current user's SID from `whoami /user` to avoid env var spoofing.
 #[cfg(windows)]
 pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Result<()> {
     let path_str = path.to_string_lossy();
-    let username = std::env::var("USERNAME").unwrap_or_default();
-    if username.is_empty() {
-        anyhow::bail!(
-            "USERNAME not set, cannot restrict permissions on {}",
-            path_str
-        );
-    }
-    // Remove all ACEs then grant only current user — ensures no other accounts have access
+    let sid = current_user_sid()?;
+    // Remove inherited ACEs, strip Everyone and Admins, grant only current user's SID
     let output = std::process::Command::new("icacls")
         .args([
             &*path_str,
@@ -36,7 +48,7 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Resul
             "/remove:g",
             "BUILTIN\\Administrators",
             "/grant:r",
-            &format!("{username}:F"),
+            &format!("*{sid}:F"),
         ])
         .output()?;
     if !output.status.success() {
@@ -44,4 +56,29 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Resul
         anyhow::bail!("icacls failed on {}: {}", path_str, stderr.trim());
     }
     Ok(())
+}
+
+/// Get the current user's SID via `whoami /user /fo csv /nh`.
+/// Returns a SID string like "S-1-5-21-...". Not spoofable via env vars.
+#[cfg(windows)]
+fn current_user_sid() -> anyhow::Result<String> {
+    let output = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("whoami /user failed");
+    }
+    // Output format: "DOMAIN\user","S-1-5-21-..."
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sid = stdout
+        .trim()
+        .rsplit(',')
+        .next()
+        .and_then(|s| s.trim().strip_prefix('"'))
+        .and_then(|s| s.strip_suffix('"'))
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse SID from whoami output: {}", stdout))?;
+    if !sid.starts_with("S-") {
+        anyhow::bail!("Invalid SID format: {}", sid);
+    }
+    Ok(sid.to_string())
 }

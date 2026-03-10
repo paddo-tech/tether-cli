@@ -771,11 +771,14 @@ fn write_file_secure(path: &Path, contents: &[u8]) -> Result<()> {
         std::io::Write::write_all(&mut file, contents)?;
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        crate::security::write_file_secure(path, contents)?;
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         std::fs::write(path, contents)?;
-        #[cfg(windows)]
-        crate::security::restrict_file_permissions(path)?;
         Ok(())
     }
 }
