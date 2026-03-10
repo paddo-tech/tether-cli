@@ -194,6 +194,7 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
 }
 
 /// Check if symlinks are available on this platform.
+/// Result is cached for the lifetime of the process.
 #[cfg(unix)]
 pub fn symlinks_available() -> bool {
     true
@@ -201,15 +202,19 @@ pub fn symlinks_available() -> bool {
 
 #[cfg(windows)]
 pub fn symlinks_available() -> bool {
-    // Try creating a symlink in temp to test Developer Mode / privilege
-    let dir = std::env::temp_dir();
-    let src = dir.join(".tether_symlink_probe_src");
-    let dst = dir.join(".tether_symlink_probe_dst");
-    let _ = std::fs::write(&src, "");
-    let ok = std::os::windows::fs::symlink_file(&src, &dst).is_ok();
-    let _ = std::fs::remove_file(&dst);
-    let _ = std::fs::remove_file(&src);
-    ok
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let dir = std::env::temp_dir();
+        let id = std::process::id();
+        let src = dir.join(format!(".tether_symlink_probe_{id}_src"));
+        let dst = dir.join(format!(".tether_symlink_probe_{id}_dst"));
+        let _ = std::fs::write(&src, "");
+        let ok = std::os::windows::fs::symlink_file(&src, &dst).is_ok();
+        let _ = std::fs::remove_file(&dst);
+        let _ = std::fs::remove_file(&src);
+        ok
+    })
 }
 
 /// Create a symlink. On Windows, falls back to copy if Developer Mode is not enabled.
