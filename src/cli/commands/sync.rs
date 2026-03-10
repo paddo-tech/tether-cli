@@ -790,10 +790,13 @@ fn ensure_symlink(checkout_file: &Path, canonical_path: &Path) -> Result<()> {
                     std::fs::create_dir_all(parent)?;
                 }
                 crate::sync::atomic_write(canonical_path, &checkout_content)?;
-                // We just wrote checkout content to canonical, so they match.
-                // On Windows copy-mode, no need to delete and re-copy the same content.
+                // Content now matches. On Windows without symlink support,
+                // skip the delete+re-copy cycle. If symlinks are available,
+                // fall through to upgrade the copy to a proper symlink.
                 #[cfg(windows)]
-                return Ok(());
+                if !crate::sync::symlinks_available() {
+                    return Ok(());
+                }
             }
             // Canonical is newer — delete stale checkout file and re-link/copy below
             std::fs::remove_file(checkout_file)?;

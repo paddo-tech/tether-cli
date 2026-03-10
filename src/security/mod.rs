@@ -26,7 +26,8 @@ pub(crate) fn write_file_secure(
     let dir = path.parent().unwrap_or(path);
     std::fs::create_dir_all(dir)?;
     let tmp = tempfile::NamedTempFile::new_in(dir)?;
-    std::io::Write::write_all(&mut &*tmp.as_file(), contents)?;
+    std::io::Write::write_all(&mut tmp.as_file(), contents)?;
+    tmp.as_file().sync_all()?;
     restrict_file_permissions(tmp.path())?;
     tmp.persist(path)?;
     Ok(())
@@ -46,7 +47,7 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Resul
             "/remove:g",
             "*S-1-1-0",
             "/remove:g",
-            "BUILTIN\\Administrators",
+            "*S-1-5-32-544",
             "/grant:r",
             &format!("*{sid}:F"),
         ])
