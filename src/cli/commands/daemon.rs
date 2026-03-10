@@ -209,14 +209,6 @@ fn force_kill_process(pid: u32) {
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
 }
 
-#[cfg(windows)]
-fn force_kill_process(pid: u32) {
-    use std::process::Command;
-    let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .output();
-}
-
 fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
     let paths = DaemonPaths::new()?;
     if !paths.pid.exists() {
