@@ -11,7 +11,10 @@ impl UvManager {
     }
 
     async fn run_uv(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("uv").args(args).output().await?;
+        let output = Command::new(super::resolve_program("uv"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,7 +86,7 @@ impl PackageManager for UvManager {
             return Ok(());
         }
 
-        let output = Command::new("uv")
+        let output = Command::new(super::resolve_program("uv"))
             .args(["tool", "upgrade", "--all"])
             .output()
             .await?;
@@ -97,7 +100,7 @@ impl PackageManager for UvManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("uv")
+        let output = Command::new(super::resolve_program("uv"))
             .args(["tool", "uninstall", package])
             .output()
             .await?;

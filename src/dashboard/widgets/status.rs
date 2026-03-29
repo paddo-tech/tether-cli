@@ -8,6 +8,7 @@ pub enum FlashMessage<'a> {
     Success(&'a str),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,
@@ -16,6 +17,7 @@ pub fn render(
     daemon_op: DaemonOp,
     flash: Option<FlashMessage>,
     uninstalling: Option<&(String, String)>,
+    installing: Option<&(String, String)>,
 ) {
     let mut spans = vec![Span::styled(
         " Tether ",
@@ -92,6 +94,15 @@ pub fn render(
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("uninstalling {}...", pkg_name),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    // Installing
+    if let Some((_, pkg_name)) = installing {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("installing {}...", pkg_name),
             Style::default().fg(Color::Yellow),
         ));
     }

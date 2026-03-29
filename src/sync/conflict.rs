@@ -323,6 +323,7 @@ impl ConflictState {
 }
 
 /// Escape a string for safe use in AppleScript
+#[cfg(target_os = "macos")]
 fn escape_applescript(s: &str) -> String {
     // Remove any control characters and limit length for safety
     let sanitized: String = s.chars().filter(|c| !c.is_control()).take(100).collect();
@@ -330,50 +331,60 @@ fn escape_applescript(s: &str) -> String {
     sanitized.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Send macOS notification about conflict
+/// Send desktop notification about conflict
 pub fn notify_conflict(file_path: &str) -> Result<()> {
-    use std::process::Command;
-
-    let safe_path = escape_applescript(file_path);
-    let script = format!(
-        r#"display notification "Conflict detected in {}" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
-        safe_path
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
-    Ok(())
+    send_notification(
+        &format!("Conflict detected in {file_path}"),
+        "Run 'tether resolve' to fix",
+    )
 }
 
-/// Send macOS notification about multiple conflicts
+/// Send desktop notification about multiple conflicts
 pub fn notify_conflicts(count: usize) -> Result<()> {
+    send_notification(
+        &format!("{count} file conflicts detected"),
+        "Run 'tether resolve' to fix",
+    )
+}
+
+/// Send desktop notification about deferred casks
+pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
+    let count = casks.len();
+    let s = if count == 1 { "" } else { "s" };
+    let verb = if count == 1 { "s" } else { "" };
+    send_notification(
+        &format!("{count} cask{s} need{verb} password"),
+        "Run 'tether sync' to install",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn send_notification(message: &str, subtitle: &str) -> Result<()> {
     use std::process::Command;
-
-    // count is a usize, no escaping needed
-    let script = format!(
-        r#"display notification "{} file conflicts detected" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
-        count
-    );
-
+    let safe_msg = escape_applescript(message);
+    let safe_sub = escape_applescript(subtitle);
+    let script =
+        format!(r#"display notification "{safe_msg}" with title "Tether" subtitle "{safe_sub}""#);
     Command::new("osascript").args(["-e", &script]).output()?;
-
     Ok(())
 }
 
-/// Send macOS notification about deferred casks
-pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
+#[cfg(windows)]
+fn send_notification(message: &str, subtitle: &str) -> Result<()> {
     use std::process::Command;
+    // Pass values via env vars to avoid PowerShell injection through string interpolation
+    let script = r#"[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); $text = $xml.GetElementsByTagName('text'); $text.Item(0).AppendChild($xml.CreateTextNode("Tether: $env:TETHER_SUB")) > $null; $text.Item(1).AppendChild($xml.CreateTextNode($env:TETHER_MSG)) > $null; [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Tether').Show([Windows.UI.Notifications.ToastNotification]::new($xml))"#;
+    Command::new("powershell")
+        .env("TETHER_SUB", subtitle)
+        .env("TETHER_MSG", message)
+        .args(["-Command", script])
+        .output()?;
+    Ok(())
+}
 
-    let count = casks.len();
-    let script = format!(
-        r#"display notification "{} cask{} need{} password" with title "Tether" subtitle "Run 'tether sync' to install""#,
-        count,
-        if count == 1 { "" } else { "s" },
-        if count == 1 { "s" } else { "" }
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn send_notification(message: &str, _subtitle: &str) -> Result<()> {
+    log::info!("Notification: {message}");
     Ok(())
 }
 
@@ -505,21 +516,25 @@ mod tests {
     }
 
     // escape_applescript tests
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_escape_applescript_plain() {
         assert_eq!(escape_applescript("hello"), "hello");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_escape_applescript_quotes() {
         assert_eq!(escape_applescript("hello\"world"), "hello\\\"world");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_escape_applescript_backslashes() {
         assert_eq!(escape_applescript("path\\to\\file"), "path\\\\to\\\\file");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_escape_applescript_truncates_long() {
         let long = "a".repeat(200);
@@ -527,6 +542,7 @@ mod tests {
         assert!(escaped.len() <= 100);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_escape_applescript_removes_control_chars() {
         let with_control = "hello\nworld\ttab";

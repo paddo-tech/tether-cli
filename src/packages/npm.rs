@@ -23,7 +23,10 @@ impl NpmManager {
     }
 
     async fn run_npm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("npm").args(args).output().await?;
+        let output = Command::new(super::resolve_program("npm"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -89,7 +92,10 @@ impl PackageManager for NpmManager {
             return Ok(());
         }
 
-        let output = Command::new("npm").args(["update", "-g"]).output().await?;
+        let output = Command::new(super::resolve_program("npm"))
+            .args(["update", "-g"])
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -100,7 +106,7 @@ impl PackageManager for NpmManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("npm")
+        let output = Command::new(super::resolve_program("npm"))
             .args(["uninstall", "-g", package])
             .output()
             .await?;

@@ -1,9 +1,9 @@
 use crate::cli::Output;
 use crate::config::Config;
+use crate::daemon::pid::{is_process_running, read_daemon_pid};
 use crate::daemon::DaemonServer;
 use anyhow::Result;
 use std::fs::{self, OpenOptions};
-use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokio::time::{sleep, Duration};
@@ -49,13 +49,20 @@ pub async fn start() -> Result<()> {
         .append(true)
         .open(&paths.log)?;
 
-    let child = Command::new(exe)
-        .arg("daemon")
+    let mut cmd = Command::new(exe);
+    cmd.arg("daemon")
         .arg("run")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()?;
+        .stderr(Stdio::from(stderr));
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x00000008 | 0x00000200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    }
+
+    let child = cmd.spawn()?;
 
     let pid = child.id();
     fs::write(&paths.pid, pid.to_string())?;
@@ -79,28 +86,24 @@ pub async fn stop() -> Result<()> {
         return Ok(());
     }
 
-    let signal_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    if signal_result != 0 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            return Err(anyhow::anyhow!("Failed to stop daemon: {}", err));
-        }
-    }
+    terminate_process(pid)?;
 
-    // Graceful: wait up to 10 seconds
-    for _ in 0..50 {
+    // On Windows, terminate_process already force-kills (no graceful signal available),
+    // so only do the extended wait on Unix where SIGTERM allows graceful shutdown.
+    let wait_rounds = if cfg!(windows) { 10 } else { 50 };
+    for _ in 0..wait_rounds {
         if !is_process_running(pid) {
             break;
         }
         sleep(Duration::from_millis(200)).await;
     }
 
-    // Force kill if still running
+    // Force kill if still running (Unix only — on Windows terminate_process already uses /F)
+    #[cfg(unix)]
     if is_process_running(pid) {
-        log::debug!("Daemon did not exit gracefully, sending SIGKILL");
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        log::debug!("Daemon did not exit gracefully, force killing");
+        force_kill_process(pid);
 
-        // Wait for forced termination
         for _ in 0..10 {
             if !is_process_running(pid) {
                 break;
@@ -112,7 +115,7 @@ pub async fn stop() -> Result<()> {
     // Final check
     if is_process_running(pid) {
         return Err(anyhow::anyhow!(
-            "Daemon did not exit after SIGKILL. Check logs: {}",
+            "Daemon did not exit after force kill. Check logs: {}",
             paths.log.display()
         ));
     }
@@ -149,8 +152,22 @@ pub async fn logs() -> Result<()> {
 }
 
 pub async fn run_daemon() -> Result<()> {
-    let mut server = DaemonServer::new();
+    let paths = DaemonPaths::new()?;
     let pid = std::process::id();
+
+    // Single-instance guard: exit if another daemon is already running
+    if let Some(existing_pid) = read_daemon_pid()? {
+        if existing_pid != pid && is_process_running(existing_pid) {
+            log::warn!("Another daemon is already running (PID {existing_pid}), exiting");
+            return Ok(());
+        }
+    }
+
+    // Write PID file so both `start()` and scheduled task get protection
+    fs::create_dir_all(&paths.dir)?;
+    fs::write(&paths.pid, pid.to_string())?;
+
+    let mut server = DaemonServer::new();
     log::info!("Daemon process starting (PID {pid})");
 
     // Write PID file so dashboard/CLI can detect the running daemon
@@ -165,28 +182,37 @@ pub async fn run_daemon() -> Result<()> {
     result
 }
 
-fn read_daemon_pid() -> Result<Option<u32>> {
-    let pid_path = DaemonPaths::new()?.pid;
-    if !pid_path.exists() {
-        return Ok(None);
-    }
-
-    let contents = fs::read_to_string(&pid_path)?;
-    match contents.trim().parse::<u32>() {
-        Ok(pid) if pid > 0 => Ok(Some(pid)),
-        _ => Ok(None),
-    }
-}
-
-fn is_process_running(pid: u32) -> bool {
-    unsafe {
-        if libc::kill(pid as libc::pid_t, 0) == 0 {
-            true
-        } else {
-            // ESRCH = no such process
-            io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<()> {
+    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(anyhow::anyhow!("Failed to stop daemon: {}", err));
         }
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) -> Result<()> {
+    use std::process::Command;
+    // Detached/console-less processes can't receive WM_CLOSE, so use /F directly.
+    let output = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains("not found") {
+            log::debug!("taskkill failed: {}", stderr.trim());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn force_kill_process(pid: u32) {
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
 }
 
 fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
@@ -206,8 +232,10 @@ fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "com.tether.daemon";
 
+#[cfg(target_os = "macos")]
 fn launchd_plist_path() -> Result<PathBuf> {
     let home = crate::home_dir()?;
     Ok(home
@@ -216,6 +244,7 @@ fn launchd_plist_path() -> Result<PathBuf> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
+#[cfg(target_os = "macos")]
 fn generate_plist() -> Result<String> {
     let exe = std::env::current_exe()?;
     let paths = DaemonPaths::new()?;
@@ -253,11 +282,60 @@ fn generate_plist() -> Result<String> {
 }
 
 pub async fn install() -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        return Err(anyhow::anyhow!(
-            "Launchd is only available on macOS. Use 'tether daemon start' instead."
-        ));
+        if let Some(pid) = read_daemon_pid()? {
+            if is_process_running(pid) {
+                Output::info("Stopping existing daemon...");
+                stop().await?;
+            }
+        }
+
+        let exe = std::env::current_exe()?;
+        let task_xml = generate_schtasks_xml(&exe);
+
+        // schtasks expects UTF-16 LE with BOM; use random temp file to avoid symlink attacks
+        let mut xml_file = tempfile::Builder::new().suffix(".xml").tempfile()?;
+        let utf16: Vec<u16> = task_xml.encode_utf16().collect();
+        let mut bytes = vec![0xFF, 0xFE]; // UTF-16 LE BOM
+        for word in &utf16 {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        std::io::Write::write_all(&mut xml_file, &bytes)?;
+        // Close file handle before schtasks reads it (Windows exclusive lock)
+        let xml_path = xml_file.into_temp_path();
+
+        // Remove existing task if present
+        let _ = Command::new("schtasks")
+            .args(["/Delete", "/TN", "TetherDaemon", "/F"])
+            .output();
+
+        let output = Command::new("schtasks")
+            .args(["/Create", "/TN", "TetherDaemon", "/XML"])
+            .arg(&xml_path)
+            .output()?;
+
+        drop(xml_path);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to create scheduled task: {}",
+                stderr
+            ));
+        }
+
+        start().await?;
+        Output::success("Scheduled task installed");
+        Output::info("Daemon will now start automatically on login and restart if it exits");
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err(anyhow::anyhow!(
+            "Daemon auto-start not supported on this platform. Use 'tether daemon start' instead."
+        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -308,9 +386,34 @@ pub async fn install() -> Result<()> {
 }
 
 pub async fn uninstall() -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        return Err(anyhow::anyhow!("Launchd is only available on macOS"));
+        let output = Command::new("schtasks")
+            .args(["/Delete", "/TN", "TetherDaemon", "/F"])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("does not exist") || stderr.contains("cannot find") {
+                Output::info("Scheduled task is not installed");
+                return Ok(());
+            }
+            return Err(anyhow::anyhow!(
+                "Failed to delete scheduled task: {}",
+                stderr
+            ));
+        }
+
+        stop().await.ok();
+        Output::success("Scheduled task uninstalled");
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err(anyhow::anyhow!(
+            "Daemon auto-start not supported on this platform"
+        ))
     }
 
     #[cfg(target_os = "macos")]
@@ -338,5 +441,64 @@ pub async fn uninstall() -> Result<()> {
 
         Output::success("Launchd service uninstalled");
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn generate_schtasks_xml(exe: &std::path::Path) -> String {
+    let exe_escaped = exe
+        .display()
+        .to_string()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+  </Triggers>
+  <Settings>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe_escaped}</Command>
+      <Arguments>daemon run</Arguments>
+    </Exec>
+  </Actions>
+</Task>"#
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn test_generate_schtasks_xml_valid() {
+        let xml = super::generate_schtasks_xml(std::path::Path::new(
+            r"C:\Program Files\tether\tether.exe",
+        ));
+        assert!(xml.contains(r#"encoding="UTF-16""#));
+        assert!(xml.contains("<LogonTrigger>"));
+        assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains(r"<Command>C:\Program Files\tether\tether.exe</Command>"));
+        assert!(xml.contains("<Arguments>daemon run</Arguments>"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_generate_schtasks_xml_escapes_special_chars() {
+        let xml = super::generate_schtasks_xml(std::path::Path::new(r#"C:\a&b<c>"d"#));
+        assert!(xml.contains(r"C:\a&amp;b&lt;c&gt;&quot;d"));
+        // Must not contain raw special chars inside XML element
+        assert!(!xml.contains("<Command>C:\\a&b"));
     }
 }

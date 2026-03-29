@@ -1,4 +1,6 @@
-use crate::config::{is_safe_dotfile_path, Config, ConflictStrategy, DotfileEntry};
+use crate::config::{
+    is_safe_dotfile_path, Config, ConflictStrategy, DotfileEntry, ProfileDotfileEntry,
+};
 use std::sync::LazyLock;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -408,10 +410,8 @@ pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> bool {
     config.save().is_ok()
 }
 
-/// Toggle shared flag for a profile dotfile by path. Returns false on failure.
+/// Toggle the shared flag on a profile dotfile entry.
 pub fn toggle_profile_dotfile_shared(config: &mut Config, machine_id: &str, path: &str) -> bool {
-    use crate::config::ProfileDotfileEntry;
-
     let profile_name = config.profile_name(machine_id).to_string();
     let profile = match config.profiles.get_mut(&profile_name) {
         Some(p) => p,
@@ -428,6 +428,41 @@ pub fn toggle_profile_dotfile_shared(config: &mut Config, machine_id: &str, path
         shared: new_shared,
         create_if_missing: entry.create_if_missing(),
     };
+    config.save().is_ok()
+}
+
+/// Add a dotfile to the machine's profile. Returns false on unsafe path, duplicate, or save failure.
+pub fn add_profile_dotfile(config: &mut Config, machine_id: &str, path: &str) -> bool {
+    let path = path.trim();
+    if path.is_empty() || !is_safe_dotfile_path(path) {
+        return false;
+    }
+    let profile_name = config.profile_name(machine_id).to_string();
+    let profile = match config.profiles.get_mut(&profile_name) {
+        Some(p) => p,
+        None => return false,
+    };
+    if profile.dotfiles.iter().any(|e| e.path() == path) {
+        return false;
+    }
+    profile
+        .dotfiles
+        .push(ProfileDotfileEntry::Simple(path.to_string()));
+    config.save().is_ok()
+}
+
+/// Remove a dotfile from the machine's profile by path. Returns false if not found or save failure.
+pub fn remove_profile_dotfile(config: &mut Config, machine_id: &str, path: &str) -> bool {
+    let profile_name = config.profile_name(machine_id).to_string();
+    let profile = match config.profiles.get_mut(&profile_name) {
+        Some(p) => p,
+        None => return false,
+    };
+    let before = profile.dotfiles.len();
+    profile.dotfiles.retain(|e| e.path() != path);
+    if profile.dotfiles.len() == before {
+        return false;
+    }
     config.save().is_ok()
 }
 

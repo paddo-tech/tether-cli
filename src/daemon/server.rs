@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+    WingetManager,
 };
 use crate::sync::{
     import_packages, notify_deferred_casks, GitBackend, MachineState, SyncEngine, SyncState,
@@ -608,6 +609,10 @@ impl DaemonServer {
             (Box::new(BunManager::new()), config.packages.bun.enabled),
             (Box::new(GemManager::new()), config.packages.gem.enabled),
             (Box::new(UvManager::new()), config.packages.uv.enabled),
+            (
+                Box::new(WingetManager::new()),
+                config.packages.winget.enabled,
+            ),
         ];
 
         for (manager, enabled) in &managers {

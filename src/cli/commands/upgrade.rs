@@ -1,7 +1,7 @@
 use crate::cli::output::Output;
 use crate::packages::{
     brew::BrewManager, bun::BunManager, gem::GemManager, manager::PackageManager, npm::NpmManager,
-    pnpm::PnpmManager, uv::UvManager,
+    pnpm::PnpmManager, uv::UvManager, winget::WingetManager,
 };
 use crate::sync::SyncState;
 use anyhow::Result;
@@ -17,6 +17,7 @@ pub async fn run() -> Result<()> {
         Box::new(BunManager::new()),
         Box::new(GemManager::new()),
         Box::new(UvManager::new()),
+        Box::new(WingetManager::new()),
     ];
 
     // Determine which managers are available and have packages

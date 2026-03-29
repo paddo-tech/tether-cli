@@ -11,7 +11,10 @@ impl GemManager {
     }
 
     async fn run_gem(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gem").args(args).output().await?;
+        let output = Command::new(super::resolve_program("gem"))
+            .args(args)
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -86,7 +89,7 @@ impl PackageManager for GemManager {
             return Ok(());
         }
 
-        let output = Command::new("gem")
+        let output = Command::new(super::resolve_program("gem"))
             .args(["update", "--user-install"])
             .output()
             .await?;
@@ -100,7 +103,7 @@ impl PackageManager for GemManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("gem")
+        let output = Command::new(super::resolve_program("gem"))
             .args(["uninstall", package, "-x", "-a"])
             .output()
             .await?;
@@ -115,7 +118,7 @@ impl PackageManager for GemManager {
 
     async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
         // gem dependency -R shows reverse dependencies
-        let output = Command::new("gem")
+        let output = Command::new(super::resolve_program("gem"))
             .args(["dependency", "-R", package])
             .output()
             .await?;

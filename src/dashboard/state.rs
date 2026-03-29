@@ -41,46 +41,11 @@ impl DashboardState {
     }
 
     fn check_daemon() -> (Option<u32>, bool) {
-        // Try PID file first
-        if let Ok(dir) = Config::config_dir() {
-            let pid_path = dir.join("daemon.pid");
-            if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-                if let Ok(pid) = contents.trim().parse::<u32>() {
-                    if pid > 0 {
-                        let running = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-                        if running {
-                            return (Some(pid), true);
-                        }
-                    }
-                }
-            }
+        use crate::daemon::pid::{is_process_running, read_daemon_pid};
+        match read_daemon_pid() {
+            Ok(Some(pid)) => (Some(pid), is_process_running(pid)),
+            _ => (None, false),
         }
-
-        // Fallback: check launchd (handles missing/stale PID file)
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(output) = std::process::Command::new("launchctl")
-                .args(["list", "com.tether.daemon"])
-                .output()
-            {
-                if output.status.success() {
-                    // Parse PID from first line: "PID\tStatus\tLabel" or "{" for JSON
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    if let Some(first) = stdout.lines().next() {
-                        // launchctl list <label> outputs: <pid>\t<status>\t<label>
-                        // pid is "-" if not running
-                        let first_field = first.split('\t').next().unwrap_or("-").trim();
-                        if first_field != "-" {
-                            if let Ok(pid) = first_field.parse::<u32>() {
-                                return (Some(pid), true);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        (None, false)
     }
 
     fn read_activity_log() -> Vec<String> {
