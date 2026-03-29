@@ -19,10 +19,7 @@ pub use secrets::{scan_for_secrets, SecretFinding, SecretType};
 /// On Unix: opens with mode 0o600 atomically.
 /// On Windows: writes to a temp file, restricts ACLs, then renames into place.
 #[cfg(windows)]
-pub(crate) fn write_file_secure(
-    path: &std::path::Path,
-    contents: &[u8],
-) -> anyhow::Result<()> {
+pub(crate) fn write_file_secure(path: &std::path::Path, contents: &[u8]) -> anyhow::Result<()> {
     let dir = path.parent().unwrap_or(path);
     std::fs::create_dir_all(dir)?;
     let tmp = tempfile::NamedTempFile::new_in(dir)?;

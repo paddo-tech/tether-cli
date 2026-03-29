@@ -488,7 +488,6 @@ pub fn migrate_dotfile_shared_change(
     }
 }
 
-
 /// Atomically write content to a file by writing to a temp file and renaming.
 /// This prevents file corruption from interrupted writes.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
