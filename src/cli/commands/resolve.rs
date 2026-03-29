@@ -22,7 +22,9 @@ pub async fn run(file: Option<&str>) -> Result<()> {
 
     let home = crate::home_dir()?;
     let sync_path = SyncEngine::sync_path()?;
-    let dotfiles_dir = sync_path.join("dotfiles");
+    let state = crate::sync::SyncState::load()?;
+    let machine_id = &state.machine_id;
+    let profile = config.profile_name(machine_id);
 
     // Get encryption key if needed
     let key = if config.security.encrypt_dotfiles {
@@ -70,22 +72,24 @@ pub async fn run(file: Option<&str>) -> Result<()> {
         };
 
         // Get remote content
-        let filename = pending.file_path.trim_start_matches('.');
-        let remote_content = if config.security.encrypt_dotfiles {
-            let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
-            if enc_file.exists() {
-                let encrypted = std::fs::read(&enc_file)?;
-                crate::security::decrypt(&encrypted, key.as_ref().unwrap())?
+        let shared = config.is_dotfile_shared(machine_id, &pending.file_path);
+        let repo_rel = crate::sync::resolve_dotfile_repo_path(
+            &sync_path,
+            &pending.file_path,
+            config.security.encrypt_dotfiles,
+            profile,
+            shared,
+        );
+        let remote_file = sync_path.join(&repo_rel);
+        let remote_content = if remote_file.exists() {
+            let raw = std::fs::read(&remote_file)?;
+            if config.security.encrypt_dotfiles {
+                crate::security::decrypt(&raw, key.as_ref().unwrap())?
             } else {
-                Vec::new()
+                raw
             }
         } else {
-            let plain_file = dotfiles_dir.join(filename);
-            if plain_file.exists() {
-                std::fs::read(&plain_file)?
-            } else {
-                Vec::new()
-            }
+            Vec::new()
         };
 
         let conflict = FileConflict {

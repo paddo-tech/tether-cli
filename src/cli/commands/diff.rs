@@ -77,21 +77,24 @@ fn show_dotfile_diff(
     sync_path: &std::path::Path,
     home: &std::path::Path,
 ) -> Result<()> {
-    let dotfiles_dir = sync_path.join("dotfiles");
-
     let mut diffs: Vec<(String, String, String)> = Vec::new(); // (file, status, details)
 
-    for entry in &config.dotfiles.files {
+    let machine_id = &state.machine_id;
+    let profile = config.profile_name(machine_id);
+
+    for entry in config.effective_dotfiles(machine_id) {
         let file = entry.path();
         let local_path = home.join(file);
-        let filename = file.trim_start_matches('.');
 
-        // Check both encrypted and plain versions
-        let remote_path = if config.security.encrypt_dotfiles {
-            dotfiles_dir.join(format!("{}.enc", filename))
-        } else {
-            dotfiles_dir.join(filename)
-        };
+        let shared = config.is_dotfile_shared(machine_id, file);
+        let repo_rel = crate::sync::resolve_dotfile_repo_path(
+            sync_path,
+            file,
+            config.security.encrypt_dotfiles,
+            profile,
+            shared,
+        );
+        let remote_path = sync_path.join(&repo_rel);
 
         let local_exists = local_path.exists();
         let remote_exists = remote_path.exists();

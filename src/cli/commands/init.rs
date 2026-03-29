@@ -25,7 +25,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
         if has_personal {
             Output::info("Running sync to preserve your data...");
-            if let Err(e) = super::sync::run(false, false).await {
+            if let Err(e) = super::sync::run(false, false, false).await {
                 Output::warning(&format!("Sync failed: {}", e));
                 if !Prompt::confirm(
                     "Continue with reinit anyway? (may lose unsynced changes)",
@@ -97,9 +97,8 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
             GitBackend::clone(&repo_url, &sync_path)?;
         }
 
-        // Create sync repo structure
+        // Create sync repo structure (profiles/ created by migration or export)
         std::fs::create_dir_all(sync_path.join("manifests"))?;
-        std::fs::create_dir_all(sync_path.join("dotfiles"))?;
         std::fs::create_dir_all(sync_path.join("machines"))?;
 
         crate::sync::check_sync_format_version(&sync_path)?;
@@ -107,6 +106,16 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         // Setup encryption if enabled
         if config.security.encrypt_dotfiles {
             setup_encryption()?;
+        }
+
+        // Load synced config from repo to discover existing profiles
+        if let Some(synced) = load_synced_config(&sync_path) {
+            for (k, v) in synced.profiles {
+                config.profiles.entry(k).or_insert(v);
+            }
+            for (k, v) in synced.machine_profiles {
+                config.machine_profiles.entry(k).or_insert(v);
+            }
         }
     } else {
         // No personal features - create minimal .tether directory
@@ -118,6 +127,11 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         config.security.encrypt_dotfiles = false;
     }
 
+    // Profile assignment
+    if needs_personal_repo {
+        assign_profile_during_init(&mut config)?;
+    }
+
     config.save()?;
 
     // Create initial state
@@ -126,7 +140,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
     // Initial sync (only if personal features enabled)
     if needs_personal_repo {
-        super::sync::run(false, false).await?;
+        super::sync::run(false, false, false).await?;
     }
 
     // Install daemon for auto-sync (unless opted out)
@@ -198,6 +212,140 @@ fn select_features(current: &FeaturesConfig) -> Result<FeaturesConfig> {
         collab_secrets: selected.contains(&3),
         team_layering: current.team_layering, // Preserve hidden setting
     })
+}
+
+/// Assign a profile to the current machine during init.
+fn assign_profile_during_init(config: &mut Config) -> Result<()> {
+    let state = SyncState::load()?;
+    let machine_id = &state.machine_id;
+
+    // Already assigned
+    if config.machine_profiles.contains_key(machine_id) {
+        return Ok(());
+    }
+
+    if config.profiles.is_empty() {
+        // No profiles exist yet — v1->v2 migration should have created "dev"
+        // but if it hasn't (e.g., fresh init), create it now
+        config.migrate_v1_to_v2();
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), "dev".to_string());
+        return Ok(());
+    }
+
+    // Profiles exist — let user pick
+    let mut names: Vec<&str> = config.profiles.keys().map(|s| s.as_str()).collect();
+    names.sort();
+    let mut options: Vec<&str> = names.clone();
+    options.push("Create new");
+
+    let idx = Prompt::select("Assign a profile to this machine", options.clone(), 0)?;
+
+    if idx < names.len() {
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), names[idx].to_string());
+        Output::success(&format!("Assigned profile '{}'", names[idx]));
+    } else {
+        // Create new
+        let name = Prompt::input("Profile name", None)?;
+        if name.is_empty() {
+            Output::warning("Skipping profile creation");
+            return Ok(());
+        }
+        if !Config::is_safe_profile_name(&name) {
+            Output::error(&format!("Invalid profile name: '{}'", name));
+            return Ok(());
+        }
+        if !config.profiles.contains_key(&name) {
+            // Start empty — first sync exports local dotfiles, packages detected locally
+            config.profiles.insert(
+                name.clone(),
+                crate::config::ProfileConfig {
+                    dotfiles: vec![],
+                    dirs: vec![],
+                    packages: detect_local_managers(),
+                },
+            );
+        }
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), name.clone());
+        Output::success(&format!("Created and assigned profile '{}'", name));
+    }
+
+    Ok(())
+}
+
+/// Try to load config from the synced repo (encrypted).
+/// Returns None if file doesn't exist or encryption is not set up yet.
+fn load_synced_config(sync_path: &std::path::Path) -> Option<Config> {
+    let new_path = sync_path.join("configs/tether/config.toml.enc");
+    let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
+    let enc_file = if new_path.exists() {
+        new_path
+    } else {
+        legacy_path
+    };
+
+    if !enc_file.exists() {
+        return None;
+    }
+
+    let key = match crate::security::get_encryption_key() {
+        Ok(k) => k,
+        Err(_) => return None, // no key yet (fresh setup) — not an error
+    };
+
+    let encrypted = match std::fs::read(&enc_file) {
+        Ok(data) => data,
+        Err(e) => {
+            Output::warning(&format!("Could not read synced config: {}", e));
+            return None;
+        }
+    };
+
+    let plaintext = match crate::security::decrypt(&encrypted, &key) {
+        Ok(p) => p,
+        Err(e) => {
+            Output::warning(&format!("Could not decrypt synced config: {}", e));
+            return None;
+        }
+    };
+
+    let toml_str = match std::str::from_utf8(&plaintext) {
+        Ok(s) => s,
+        Err(_) => {
+            Output::warning("Synced config is not valid UTF-8");
+            return None;
+        }
+    };
+
+    match toml::from_str(toml_str) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            Output::warning(&format!("Could not parse synced config: {}", e));
+            None
+        }
+    }
+}
+
+/// Detect which package managers are installed on this machine.
+fn detect_local_managers() -> Vec<String> {
+    let checks: &[(&str, &str)] = &[
+        ("brew", "brew"),
+        ("npm", "npm"),
+        ("pnpm", "pnpm"),
+        ("bun", "bun"),
+        ("gem", "gem"),
+        ("uv", "uv"),
+    ];
+    checks
+        .iter()
+        .filter(|(_, bin)| which::which(bin).is_ok())
+        .map(|(name, _)| name.to_string())
+        .collect()
 }
 
 fn setup_encryption() -> Result<()> {

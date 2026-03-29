@@ -20,6 +20,9 @@ pub struct SyncState {
     /// Hash of deferred_casks for change detection (notify once)
     #[serde(default)]
     pub deferred_casks_hash: Option<String>,
+    /// Dotfile paths dismissed when prompted to import from other profiles
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub dismissed_imports: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +88,9 @@ pub struct MachineState {
     /// Multiple checkouts per project URL (project_key -> list of checkouts)
     #[serde(default)]
     pub checkouts: HashMap<String, Vec<CheckoutInfo>>,
+    /// Profile assigned to this machine (if any)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl Default for MachineState {
@@ -114,6 +120,7 @@ impl MachineState {
             project_configs: HashMap::new(),
             ignored_project_configs: HashMap::new(),
             checkouts: HashMap::new(),
+            profile: None,
         }
     }
 
@@ -267,6 +274,7 @@ impl SyncState {
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
+            dismissed_imports: std::collections::HashSet::new(),
         }
     }
 

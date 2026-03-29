@@ -34,7 +34,7 @@ fn build_project_map(search_paths: &[PathBuf]) -> HashMap<String, Vec<PathBuf>> 
     project_map
 }
 
-pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
+pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
     if dry_run {
         Output::info("Dry-run mode");
     }
@@ -94,9 +94,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
-    let dotfiles_dir = sync_path.join("dotfiles");
-    std::fs::create_dir_all(&dotfiles_dir)?;
-
     // Always sync tether config first (hardcoded, not dependent on config)
     // This ensures config changes from other machines are applied before using config
     if config.security.encrypt_dotfiles && !dry_run {
@@ -106,6 +103,14 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
     }
 
     let mut state = SyncState::load()?;
+
+    // Auto-assign machine to "dev" profile on first run after v2 migration
+    if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
+        config
+            .machine_profiles
+            .insert(state.machine_id.clone(), "dev".to_string());
+        config.save()?;
+    }
 
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
@@ -119,16 +124,42 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             &config,
             &sync_path,
             &home,
-            &state,
+            &mut state,
             &machine_state_for_decrypt,
             interactive,
         )?;
     }
 
+    // Interactive mode: offer files from other profiles
+    if interactive && !dry_run && config.features.personal_dotfiles {
+        if rediscover {
+            state.dismissed_imports.clear();
+        }
+        let machine_id_for_prompt = state.machine_id.clone();
+        if let Ok(true) =
+            prompt_new_items(&mut config, &machine_id_for_prompt, &sync_path, &mut state)
+        {
+            // Config changed, dotfile list expanded — re-decrypt for newly added files
+            if config.security.encrypt_dotfiles {
+                decrypt_from_repo(
+                    &config,
+                    &sync_path,
+                    &home,
+                    &mut state,
+                    &machine_state_for_decrypt,
+                    interactive,
+                )?;
+            }
+        }
+    }
+
     // Sync dotfiles (local → Git) - only if personal dotfiles enabled
     if config.features.personal_dotfiles {
+        let machine_id = state.machine_id.clone();
+        let upload_profile = config.profile_name(&machine_id).to_string();
+
         // Sync individual dotfiles (with glob expansion)
-        for entry in &config.dotfiles.files {
+        for entry in config.effective_dotfiles(&machine_id) {
             // Validate path before expansion to prevent traversal attacks
             if !entry.is_safe_path() {
                 Output::warning(&format!("Skipping unsafe dotfile path: {}", entry.path()));
@@ -136,9 +167,20 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             }
 
             let pattern = entry.path();
+            let shared = config.is_dotfile_shared(&machine_id, pattern);
             let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
             for file in expanded {
+                if !dry_run {
+                    crate::sync::migrate_dotfile_shared_change(
+                        &sync_path,
+                        &file,
+                        config.security.encrypt_dotfiles,
+                        &upload_profile,
+                        shared,
+                    )?;
+                }
+
                 let source = home.join(&file);
 
                 if source.exists() {
@@ -152,22 +194,36 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
                             .unwrap_or(true);
 
                         if file_changed && !dry_run {
-                            let filename = file.trim_start_matches('.');
-
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt(&content, &key)?;
-                                let dest = dotfiles_dir.join(format!("{}.enc", filename));
+                                let encrypted_data = crate::security::encrypt(&content, &key)?;
+                                let repo_path = crate::sync::dotfile_to_repo_path_profiled(
+                                    &file,
+                                    true,
+                                    &upload_profile,
+                                    shared,
+                                );
+                                let dest = sync_path.join(&repo_path);
                                 if let Some(parent) = dest.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
-                                std::fs::write(&dest, encrypted)?;
+                                std::fs::write(&dest, encrypted_data)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(&source, &dest);
                             } else {
-                                let dest = dotfiles_dir.join(filename);
+                                let repo_path = crate::sync::dotfile_to_repo_path_profiled(
+                                    &file,
+                                    false,
+                                    &upload_profile,
+                                    shared,
+                                );
+                                let dest = sync_path.join(&repo_path);
                                 if let Some(parent) = dest.parent() {
                                     std::fs::create_dir_all(parent)?;
                                 }
                                 std::fs::write(&dest, &content)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(&source, &dest);
                             }
 
                             state.update_file(&file, hash.clone());
@@ -179,10 +235,19 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
         // Auto-discover directories sourced from shell configs and add to config
         if !dry_run {
-            let discovered = crate::sync::discover_sourced_dirs(&home, &config.dotfiles.files);
+            let effective = config.effective_dotfiles(&machine_id);
+            let discovered = crate::sync::discover_sourced_dirs(&home, &effective);
             let mut config_changed = false;
             for dir in discovered {
-                if !config.dotfiles.dirs.contains(&dir) {
+                // Push to current profile's dirs (or global if no profile)
+                let current_profile = config.profile_name(&machine_id).to_string();
+                if let Some(profile) = config.profiles.get_mut(&current_profile) {
+                    if !profile.dirs.contains(&dir) {
+                        Output::info(&format!("Auto-discovered sourced directory: {}", dir));
+                        profile.dirs.push(dir);
+                        config_changed = true;
+                    }
+                } else if !config.dotfiles.dirs.contains(&dir) {
                     Output::info(&format!("Auto-discovered sourced directory: {}", dir));
                     config.dotfiles.dirs.push(dir);
                     config_changed = true;
@@ -190,13 +255,17 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             }
             if config_changed {
                 config.dotfiles.dirs.sort();
+                for profile in config.profiles.values_mut() {
+                    profile.dirs.sort();
+                }
                 config.save()?;
             }
         }
 
         // Sync global config directories
-        if !config.dotfiles.dirs.is_empty() {
-            sync_directories(&config, &mut state, &sync_path, &home, dry_run)?;
+        let effective_dirs = config.effective_dirs(&machine_id);
+        if !effective_dirs.is_empty() {
+            sync_directories(&config, &machine_id, &mut state, &sync_path, &home, dry_run)?;
         }
 
         // Sync project-local configs (personal)
@@ -207,7 +276,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Sync team project secrets
     if !dry_run {
-        sync_team_project_secrets(&config, &home)?;
+        sync_team_project_secrets(&config, &home, &mut state)?;
     }
 
     // Build machine state first (to know what's installed locally + respect removed_packages)
@@ -266,9 +335,6 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
             git.push()?;
             pb.finish_and_clear();
         }
-
-        state.mark_synced();
-        state.save()?;
     }
 
     // Check and push team repo changes (if write access enabled)
@@ -314,7 +380,7 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
 
     // Sync collab secrets (only if feature enabled)
     if !dry_run && config.features.collab_secrets {
-        sync_collab_secrets(&config, &home)?;
+        sync_collab_secrets(&config, &home, &mut state)?;
     }
 
     // Prune old backups
@@ -324,12 +390,19 @@ pub async fn run(dry_run: bool, _force: bool) -> Result<()> {
         }
     }
 
+    if !dry_run {
+        state.mark_synced();
+        state.save()?;
+    }
+
     Output::success("Synced");
     Ok(())
 }
 
 /// Sync secrets from collab repos to local projects
-fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
+pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) -> Result<()> {
+    use crate::sync::{backup_file, create_backup_dir};
+
     let teams = match &config.teams {
         Some(t) if !t.collabs.is_empty() => t,
         _ => return Ok(()), // No collabs configured
@@ -365,6 +438,8 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
         Ok(id) => id,
         Err(_) => return Ok(()), // No identity, can't decrypt
     };
+
+    let mut backup_dir: Option<PathBuf> = None;
 
     // Process each collab
     for (collab_name, collab_config) in &teams.collabs {
@@ -458,6 +533,11 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                         continue;
                     }
 
+                    let state_key =
+                        format!("collab-secret:{}/{}/{}", collab_name, project_url, filename);
+                    let last_synced_hash = state.files.get(&state_key).map(|f| f.hash.as_str());
+                    let remote_hash = format!("{:x}", Sha256::digest(&decrypted));
+
                     // Write to all checkouts of this project
                     for local_project in checkouts {
                         let dest = local_project.join(filename);
@@ -489,15 +569,46 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                             }
                         }
 
-                        // Only write if content differs
                         let should_write = if dest.exists() {
-                            std::fs::read(&dest).map(|c| c != decrypted).unwrap_or(true)
+                            let existing = std::fs::read(&dest).unwrap_or_default();
+                            let local_hash = format!("{:x}", Sha256::digest(&existing));
+                            if local_hash == remote_hash {
+                                false // Already in sync
+                            } else {
+                                match last_synced_hash {
+                                    Some(h) => {
+                                        if local_hash == h {
+                                            true
+                                        } else {
+                                            log::info!(
+                                                "Preserving local changes to collab secret: {}/{}",
+                                                project_url,
+                                                filename
+                                            );
+                                            false
+                                        }
+                                    }
+                                    None => true,
+                                }
+                            }
                         } else {
                             true
                         };
 
                         if should_write {
-                            std::fs::write(&dest, &decrypted)?;
+                            if dest.exists() {
+                                if backup_dir.is_none() {
+                                    backup_dir = Some(create_backup_dir()?);
+                                }
+                                let backup_path = format!("{}/{}", project_url, filename);
+                                backup_file(
+                                    backup_dir.as_ref().unwrap(),
+                                    "collab-secrets",
+                                    &backup_path,
+                                    &dest,
+                                )?;
+                            }
+                            write_decrypted(&dest, &decrypted)?;
                             log::debug!(
                                 "Synced collab secret: {} -> {}",
                                 filename,
@@ -505,6 +616,8 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
                             );
                         }
                     }
+
+                    state.update_file(&state_key, remote_hash);
                 }
                 Err(e) => {
                     let err_str = e.to_string().to_lowercase();
@@ -521,11 +634,38 @@ fn sync_collab_secrets(config: &Config, home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn decrypt_from_repo(
+/// Copy owner executable bit from source to dest.
+/// Git tracks this bit, so it travels across machines via the sync repo.
+#[cfg(unix)]
+fn preserve_executable_bit(source: &Path, dest: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let is_exec = std::fs::metadata(source)
+        .map(|m| m.permissions().mode() & 0o100 != 0)
+        .unwrap_or(false);
+    if is_exec {
+        if let Ok(meta) = std::fs::metadata(dest) {
+            let mode = meta.permissions().mode() | 0o100;
+            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode));
+        }
+    }
+}
+
+/// Write decrypted content with secure permissions (0o600 on Unix)
+fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
     home: &Path,
-    state: &SyncState,
+    state: &mut SyncState,
     machine_state: &MachineState,
     interactive: bool,
 ) -> Result<()> {
@@ -541,7 +681,20 @@ fn decrypt_from_repo(
     // Create backup directory for this sync (lazily - only if needed)
     let mut backup_dir: Option<PathBuf> = None;
 
-    for entry in &config.dotfiles.files {
+    let machine_id = &state.machine_id.clone();
+    let profile_name = config.profile_name(machine_id).to_string();
+
+    // Migrate flat repo to profiled layout on first sync after config v2 migration
+    if let Err(e) = crate::sync::migrate_repo_to_profiled(sync_path, config, machine_id) {
+        log::warn!("Repo migration failed: {}", e);
+    }
+
+    // Clean up legacy flat/old-profiled files once all machines are upgraded
+    if let Err(e) = crate::sync::cleanup_legacy_dotfiles(sync_path) {
+        log::warn!("Legacy cleanup failed: {}", e);
+    }
+
+    for entry in config.effective_dotfiles(machine_id) {
         // Validate path before expansion to prevent traversal attacks
         if !entry.is_safe_path() {
             Output::warning(&format!("Skipping unsafe dotfile path: {}", entry.path()));
@@ -552,8 +705,24 @@ fn decrypt_from_repo(
         // Glob patterns default to create_if_missing = true (sync all matching files from other machines)
         let create_if_missing = entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
 
+        let shared = config.is_dotfile_shared(machine_id, pattern);
+
         // Expand glob pattern by scanning sync repo for matching .enc files
-        let expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
+        // Check both profiled and flat dirs for backwards compat
+        let subdir = if shared { "shared" } else { &profile_name };
+        let profiled_dir = sync_path.join("profiles").join(subdir);
+        let mut expanded = if profiled_dir.exists() {
+            crate::sync::expand_from_sync_repo(pattern, &profiled_dir)
+        } else {
+            vec![]
+        };
+        // Also check flat dir for un-migrated files (only if profiles/ doesn't exist yet)
+        if expanded.is_empty()
+            && dotfiles_dir.exists()
+            && crate::sync::is_pre_migration_repo(sync_path)
+        {
+            expanded = crate::sync::expand_from_sync_repo(pattern, &dotfiles_dir);
+        }
 
         for file in expanded {
             // Skip if this dotfile is ignored on this machine
@@ -561,8 +730,15 @@ fn decrypt_from_repo(
                 continue;
             }
 
-            let filename = file.trim_start_matches('.');
-            let enc_file = dotfiles_dir.join(format!("{}.enc", filename));
+            // Resolve repo path: profile dir first, flat fallback
+            let repo_path = crate::sync::resolve_dotfile_repo_path(
+                sync_path,
+                &file,
+                true, // encrypted
+                &profile_name,
+                shared,
+            );
+            let enc_file = sync_path.join(&repo_path);
 
             if enc_file.exists() {
                 let encrypted_content = std::fs::read(&enc_file)?;
@@ -601,7 +777,9 @@ fn decrypt_from_repo(
                                                 &local_file,
                                             )?;
                                         }
-                                        std::fs::write(&local_file, &plaintext)?;
+                                        write_decrypted(&local_file, &plaintext)?;
+                                        #[cfg(unix)]
+                                        preserve_executable_bit(&enc_file, &local_file);
                                         conflict_state.remove_conflict(&file);
                                     }
                                     ConflictResolution::Merged => {
@@ -647,7 +825,12 @@ fn decrypt_from_repo(
                                         &local_file,
                                     )?;
                                 }
-                                std::fs::write(&local_file, plaintext)?;
+                                if let Some(parent) = local_file.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
+                                write_decrypted(&local_file, &plaintext)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(&enc_file, &local_file);
                             }
                             conflict_state.remove_conflict(&file);
                         }
@@ -719,7 +902,9 @@ fn decrypt_from_repo(
                                     .map(|c| format!("{:x}", Sha256::digest(&c)));
                                 let local_unchanged = local_hash.as_deref() == last_synced_hash;
                                 if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
-                                    std::fs::write(&local_file, plaintext)?;
+                                    write_decrypted(&local_file, &plaintext)?;
+                                    #[cfg(unix)]
+                                    preserve_executable_bit(file_path, &local_file);
                                 }
                             }
                             Err(e) => {
@@ -741,6 +926,155 @@ fn decrypt_from_repo(
     }
 
     Ok(())
+}
+
+/// During interactive sync, scan other profiles for files not in the current profile.
+/// Offers to add selected files to the current profile as profile-specific copies.
+/// Returns true if config was modified.
+pub fn prompt_new_items(
+    config: &mut Config,
+    machine_id: &str,
+    sync_path: &Path,
+    state: &mut crate::sync::state::SyncState,
+) -> Result<bool> {
+    let encrypted = config.security.encrypt_dotfiles;
+    let current_profile = config.profile_name(machine_id).to_string();
+    let profiles_dir = sync_path.join("profiles");
+
+    // Gather current profile's dotfile paths
+    let current_paths: std::collections::HashSet<String> = config
+        .effective_dotfiles(machine_id)
+        .iter()
+        .map(|e| e.path().to_string())
+        .collect();
+
+    // Scan other profile directories for .enc files
+    // Only consider directories that are known profile names (not flat-layout subdirs like config/)
+    let known_profiles: std::collections::HashSet<&str> =
+        config.profiles.keys().map(|s| s.as_str()).collect();
+
+    let mut candidates: Vec<(String, String)> = Vec::new(); // (dotfile_path, source_profile)
+
+    if let Ok(entries) = std::fs::read_dir(&profiles_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir_name = entry.file_name().to_string_lossy().to_string();
+            // Skip current profile and shared (shared is already accessible)
+            if dir_name == current_profile || dir_name == "shared" {
+                continue;
+            }
+            // Only scan known profile directories
+            if !known_profiles.contains(dir_name.as_str()) {
+                continue;
+            }
+
+            // Walk this profile dir recursively for .enc files
+            for file in walkdir::WalkDir::new(entry.path())
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+            {
+                let fname = file.path().to_string_lossy().to_string();
+                if encrypted && fname.ends_with(".enc") {
+                    if let Ok(rel) = file.path().strip_prefix(entry.path()) {
+                        let rel_str = rel.to_string_lossy();
+                        let name = rel_str.trim_end_matches(".enc");
+                        let dotfile = format!(".{}", name);
+                        if !current_paths.contains(&dotfile) {
+                            candidates.push((dotfile, dir_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup_by(|a, b| a.0 == b.0);
+
+    // Filter out previously dismissed files
+    candidates.retain(|(path, _)| !state.dismissed_imports.contains(path));
+
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+
+    let options: Vec<String> = candidates
+        .iter()
+        .map(|(path, profile)| format!("{} (from {})", path, profile))
+        .collect();
+    let options_ref: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
+
+    let selected = match Prompt::multi_select(
+        "New files from other profiles — add to yours?",
+        options_ref,
+        &[],
+    ) {
+        Ok(sel) => sel,
+        Err(_) => {
+            // Cancelled — dismiss all candidates
+            for (path, _) in &candidates {
+                state.dismissed_imports.insert(path.clone());
+            }
+            return Ok(false);
+        }
+    };
+
+    if selected.is_empty() {
+        // Selected nothing — dismiss all candidates
+        for (path, _) in &candidates {
+            state.dismissed_imports.insert(path.clone());
+        }
+        return Ok(false);
+    }
+
+    // Dismiss non-selected files so we don't re-prompt
+    let selected_set: std::collections::HashSet<usize> = selected.iter().copied().collect();
+    for (i, (path, _)) in candidates.iter().enumerate() {
+        if !selected_set.contains(&i) {
+            state.dismissed_imports.insert(path.clone());
+        }
+    }
+
+    // Add selected files to current profile
+    let profile = config.profiles.entry(current_profile.clone()).or_default();
+
+    for idx in selected {
+        let (dotfile_path, source_profile) = &candidates[idx];
+        profile
+            .dotfiles
+            .push(crate::config::ProfileDotfileEntry::Simple(
+                dotfile_path.clone(),
+            ));
+
+        // Copy the file from source profile to current profile
+        let src_repo_path = crate::sync::dotfile_to_repo_path_profiled(
+            dotfile_path,
+            encrypted,
+            source_profile,
+            false,
+        );
+        let dst_repo_path = crate::sync::dotfile_to_repo_path_profiled(
+            dotfile_path,
+            encrypted,
+            &current_profile,
+            false,
+        );
+        let src = sync_path.join(&src_repo_path);
+        let dst = sync_path.join(&dst_repo_path);
+        if src.exists() && !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+
+    config.save()?;
+    Ok(true)
 }
 
 /// Ensure checkout_file is a symlink pointing to canonical_path.
@@ -823,7 +1157,7 @@ fn decrypt_project_configs(
     sync_path: &Path,
     home: &Path,
     machine_state: &MachineState,
-    state: &SyncState,
+    state: &mut SyncState,
     key: &[u8],
 ) -> Result<()> {
     use crate::sync::{backup_file, create_backup_dir};
@@ -991,7 +1325,18 @@ fn decrypt_project_configs(
                                     }
 
                                     crate::sync::atomic_write(&canonical_path, &plaintext)?;
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        std::fs::set_permissions(
+                                            &canonical_path,
+                                            std::fs::Permissions::from_mode(0o600),
+                                        )?;
+                                    }
+                                    #[cfg(unix)]
+                                    preserve_executable_bit(enc_file, &canonical_path);
                                 }
+                                state.update_file(&state_key, remote_hash);
                             }
 
                             // Create symlinks in all checkouts
@@ -1025,8 +1370,14 @@ fn decrypt_project_configs(
 /// Sync tether config from remote (always, independent of config file list)
 /// Only applies remote if local config hasn't changed since last sync (to avoid overwriting local edits)
 /// Returns Some(config) if remote config was applied, None otherwise
-fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
-    let enc_file = sync_path.join("dotfiles/tether/config.toml.enc");
+pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
+    let new_path = sync_path.join("configs/tether/config.toml.enc");
+    let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
+    let enc_file = if new_path.exists() {
+        new_path
+    } else {
+        legacy_path
+    };
 
     if !enc_file.exists() {
         return Ok(None);
@@ -1083,7 +1434,7 @@ fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
 }
 
 /// Export tether config to sync repo (always, independent of config file list)
-fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) -> Result<()> {
+pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) -> Result<()> {
     let config_path = home.join(".tether/config.toml");
 
     if !config_path.exists() {
@@ -1093,7 +1444,7 @@ fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) ->
     let content = std::fs::read(&config_path)?;
     let hash = format!("{:x}", Sha256::digest(&content));
 
-    let dest_dir = sync_path.join("dotfiles/tether");
+    let dest_dir = sync_path.join("configs/tether");
     std::fs::create_dir_all(&dest_dir)?;
 
     let dest = dest_dir.join("config.toml.enc");
@@ -1116,8 +1467,9 @@ fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) ->
     Ok(())
 }
 
-fn sync_directories(
+pub fn sync_directories(
     config: &Config,
+    machine_id: &str,
     state: &mut SyncState,
     sync_path: &Path,
     home: &Path,
@@ -1128,7 +1480,7 @@ fn sync_directories(
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
 
-    for dir_path in &config.dotfiles.dirs {
+    for dir_path in config.effective_dirs(machine_id) {
         // Validate path is safe (security: prevents path traversal via synced config)
         if !crate::config::is_safe_dotfile_path(dir_path) {
             Output::warning(&format!("  {} (unsafe path, skipping)", dir_path));
@@ -1166,9 +1518,14 @@ fn sync_directories(
                     if config.security.encrypt_dotfiles {
                         let key = crate::security::get_encryption_key()?;
                         let encrypted = crate::security::encrypt(&content, &key)?;
-                        std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                        let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
+                        std::fs::write(&enc_dest, encrypted)?;
+                        #[cfg(unix)]
+                        preserve_executable_bit(&expanded_path, &enc_dest);
                     } else {
                         std::fs::write(&dest, &content)?;
+                        #[cfg(unix)]
+                        preserve_executable_bit(&expanded_path, &dest);
                     }
 
                     state.update_file(dir_path, hash);
@@ -1205,9 +1562,14 @@ fn sync_directories(
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
                                 let encrypted = crate::security::encrypt(&content, &key)?;
-                                std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                                let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
+                                std::fs::write(&enc_dest, encrypted)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &enc_dest);
                             } else {
                                 std::fs::write(&dest, &content)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &dest);
                             }
 
                             state.update_file(&state_key, hash);
@@ -1221,7 +1583,7 @@ fn sync_directories(
     Ok(())
 }
 
-fn sync_project_configs(
+pub fn sync_project_configs(
     config: &Config,
     state: &mut SyncState,
     sync_path: &Path,
@@ -1270,7 +1632,7 @@ fn sync_project_configs(
 
             for pattern in &config.project_configs.patterns {
                 let walker = WalkDir::new(&repo_path)
-                    .follow_links(false)
+                    .follow_links(true)
                     .max_depth(5)
                     .into_iter()
                     .filter_entry(|e| {
@@ -1351,9 +1713,14 @@ fn sync_project_configs(
                             if config.security.encrypt_dotfiles {
                                 let key = crate::security::get_encryption_key()?;
                                 let encrypted = crate::security::encrypt(&content, &key)?;
-                                std::fs::write(format!("{}.enc", dest.display()), encrypted)?;
+                                let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
+                                std::fs::write(&enc_dest, encrypted)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &enc_dest);
                             } else {
                                 std::fs::write(&dest, &content)?;
+                                #[cfg(unix)]
+                                preserve_executable_bit(file_path, &dest);
                             }
 
                             state.update_file(&state_key, hash);
@@ -1368,7 +1735,7 @@ fn sync_project_configs(
 }
 
 /// Build machine state for cross-machine comparison
-async fn build_machine_state(
+pub async fn build_machine_state(
     config: &Config,
     state: &SyncState,
     sync_path: &Path,
@@ -1377,9 +1744,10 @@ async fn build_machine_state(
     let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Update last_sync time and CLI version
+    // Update last_sync time, CLI version, and profile
     machine_state.last_sync = chrono::Utc::now();
     machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
+    machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
 
     // Collect file hashes
     machine_state.files.clear();
@@ -1393,8 +1761,9 @@ async fn build_machine_state(
     let previous_packages = machine_state.packages.clone();
     machine_state.packages.clear();
 
+    let mid = &state.machine_id;
     // Homebrew
-    if config.packages.brew.enabled {
+    if config.is_manager_enabled(mid, "brew") {
         let brew = BrewManager::new();
         if brew.is_available().await {
             // Get formulae
@@ -1419,11 +1788,26 @@ async fn build_machine_state(
 
     // Standard managers (same pattern: check enabled, check available, list installed)
     let managers: Vec<(bool, Box<dyn PackageManager>)> = vec![
-        (config.packages.npm.enabled, Box::new(NpmManager::new())),
-        (config.packages.pnpm.enabled, Box::new(PnpmManager::new())),
-        (config.packages.bun.enabled, Box::new(BunManager::new())),
-        (config.packages.gem.enabled, Box::new(GemManager::new())),
-        (config.packages.uv.enabled, Box::new(UvManager::new())),
+        (
+            config.is_manager_enabled(mid, "npm"),
+            Box::new(NpmManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "pnpm"),
+            Box::new(PnpmManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "bun"),
+            Box::new(BunManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "gem"),
+            Box::new(GemManager::new()),
+        ),
+        (
+            config.is_manager_enabled(mid, "uv"),
+            Box::new(UvManager::new()),
+        ),
     ];
 
     for (enabled, manager) in managers {
@@ -1456,7 +1840,7 @@ async fn build_machine_state(
     // Populate dotfiles list from config (files that exist locally, with glob expansion)
     let home = crate::home_dir()?;
     machine_state.dotfiles.clear();
-    for entry in &config.dotfiles.files {
+    for entry in config.effective_dotfiles(&state.machine_id) {
         if !entry.is_safe_path() {
             continue;
         }
@@ -1563,7 +1947,11 @@ fn detect_removed_packages(
 }
 
 /// Sync project secrets from team repos to local projects
-pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
+pub fn sync_team_project_secrets(
+    config: &Config,
+    home: &Path,
+    state: &mut SyncState,
+) -> Result<()> {
     use crate::sync::{backup_file, create_backup_dir};
     use walkdir::WalkDir;
 
@@ -1681,14 +2069,37 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                 Ok(encrypted) => {
                     match crate::security::decrypt_with_identity(&encrypted, &identity) {
                         Ok(decrypted) => {
+                            let state_key =
+                                format!("team-secret:{}/{}", normalized_url, rel_file_no_age);
+                            let last_synced_hash =
+                                state.files.get(&state_key).map(|f| f.hash.as_str());
+                            let remote_hash = format!("{:x}", Sha256::digest(&decrypted));
+
                             for local_project in checkouts {
                                 let local_file = local_project.join(rel_file_no_age);
 
-                                // Only write if different or doesn't exist
                                 let should_write = if local_file.exists() {
-                                    std::fs::read(&local_file)
-                                        .map(|existing| existing != decrypted)
-                                        .unwrap_or(true)
+                                    let existing = std::fs::read(&local_file).unwrap_or_default();
+                                    let local_hash = format!("{:x}", Sha256::digest(&existing));
+                                    if local_hash == remote_hash {
+                                        false // Already in sync
+                                    } else {
+                                        match last_synced_hash {
+                                            Some(h) => {
+                                                if local_hash == h {
+                                                    true
+                                                } else {
+                                                    log::info!(
+                                                        "Preserving local changes to team secret: {}/{}",
+                                                        normalized_url,
+                                                        rel_file_no_age
+                                                    );
+                                                    false
+                                                }
+                                            }
+                                            None => true,
+                                        }
+                                    }
                                 } else {
                                     true
                                 };
@@ -1711,7 +2122,7 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                                     if let Some(parent) = local_file.parent() {
                                         std::fs::create_dir_all(parent)?;
                                     }
-                                    std::fs::write(&local_file, &decrypted)?;
+                                    write_decrypted(&local_file, &decrypted)?;
                                     Output::success(&format!(
                                         "Team secret: {} → {}",
                                         rel_file_no_age,
@@ -1719,6 +2130,8 @@ pub fn sync_team_project_secrets(config: &Config, home: &Path) -> Result<()> {
                                     ));
                                 }
                             }
+
+                            state.update_file(&state_key, remote_hash);
                         }
                         Err(e) => {
                             let err_str = e.to_string().to_lowercase();
@@ -1796,9 +2209,130 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 
     // Sync team project secrets to local projects
     if !dry_run {
-        sync_team_project_secrets(config, &home)?;
+        let mut state = SyncState::load()?;
+        sync_team_project_secrets(config, &home, &mut state)?;
+        state.save()?;
     }
 
     Output::success("Team sync complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_write_decrypted_creates_file_with_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("secret.env");
+        let content = b"API_KEY=hunter2";
+
+        write_decrypted(&path, content).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_decrypted_sets_secure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("secret.env");
+
+        write_decrypted(&path, b"secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_decrypted_overwrites_existing_and_fixes_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("secret.env");
+
+        // Create file with permissive permissions
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_decrypted(&path, b"new secret").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"new secret");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn test_write_decrypted_empty_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("empty");
+
+        write_decrypted(&path, b"").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+    }
+
+    #[test]
+    fn test_write_decrypted_fails_missing_parent() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("nonexistent_dir").join("file");
+
+        assert!(write_decrypted(&path, b"data").is_err());
+    }
+
+    #[test]
+    fn test_write_decrypted_binary_content() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("binary");
+        let content: Vec<u8> = (0..=255).collect();
+
+        write_decrypted(&path, &content).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), content);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_preserve_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("script.sh");
+        let dest = temp.path().join("script.sh.enc");
+
+        std::fs::write(&source, b"#!/bin/sh").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&dest, b"encrypted").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        preserve_executable_bit(&source, &dest);
+
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o744);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_preserve_executable_bit_not_set() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("config");
+        let dest = temp.path().join("config.enc");
+
+        std::fs::write(&source, b"key=value").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&dest, b"encrypted").unwrap();
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        preserve_executable_bit(&source, &dest);
+
+        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644);
+    }
 }

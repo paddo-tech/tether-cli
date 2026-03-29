@@ -3,14 +3,20 @@ use crate::dashboard::state::DashboardState;
 use crate::dashboard::DaemonOp;
 use ratatui::{prelude::*, widgets::*};
 
+pub enum FlashMessage<'a> {
+    Error(&'a str),
+    Success(&'a str),
+}
+
 pub fn render(
     f: &mut Frame,
     area: Rect,
     state: &DashboardState,
     syncing: bool,
     daemon_op: DaemonOp,
-    flash_error: Option<&str>,
+    flash: Option<FlashMessage>,
     uninstalling: Option<&(String, String)>,
+    installing: Option<&(String, String)>,
 ) {
     let mut spans = vec![Span::styled(
         " Tether ",
@@ -91,10 +97,23 @@ pub fn render(
         ));
     }
 
-    // Flash error
-    if let Some(msg) = flash_error {
+    // Installing
+    if let Some((_, pkg_name)) = installing {
         spans.push(Span::raw("  "));
-        spans.push(Span::styled(msg, Style::default().fg(Color::Red).bold()));
+        spans.push(Span::styled(
+            format!("installing {}...", pkg_name),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    // Flash message
+    if let Some(flash_msg) = flash {
+        let (msg, color) = match flash_msg {
+            FlashMessage::Error(m) => (m, Color::Red),
+            FlashMessage::Success(m) => (m, Color::Green),
+        };
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(msg, Style::default().fg(color).bold()));
     }
 
     // Features from config

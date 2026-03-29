@@ -2,7 +2,7 @@
   "name": "tether-cli-website",
   "version": "0.0.1",
   "dependencies": {
-    "astro": "^5.15.4"
+    "astro": "5.17.2"
   },
   "scripts": {
     "dev": "astro dev",

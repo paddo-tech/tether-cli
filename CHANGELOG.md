@@ -17,6 +17,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cross-platform path normalization (forward slashes in sync state)
 - Windows CI test matrix and release builds (`.zip` + SHA256)
 
+## [1.11.8] - 2026-03-09
+
+### Fixed
+
+- Directory-based dotfiles (`dotfiles.dirs`) now appear in dashboard Files tab
+- Deleted file detection includes `configs/` tracked files
+
+## [1.11.7] - 2026-02-24
+
+### Fixed
+
+- Cross-profile import prompt no longer re-asks for dismissed files on every sync
+- `tether sync --rediscover` flag to reset dismissed imports and re-prompt
+
+## [1.11.6] - 2026-02-23
+
+### Added
+
+- Graceful shared↔profile dotfile migration during sync (git mv preserves history)
+- Dashboard `t` key to toggle shared flag on dotfiles
+- Profile edit prompts for shared flag per dotfile
+- Profile name shown in `tether status`
+
+### Fixed
+
+- New profiles start empty instead of cloning dev's dotfile list
+
+## [1.11.5] - 2026-02-23
+
+### Fixed
+
+- New profiles detect locally installed package managers instead of cloning dev's list
+
+## [1.11.4] - 2026-02-23
+
+### Fixed
+
+- New machines joining a flat-only repo now correctly migrate dotfiles to profiled layout
+
+## [1.11.3] - 2026-02-23
+
+### Fixed
+
+- Profile-specific dotfiles no longer bleed across profiles via legacy flat layout fallback
+
+## [1.11.2] - 2026-02-23
+
+### Fixed
+
+- `tether init` on new machine now prompts for profile selection when synced profiles exist
+
+## [1.11.1] - 2026-02-22
+
+### Fixed
+
+- Legacy `dotfiles/` cleanup no longer blocked by sync recreating the directory
+- Dashboard profile picker no longer shows "(none)" option
+
+## [1.11.0] - 2026-02-22
+
+### Added
+
+- Machine profiles: assign named profiles to machines for per-machine dotfile/package control
+- Profile-aware sync: dotfiles stored under `profiles/<profile>/` with automatic flat-layout migration
+- `tether machines profile` subcommands: set, unset, create, edit, list
+- `tether history` command: show file change history from sync repo
+- `tether restore git` command: restore dotfiles from git history
+- Cross-profile discovery: interactive prompt to adopt dotfiles from other profiles
+- Dashboard: file history viewer with inline diffs and restore support
+- Dashboard: deleted file detection across profile and flat layouts
+- Dashboard: profile picker for machine assignment
+- Auto-cleanup of legacy `dotfiles/` tree once all machines are upgraded
+- Tether config moved from `dotfiles/tether/` to `configs/tether/` to avoid dotfile path collisions
+
+### Fixed
+
+- `tether diff` and `tether resolve` now use profile-aware repo paths
+- Glob patterns in dotfile config (e.g., `.claude/commands/*.md`) correctly migrate from flat to profiled layout
+
+## [1.10.0] - 2026-02-21
+
+### Added
+
+- Preserve executable bit (+x) during dotfile sync using git's native mode tracking
+
+## [1.9.9] - 2026-02-20
+
+### Fixed
+
+- Create parent directories when decrypting dotfiles from sync repo
+
+## [1.9.8] - 2026-02-20
+
+### Fixed
+
+- Daemon sync now uses same code paths as manual sync (was missing config import, directory sync, project configs, collab secrets, team repo push, auto-discover, and backup pruning)
+- Daemon package export now uses union-of-all-machines logic instead of local-only
+- Decrypted dotfiles written with secure permissions (0o600) in both daemon and manual sync
+- Manual sync now persists collab secret state (was lost due to early `state.save()`)
+- `mark_synced()` now always runs in daemon, even when only inbound changes occur
+
+## [1.9.7] - 2026-02-15
+
+### Fixed
+
+- Project config sync no longer drops local changes
+
+## [1.9.6] - 2026-02-15
+
+### Fixed
+
+- Project config export now follows symlinks to canonical files
+- "Local changes will be pushed" no longer repeats every sync
+
+## [1.9.5] - 2026-02-15
+
+### Fixed
+
+- Track synced state for project configs on import
+
+## [1.9.4] - 2026-02-15
+
+### Fixed
+
+- Track synced state for project configs on import (partial fix)
+
+## [1.9.3] - 2026-02-14
+
+### Changed
+
+- Update all dependencies to latest (age 0.11, git2 0.20, ratatui 0.30, notify 8.2, and others)
+- Remove unused `rand` direct dependency
+
+## [1.9.2] - 2026-02-14
+
+### Fixed
+
+- Daemon sync no longer overwrites local changes to team/collab secrets (e.g. `.env.local`)
+- Collab secrets now backed up before overwriting, matching team secrets behavior
+
 ## [1.9.1] - 2026-02-10
 
 ### Fixed

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use git2::{Repository, Signature};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -80,6 +81,10 @@ impl GitBackend {
         // Check if this is the first commit
         if self.has_commits() {
             let parent = repo.head()?.peel_to_commit()?;
+            // Skip empty commits (tree unchanged from parent)
+            if parent.tree()?.id() == oid {
+                return Ok(());
+            }
             repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
         } else {
             // Initial commit (no parent)
@@ -235,6 +240,187 @@ impl GitBackend {
 
         Ok(!output.stdout.is_empty())
     }
+
+    /// Get commit history for a specific file in the repo
+    pub fn file_log(&self, repo_path: &str, limit: usize) -> Result<Vec<FileLogEntry>> {
+        let limit_arg = format!("-{}", limit);
+        let output = Command::new("git")
+            .args([
+                "log",
+                "--format=%H|%h|%aI|%an|%s",
+                &limit_arg,
+                "--",
+                repo_path,
+            ])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut entries = Vec::new();
+
+        for line in stdout.lines() {
+            if let Some(entry) = FileLogEntry::parse(line) {
+                entries.push(entry);
+            }
+        }
+
+        Ok(entries)
+    }
+
+    /// Get file contents at a specific commit
+    pub fn show_at_commit(&self, commit: &str, repo_path: &str) -> Result<Vec<u8>> {
+        if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("Invalid commit hash: {}", commit);
+        }
+        let spec = format!("{}:{}", commit, repo_path);
+        let output = Command::new("git")
+            .args(["show", &spec])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to get file at {}: {}", spec, error));
+        }
+
+        Ok(output.stdout)
+    }
+
+    /// Like file_log, but filters out commits where the file content didn't change.
+    /// For encrypted files, this decrypts to compare plaintext.
+    pub fn file_log_changed(
+        &self,
+        repo_path: &str,
+        limit: usize,
+        encrypted: bool,
+    ) -> Result<Vec<FileLogEntry>> {
+        // Fetch more than needed since some may be filtered out
+        let entries = self.file_log(repo_path, limit * 3)?;
+        let mut result = Vec::new();
+        for entry in entries {
+            if result.len() >= limit {
+                break;
+            }
+            let changed = self
+                .resolve_parent(&entry.commit_hash)
+                .map(|parent| {
+                    let old = self.file_content_at(&parent, repo_path, encrypted).ok();
+                    let new = self
+                        .file_content_at(&entry.commit_hash, repo_path, encrypted)
+                        .ok();
+                    old != new
+                })
+                .unwrap_or(true); // root commit always counts
+            if changed {
+                result.push(entry);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Get unified diff for a file at a specific commit.
+    /// Decrypts if needed, diffs commit version against parent version.
+    pub fn file_diff(
+        &self,
+        commit: &str,
+        repo_path: &str,
+        dotfile_path: &str,
+        encrypted: bool,
+    ) -> Result<String> {
+        let new_text = self.file_content_at(commit, repo_path, encrypted)?;
+
+        // Resolve parent hash; empty content if initial commit
+        let old_text = self
+            .resolve_parent(commit)
+            .and_then(|parent| self.file_content_at(&parent, repo_path, encrypted).ok())
+            .unwrap_or_default();
+
+        Ok(text_diff(&old_text, &new_text, dotfile_path))
+    }
+
+    /// Resolve the parent commit hash, returning None for root commits.
+    fn resolve_parent(&self, commit: &str) -> Option<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", &format!("{}^", commit)])
+            .current_dir(&self.repo_path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if hash.is_empty() {
+            None
+        } else {
+            Some(hash)
+        }
+    }
+
+    /// Get file content at a commit as a string, decrypting if needed.
+    fn file_content_at(&self, commit: &str, repo_path: &str, encrypted: bool) -> Result<String> {
+        let raw = self.show_at_commit(commit, repo_path)?;
+        if encrypted {
+            let key = crate::security::get_encryption_key()?;
+            let bytes = crate::security::decrypt(&raw, &key)?;
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        } else {
+            Ok(String::from_utf8_lossy(&raw).into_owned())
+        }
+    }
+
+    /// List all tracked files under a prefix in the repo
+    pub fn list_tracked_files(&self, prefix: &str) -> Result<Vec<String>> {
+        let output = Command::new("git")
+            .args(["ls-tree", "-r", "--name-only", "HEAD", "--", prefix])
+            .current_dir(&self.repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.lines().map(|s| s.to_string()).collect())
+    }
+}
+
+pub struct FileLogEntry {
+    pub commit_hash: String,
+    pub short_hash: String,
+    pub date: DateTime<Utc>,
+    pub message: String,
+    pub machine_id: String,
+}
+
+impl FileLogEntry {
+    pub fn parse(line: &str) -> Option<Self> {
+        let parts: Vec<&str> = line.splitn(5, '|').collect();
+        if parts.len() < 5 {
+            return None;
+        }
+        let date = parts[2].parse::<DateTime<Utc>>().ok()?;
+        Some(Self {
+            commit_hash: parts[0].to_string(),
+            short_hash: parts[1].to_string(),
+            date,
+            machine_id: parts[3].to_string(),
+            message: parts[4].to_string(),
+        })
+    }
+}
+
+/// Generate a unified-style text diff between two strings
+fn text_diff(old: &str, new: &str, label: &str) -> String {
+    use similar::TextDiff;
+
+    let diff = TextDiff::from_lines(old, new);
+    diff.unified_diff()
+        .header(&format!("a/{}", label), &format!("b/{}", label))
+        .to_string()
 }
 
 /// Git utility functions for project config syncing
