@@ -292,37 +292,7 @@ pub async fn install() -> Result<()> {
         }
 
         let exe = std::env::current_exe()?;
-        let exe_escaped = exe
-            .display()
-            .to_string()
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;");
-        // XML task definition enables RestartOnFailure (equivalent to macOS KeepAlive)
-        let task_xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers>
-    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
-  </Triggers>
-  <Settings>
-    <RestartOnFailure>
-      <Interval>PT1M</Interval>
-      <Count>999</Count>
-    </RestartOnFailure>
-    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
-    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
-  </Settings>
-  <Actions Context="Author">
-    <Exec>
-      <Command>{exe_escaped}</Command>
-      <Arguments>daemon run</Arguments>
-    </Exec>
-  </Actions>
-</Task>"#
-        );
+        let task_xml = generate_schtasks_xml(&exe);
 
         // schtasks expects UTF-16 LE with BOM; use random temp file to avoid symlink attacks
         let mut xml_file = tempfile::Builder::new().suffix(".xml").tempfile()?;
@@ -471,5 +441,64 @@ pub async fn uninstall() -> Result<()> {
 
         Output::success("Launchd service uninstalled");
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn generate_schtasks_xml(exe: &std::path::Path) -> String {
+    let exe_escaped = exe
+        .display()
+        .to_string()
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+  </Triggers>
+  <Settings>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe_escaped}</Command>
+      <Arguments>daemon run</Arguments>
+    </Exec>
+  </Actions>
+</Task>"#
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn test_generate_schtasks_xml_valid() {
+        let xml = super::generate_schtasks_xml(std::path::Path::new(
+            r"C:\Program Files\tether\tether.exe",
+        ));
+        assert!(xml.contains(r#"encoding="UTF-16""#));
+        assert!(xml.contains("<LogonTrigger>"));
+        assert!(xml.contains("<RestartOnFailure>"));
+        assert!(xml.contains(r"<Command>C:\Program Files\tether\tether.exe</Command>"));
+        assert!(xml.contains("<Arguments>daemon run</Arguments>"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_generate_schtasks_xml_escapes_special_chars() {
+        let xml = super::generate_schtasks_xml(std::path::Path::new(r#"C:\a&b<c>"d"#));
+        assert!(xml.contains(r"C:\a&amp;b&lt;c&gt;&quot;d"));
+        // Must not contain raw special chars inside XML element
+        assert!(!xml.contains("<Command>C:\\a&b"));
     }
 }

@@ -754,6 +754,28 @@ mod tests {
         assert!(err.to_string().contains("max depth"));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_copy_dir_recursive_preserves_content() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "aaa").unwrap();
+        std::fs::create_dir(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), "bbb").unwrap();
+        // empty dir
+        std::fs::create_dir(src.join("empty")).unwrap();
+
+        let dst = tmp.path().join("dst");
+        copy_dir_recursive(&src, &dst, 0).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(),
+            "bbb"
+        );
+        assert!(dst.join("empty").is_dir());
+    }
+
     /// Helper: build a v1-style Config then migrate to v2, returning the migrated config.
     fn make_migrated_config(
         dotfiles: Vec<crate::config::DotfileEntry>,

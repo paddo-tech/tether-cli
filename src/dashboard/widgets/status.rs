@@ -8,6 +8,7 @@ pub enum FlashMessage<'a> {
     Success(&'a str),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,

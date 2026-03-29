@@ -57,9 +57,14 @@ pub(crate) fn restrict_file_permissions(path: &std::path::Path) -> anyhow::Resul
 }
 
 /// Get the current user's SID via `whoami /user /fo csv /nh`.
-/// Returns a SID string like "S-1-5-21-...". Not spoofable via env vars.
+/// Returns a SID string like "S-1-5-21-...". Cached after first call.
 #[cfg(windows)]
 fn current_user_sid() -> anyhow::Result<String> {
+    use std::sync::OnceLock;
+    static SID: OnceLock<String> = OnceLock::new();
+    if let Some(sid) = SID.get() {
+        return Ok(sid.clone());
+    }
     let output = std::process::Command::new("whoami")
         .args(["/user", "/fo", "csv", "/nh"])
         .output()?;
@@ -78,5 +83,39 @@ fn current_user_sid() -> anyhow::Result<String> {
     if !sid.starts_with("S-") {
         anyhow::bail!("Invalid SID format: {}", sid);
     }
-    Ok(sid.to_string())
+    let sid = sid.to_string();
+    let _ = SID.set(sid.clone());
+    Ok(sid)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn test_current_user_sid() {
+        let sid = super::current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-5-"));
+        // Cached: second call returns same value
+        assert_eq!(sid, super::current_user_sid().unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_write_file_secure_creates_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("secret.txt");
+        super::write_file_secure(&path, b"sensitive data").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"sensitive data");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_restrict_file_permissions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("restricted.txt");
+        std::fs::write(&path, "test").unwrap();
+        super::restrict_file_permissions(&path).unwrap();
+        // Verify file is still readable by current user
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "test");
+    }
 }

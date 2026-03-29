@@ -99,9 +99,20 @@ impl TeamManifest {
             if let Some(team_symlinks) = self.symlinks.get(team) {
                 for target_str in team_symlinks.keys() {
                     let target = PathBuf::from(target_str);
-                    if target.exists() && target.is_symlink() {
+                    if target.is_symlink() {
                         std::fs::remove_file(&target)
                             .with_context(|| format!("Failed to remove symlink: {}", target_str))?;
+                    } else if target.exists() {
+                        // On Windows without Developer Mode, create_symlink falls back to copy
+                        if target.is_dir() {
+                            std::fs::remove_dir_all(&target).with_context(|| {
+                                format!("Failed to remove copied dir: {}", target_str)
+                            })?;
+                        } else {
+                            std::fs::remove_file(&target).with_context(|| {
+                                format!("Failed to remove copied file: {}", target_str)
+                            })?;
+                        }
                     }
                 }
             }

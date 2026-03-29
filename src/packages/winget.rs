@@ -10,11 +10,14 @@ impl WingetManager {
         Self
     }
 
+    fn winget_cmd(args: &[&str]) -> Command {
+        let mut cmd = Command::new(super::resolve_program("winget"));
+        cmd.args(args);
+        cmd
+    }
+
     async fn run_winget(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new(super::resolve_program("winget"))
-            .args(args)
-            .output()
-            .await?;
+        let output = Self::winget_cmd(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -96,18 +99,17 @@ impl PackageManager for WingetManager {
 
         for id in package_ids {
             if !installed_ids.contains(&id.to_lowercase()) {
-                let output = Command::new(super::resolve_program("winget"))
-                    .args([
-                        "install",
-                        "--id",
-                        id,
-                        "-e",
-                        "--disable-interactivity",
-                        "--accept-source-agreements",
-                        "--accept-package-agreements",
-                    ])
-                    .output()
-                    .await?;
+                let output = Self::winget_cmd(&[
+                    "install",
+                    "--id",
+                    id,
+                    "-e",
+                    "--disable-interactivity",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ])
+                .output()
+                .await?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -134,16 +136,15 @@ impl PackageManager for WingetManager {
 
         for pkg in installed {
             if !desired.contains(&pkg.name.to_lowercase()) {
-                let output = Command::new(super::resolve_program("winget"))
-                    .args([
-                        "uninstall",
-                        "--id",
-                        &pkg.name,
-                        "-e",
-                        "--disable-interactivity",
-                    ])
-                    .output()
-                    .await?;
+                let output = Self::winget_cmd(&[
+                    "uninstall",
+                    "--id",
+                    &pkg.name,
+                    "-e",
+                    "--disable-interactivity",
+                ])
+                .output()
+                .await?;
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -156,16 +157,15 @@ impl PackageManager for WingetManager {
     }
 
     async fn update_all(&self) -> Result<()> {
-        let output = Command::new(super::resolve_program("winget"))
-            .args([
-                "upgrade",
-                "--all",
-                "--disable-interactivity",
-                "--accept-source-agreements",
-                "--accept-package-agreements",
-            ])
-            .output()
-            .await?;
+        let output = Self::winget_cmd(&[
+            "upgrade",
+            "--all",
+            "--disable-interactivity",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ])
+        .output()
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -176,16 +176,15 @@ impl PackageManager for WingetManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new(super::resolve_program("winget"))
-            .args([
-                "uninstall",
-                "--id",
-                package,
-                "-e",
-                "--disable-interactivity",
-            ])
-            .output()
-            .await?;
+        let output = Self::winget_cmd(&[
+            "uninstall",
+            "--id",
+            package,
+            "-e",
+            "--disable-interactivity",
+        ])
+        .output()
+        .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

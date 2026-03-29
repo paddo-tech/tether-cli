@@ -650,13 +650,17 @@ fn preserve_executable_bit(source: &Path, dest: &Path) {
     }
 }
 
-/// Write decrypted content with secure permissions (0o600 on Unix)
+/// Write decrypted content with secure permissions (0o600 on Unix, restricted ACL on Windows)
 fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
     std::fs::write(path, contents)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(windows)]
+    {
+        crate::security::restrict_file_permissions(path)?;
     }
     Ok(())
 }
