@@ -566,80 +566,96 @@ fn decrypt_from_repo(
 
                         let last_synced_hash = state.files.get(&file).map(|f| f.hash.as_str());
 
-                        // Check for conflict
-                        if let Some(conflict) =
-                            detect_conflict(&file, &local_file, &plaintext, last_synced_hash)
-                        {
-                            if interactive {
-                                // Interactive mode: prompt user
-                                conflict.show_diff()?;
-                                let resolution = conflict.prompt_resolution()?;
+                        // First-time sync: no sync history for this file on this machine.
+                        // Remote content should win over any locally-created default (e.g. an
+                        // app writing an empty {} on startup before tether runs).
+                        let first_sync = last_synced_hash.is_none() && create_if_missing;
 
-                                match resolution {
-                                    ConflictResolution::KeepLocal => {}
-                                    ConflictResolution::UseRemote => {
-                                        // Backup before overwriting
-                                        if local_file.exists() {
-                                            if backup_dir.is_none() {
-                                                backup_dir = Some(create_backup_dir()?);
+                        if !first_sync {
+                            // Check for conflict
+                            if let Some(conflict) =
+                                detect_conflict(&file, &local_file, &plaintext, last_synced_hash)
+                            {
+                                if interactive {
+                                    conflict.show_diff()?;
+                                    let resolution = conflict.prompt_resolution()?;
+
+                                    match resolution {
+                                        ConflictResolution::KeepLocal => {}
+                                        ConflictResolution::UseRemote => {
+                                            if local_file.exists() {
+                                                if backup_dir.is_none() {
+                                                    backup_dir = Some(create_backup_dir()?);
+                                                }
+                                                backup_file(
+                                                    backup_dir.as_ref().unwrap(),
+                                                    "dotfiles",
+                                                    &file,
+                                                    &local_file,
+                                                )?;
                                             }
-                                            backup_file(
-                                                backup_dir.as_ref().unwrap(),
-                                                "dotfiles",
-                                                &file,
-                                                &local_file,
-                                            )?;
+                                            std::fs::write(&local_file, &plaintext)?;
+                                            conflict_state.remove_conflict(&file);
                                         }
-                                        std::fs::write(&local_file, &plaintext)?;
-                                        conflict_state.remove_conflict(&file);
+                                        ConflictResolution::Merged => {
+                                            conflict.launch_merge_tool(&config.merge, home)?;
+                                            conflict_state.remove_conflict(&file);
+                                        }
+                                        ConflictResolution::Skip => {
+                                            new_conflicts.push((
+                                                file.to_string(),
+                                                conflict.local_hash.clone(),
+                                                conflict.remote_hash.clone(),
+                                            ));
+                                        }
                                     }
-                                    ConflictResolution::Merged => {
-                                        conflict.launch_merge_tool(&config.merge, home)?;
-                                        conflict_state.remove_conflict(&file);
-                                    }
-                                    ConflictResolution::Skip => {
-                                        new_conflicts.push((
-                                            file.to_string(),
-                                            conflict.local_hash.clone(),
-                                            conflict.remote_hash.clone(),
-                                        ));
-                                    }
+                                    continue;
+                                } else {
+                                    Output::warning(&format!(
+                                        "  {} (conflict - skipped)",
+                                        file
+                                    ));
+                                    new_conflicts.push((
+                                        file.to_string(),
+                                        conflict.local_hash.clone(),
+                                        conflict.remote_hash.clone(),
+                                    ));
+                                    continue;
                                 }
-                            } else {
-                                // Non-interactive (daemon): save conflict for later
-                                Output::warning(&format!("  {} (conflict - skipped)", file));
-                                new_conflicts.push((
-                                    file.to_string(),
-                                    conflict.local_hash.clone(),
-                                    conflict.remote_hash.clone(),
-                                ));
                             }
-                        } else {
-                            // No true conflict - but preserve local-only changes
-                            let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
-                            let local_hash = std::fs::read(&local_file)
-                                .ok()
-                                .map(|c| format!("{:x}", Sha256::digest(&c)));
-
-                            // Only write if local unchanged from last sync AND remote differs
-                            let local_unchanged = local_hash.as_deref() == last_synced_hash;
-                            if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
-                                // Backup before overwriting
-                                if local_file.exists() {
-                                    if backup_dir.is_none() {
-                                        backup_dir = Some(create_backup_dir()?);
-                                    }
-                                    backup_file(
-                                        backup_dir.as_ref().unwrap(),
-                                        "dotfiles",
-                                        &file,
-                                        &local_file,
-                                    )?;
-                                }
-                                std::fs::write(&local_file, plaintext)?;
-                            }
-                            conflict_state.remove_conflict(&file);
                         }
+
+                        // Apply remote content if local is unchanged or this is a first sync
+                        let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                        let local_hash = std::fs::read(&local_file)
+                            .ok()
+                            .map(|c| format!("{:x}", Sha256::digest(&c)));
+
+                        let should_write = if first_sync {
+                            local_hash.as_ref() != Some(&remote_hash)
+                        } else {
+                            let local_unchanged = local_hash.as_deref() == last_synced_hash;
+                            local_unchanged && local_hash.as_ref() != Some(&remote_hash)
+                        };
+
+                        if should_write {
+                            if local_file.exists() {
+                                if backup_dir.is_none() {
+                                    backup_dir = Some(create_backup_dir()?);
+                                }
+                                backup_file(
+                                    backup_dir.as_ref().unwrap(),
+                                    "dotfiles",
+                                    &file,
+                                    &local_file,
+                                )?;
+                            }
+                            if let Some(parent) = local_file.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&local_file, plaintext)?;
+                        }
+                        conflict_state.remove_conflict(&file);
                     }
                     Err(e) => {
                         Output::warning(&format!("  {} (failed to decrypt: {})", file, e));
