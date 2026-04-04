@@ -466,13 +466,14 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_conflict_returns_some_when_differ_no_history() {
+    fn test_detect_conflict_returns_none_when_differ_no_history() {
+        // No sync history means local is authoritative — not a conflict.
         let temp = TempDir::new().unwrap();
         let local_path = temp.path().join(".zshrc");
         std::fs::write(&local_path, b"local content").unwrap();
 
         let result = detect_conflict(".zshrc", &local_path, b"remote content", None);
-        assert!(result.is_some());
+        assert!(result.is_none());
     }
 
     #[test]

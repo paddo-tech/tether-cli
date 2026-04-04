@@ -1404,6 +1404,56 @@ files = []
     }
 
     #[test]
+    fn test_effective_dotfiles_profile_overrides_global() {
+        let mut config = Config::default();
+        // Global has .zshrc with create_if_missing=false (from default)
+        // Profile has .zshrc with create_if_missing=true — profile should win
+        config.profiles.insert(
+            "server".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::WithOptions {
+                    path: ".zshrc".to_string(),
+                    shared: false,
+                    create_if_missing: true,
+                }],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+
+        let files = config.effective_dotfiles("my-server");
+        let zshrc = files.iter().find(|e| e.path() == ".zshrc").unwrap();
+        // Profile version takes priority (create_if_missing=true)
+        assert!(zshrc.create_if_missing());
+    }
+
+    #[test]
+    fn test_effective_dotfiles_disjoint_sets() {
+        let mut config = Config::default();
+        config.dotfiles.files = vec![DotfileEntry::Simple(".gitconfig".to_string())];
+        config.profiles.insert(
+            "server".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::Simple(".vimrc".to_string())],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+
+        let files = config.effective_dotfiles("my-server");
+        // Profile has .vimrc, global has .gitconfig — should get both
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path(), ".vimrc"); // profile first
+        assert_eq!(files[1].path(), ".gitconfig"); // global appended
+    }
+
+    #[test]
     fn test_is_manager_enabled_with_profile() {
         let mut config = Config::default();
         config.profiles.insert(
