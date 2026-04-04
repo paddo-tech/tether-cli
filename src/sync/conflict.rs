@@ -41,8 +41,12 @@ impl FileConflict {
                 self.local_hash != *last && self.remote_hash != *last
             }
             None => {
-                // No sync history - conflict if they differ
-                self.local_hash != self.remote_hash
+                // No sync history — local is authoritative. The export step will
+                // push it to establish a baseline. Treating this as a conflict
+                // causes the file to be skipped in both import AND export (since
+                // the daemon can't resolve conflicts interactively), leaving the
+                // file stuck indefinitely.
+                false
             }
         }
     }
@@ -422,7 +426,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_conflict_no_sync_history_different() {
+    fn test_no_conflict_no_sync_history_different() {
+        // No sync history means local is authoritative — not a conflict.
+        // The export step will push to establish a baseline.
         let conflict = FileConflict {
             file_path: ".zshrc".to_string(),
             local_hash: "aaa".to_string(),
@@ -431,7 +437,7 @@ mod tests {
             local_content: vec![],
             remote_content: vec![],
         };
-        assert!(conflict.is_true_conflict());
+        assert!(!conflict.is_true_conflict());
     }
 
     #[test]

@@ -708,11 +708,20 @@ impl Config {
     pub fn effective_dotfiles(&self, machine_id: &str) -> Vec<DotfileEntry> {
         if let Some(profile) = self.machine_profile(machine_id) {
             if !profile.dotfiles.is_empty() {
-                return profile
+                let mut entries: Vec<DotfileEntry> = profile
                     .dotfiles
                     .iter()
                     .map(|e| e.to_dotfile_entry())
                     .collect();
+                // Merge global dotfiles that aren't already in the profile list
+                let profile_paths: std::collections::HashSet<String> =
+                    entries.iter().map(|e| e.path().to_string()).collect();
+                for global in &self.dotfiles.files {
+                    if !profile_paths.contains(global.path()) {
+                        entries.push(global.clone());
+                    }
+                }
+                return entries;
             }
         }
         self.dotfiles.files.clone()
@@ -1383,7 +1392,9 @@ files = []
             .insert("my-server".to_string(), "server".to_string());
 
         let files = config.effective_dotfiles("my-server");
-        assert_eq!(files.len(), 1);
+        // Profile dotfiles are merged with global — .zshrc is in both so no duplicate
+        assert_eq!(files.len(), config.dotfiles.files.len());
+        // Profile entry comes first
         assert_eq!(files[0].path(), ".zshrc");
 
         // Unassigned machines get "dev" profile (which may or may not exist)
@@ -1495,8 +1506,8 @@ packages = ["brew"]
         assert_eq!(profile.dotfiles.len(), 1);
         assert_eq!(profile.packages, vec!["brew"]);
 
-        // Helpers work
-        assert_eq!(parsed.effective_dotfiles("my-server").len(), 1);
+        // Helpers work — profile dotfiles merge with global (profile has .zshrc, global adds .gitconfig)
+        assert_eq!(parsed.effective_dotfiles("my-server").len(), 2);
         assert!(!parsed.is_manager_enabled("my-server", "npm"));
         assert!(parsed.is_manager_enabled("my-server", "brew"));
     }
