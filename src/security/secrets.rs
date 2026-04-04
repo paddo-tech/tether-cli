@@ -172,10 +172,7 @@ mod tests {
         let content = "GITHUB_TOKEN=ghp_123456789012345678901234567890123456";
         let findings = scanner.scan_content(content);
         assert!(!findings.is_empty());
-        assert!(matches!(
-            findings[0].secret_type,
-            SecretType::GitHubToken
-        ));
+        assert!(matches!(findings[0].secret_type, SecretType::GitHubToken));
     }
 
     #[test]
