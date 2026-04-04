@@ -117,7 +117,6 @@ pub struct App {
     active_tab: Tab,
     scroll_offsets: [usize; 5],
     should_quit: bool,
-    syncing: bool,
     sync_child: Option<std::process::Child>,
     daemon_child: Option<std::process::Child>,
     daemon_op: DaemonOp,
@@ -128,29 +127,23 @@ pub struct App {
     flash_error: Option<(Instant, String)>,
     flash_message: Option<(Instant, String)>,
     list_edit: Option<ListEditState>,
-    // Packages tab state
     pkg_expanded: Option<String>,
     pkg_cursor: usize,
     uninstall_confirm: Option<(String, String)>,
     uninstalling: Option<(String, String)>,
     uninstall_rx: Option<std::sync::mpsc::Receiver<std::result::Result<(), String>>>,
-    // Machines tab state
     machine_expanded: Option<String>,
     machine_cursor: usize,
-    // Profile picker state
     profile_editing: bool,
-    profile_picker_options: Vec<String>, // ["(none)", "dev", "server", ...]
+    profile_picker_options: Vec<String>,
     profile_picker_cursor: usize,
-    // Files tab state
     files: FilesTabState,
     file_delete_confirm: Option<String>,
     file_import_picker: Option<ImportPickerState>,
-    // Package import state
     pkg_import_picker: Option<PkgImportPickerState>,
     pkg_install_confirm: Option<(String, String)>,
     installing: Option<(String, String)>,
     install_rx: Option<std::sync::mpsc::Receiver<std::result::Result<(), String>>>,
-    // Background package refresh on startup
     pkg_refresh_rx: Option<std::sync::mpsc::Receiver<HashMap<String, Vec<String>>>>,
 }
 
@@ -169,6 +162,28 @@ impl App {
             .position(|t| *t == self.active_tab)
             .unwrap_or(0);
         &mut self.scroll_offsets[idx]
+    }
+
+    fn spawn_sync(&mut self) {
+        if self.sync_child.is_some() {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
+        if let Ok(child) = std::process::Command::new(exe)
+            .arg("sync")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            self.sync_child = Some(child);
+        }
+    }
+
+    fn reload_state(&mut self) {
+        self.state = DashboardState::load();
+        self.files.deleted = load_deleted_files(&self.state);
+        refresh_files_expanded(self);
+        self.last_refresh = Instant::now();
     }
 
     fn item_count(&self) -> usize {
@@ -209,7 +224,6 @@ pub fn run() -> Result<()> {
         active_tab: Tab::Overview,
         scroll_offsets: [0; 5],
         should_quit: false,
-        syncing: false,
         sync_child: None,
         daemon_child: None,
         daemon_op: DaemonOp::None,
@@ -285,48 +299,26 @@ pub fn run() -> Result<()> {
             }
         }
 
-        // Check sync child process
         if let Some(ref mut child) = app.sync_child {
             if let Ok(Some(_)) = child.try_wait() {
-                app.syncing = false;
                 app.sync_child = None;
-                app.state = DashboardState::load();
-                app.files.deleted = load_deleted_files(&app.state);
-                refresh_files_expanded(&mut app);
-                app.last_refresh = Instant::now();
+                app.reload_state();
             }
         }
 
-        // Check daemon child process
         if let Some(ref mut child) = app.daemon_child {
             if let Ok(Some(_)) = child.try_wait() {
                 app.daemon_op = DaemonOp::None;
                 app.daemon_child = None;
-                app.state = DashboardState::load();
-                app.files.deleted = load_deleted_files(&app.state);
-                refresh_files_expanded(&mut app);
-                app.last_refresh = Instant::now();
+                app.reload_state();
             }
         }
 
-        // Check uninstall result
         if let Some(ref rx) = app.uninstall_rx {
             if let Ok(result) = rx.try_recv() {
                 match result {
                     Ok(()) => {
-                        // Trigger a sync so machine state reflects the removal
-                        if !app.syncing {
-                            let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
-                            if let Ok(child) = std::process::Command::new(exe)
-                                .arg("sync")
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                            {
-                                app.syncing = true;
-                                app.sync_child = Some(child);
-                            }
-                        }
+                        app.spawn_sync();
                     }
                     Err(msg) => {
                         app.flash_error =
@@ -338,7 +330,6 @@ pub fn run() -> Result<()> {
             }
         }
 
-        // Check install result
         if let Some(ref rx) = app.install_rx {
             if let Ok(result) = rx.try_recv() {
                 match result {
@@ -360,19 +351,7 @@ pub fn run() -> Result<()> {
                                 }
                             }
                         }
-                        // Trigger sync
-                        if !app.syncing {
-                            let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
-                            if let Ok(child) = std::process::Command::new(exe)
-                                .arg("sync")
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                            {
-                                app.syncing = true;
-                                app.sync_child = Some(child);
-                            }
-                        }
+                        app.spawn_sync();
                     }
                     Err(msg) => {
                         app.flash_error =
@@ -429,10 +408,7 @@ pub fn run() -> Result<()> {
         }
 
         if app.last_refresh.elapsed() >= refresh_interval {
-            app.state = DashboardState::load();
-            app.files.deleted = load_deleted_files(&app.state);
-            refresh_files_expanded(&mut app);
-            app.last_refresh = Instant::now();
+            app.reload_state();
         }
 
         if app.should_quit {
@@ -503,20 +479,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                                 Instant::now(),
                                 format!("Restored {} to {}", dotfile_path, short_hash),
                             ));
-                            // Trigger sync
-                            if !app.syncing {
-                                let exe =
-                                    std::env::current_exe().unwrap_or_else(|_| "tether".into());
-                                if let Ok(child) = std::process::Command::new(exe)
-                                    .arg("sync")
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn()
-                                {
-                                    app.syncing = true;
-                                    app.sync_child = Some(child);
-                                }
-                            }
+                            app.spawn_sync();
                         }
                         Err(e) => {
                             app.flash_error =
@@ -544,29 +507,13 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         let ok = config_edit::remove_profile_dotfile(config, &ss.machine_id, &path);
                         if ok {
                             app.flash_message = Some((Instant::now(), format!("removed {}", path)));
-                            app.state = DashboardState::load();
-                            app.files.deleted = load_deleted_files(&app.state);
-                            refresh_files_expanded(app);
-                            app.last_refresh = Instant::now();
+                            app.reload_state();
                             // Clamp cursor
                             let new_rows = widgets::files::build_rows(&app.state, &app.files);
                             if app.files.cursor >= new_rows.len() {
                                 app.files.cursor = new_rows.len().saturating_sub(1);
                             }
-                            // Trigger sync
-                            if !app.syncing {
-                                let exe =
-                                    std::env::current_exe().unwrap_or_else(|_| "tether".into());
-                                if let Ok(child) = std::process::Command::new(exe)
-                                    .arg("sync")
-                                    .stdout(std::process::Stdio::null())
-                                    .stderr(std::process::Stdio::null())
-                                    .spawn()
-                                {
-                                    app.syncing = true;
-                                    app.sync_child = Some(child);
-                                }
-                            }
+                            app.spawn_sync();
                         } else {
                             app.flash_error = Some((Instant::now(), "remove failed".into()));
                         }
@@ -612,10 +559,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                             }
                             app.flash_message =
                                 Some((Instant::now(), format!("imported {}", item.path)));
-                            app.state = DashboardState::load();
-                            app.files.deleted = load_deleted_files(&app.state);
-                            refresh_files_expanded(app);
-                            app.last_refresh = Instant::now();
+                            app.reload_state();
                         } else {
                             app.flash_error = Some((Instant::now(), "import failed".into()));
                         }
@@ -720,10 +664,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         if config.save().is_err() {
                             app.flash_error = Some((Instant::now(), "save failed".into()));
                         }
-                        app.state = DashboardState::load();
-                        app.files.deleted = load_deleted_files(&app.state);
-                        refresh_files_expanded(app);
-                        app.last_refresh = Instant::now();
+                        app.reload_state();
                     }
                 }
             }
@@ -1031,7 +972,11 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                             .expanded_file
                             .as_ref()
                             .and_then(|repo_path| {
-                                let dotfile = repo_path_to_dotfile(repo_path, encrypted);
+                                let dotfile = repo_path_to_dotfile(
+                                    repo_path,
+                                    encrypted,
+                                    app.state.config.as_ref(),
+                                );
                                 crate::sync::SyncEngine::sync_path()
                                     .ok()
                                     .and_then(|p| crate::sync::GitBackend::open(&p).ok())
@@ -1101,18 +1046,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         KeyCode::Char('s') => {
-            if !app.syncing {
-                let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
-                if let Ok(child) = std::process::Command::new(exe)
-                    .arg("sync")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                {
-                    app.syncing = true;
-                    app.sync_child = Some(child);
-                }
-            }
+            app.spawn_sync();
         }
         KeyCode::Char('d') => {
             if app.daemon_op == DaemonOp::None && app.daemon_child.is_none() {
@@ -1138,10 +1072,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         KeyCode::Char('r') => {
-            app.state = DashboardState::load();
-            app.files.deleted = load_deleted_files(&app.state);
-            refresh_files_expanded(app);
-            app.last_refresh = Instant::now();
+            app.reload_state();
         }
         KeyCode::Char('t') => {
             if app.active_tab == Tab::Files {
@@ -1170,10 +1101,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                                         }
                                     ),
                                 ));
-                                app.state = DashboardState::load();
-                                app.files.deleted = load_deleted_files(&app.state);
-                                refresh_files_expanded(app);
-                                app.last_refresh = Instant::now();
+                                app.reload_state();
                             }
                         }
                     }
@@ -1197,7 +1125,11 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                                 .as_ref()
                                 .map(|c| c.security.encrypt_dotfiles)
                                 .unwrap_or(false);
-                            let dotfile = repo_path_to_dotfile(repo_path, encrypted);
+                            let dotfile = repo_path_to_dotfile(
+                                repo_path,
+                                encrypted,
+                                app.state.config.as_ref(),
+                            );
                             app.files.restore_confirm =
                                 Some((dotfile, commit_hash.clone(), short_hash.clone()));
                         }
@@ -1607,9 +1539,8 @@ fn run_restore(
     Ok(())
 }
 
-fn render_restore_popup(f: &mut Frame, dotfile_path: &str, short_hash: &str) {
+fn render_confirm_popup(f: &mut Frame, title: &str, msg: &str, border_color: Color) {
     let area = f.area();
-    let msg = format!("Restore {} to {}?", dotfile_path, short_hash);
     let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
     let height = 5u16.min(area.height.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -1635,44 +1566,9 @@ fn render_restore_popup(f: &mut Frame, dotfile_path: &str, short_hash: &str) {
 
     let paragraph = ratatui::widgets::Paragraph::new(text).block(
         ratatui::widgets::Block::default()
-            .title(" Restore ")
+            .title(format!(" {} ", title))
             .borders(ratatui::widgets::Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow)),
-    );
-    f.render_widget(paragraph, popup_area);
-}
-
-fn render_file_delete_popup(f: &mut Frame, path: &str) {
-    let area = f.area();
-    let msg = format!("Remove {} from profile?", path);
-    let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
-    let height = 5u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect::new(x, y, width, height);
-
-    f.render_widget(ratatui::widgets::Clear, popup_area);
-
-    let text = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {}", msg),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  y", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n/Esc", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-        ]),
-    ];
-
-    let paragraph = ratatui::widgets::Paragraph::new(text).block(
-        ratatui::widgets::Block::default()
-            .title(" Remove ")
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(Style::default().fg(Color::Red)),
+            .border_style(Style::default().fg(border_color)),
     );
     f.render_widget(paragraph, popup_area);
 }
@@ -1823,42 +1719,6 @@ fn render_pkg_import_popup(f: &mut Frame, picker: &PkgImportPickerState) {
     f.render_widget(paragraph, popup_area);
 }
 
-fn render_install_popup(f: &mut Frame, manager_key: &str, pkg_name: &str) {
-    let area = f.area();
-    let label = widgets::manager_label(manager_key);
-    let msg = format!("Install {} ({})?", pkg_name, label);
-    let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
-    let height = 5u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect::new(x, y, width, height);
-
-    f.render_widget(ratatui::widgets::Clear, popup_area);
-
-    let text = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {}", msg),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  y", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n/Esc", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-        ]),
-    ];
-
-    let paragraph = ratatui::widgets::Paragraph::new(text).block(
-        ratatui::widgets::Block::default()
-            .title(" Install ")
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(Style::default().fg(Color::Green)),
-    );
-    f.render_widget(paragraph, popup_area);
-}
-
 fn draw(f: &mut Frame, app: &App) {
     let main_chunks = Layout::vertical([
         Constraint::Length(3),
@@ -1880,7 +1740,7 @@ fn draw(f: &mut Frame, app: &App) {
         f,
         main_chunks[0],
         &app.state,
-        app.syncing,
+        app.sync_child.is_some(),
         app.daemon_op,
         flash,
         app.uninstalling.as_ref(),
@@ -1967,17 +1827,33 @@ fn draw(f: &mut Frame, app: &App) {
 
     // Uninstall confirmation popup
     if let Some((ref manager_key, ref pkg_name)) = app.uninstall_confirm {
-        render_uninstall_popup(f, manager_key, pkg_name);
+        let label = widgets::manager_label(manager_key);
+        render_confirm_popup(
+            f,
+            "Uninstall",
+            &format!("Uninstall {} ({})?", pkg_name, label),
+            Color::Red,
+        );
     }
 
     // Restore confirmation popup
     if let Some((ref dotfile_path, _, ref short_hash)) = app.files.restore_confirm {
-        render_restore_popup(f, dotfile_path, short_hash);
+        render_confirm_popup(
+            f,
+            "Restore",
+            &format!("Restore {} to {}?", dotfile_path, short_hash),
+            Color::Yellow,
+        );
     }
 
     // File delete confirmation popup
     if let Some(ref path) = app.file_delete_confirm {
-        render_file_delete_popup(f, path);
+        render_confirm_popup(
+            f,
+            "Remove",
+            &format!("Remove {} from profile?", path),
+            Color::Red,
+        );
     }
 
     // File import picker popup
@@ -1987,49 +1863,19 @@ fn draw(f: &mut Frame, app: &App) {
 
     // Package install confirmation popup
     if let Some((ref manager_key, ref pkg_name)) = app.pkg_install_confirm {
-        render_install_popup(f, manager_key, pkg_name);
+        let label = widgets::manager_label(manager_key);
+        render_confirm_popup(
+            f,
+            "Install",
+            &format!("Install {} ({})?", pkg_name, label),
+            Color::Green,
+        );
     }
 
     // Package import picker popup
     if let Some(ref picker) = app.pkg_import_picker {
         render_pkg_import_popup(f, picker);
     }
-}
-
-fn render_uninstall_popup(f: &mut Frame, manager_key: &str, pkg_name: &str) {
-    let area = f.area();
-    let label = widgets::manager_label(manager_key);
-    let msg = format!("Uninstall {} ({})?", pkg_name, label);
-    let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
-    let height = 5u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect::new(x, y, width, height);
-
-    f.render_widget(ratatui::widgets::Clear, popup_area);
-
-    let text = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {}", msg),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  y", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n/Esc", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
-        ]),
-    ];
-
-    let paragraph = ratatui::widgets::Paragraph::new(text).block(
-        ratatui::widgets::Block::default()
-            .title(" Uninstall ")
-            .borders(ratatui::widgets::Borders::ALL)
-            .border_style(Style::default().fg(Color::Red)),
-    );
-    f.render_widget(paragraph, popup_area);
 }
 
 fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
@@ -2119,7 +1965,7 @@ fn load_deleted_files(state: &DashboardState) -> HashMap<String, Vec<String>> {
     let config_ref = state.config.as_ref();
     let profile = config_ref
         .map(|c| c.profile_name(machine_id))
-        .unwrap_or("dev");
+        .unwrap_or(crate::config::DEFAULT_PROFILE);
 
     let mut state_repo_paths: HashSet<String> = HashSet::new();
     for path in ss.files.keys() {
@@ -2154,7 +2000,7 @@ fn load_deleted_files(state: &DashboardState) -> HashMap<String, Vec<String>> {
             continue;
         }
         // Reverse map: repo path -> display path
-        let display = repo_path_to_dotfile(repo_file, encrypted);
+        let display = repo_path_to_dotfile(repo_file, encrypted, state.config.as_ref());
         deleted
             .entry("Personal".to_string())
             .or_default()
@@ -2172,19 +2018,19 @@ fn load_deleted_files(state: &DashboardState) -> HashMap<String, Vec<String>> {
 /// Reverse of dotfile_to_repo_path: "dotfiles/zshrc.enc" -> ".zshrc"
 /// Also handles profiled paths: "profiles/dev/zshrc.enc" -> ".zshrc"
 /// Uses known profile names from config to distinguish profile dirs from dotfile subdirs.
-fn repo_path_to_dotfile(repo_path: &str, encrypted: bool) -> String {
-    repo_path_to_dotfile_with_profiles(repo_path, encrypted, &known_profile_names())
-}
-
-fn known_profile_names() -> HashSet<String> {
+fn repo_path_to_dotfile(
+    repo_path: &str,
+    encrypted: bool,
+    config: Option<&crate::Config>,
+) -> String {
     let mut names = HashSet::new();
     names.insert("shared".to_string());
-    if let Ok(config) = crate::config::Config::load() {
+    if let Some(config) = config {
         for name in config.profiles.keys() {
             names.insert(name.clone());
         }
     }
-    names
+    repo_path_to_dotfile_with_profiles(repo_path, encrypted, &names)
 }
 
 fn repo_path_to_dotfile_with_profiles(

@@ -7,7 +7,6 @@ use crate::sync::{
 };
 use anyhow::Result;
 use chrono::Local;
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -228,11 +227,12 @@ impl DaemonServer {
         // Load state and machine state
         let mut state = SyncState::load()?;
 
-        // Auto-assign machine to "dev" profile on first run after v2 migration
+        // Auto-assign machine to default profile on first run after v2 migration
         if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
-            config
-                .machine_profiles
-                .insert(state.machine_id.clone(), "dev".to_string());
+            config.machine_profiles.insert(
+                state.machine_id.clone(),
+                crate::config::DEFAULT_PROFILE.to_string(),
+            );
             let _ = config.save();
         }
 
@@ -279,7 +279,7 @@ impl DaemonServer {
                     let source = home.join(&file);
                     if source.exists() {
                         if let Ok(content) = std::fs::read(&source) {
-                            let hash = format!("{:x}", Sha256::digest(&content));
+                            let hash = crate::sha256_hex(&content);
                             let file_changed = state
                                 .files
                                 .get(&file)
@@ -405,10 +405,7 @@ impl DaemonServer {
                 state.deferred_casks.sort();
 
                 // Only notify if list changed (avoid repeated notifications)
-                let hash = format!(
-                    "{:x}",
-                    Sha256::digest(state.deferred_casks.join(",").as_bytes())
-                );
+                let hash = crate::sha256_hex(state.deferred_casks.join(",").as_bytes());
                 if state.deferred_casks_hash.as_ref() != Some(&hash) {
                     notify_deferred_casks(&state.deferred_casks).ok();
                     state.deferred_casks_hash = Some(hash);

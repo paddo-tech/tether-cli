@@ -99,8 +99,7 @@ pub trait PackageManager: Send + Sync {
     /// Compute a hash of the current manifest for change detection
     async fn compute_manifest_hash(&self) -> Result<String> {
         let manifest = self.export_manifest().await?;
-        use sha2::{Digest, Sha256};
-        Ok(format!("{:x}", Sha256::digest(manifest.as_bytes())))
+        Ok(crate::sha256_hex(manifest.as_bytes()))
     }
 
     /// Uninstall a package by name

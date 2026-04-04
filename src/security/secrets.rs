@@ -163,7 +163,7 @@ mod tests {
         let content = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
         let findings = scanner.scan_content(content);
         assert!(!findings.is_empty());
-        matches!(findings[0].secret_type, SecretType::AwsAccessKey);
+        assert!(matches!(findings[0].secret_type, SecretType::AwsAccessKey));
     }
 
     #[test]
@@ -172,6 +172,10 @@ mod tests {
         let content = "GITHUB_TOKEN=ghp_123456789012345678901234567890123456";
         let findings = scanner.scan_content(content);
         assert!(!findings.is_empty());
+        assert!(matches!(
+            findings[0].secret_type,
+            SecretType::GitHubToken
+        ));
     }
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
         let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...";
         let findings = scanner.scan_content(content);
         assert!(!findings.is_empty());
-        matches!(findings[0].secret_type, SecretType::PrivateKey);
+        assert!(matches!(findings[0].secret_type, SecretType::PrivateKey));
     }
 
     #[test]

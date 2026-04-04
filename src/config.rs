@@ -13,6 +13,7 @@ use std::path::PathBuf;
 ///   packages (Vec<String>). Old ProfilePackagesConfig removed.
 ///   Migration: creates "dev" profile from global dotfiles/dirs/packages.
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
+pub const DEFAULT_PROFILE: &str = "dev";
 
 fn default_config_version() -> u32 {
     1
@@ -694,7 +695,7 @@ impl Config {
         self.machine_profiles
             .get(machine_id)
             .map(|s| s.as_str())
-            .unwrap_or("dev")
+            .unwrap_or(DEFAULT_PROFILE)
     }
 
     /// Get the profile assigned to a machine, if any
@@ -910,9 +911,10 @@ impl Config {
             packages,
         };
 
-        self.profiles.insert("dev".to_string(), dev_profile);
+        self.profiles
+            .insert(DEFAULT_PROFILE.to_string(), dev_profile);
 
-        // Assign all unassigned machines to "dev"
+        // Assign all unassigned machines to default profile
         // (machines already in machine_profiles keep their existing assignment)
     }
 
@@ -1533,7 +1535,7 @@ files = [".zshrc"]
     #[test]
     fn test_profile_name_defaults_to_dev() {
         let config = Config::default();
-        assert_eq!(config.profile_name("any-machine"), "dev");
+        assert_eq!(config.profile_name("any-machine"), DEFAULT_PROFILE);
     }
 
     #[test]
@@ -1543,7 +1545,7 @@ files = [".zshrc"]
             .machine_profiles
             .insert("my-server".to_string(), "server".to_string());
         assert_eq!(config.profile_name("my-server"), "server");
-        assert_eq!(config.profile_name("other"), "dev");
+        assert_eq!(config.profile_name("other"), DEFAULT_PROFILE);
     }
 
     #[test]
