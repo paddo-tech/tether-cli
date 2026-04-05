@@ -764,7 +764,9 @@ pub fn decrypt_from_repo(
                                     let resolution = conflict.prompt_resolution()?;
 
                                     match resolution {
-                                        ConflictResolution::KeepLocal => {}
+                                        ConflictResolution::KeepLocal => {
+                                            conflict_state.remove_conflict(&file);
+                                        }
                                         ConflictResolution::UseRemote => {
                                             if local_file.exists() {
                                                 if backup_dir.is_none() {
