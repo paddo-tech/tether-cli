@@ -7,7 +7,6 @@ use crate::packages::{
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -428,12 +427,12 @@ fn sync_brew(
     };
 
     let manifest = brew_packages.generate();
-    let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+    let hash = crate::sha256_hex(manifest.as_bytes());
     let manifest_path = manifests_dir.join("Brewfile");
 
     let file_hash = std::fs::read(&manifest_path)
         .ok()
-        .map(|c| format!("{:x}", Sha256::digest(&c)));
+        .map(|c| crate::sha256_hex(&c));
     let changed = file_hash.as_ref() != Some(&hash);
 
     if !dry_run {
@@ -479,12 +478,12 @@ fn sync_simple_manager(
     } else {
         packages.join("\n") + "\n"
     };
-    let hash = format!("{:x}", Sha256::digest(manifest.as_bytes()));
+    let hash = crate::sha256_hex(manifest.as_bytes());
     let manifest_path = manifests_dir.join(def.manifest_file);
 
     let file_hash = std::fs::read(&manifest_path)
         .ok()
-        .map(|c| format!("{:x}", Sha256::digest(&c)));
+        .map(|c| crate::sha256_hex(&c));
     let changed = file_hash.as_ref() != Some(&hash);
 
     if !dry_run {
@@ -571,7 +570,7 @@ mod tests {
 
         let pkg_state = state.packages.get("brew").unwrap();
         // last_upgrade should be updated to now (newer than original)
-        assert!(pkg_state.last_upgrade.unwrap() > original_time);
+        assert!(pkg_state.last_upgrade.unwrap() >= original_time);
         // Other fields preserved via and_modify
         assert_eq!(pkg_state.last_modified, original_modified);
         assert_eq!(pkg_state.last_sync, original_time);

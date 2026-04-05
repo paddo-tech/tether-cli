@@ -228,9 +228,10 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
         // No profiles exist yet — v1->v2 migration should have created "dev"
         // but if it hasn't (e.g., fresh init), create it now
         config.migrate_v1_to_v2();
-        config
-            .machine_profiles
-            .insert(machine_id.clone(), "dev".to_string());
+        config.machine_profiles.insert(
+            machine_id.clone(),
+            crate::config::DEFAULT_PROFILE.to_string(),
+        );
         return Ok(());
     }
 

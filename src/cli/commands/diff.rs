@@ -4,7 +4,6 @@ use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub async fn run(machine: Option<&str>) -> Result<()> {
@@ -103,7 +102,7 @@ fn show_dotfile_diff(
             (true, true) => {
                 // Both exist - check if different
                 let local_content = std::fs::read(&local_path)?;
-                let local_hash = format!("{:x}", Sha256::digest(&local_content));
+                let local_hash = crate::sha256_hex(&local_content);
 
                 let is_different = state
                     .files
@@ -389,7 +388,7 @@ fn build_current_machine_state(
         let path = home.join(file);
         if path.exists() {
             let content = std::fs::read(&path)?;
-            let hash = format!("{:x}", sha2::Sha256::digest(&content));
+            let hash = crate::sha256_hex(&content);
             machine.files.insert(file.to_string(), hash);
         }
     }

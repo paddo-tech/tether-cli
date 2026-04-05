@@ -488,10 +488,8 @@ pub fn extract_org_from_normalized_url(normalized_url: &str) -> Option<String> {
 
 /// Generate a short checkout ID from a path (first 8 chars of SHA256 of canonical path)
 pub fn checkout_id_from_path(path: &Path) -> String {
-    use sha2::{Digest, Sha256};
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let hash = Sha256::digest(canonical.to_string_lossy().as_bytes());
-    format!("{:x}", hash)[..8].to_string()
+    crate::sha256_hex(canonical.to_string_lossy().as_bytes())[..8].to_string()
 }
 
 /// Check if a file is gitignored in its repository

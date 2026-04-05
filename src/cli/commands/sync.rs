@@ -8,7 +8,6 @@ use crate::sync::{
     import_packages, sync_packages, GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -103,11 +102,12 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
     let mut state = SyncState::load()?;
 
-    // Auto-assign machine to "dev" profile on first run after v2 migration
+    // Auto-assign machine to default profile on first run after v2 migration
     if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
-        config
-            .machine_profiles
-            .insert(state.machine_id.clone(), "dev".to_string());
+        config.machine_profiles.insert(
+            state.machine_id.clone(),
+            crate::config::DEFAULT_PROFILE.to_string(),
+        );
         config.save()?;
     }
 
@@ -184,7 +184,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
                 if source.exists() {
                     if let Ok(content) = std::fs::read(&source) {
-                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let hash = crate::sha256_hex(&content);
 
                         let file_changed = state
                             .files
@@ -535,7 +535,7 @@ pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) 
                     let state_key =
                         format!("collab-secret:{}/{}/{}", collab_name, project_url, filename);
                     let last_synced_hash = state.files.get(&state_key).map(|f| f.hash.as_str());
-                    let remote_hash = format!("{:x}", Sha256::digest(&decrypted));
+                    let remote_hash = crate::sha256_hex(&decrypted);
 
                     // Write to all checkouts of this project
                     for local_project in checkouts {
@@ -570,7 +570,7 @@ pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) 
 
                         let should_write = if dest.exists() {
                             let existing = std::fs::read(&dest).unwrap_or_default();
-                            let local_hash = format!("{:x}", Sha256::digest(&existing));
+                            let local_hash = crate::sha256_hex(&existing);
                             if local_hash == remote_hash {
                                 false // Already in sync
                             } else {
@@ -804,10 +804,10 @@ pub fn decrypt_from_repo(
                             }
                         } else {
                             // No true conflict - but preserve local-only changes
-                            let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                            let remote_hash = crate::sha256_hex(&plaintext);
                             let local_hash = std::fs::read(&local_file)
                                 .ok()
-                                .map(|c| format!("{:x}", Sha256::digest(&c)));
+                                .map(|c| crate::sha256_hex(&c));
 
                             // Only write if local unchanged from last sync AND remote differs
                             let local_unchanged = local_hash.as_deref() == last_synced_hash;
@@ -895,10 +895,10 @@ pub fn decrypt_from_repo(
                                 let state_key = format!("~/{}", rel_path_no_enc);
                                 let last_synced_hash =
                                     state.files.get(&state_key).map(|f| f.hash.as_str());
-                                let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                                let remote_hash = crate::sha256_hex(&plaintext);
                                 let local_hash = std::fs::read(&local_file)
                                     .ok()
-                                    .map(|c| format!("{:x}", Sha256::digest(&c)));
+                                    .map(|c| crate::sha256_hex(&c));
                                 let local_unchanged = local_hash.as_deref() == last_synced_hash;
                                 if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
                                     write_decrypted(&local_file, &plaintext)?;
@@ -1259,7 +1259,7 @@ fn decrypt_project_configs(
                 if let Ok(encrypted_content) = std::fs::read(enc_file) {
                     match crate::security::decrypt(&encrypted_content, key) {
                         Ok(plaintext) => {
-                            let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                            let remote_hash = crate::sha256_hex(&plaintext);
                             let state_key = format!("project:{}/{}", project_name, rel_path_no_enc);
                             let canonical_path = crate::sync::canonical_project_file_path(
                                 project_name,
@@ -1275,8 +1275,7 @@ fn decrypt_project_configs(
                                 let local_file = local_repo_path.join(rel_path_no_enc);
                                 // Read actual content (follows symlinks)
                                 if let Ok(local_content) = std::fs::read(&local_file) {
-                                    let local_hash =
-                                        format!("{:x}", Sha256::digest(&local_content));
+                                    let local_hash = crate::sha256_hex(&local_content);
                                     if Some(&local_hash) != last_synced_hash.as_ref()
                                         && local_hash != remote_hash
                                     {
@@ -1294,9 +1293,8 @@ fn decrypt_project_configs(
                             } else {
                                 // Write decrypted content to canonical location
                                 let canonical_content = std::fs::read(&canonical_path).ok();
-                                let canonical_hash = canonical_content
-                                    .as_ref()
-                                    .map(|c| format!("{:x}", Sha256::digest(c)));
+                                let canonical_hash =
+                                    canonical_content.as_ref().map(|c| crate::sha256_hex(c));
 
                                 if canonical_hash.as_ref() != Some(&remote_hash) {
                                     // Backup canonical file if it exists and differs
@@ -1381,10 +1379,8 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
             let local_config_path = home.join(".tether/config.toml");
             let local_content = std::fs::read(&local_config_path).ok();
 
-            let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
-            let local_hash = local_content
-                .as_ref()
-                .map(|c| format!("{:x}", Sha256::digest(c)));
+            let remote_hash = crate::sha256_hex(&plaintext);
+            let local_hash = local_content.as_ref().map(|c| crate::sha256_hex(c));
 
             // Check if local has changed since last sync
             let state = SyncState::load().ok();
@@ -1432,7 +1428,7 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
     }
 
     let content = std::fs::read(&config_path)?;
-    let hash = format!("{:x}", Sha256::digest(&content));
+    let hash = crate::sha256_hex(&content);
 
     let dest_dir = sync_path.join("configs/tether");
     std::fs::create_dir_all(&dest_dir)?;
@@ -1444,7 +1440,7 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
         let key = crate::security::get_encryption_key().ok()?;
         crate::security::decrypt(&enc, &key)
             .ok()
-            .map(|plain| format!("{:x}", Sha256::digest(&plain)))
+            .map(|plain| crate::sha256_hex(&plain))
     });
 
     if file_hash.as_ref() != Some(&hash) {
@@ -1490,7 +1486,7 @@ pub fn sync_directories(
 
         if expanded_path.is_file() {
             if let Ok(content) = std::fs::read(&expanded_path) {
-                let hash = format!("{:x}", Sha256::digest(&content));
+                let hash = crate::sha256_hex(&content);
                 let file_changed = state
                     .files
                     .get(dir_path)
@@ -1534,7 +1530,7 @@ pub fn sync_directories(
                     let state_key = format!("~/{}", rel_to_home.display());
 
                     if let Ok(content) = std::fs::read(file_path) {
-                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let hash = crate::sha256_hex(&content);
                         let file_changed = state
                             .files
                             .get(&state_key)
@@ -1675,7 +1671,7 @@ pub fn sync_project_configs(
                     }
 
                     if let Ok(content) = std::fs::read(file_path) {
-                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let hash = crate::sha256_hex(&content);
 
                         let rel_to_repo = file_path
                             .strip_prefix(&repo_path)
@@ -2046,14 +2042,14 @@ pub fn sync_team_project_secrets(
                                 format!("team-secret:{}/{}", normalized_url, rel_file_no_age);
                             let last_synced_hash =
                                 state.files.get(&state_key).map(|f| f.hash.as_str());
-                            let remote_hash = format!("{:x}", Sha256::digest(&decrypted));
+                            let remote_hash = crate::sha256_hex(&decrypted);
 
                             for local_project in checkouts {
                                 let local_file = local_project.join(rel_file_no_age);
 
                                 let should_write = if local_file.exists() {
                                     let existing = std::fs::read(&local_file).unwrap_or_default();
-                                    let local_hash = format!("{:x}", Sha256::digest(&existing));
+                                    let local_hash = crate::sha256_hex(&existing);
                                     if local_hash == remote_hash {
                                         false // Already in sync
                                     } else {

@@ -104,7 +104,6 @@ pub fn resolve_dotfile_repo_path(
             return flat;
         }
     }
-    // Default to profiled path (for new writes)
     profiled
 }
 
@@ -1147,5 +1146,29 @@ mod tests {
             std::fs::read_to_string(sync_path.join("profiles/dev/.zshrc")).unwrap(),
             "plain"
         );
+    }
+
+    #[test]
+    fn test_canonical_project_file_path_rejects_traversal_in_url() {
+        let result = canonical_project_file_path("github.com/../../etc", "config.json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_canonical_project_file_path_rejects_traversal_in_rel_path() {
+        let result = canonical_project_file_path("github.com/org/repo", "../../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_canonical_project_file_path_rejects_absolute_paths() {
+        assert!(canonical_project_file_path("/etc", "config.json").is_err());
+        assert!(canonical_project_file_path("github.com/org/repo", "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_canonical_project_file_path_valid() {
+        let result = canonical_project_file_path("github.com/org/repo", ".env").unwrap();
+        assert!(result.ends_with(".tether/projects/github.com/org/repo/.env"));
     }
 }

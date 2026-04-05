@@ -162,7 +162,7 @@ fn collect_sections(state: &DashboardState) -> Vec<SectionData> {
                 let config_ref = state.config.as_ref();
                 let profile = config_ref
                     .map(|c| c.profile_name(machine_id))
-                    .unwrap_or("dev");
+                    .unwrap_or(crate::config::DEFAULT_PROFILE);
                 let shared = config_ref
                     .map(|c| c.is_dotfile_shared(machine_id, path))
                     .unwrap_or(false);

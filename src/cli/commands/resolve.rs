@@ -3,7 +3,6 @@ use crate::config::Config;
 use crate::sync::{ConflictResolution, ConflictState, FileConflict, SyncEngine};
 use anyhow::Result;
 use owo_colors::OwoColorize;
-use sha2::{Digest, Sha256};
 
 pub async fn run(file: Option<&str>) -> Result<()> {
     let config = Config::load()?;
@@ -94,9 +93,9 @@ pub async fn run(file: Option<&str>) -> Result<()> {
 
         let conflict = FileConflict {
             file_path: pending.file_path.clone(),
-            local_hash: format!("{:x}", Sha256::digest(&local_content)),
+            local_hash: crate::sha256_hex(&local_content),
             last_synced_hash: None,
-            remote_hash: format!("{:x}", Sha256::digest(&remote_content)),
+            remote_hash: crate::sha256_hex(&remote_content),
             local_content,
             remote_content,
         };

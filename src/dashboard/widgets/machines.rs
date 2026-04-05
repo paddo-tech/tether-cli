@@ -48,7 +48,7 @@ pub fn build_rows(state: &DashboardState, expanded: Option<&str>) -> Vec<Machine
                             .as_ref()
                             .map(|c| c.profile_name(&m.machine_id).to_string())
                     })
-                    .unwrap_or_else(|| "dev".to_string()),
+                    .unwrap_or_else(|| crate::config::DEFAULT_PROFILE.to_string()),
             ),
         });
 

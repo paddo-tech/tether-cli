@@ -4,7 +4,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Represents a file conflict during sync
@@ -155,7 +154,7 @@ impl FileConflict {
             // Check if the file was modified
             if merged_path.exists() {
                 let new_content = std::fs::read(&merged_path)?;
-                let new_hash = format!("{:x}", Sha256::digest(&new_content));
+                let new_hash = crate::sha256_hex(&new_content);
                 if new_hash != self.local_hash {
                     Output::success("File was modified - using merged version");
                     return Ok(ConflictResolution::Merged);
@@ -241,8 +240,8 @@ pub fn detect_conflict(
         Err(_) => return None, // Local doesn't exist, no conflict
     };
 
-    let local_hash = format!("{:x}", Sha256::digest(&local_content));
-    let remote_hash = format!("{:x}", Sha256::digest(remote_content));
+    let local_hash = crate::sha256_hex(&local_content);
+    let remote_hash = crate::sha256_hex(remote_content);
 
     // No conflict if hashes match
     if local_hash == remote_hash {
@@ -524,7 +523,7 @@ mod tests {
     fn test_escape_applescript_truncates_long() {
         let long = "a".repeat(200);
         let escaped = escape_applescript(&long);
-        assert!(escaped.len() <= 100);
+        assert_eq!(escaped.len(), 100);
     }
 
     #[test]
