@@ -267,9 +267,12 @@ pub async fn join(url: &str) -> Result<()> {
                         }
                     }
                     Err(_) => {
-                        // Can't verify - might not have access to check collaborators
                         Output::warning(&format!(
                             "Could not verify access to {}/{}",
+                            project_owner, project_repo
+                        ));
+                        not_collaborator_on.push(format!(
+                            "{}/{} (verification failed)",
                             project_owner, project_repo
                         ));
                     }
@@ -356,7 +359,7 @@ pub async fn add(file: &str, project_path: Option<&str>) -> Result<()> {
     let normalized_url = normalize_remote_url(&remote_url);
 
     // Find collab for this project
-    let (collab_name, _collab_config) =
+    let (collab_name, collab_config) =
         config.collab_for_project(&normalized_url).ok_or_else(|| {
             anyhow::anyhow!(
                 "No collab configured for this project. Run 'tether collab init' first."
@@ -374,9 +377,15 @@ pub async fn add(file: &str, project_path: Option<&str>) -> Result<()> {
     let git = GitBackend::open(&collab_dir)?;
     git.pull()?;
 
-    // Load recipients
+    // Load recipients filtered by authorized members
     let recipients_dir = collab_dir.join("recipients");
-    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    let (recipients, skipped) = crate::security::load_recipients_authorized(
+        &recipients_dir,
+        &collab_config.members_cache,
+    )?;
+    for name in &skipped {
+        Output::warning(&format!("Skipping unauthorized recipient: {}", name));
+    }
     if recipients.is_empty() {
         return Err(anyhow::anyhow!(
             "No recipients found in collab. Add recipients first."
@@ -571,8 +580,12 @@ pub async fn refresh(project_path: Option<&str>) -> Result<()> {
         }
     }
 
-    // Re-encrypt all secrets with current recipients
-    let recipients = crate::security::load_recipients(&recipients_dir)?;
+    // Re-encrypt all secrets with only authorized recipients
+    let (recipients, skipped) =
+        crate::security::load_recipients_authorized(&recipients_dir, &collaborators)?;
+    for name in &skipped {
+        Output::warning(&format!("Skipping unauthorized recipient: {}", name));
+    }
 
     if recipients.is_empty() {
         Output::warning("No recipients found - secrets won't be re-encrypted");

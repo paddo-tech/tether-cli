@@ -4,9 +4,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
-
 const IDENTITY_FILENAME: &str = "identity.age";
 const PUBKEY_FILENAME: &str = "identity.pub";
 
@@ -57,18 +54,7 @@ pub fn store_identity(identity: &age::x25519::Identity, passphrase: &str) -> Res
         fs::create_dir_all(parent)?;
     }
 
-    #[cfg(unix)]
-    {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(&encrypted)?;
-    }
-    #[cfg(not(unix))]
-    fs::write(&path, &encrypted)?;
+    super::write_owner_only(&path, &encrypted)?;
 
     // Also store public key for easy sharing
     let pubkey = identity.to_public().to_string();
@@ -131,18 +117,7 @@ fn cache_identity(identity: &age::x25519::Identity) -> Result<()> {
 
     let identity_str = identity.to_string();
 
-    #[cfg(unix)]
-    {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(identity_str.expose_secret().as_bytes())?;
-    }
-    #[cfg(not(unix))]
-    fs::write(&path, identity_str.expose_secret())?;
+    super::write_owner_only(&path, identity_str.expose_secret().as_bytes())?;
 
     Ok(())
 }
@@ -185,16 +160,45 @@ pub fn get_public_key() -> Result<String> {
 
 /// Load recipients from a team's recipients directory
 pub fn load_recipients(recipients_dir: &Path) -> Result<Vec<age::x25519::Recipient>> {
+    let (recipients, _) = load_recipients_filtered(recipients_dir, &[])?;
+    Ok(recipients)
+}
+
+/// Load recipients filtered by an authorized list.
+/// Returns (included recipients, skipped usernames).
+/// If authorized list is empty, loads all recipients.
+pub fn load_recipients_authorized(
+    recipients_dir: &Path,
+    authorized: &[String],
+) -> Result<(Vec<age::x25519::Recipient>, Vec<String>)> {
+    load_recipients_filtered(recipients_dir, authorized)
+}
+
+fn load_recipients_filtered(
+    recipients_dir: &Path,
+    authorized: &[String],
+) -> Result<(Vec<age::x25519::Recipient>, Vec<String>)> {
     let mut recipients = Vec::new();
+    let mut skipped = Vec::new();
 
     if !recipients_dir.exists() {
-        return Ok(recipients);
+        return Ok((recipients, skipped));
     }
 
     for entry in fs::read_dir(recipients_dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "pub") {
+            if !authorized.is_empty() {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                if !authorized.iter().any(|a| a.eq_ignore_ascii_case(stem)) {
+                    skipped.push(stem.to_string());
+                    continue;
+                }
+            }
             let pubkey = fs::read_to_string(&path)?;
             let recipient: age::x25519::Recipient = pubkey
                 .trim()
@@ -204,7 +208,7 @@ pub fn load_recipients(recipients_dir: &Path) -> Result<Vec<age::x25519::Recipie
         }
     }
 
-    Ok(recipients)
+    Ok((recipients, skipped))
 }
 
 /// Encrypt data to multiple recipients
