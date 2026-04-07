@@ -76,7 +76,7 @@ pub fn render(
     } else if let Some(ref sync_state) = state.sync_state {
         spans.push(Span::styled(
             format!("last sync: {}", relative_time(sync_state.last_sync)),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ));
     }
 
@@ -126,7 +126,7 @@ pub fn render(
     let paragraph = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Color::Gray)),
     );
     f.render_widget(paragraph, area);
 }

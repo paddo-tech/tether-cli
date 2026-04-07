@@ -1558,9 +1558,9 @@ fn render_confirm_popup(f: &mut Frame, title: &str, msg: &str, border_color: Col
         Line::from(""),
         Line::from(vec![
             Span::styled("  y", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" confirm    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" confirm    ", Style::default().fg(Color::Gray)),
             Span::styled("n/Esc", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+            Span::styled(" cancel", Style::default().fg(Color::Gray)),
         ]),
     ];
 
@@ -1609,7 +1609,10 @@ fn render_file_import_popup(f: &mut Frame, picker: &ImportPickerState) {
     {
         let marker = if i == picker.cursor { "> " } else { "  " };
         let style = if i == picker.cursor {
-            Style::default().fg(Color::White).bg(Color::DarkGray).bold()
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Indexed(240))
+                .bold()
         } else {
             Style::default().fg(Color::White)
         };
@@ -1618,9 +1621,11 @@ fn render_file_import_popup(f: &mut Frame, picker: &ImportPickerState) {
             Span::styled(
                 format!(" [{}]", item.source_profile),
                 if i == picker.cursor {
-                    Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+                    Style::default()
+                        .fg(Color::Indexed(240))
+                        .bg(Color::Indexed(240))
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::Gray)
                 },
             ),
         ]));
@@ -1628,11 +1633,11 @@ fn render_file_import_popup(f: &mut Frame, picker: &ImportPickerState) {
     text.push(Line::from(""));
     text.push(Line::from(vec![
         Span::styled("  j/k", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" navigate  ", Style::default().fg(Color::Gray)),
         Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" import  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" import  ", Style::default().fg(Color::Gray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
     ]));
 
     let paragraph = ratatui::widgets::Paragraph::new(text).block(
@@ -1685,14 +1690,19 @@ fn render_pkg_import_popup(f: &mut Frame, picker: &PkgImportPickerState) {
         let label = widgets::manager_label(&item.manager_key);
         let sources = item.sources.join(", ");
         let style = if i == picker.cursor {
-            Style::default().fg(Color::White).bg(Color::DarkGray).bold()
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Indexed(240))
+                .bold()
         } else {
             Style::default().fg(Color::White)
         };
         let dim = if i == picker.cursor {
-            Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+            Style::default()
+                .fg(Color::Indexed(240))
+                .bg(Color::Indexed(240))
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::Gray)
         };
         text.push(Line::from(vec![
             Span::styled(format!("  {}{}", marker, item.name), style),
@@ -1703,11 +1713,11 @@ fn render_pkg_import_popup(f: &mut Frame, picker: &PkgImportPickerState) {
     text.push(Line::from(""));
     text.push(Line::from(vec![
         Span::styled("  j/k", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" navigate  ", Style::default().fg(Color::Gray)),
         Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" install  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" install  ", Style::default().fg(Color::Gray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" close", Style::default().fg(Color::DarkGray)),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
     ]));
 
     let paragraph = ratatui::widgets::Paragraph::new(text).block(
@@ -1761,16 +1771,16 @@ fn draw(f: &mut Frame, app: &App) {
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled(num, Style::default().fg(Color::DarkGray)),
+                    Span::styled(num, Style::default().fg(Color::Gray)),
                     Span::raw(":"),
-                    Span::styled(t.title(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(t.title(), Style::default().fg(Color::Gray)),
                 ])
             }
         })
         .collect();
 
     let tabs = ratatui::widgets::Tabs::new(tab_titles)
-        .divider(Span::styled(" | ", Style::default().fg(Color::DarkGray)))
+        .divider(Span::styled(" | ", Style::default().fg(Color::Gray)))
         .select(
             Tab::all()
                 .iter()
@@ -1898,7 +1908,10 @@ fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
     for (i, option) in options.iter().enumerate() {
         let marker = if i == cursor { "> " } else { "  " };
         let style = if i == cursor {
-            Style::default().fg(Color::White).bg(Color::DarkGray).bold()
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Indexed(240))
+                .bold()
         } else {
             Style::default().fg(Color::White)
         };
@@ -1910,15 +1923,15 @@ fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
     text.push(Line::from(""));
     text.push(Line::from(vec![
         Span::styled("  j/k", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" navigate  ", Style::default().fg(Color::Gray)),
         Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" select  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" select  ", Style::default().fg(Color::Gray)),
         Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
+        Span::styled(" cancel", Style::default().fg(Color::Gray)),
     ]));
     text.push(Line::from(Span::styled(
         "  New: tether machines profile create <name>",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(Color::Gray),
     )));
 
     let paragraph = ratatui::widgets::Paragraph::new(text).block(

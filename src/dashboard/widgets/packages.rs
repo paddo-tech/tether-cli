@@ -68,14 +68,14 @@ pub fn render(
     let block = Block::default()
         .title(" Packages ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Gray));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
     if rows.is_empty() {
         let msg = Paragraph::new(Span::styled(
             "  No package data for this machine",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ));
         f.render_widget(msg, inner_area);
         return;
@@ -110,12 +110,15 @@ pub fn render(
                     ">"
                 };
                 let style = if is_selected {
-                    Style::default().fg(Color::Cyan).bg(Color::DarkGray).bold()
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::Indexed(240))
+                        .bold()
                 } else {
                     Style::default().fg(Color::Cyan).bold()
                 };
                 let bg_style = if is_selected {
-                    Style::default().bg(Color::DarkGray)
+                    Style::default().bg(Color::Indexed(240))
                 } else {
                     Style::default()
                 };
@@ -124,9 +127,11 @@ pub fn render(
                     Span::styled(
                         format!("({})", count),
                         if is_selected {
-                            Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+                            Style::default()
+                                .fg(Color::Indexed(240))
+                                .bg(Color::Indexed(240))
                         } else {
-                            Style::default().fg(Color::DarkGray)
+                            Style::default().fg(Color::Gray)
                         },
                     ),
                     Span::styled(" ".repeat(inner_area.width as usize), bg_style),
@@ -135,7 +140,7 @@ pub fn render(
             }
             PkgRow::Package { name, .. } => {
                 let style = if is_selected {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                    Style::default().fg(Color::White).bg(Color::Indexed(240))
                 } else {
                     Style::default().fg(Color::White)
                 };
@@ -172,7 +177,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
             if managers.is_empty() {
                 vec![ListItem::new(Span::styled(
                     "  No packages tracked",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Gray),
                 ))]
             } else {
                 managers
@@ -184,7 +189,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
                             Span::raw("  "),
                             Span::styled(
                                 format!("{} packages", packages.len()),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(Color::Gray),
                             ),
                         ]))
                     })
@@ -193,7 +198,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
         }
         None => vec![ListItem::new(Span::styled(
             "  No package data",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ))],
     };
 
@@ -201,7 +206,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
         Block::default()
             .title(" Packages ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Color::Gray)),
     );
     f.render_widget(list, area);
 }

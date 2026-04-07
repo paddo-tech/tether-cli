@@ -345,14 +345,14 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
     let block = Block::default()
         .title(" Files ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Gray));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
     if rows.is_empty() {
         let msg = Paragraph::new(Span::styled(
             "  No sync state",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ));
         f.render_widget(msg, inner_area);
         return;
@@ -375,7 +375,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
         let row_area = Rect::new(inner_area.x, y, inner_area.width, 1);
 
         let bg = if is_selected {
-            Color::DarkGray
+            Color::Indexed(240)
         } else {
             Color::Reset
         };
@@ -396,13 +396,13 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                     ),
                     Span::styled(
                         format!("({})", count),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                 ];
                 if !url.is_empty() {
                     spans.push(Span::styled(
                         format!("  {}", url),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ));
                 }
                 spans.push(Span::styled(
@@ -436,7 +436,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 let mut spans = vec![
                     Span::styled(
                         format!(" {}", arrow),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                     badge,
                     Span::styled(" ", Style::default().bg(bg)),
@@ -445,15 +445,12 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 if *shared {
                     spans.push(Span::styled(
                         " [shared]",
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ));
                 }
                 if !time.is_empty() {
                     spans.push(Span::styled("  ", Style::default().bg(bg)));
-                    spans.push(Span::styled(
-                        time,
-                        Style::default().fg(Color::DarkGray).bg(bg),
-                    ));
+                    spans.push(Span::styled(time, Style::default().fg(Color::Gray).bg(bg)));
                 }
                 spans.push(Span::styled(
                     " ".repeat(inner_area.width as usize),
@@ -473,16 +470,16 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 let line = Line::from(vec![
                     Span::styled(
                         format!("     {} ", arrow),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                     Span::styled(short_hash, Style::default().fg(Color::Yellow).bg(bg).bold()),
                     Span::styled(
                         format!("  {:>12}", date),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                     Span::styled(
                         format!("  {:15}", machine_id),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                     Span::styled(
                         format!("  {}", message),
@@ -501,11 +498,11 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 let line = Line::from(vec![
                     Span::styled(
                         format!("  {} ", arrow),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                     Span::styled(
                         format!("Deleted ({})", count),
-                        Style::default().fg(Color::DarkGray).bg(bg),
+                        Style::default().fg(Color::Gray).bg(bg),
                     ),
                     Span::styled(
                         " ".repeat(inner_area.width as usize),
@@ -529,13 +526,13 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 let fg = if diff_line.starts_with("@@") {
                     Color::Cyan
                 } else if diff_line.starts_with("+++") || diff_line.starts_with("---") {
-                    Color::DarkGray
+                    Color::Gray
                 } else if diff_line.starts_with('+') {
                     Color::Green
                 } else if diff_line.starts_with('-') {
                     Color::Red
                 } else {
-                    Color::DarkGray
+                    Color::Gray
                 };
                 let line = Line::from(vec![
                     Span::styled("        ", Style::default().bg(bg)),
@@ -560,7 +557,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState, scroll
     let items: Vec<ListItem> = if rows.is_empty() {
         vec![ListItem::new(Span::styled(
             "  No sync state",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ))]
     } else {
         rows.into_iter()
@@ -572,12 +569,12 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState, scroll
                             format!(" {} ", label),
                             Style::default().fg(Color::Cyan).bold(),
                         ),
-                        Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("({})", count), Style::default().fg(Color::Gray)),
                     ];
                     if !url.is_empty() {
                         spans.push(Span::styled(
                             format!("  {}", url),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(Color::Gray),
                         ));
                     }
                     ListItem::new(Line::from(spans))
@@ -598,7 +595,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState, scroll
                     ];
                     if !time.is_empty() {
                         spans.push(Span::raw("  "));
-                        spans.push(Span::styled(time, Style::default().fg(Color::DarkGray)));
+                        spans.push(Span::styled(time, Style::default().fg(Color::Gray)));
                     }
                     ListItem::new(Line::from(spans))
                 }
@@ -611,7 +608,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState, scroll
         Block::default()
             .title(" Dotfiles ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Color::Gray)),
     );
     f.render_widget(list, area);
 }

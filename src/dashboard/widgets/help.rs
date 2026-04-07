@@ -4,44 +4,44 @@ use ratatui::{prelude::*, widgets::*};
 pub fn render_bar(f: &mut Frame, area: Rect, active_tab: Tab) {
     let mut spans = vec![
         Span::styled(" q", Style::default().fg(Color::Yellow).bold()),
-        Span::styled("uit ", Style::default().fg(Color::DarkGray)),
+        Span::styled("uit ", Style::default().fg(Color::Gray)),
         Span::styled("s", Style::default().fg(Color::Yellow).bold()),
-        Span::styled("ync ", Style::default().fg(Color::DarkGray)),
+        Span::styled("ync ", Style::default().fg(Color::Gray)),
         Span::styled("d", Style::default().fg(Color::Yellow).bold()),
-        Span::styled("aemon ", Style::default().fg(Color::DarkGray)),
+        Span::styled("aemon ", Style::default().fg(Color::Gray)),
         Span::styled("r", Style::default().fg(Color::Yellow).bold()),
-        Span::styled("efresh ", Style::default().fg(Color::DarkGray)),
+        Span::styled("efresh ", Style::default().fg(Color::Gray)),
     ];
 
     match active_tab {
         Tab::Config => {
             spans.extend([
                 Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(" edit ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" edit ", Style::default().fg(Color::Gray)),
             ]);
         }
         Tab::Packages => {
             spans.extend([
                 Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(" expand/uninstall ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" expand/uninstall ", Style::default().fg(Color::Gray)),
             ]);
         }
         Tab::Machines => {
             spans.extend([
                 Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(" expand ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" expand ", Style::default().fg(Color::Gray)),
                 Span::styled("p", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(" profile ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" profile ", Style::default().fg(Color::Gray)),
             ]);
         }
         Tab::Files => {
             spans.extend([
                 Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(" expand/diff ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" expand/diff ", Style::default().fg(Color::Gray)),
                 Span::styled("t", Style::default().fg(Color::Yellow).bold()),
-                Span::styled(" shared ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" shared ", Style::default().fg(Color::Gray)),
                 Span::styled("R", Style::default().fg(Color::Yellow).bold()),
-                Span::styled("estore ", Style::default().fg(Color::DarkGray)),
+                Span::styled("estore ", Style::default().fg(Color::Gray)),
             ]);
         }
         _ => {}
@@ -49,7 +49,7 @@ pub fn render_bar(f: &mut Frame, area: Rect, active_tab: Tab) {
 
     spans.extend([
         Span::styled("?", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" help", Style::default().fg(Color::DarkGray)),
+        Span::styled(" help", Style::default().fg(Color::Gray)),
     ]);
 
     let paragraph = Paragraph::new(Line::from(spans));

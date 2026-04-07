@@ -651,13 +651,7 @@ fn preserve_executable_bit(source: &Path, dest: &Path) {
 
 /// Write decrypted content with secure permissions (0o600 on Unix)
 fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
-    std::fs::write(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    crate::security::write_owner_only(path, contents)
 }
 
 pub fn decrypt_from_repo(

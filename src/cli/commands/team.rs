@@ -359,29 +359,42 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
     let mut secrets_found = false;
 
     if dotfiles_dir.exists() {
-        for entry in std::fs::read_dir(&dotfiles_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                if let Some(filename) = entry.file_name().to_str() {
-                    team_files.push(filename.to_string());
+        for entry in walkdir::WalkDir::new(&dotfiles_dir)
+            .min_depth(1)
+            .follow_links(false)
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    Output::warning(&format!("Could not read during scan: {}", e));
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel_path = entry
+                .path()
+                .strip_prefix(&dotfiles_dir)
+                .unwrap_or(entry.path());
+            if let Some(rel_str) = rel_path.to_str() {
+                team_files.push(rel_str.to_string());
 
-                    // Scan for secrets
-                    let file_path = entry.path();
-                    if let Ok(findings) = crate::security::scan_for_secrets(&file_path) {
-                        if !findings.is_empty() {
-                            secrets_found = true;
+                // Scan for secrets
+                if let Ok(findings) = crate::security::scan_for_secrets(entry.path()) {
+                    if !findings.is_empty() {
+                        secrets_found = true;
+                        Output::warning(&format!(
+                            "  {} - Found {} potential secret(s)",
+                            rel_str,
+                            findings.len()
+                        ));
+                        for finding in findings.iter().take(2) {
                             Output::warning(&format!(
-                                "  {} - Found {} potential secret(s)",
-                                filename,
-                                findings.len()
+                                "    Line {}: {}",
+                                finding.line_number,
+                                finding.secret_type.description()
                             ));
-                            for finding in findings.iter().take(2) {
-                                Output::warning(&format!(
-                                    "    Line {}: {}",
-                                    finding.line_number,
-                                    finding.secret_type.description()
-                                ));
-                            }
                         }
                     }
                 }

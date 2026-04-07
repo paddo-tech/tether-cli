@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.9] - 2026-04-07
+
+### Fixed
+
+- Collab join now fails closed when GitHub API collaborator check fails
+- Recipient filtering enforced against authorized list during `collab add` and `collab refresh`
+- Secret scan during `team add` is now recursive (catches secrets in subdirectories)
+- Secure file permissions on Windows for key cache, identity cache, and decrypted secrets via `icacls`
+- Centralized `write_owner_only` helper fixes pre-existing file permissions on Unix
+
+### Changed
+
+- Dashboard TUI palette brightened for better readability on dark and light terminals
+
 ## [1.11.8] - 2026-03-09
 
 ### Fixed
