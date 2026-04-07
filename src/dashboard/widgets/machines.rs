@@ -108,14 +108,14 @@ pub fn render(
     let block = Block::default()
         .title(" Machines ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Gray));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
     if rows.is_empty() {
         let msg = Paragraph::new(Span::styled(
             "  No machines found",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ));
         f.render_widget(msg, inner_area);
         return;
@@ -153,9 +153,9 @@ pub fn render(
 
                 let name_style = if is_selected {
                     if *is_current {
-                        Style::default().fg(Color::White).bg(Color::DarkGray).bold()
+                        Style::default().fg(Color::White).bg(Color::Indexed(240)).bold()
                     } else {
-                        Style::default().fg(Color::White).bg(Color::DarkGray)
+                        Style::default().fg(Color::White).bg(Color::Indexed(240))
                     }
                 } else if *is_current {
                     Style::default().fg(Color::White).bold()
@@ -164,14 +164,14 @@ pub fn render(
                 };
 
                 let bg_style = if is_selected {
-                    Style::default().bg(Color::DarkGray)
+                    Style::default().bg(Color::Indexed(240))
                 } else {
                     Style::default()
                 };
 
                 let marker_style = if *is_current {
                     if is_selected {
-                        Style::default().fg(Color::Green).bg(Color::DarkGray).bold()
+                        Style::default().fg(Color::Green).bg(Color::Indexed(240)).bold()
                     } else {
                         Style::default().fg(Color::Green).bold()
                     }
@@ -180,9 +180,9 @@ pub fn render(
                 };
 
                 let dim_style = if is_selected {
-                    Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+                    Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::Gray)
                 };
 
                 let profile_span = if let Some(p) = profile {
@@ -204,14 +204,14 @@ pub fn render(
             }
             MachineRow::Detail { label, value } => {
                 let style = if is_selected {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                    Style::default().fg(Color::White).bg(Color::Indexed(240))
                 } else {
                     Style::default().fg(Color::White)
                 };
                 let label_style = if is_selected {
-                    Style::default().fg(Color::DarkGray).bg(Color::DarkGray)
+                    Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(Color::Gray)
                 };
                 let line = Line::from(vec![
                     Span::styled(format!("      {}: ", label), label_style),
@@ -219,7 +219,7 @@ pub fn render(
                     Span::styled(
                         " ".repeat(inner_area.width as usize),
                         if is_selected {
-                            Style::default().bg(Color::DarkGray)
+                            Style::default().bg(Color::Indexed(240))
                         } else {
                             Style::default()
                         },
@@ -244,7 +244,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
     let items: Vec<ListItem> = if state.machines.is_empty() {
         vec![ListItem::new(Span::styled(
             "  No machines found",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ))]
     } else {
         state
@@ -278,10 +278,10 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
                     Span::raw("  "),
                     Span::styled(
                         format!("{}f {}p", file_count, pkg_count),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::Gray),
                     ),
                     Span::raw("  "),
-                    Span::styled(time, Style::default().fg(Color::DarkGray)),
+                    Span::styled(time, Style::default().fg(Color::Gray)),
                 ]))
             })
             .collect()
@@ -291,7 +291,7 @@ pub fn render_overview(f: &mut Frame, area: Rect, state: &DashboardState) {
         Block::default()
             .title(" Machines ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+            .border_style(Style::default().fg(Color::Gray)),
     );
     f.render_widget(list, area);
 }

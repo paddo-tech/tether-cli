@@ -15,13 +15,13 @@ pub fn render(
     let Some(config) = config else {
         let msg = Paragraph::new(Span::styled(
             "  No config loaded",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(Color::Gray),
         ))
         .block(
             Block::default()
                 .title(" Config ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(Style::default().fg(Color::Gray)),
         );
         f.render_widget(msg, area);
         return;
@@ -38,7 +38,7 @@ pub fn render(
     let inner = Block::default()
         .title(" Config ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Gray));
     let inner_area = inner.inner(area);
     f.render_widget(inner, area);
 
@@ -116,7 +116,7 @@ pub fn render(
             };
 
             let style = if is_selected {
-                Style::default().fg(Color::White).bg(Color::DarkGray)
+                Style::default().fg(Color::White).bg(Color::Indexed(240))
             } else {
                 Style::default().fg(Color::White)
             };
@@ -146,7 +146,7 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Gray));
     let inner_area = block.inner(area);
     f.render_widget(block, area);
 
@@ -157,18 +157,18 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState) {
     // Header line with keybindings
     let header = Line::from(vec![
         Span::styled("  Esc", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" back  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" back  ", Style::default().fg(Color::Gray)),
         Span::styled("a", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" add  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" add  ", Style::default().fg(Color::Gray)),
         Span::styled("d", Style::default().fg(Color::Yellow).bold()),
-        Span::styled(" delete", Style::default().fg(Color::DarkGray)),
+        Span::styled(" delete", Style::default().fg(Color::Gray)),
         if le.is_dotfile {
             Span::styled("  t", Style::default().fg(Color::Yellow).bold())
         } else {
             Span::raw("")
         },
         if le.is_dotfile {
-            Span::styled(" toggle create", Style::default().fg(Color::DarkGray))
+            Span::styled(" toggle create", Style::default().fg(Color::Gray))
         } else {
             Span::raw("")
         },
@@ -184,7 +184,7 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState) {
     }
     let sep = "─".repeat(inner_area.width as usize);
     f.render_widget(
-        Paragraph::new(Span::styled(sep, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(sep, Style::default().fg(Color::Gray))),
         Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1),
     );
 
@@ -216,7 +216,7 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState) {
 
         let is_selected = i == le.cursor;
         let style = if is_selected {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+            Style::default().fg(Color::White).bg(Color::Indexed(240))
         } else {
             Style::default().fg(Color::White)
         };
