@@ -36,18 +36,9 @@ impl FileConflict {
     /// Check if there's actually a conflict (both sides changed since last sync)
     pub fn is_true_conflict(&self) -> bool {
         match &self.last_synced_hash {
-            Some(last) => {
-                // Both changed: local != last AND remote != last
-                self.local_hash != *last && self.remote_hash != *last
-            }
-            None => {
-                // No sync history — local is authoritative. The export step will
-                // push it to establish a baseline. Treating this as a conflict
-                // causes the file to be skipped in both import AND export (since
-                // the daemon can't resolve conflicts interactively), leaving the
-                // file stuck indefinitely.
-                false
-            }
+            Some(last) => self.local_hash != *last && self.remote_hash != *last,
+            // No sync history — local is authoritative; export establishes baseline
+            None => false,
         }
     }
 

@@ -713,11 +713,8 @@ impl Config {
                     .iter()
                     .map(|e| e.to_dotfile_entry())
                     .collect();
-                // Merge global dotfiles that aren't already in the profile list
-                let profile_paths: std::collections::HashSet<String> =
-                    entries.iter().map(|e| e.path().to_string()).collect();
                 for global in &self.dotfiles.files {
-                    if !profile_paths.contains(global.path()) {
+                    if !entries.iter().any(|e| e.path() == global.path()) {
                         entries.push(global.clone());
                     }
                 }
