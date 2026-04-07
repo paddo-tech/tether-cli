@@ -8,7 +8,6 @@ use crate::sync::{
     import_packages, sync_packages, GitBackend, MachineState, SyncEngine, SyncState,
 };
 use anyhow::Result;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -813,10 +812,10 @@ pub fn decrypt_from_repo(
                         }
 
                         // Apply remote content if local is unchanged or this is a first sync
-                        let remote_hash = format!("{:x}", Sha256::digest(&plaintext));
+                        let remote_hash = crate::sha256_hex(&plaintext);
                         let local_hash = std::fs::read(&local_file)
                             .ok()
-                            .map(|c| format!("{:x}", Sha256::digest(&c)));
+                            .map(|c| crate::sha256_hex(&c));
 
                         let should_write = if first_sync {
                             // First sync: write unless local already matches remote
