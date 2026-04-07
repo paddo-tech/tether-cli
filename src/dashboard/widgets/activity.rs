@@ -10,12 +10,7 @@ pub fn render(f: &mut Frame, area: Rect, lines: &[String]) {
         Text::from(
             lines
                 .iter()
-                .map(|l| {
-                    Line::from(Span::styled(
-                        l.as_str(),
-                        Style::default().fg(Color::Gray),
-                    ))
-                })
+                .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(Color::Gray))))
                 .collect::<Vec<_>>(),
         )
     };

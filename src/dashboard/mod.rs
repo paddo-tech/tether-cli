@@ -1609,7 +1609,10 @@ fn render_file_import_popup(f: &mut Frame, picker: &ImportPickerState) {
     {
         let marker = if i == picker.cursor { "> " } else { "  " };
         let style = if i == picker.cursor {
-            Style::default().fg(Color::White).bg(Color::Indexed(240)).bold()
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Indexed(240))
+                .bold()
         } else {
             Style::default().fg(Color::White)
         };
@@ -1618,7 +1621,9 @@ fn render_file_import_popup(f: &mut Frame, picker: &ImportPickerState) {
             Span::styled(
                 format!(" [{}]", item.source_profile),
                 if i == picker.cursor {
-                    Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
+                    Style::default()
+                        .fg(Color::Indexed(240))
+                        .bg(Color::Indexed(240))
                 } else {
                     Style::default().fg(Color::Gray)
                 },
@@ -1685,12 +1690,17 @@ fn render_pkg_import_popup(f: &mut Frame, picker: &PkgImportPickerState) {
         let label = widgets::manager_label(&item.manager_key);
         let sources = item.sources.join(", ");
         let style = if i == picker.cursor {
-            Style::default().fg(Color::White).bg(Color::Indexed(240)).bold()
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Indexed(240))
+                .bold()
         } else {
             Style::default().fg(Color::White)
         };
         let dim = if i == picker.cursor {
-            Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
+            Style::default()
+                .fg(Color::Indexed(240))
+                .bg(Color::Indexed(240))
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -1898,7 +1908,10 @@ fn render_profile_popup(f: &mut Frame, options: &[String], cursor: usize) {
     for (i, option) in options.iter().enumerate() {
         let marker = if i == cursor { "> " } else { "  " };
         let style = if i == cursor {
-            Style::default().fg(Color::White).bg(Color::Indexed(240)).bold()
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Indexed(240))
+                .bold()
         } else {
             Style::default().fg(Color::White)
         };

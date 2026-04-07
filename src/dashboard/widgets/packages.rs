@@ -110,7 +110,10 @@ pub fn render(
                     ">"
                 };
                 let style = if is_selected {
-                    Style::default().fg(Color::Cyan).bg(Color::Indexed(240)).bold()
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .bg(Color::Indexed(240))
+                        .bold()
                 } else {
                     Style::default().fg(Color::Cyan).bold()
                 };
@@ -124,7 +127,9 @@ pub fn render(
                     Span::styled(
                         format!("({})", count),
                         if is_selected {
-                            Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
+                            Style::default()
+                                .fg(Color::Indexed(240))
+                                .bg(Color::Indexed(240))
                         } else {
                             Style::default().fg(Color::Gray)
                         },

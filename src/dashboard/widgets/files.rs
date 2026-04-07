@@ -450,10 +450,7 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 }
                 if !time.is_empty() {
                     spans.push(Span::styled("  ", Style::default().bg(bg)));
-                    spans.push(Span::styled(
-                        time,
-                        Style::default().fg(Color::Gray).bg(bg),
-                    ));
+                    spans.push(Span::styled(time, Style::default().fg(Color::Gray).bg(bg)));
                 }
                 spans.push(Span::styled(
                     " ".repeat(inner_area.width as usize),

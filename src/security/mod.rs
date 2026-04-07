@@ -47,10 +47,7 @@ pub fn write_owner_only(path: &Path, data: &[u8]) -> Result<()> {
             Ok(s) if s.success() => {}
             _ => {
                 std::fs::remove_file(path).ok();
-                anyhow::bail!(
-                    "Failed to restrict file permissions on {}",
-                    path.display()
-                );
+                anyhow::bail!("Failed to restrict file permissions on {}", path.display());
             }
         }
     }

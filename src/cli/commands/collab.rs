@@ -379,10 +379,8 @@ pub async fn add(file: &str, project_path: Option<&str>) -> Result<()> {
 
     // Load recipients filtered by authorized members
     let recipients_dir = collab_dir.join("recipients");
-    let (recipients, skipped) = crate::security::load_recipients_authorized(
-        &recipients_dir,
-        &collab_config.members_cache,
-    )?;
+    let (recipients, skipped) =
+        crate::security::load_recipients_authorized(&recipients_dir, &collab_config.members_cache)?;
     for name in &skipped {
         Output::warning(&format!("Skipping unauthorized recipient: {}", name));
     }

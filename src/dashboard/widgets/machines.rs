@@ -153,7 +153,10 @@ pub fn render(
 
                 let name_style = if is_selected {
                     if *is_current {
-                        Style::default().fg(Color::White).bg(Color::Indexed(240)).bold()
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::Indexed(240))
+                            .bold()
                     } else {
                         Style::default().fg(Color::White).bg(Color::Indexed(240))
                     }
@@ -171,7 +174,10 @@ pub fn render(
 
                 let marker_style = if *is_current {
                     if is_selected {
-                        Style::default().fg(Color::Green).bg(Color::Indexed(240)).bold()
+                        Style::default()
+                            .fg(Color::Green)
+                            .bg(Color::Indexed(240))
+                            .bold()
                     } else {
                         Style::default().fg(Color::Green).bold()
                     }
@@ -180,7 +186,9 @@ pub fn render(
                 };
 
                 let dim_style = if is_selected {
-                    Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
+                    Style::default()
+                        .fg(Color::Indexed(240))
+                        .bg(Color::Indexed(240))
                 } else {
                     Style::default().fg(Color::Gray)
                 };
@@ -209,7 +217,9 @@ pub fn render(
                     Style::default().fg(Color::White)
                 };
                 let label_style = if is_selected {
-                    Style::default().fg(Color::Indexed(240)).bg(Color::Indexed(240))
+                    Style::default()
+                        .fg(Color::Indexed(240))
+                        .bg(Color::Indexed(240))
                 } else {
                     Style::default().fg(Color::Gray)
                 };
