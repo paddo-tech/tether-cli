@@ -734,14 +734,21 @@ impl Config {
         }
     }
 
-    /// Get effective dirs for a machine (profile takes priority, then global)
-    pub fn effective_dirs(&self, machine_id: &str) -> &[String] {
+    /// Get effective dirs for a machine. Profile dirs merge with global dirs;
+    /// profile entries take priority on duplicates.
+    pub fn effective_dirs(&self, machine_id: &str) -> Vec<String> {
         if let Some(profile) = self.machine_profile(machine_id) {
             if !profile.dirs.is_empty() {
-                return &profile.dirs;
+                let mut dirs = profile.dirs.clone();
+                for global in &self.dotfiles.dirs {
+                    if !dirs.contains(global) {
+                        dirs.push(global.clone());
+                    }
+                }
+                return dirs;
             }
         }
-        &self.dotfiles.dirs
+        self.dotfiles.dirs.clone()
     }
 
     /// Check if a package manager is enabled for a machine.

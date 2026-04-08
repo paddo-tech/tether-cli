@@ -223,33 +223,26 @@ fn diff_lines<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<DiffLine<'a>> {
     result
 }
 
-/// Detect conflicts for a file
+/// Detect conflicts for a file. Caller supplies pre-computed hashes to avoid
+/// re-reading and re-hashing in the common non-conflict path.
 pub fn detect_conflict(
     file_path: &str,
-    local_path: &Path,
+    local_content: &[u8],
+    local_hash: &str,
     remote_content: &[u8],
+    remote_hash: &str,
     last_synced_hash: Option<&str>,
 ) -> Option<FileConflict> {
-    let local_content = match std::fs::read(local_path) {
-        Ok(c) => c,
-        Err(_) => return None, // Local doesn't exist, no conflict
-    };
-
-    let local_hash = crate::sha256_hex(&local_content);
-    let remote_hash = crate::sha256_hex(remote_content);
-
-    // No conflict if hashes match
     if local_hash == remote_hash {
         return None;
     }
 
-    // Check if it's a true conflict (both changed since last sync)
     let conflict = FileConflict {
         file_path: file_path.to_string(),
-        local_hash,
+        local_hash: local_hash.to_string(),
         last_synced_hash: last_synced_hash.map(|s| s.to_string()),
-        remote_hash,
-        local_content,
+        remote_hash: remote_hash.to_string(),
+        local_content: local_content.to_vec(),
         remote_content: remote_content.to_vec(),
     };
 
@@ -374,7 +367,6 @@ pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     // is_true_conflict tests
     #[test]
@@ -447,32 +439,20 @@ mod tests {
     // detect_conflict tests
     #[test]
     fn test_detect_conflict_returns_none_when_equal() {
-        let temp = TempDir::new().unwrap();
-        let local_path = temp.path().join(".zshrc");
         let content = b"same content";
-        std::fs::write(&local_path, content).unwrap();
-
-        let result = detect_conflict(".zshrc", &local_path, content, None);
+        let hash = crate::sha256_hex(content);
+        let result = detect_conflict(".zshrc", content, &hash, content, &hash, None);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_detect_conflict_returns_none_when_differ_no_history() {
         // No sync history means local is authoritative — not a conflict.
-        let temp = TempDir::new().unwrap();
-        let local_path = temp.path().join(".zshrc");
-        std::fs::write(&local_path, b"local content").unwrap();
-
-        let result = detect_conflict(".zshrc", &local_path, b"remote content", None);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_detect_conflict_returns_none_when_local_missing() {
-        let temp = TempDir::new().unwrap();
-        let local_path = temp.path().join("nonexistent");
-
-        let result = detect_conflict("nonexistent", &local_path, b"remote", None);
+        let local = b"local content";
+        let remote = b"remote content";
+        let local_hash = crate::sha256_hex(local);
+        let remote_hash = crate::sha256_hex(remote);
+        let result = detect_conflict(".zshrc", local, &local_hash, remote, &remote_hash, None);
         assert!(result.is_none());
     }
 

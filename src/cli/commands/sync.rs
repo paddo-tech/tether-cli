@@ -654,6 +654,32 @@ fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
     crate::security::write_owner_only(path, contents)
 }
 
+/// Back up an existing dotfile (if present), ensure parent dir exists,
+/// write the decrypted content, and preserve the executable bit from the
+/// encrypted source file.
+fn backup_and_write_dotfile(
+    backup_dir: &mut Option<PathBuf>,
+    file: &str,
+    local_file: &Path,
+    enc_file: &Path,
+    plaintext: &[u8],
+) -> Result<()> {
+    use crate::sync::{backup_file, create_backup_dir};
+    if local_file.exists() {
+        if backup_dir.is_none() {
+            *backup_dir = Some(create_backup_dir()?);
+        }
+        backup_file(backup_dir.as_ref().unwrap(), "dotfiles", file, local_file)?;
+    }
+    if let Some(parent) = local_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_decrypted(local_file, plaintext)?;
+    #[cfg(unix)]
+    preserve_executable_bit(enc_file, local_file);
+    Ok(())
+}
+
 pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
@@ -662,9 +688,7 @@ pub fn decrypt_from_repo(
     machine_state: &MachineState,
     interactive: bool,
 ) -> Result<()> {
-    use crate::sync::{
-        backup_file, create_backup_dir, detect_conflict, ConflictResolution, ConflictState,
-    };
+    use crate::sync::{detect_conflict, ConflictResolution, ConflictState};
 
     let key = crate::security::get_encryption_key()?;
     let dotfiles_dir = sync_path.join("dotfiles");
@@ -747,100 +771,88 @@ pub fn decrypt_from_repo(
                         let last_synced_hash = state.files.get(&file).map(|f| f.hash.as_str());
 
                         // First-time sync for create_if_missing files: remote wins.
-                        // This handles the case where an app creates a default file
-                        // (e.g. Claude Code writes `{}` to settings.json on startup)
-                        // before tether runs — that default shouldn't block the
-                        // synced content from being applied.
+                        // Handles apps that create defaults (e.g. Claude Code writes
+                        // `{}` to settings.json) before tether has a chance to sync.
                         let first_sync = last_synced_hash.is_none() && create_if_missing;
 
-                        if !first_sync {
-                            // Normal sync: check for conflict
-                            if let Some(conflict) =
-                                detect_conflict(&file, &local_file, &plaintext, last_synced_hash)
-                            {
-                                if interactive {
-                                    conflict.show_diff()?;
-                                    let resolution = conflict.prompt_resolution()?;
+                        let local_content = std::fs::read(&local_file).ok();
+                        let local_hash = local_content.as_ref().map(|c| crate::sha256_hex(c));
+                        let remote_hash = crate::sha256_hex(&plaintext);
 
-                                    match resolution {
-                                        ConflictResolution::KeepLocal => {
-                                            conflict_state.remove_conflict(&file);
-                                        }
-                                        ConflictResolution::UseRemote => {
-                                            if local_file.exists() {
-                                                if backup_dir.is_none() {
-                                                    backup_dir = Some(create_backup_dir()?);
-                                                }
-                                                backup_file(
-                                                    backup_dir.as_ref().unwrap(),
-                                                    "dotfiles",
+                        if !first_sync {
+                            if let (Some(lc), Some(lh)) =
+                                (local_content.as_ref(), local_hash.as_ref())
+                            {
+                                if let Some(conflict) = detect_conflict(
+                                    &file,
+                                    lc,
+                                    lh,
+                                    &plaintext,
+                                    &remote_hash,
+                                    last_synced_hash,
+                                ) {
+                                    if interactive {
+                                        conflict.show_diff()?;
+                                        let resolution = conflict.prompt_resolution()?;
+
+                                        match resolution {
+                                            ConflictResolution::KeepLocal => {
+                                                conflict_state.remove_conflict(&file);
+                                            }
+                                            ConflictResolution::UseRemote => {
+                                                backup_and_write_dotfile(
+                                                    &mut backup_dir,
                                                     &file,
                                                     &local_file,
+                                                    &enc_file,
+                                                    &plaintext,
                                                 )?;
+                                                conflict_state.remove_conflict(&file);
                                             }
-                                            write_decrypted(&local_file, &plaintext)?;
-                                            #[cfg(unix)]
-                                            preserve_executable_bit(&enc_file, &local_file);
-                                            conflict_state.remove_conflict(&file);
+                                            ConflictResolution::Merged => {
+                                                conflict.launch_merge_tool(&config.merge, home)?;
+                                                conflict_state.remove_conflict(&file);
+                                            }
+                                            ConflictResolution::Skip => {
+                                                new_conflicts.push((
+                                                    file.to_string(),
+                                                    conflict.local_hash.clone(),
+                                                    conflict.remote_hash.clone(),
+                                                ));
+                                            }
                                         }
-                                        ConflictResolution::Merged => {
-                                            conflict.launch_merge_tool(&config.merge, home)?;
-                                            conflict_state.remove_conflict(&file);
-                                        }
-                                        ConflictResolution::Skip => {
-                                            new_conflicts.push((
-                                                file.to_string(),
-                                                conflict.local_hash.clone(),
-                                                conflict.remote_hash.clone(),
-                                            ));
-                                        }
+                                        continue;
+                                    } else {
+                                        Output::warning(&format!(
+                                            "  {} (conflict - skipped)",
+                                            file
+                                        ));
+                                        new_conflicts.push((
+                                            file.to_string(),
+                                            conflict.local_hash.clone(),
+                                            conflict.remote_hash.clone(),
+                                        ));
+                                        continue;
                                     }
-                                    continue;
-                                } else {
-                                    Output::warning(&format!("  {} (conflict - skipped)", file));
-                                    new_conflicts.push((
-                                        file.to_string(),
-                                        conflict.local_hash.clone(),
-                                        conflict.remote_hash.clone(),
-                                    ));
-                                    continue;
                                 }
                             }
                         }
 
-                        // Apply remote content if local is unchanged or this is a first sync
-                        let remote_hash = crate::sha256_hex(&plaintext);
-                        let local_hash = std::fs::read(&local_file)
-                            .ok()
-                            .map(|c| crate::sha256_hex(&c));
-
                         let should_write = if first_sync {
-                            // First sync: write unless local already matches remote
                             local_hash.as_ref() != Some(&remote_hash)
                         } else {
-                            // Normal sync: only write if local unchanged from last sync
                             let local_unchanged = local_hash.as_deref() == last_synced_hash;
                             local_unchanged && local_hash.as_ref() != Some(&remote_hash)
                         };
 
                         if should_write {
-                            if local_file.exists() {
-                                if backup_dir.is_none() {
-                                    backup_dir = Some(create_backup_dir()?);
-                                }
-                                backup_file(
-                                    backup_dir.as_ref().unwrap(),
-                                    "dotfiles",
-                                    &file,
-                                    &local_file,
-                                )?;
-                            }
-                            if let Some(parent) = local_file.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            write_decrypted(&local_file, &plaintext)?;
-                            #[cfg(unix)]
-                            preserve_executable_bit(&enc_file, &local_file);
+                            backup_and_write_dotfile(
+                                &mut backup_dir,
+                                &file,
+                                &local_file,
+                                &enc_file,
+                                &plaintext,
+                            )?;
                         }
                         conflict_state.remove_conflict(&file);
                     }
@@ -1476,7 +1488,7 @@ pub fn sync_directories(
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
 
-    for dir_path in config.effective_dirs(machine_id) {
+    for dir_path in &config.effective_dirs(machine_id) {
         // Validate path is safe (security: prevents path traversal via synced config)
         if !crate::config::is_safe_dotfile_path(dir_path) {
             Output::warning(&format!("  {} (unsafe path, skipping)", dir_path));
