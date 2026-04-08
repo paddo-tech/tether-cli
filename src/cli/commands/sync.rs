@@ -797,10 +797,7 @@ pub fn decrypt_from_repo(
                                     }
                                     continue;
                                 } else {
-                                    Output::warning(&format!(
-                                        "  {} (conflict - skipped)",
-                                        file
-                                    ));
+                                    Output::warning(&format!("  {} (conflict - skipped)", file));
                                     new_conflicts.push((
                                         file.to_string(),
                                         conflict.local_hash.clone(),
