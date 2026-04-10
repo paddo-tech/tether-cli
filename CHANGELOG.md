@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.10] - 2026-04-08
+
+### Fixed
+
+- Dotfiles with no sync history no longer treated as conflicts (prevented daemon from syncing new files)
+- `create_if_missing` dotfiles now receive remote content on first sync even when an app created a default locally
+- `effective_dotfiles()` merges profile + global dotfiles instead of replacing (global entries no longer silently dropped)
+- `effective_dirs()` now merges profile + global dirs to match `effective_dotfiles` behavior
+- `KeepLocal` conflict resolution now clears conflict state (no longer re-prompts on every sync)
+
+### Changed
+
+- `detect_conflict` takes pre-computed hashes so the local file is read once per sync instead of twice
+- Extracted `backup_and_write_dotfile` helper to dedupe backup+write logic in `decrypt_from_repo`
+
 ## [1.11.9] - 2026-04-07
 
 ### Fixed
