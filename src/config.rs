@@ -708,11 +708,17 @@ impl Config {
     pub fn effective_dotfiles(&self, machine_id: &str) -> Vec<DotfileEntry> {
         if let Some(profile) = self.machine_profile(machine_id) {
             if !profile.dotfiles.is_empty() {
-                return profile
+                let mut entries: Vec<DotfileEntry> = profile
                     .dotfiles
                     .iter()
                     .map(|e| e.to_dotfile_entry())
                     .collect();
+                for global in &self.dotfiles.files {
+                    if !entries.iter().any(|e| e.path() == global.path()) {
+                        entries.push(global.clone());
+                    }
+                }
+                return entries;
             }
         }
         self.dotfiles.files.clone()
@@ -728,14 +734,21 @@ impl Config {
         }
     }
 
-    /// Get effective dirs for a machine (profile takes priority, then global)
-    pub fn effective_dirs(&self, machine_id: &str) -> &[String] {
+    /// Get effective dirs for a machine. Profile dirs merge with global dirs;
+    /// profile entries take priority on duplicates.
+    pub fn effective_dirs(&self, machine_id: &str) -> Vec<String> {
         if let Some(profile) = self.machine_profile(machine_id) {
             if !profile.dirs.is_empty() {
-                return &profile.dirs;
+                let mut dirs = profile.dirs.clone();
+                for global in &self.dotfiles.dirs {
+                    if !dirs.contains(global) {
+                        dirs.push(global.clone());
+                    }
+                }
+                return dirs;
             }
         }
-        &self.dotfiles.dirs
+        self.dotfiles.dirs.clone()
     }
 
     /// Check if a package manager is enabled for a machine.
@@ -1383,13 +1396,65 @@ files = []
             .insert("my-server".to_string(), "server".to_string());
 
         let files = config.effective_dotfiles("my-server");
-        assert_eq!(files.len(), 1);
+        // Profile dotfiles are merged with global — .zshrc is in both so no duplicate
+        assert_eq!(files.len(), config.dotfiles.files.len());
+        // Profile entry comes first
         assert_eq!(files[0].path(), ".zshrc");
 
         // Unassigned machines get "dev" profile (which may or may not exist)
         // If "dev" doesn't exist, falls through to global
         let other = config.effective_dotfiles("my-laptop");
         assert_eq!(other.len(), config.dotfiles.files.len());
+    }
+
+    #[test]
+    fn test_effective_dotfiles_profile_overrides_global() {
+        let mut config = Config::default();
+        // Global has .zshrc with create_if_missing=false (from default)
+        // Profile has .zshrc with create_if_missing=true — profile should win
+        config.profiles.insert(
+            "server".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::WithOptions {
+                    path: ".zshrc".to_string(),
+                    shared: false,
+                    create_if_missing: true,
+                }],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+
+        let files = config.effective_dotfiles("my-server");
+        let zshrc = files.iter().find(|e| e.path() == ".zshrc").unwrap();
+        // Profile version takes priority (create_if_missing=true)
+        assert!(zshrc.create_if_missing());
+    }
+
+    #[test]
+    fn test_effective_dotfiles_disjoint_sets() {
+        let mut config = Config::default();
+        config.dotfiles.files = vec![DotfileEntry::Simple(".gitconfig".to_string())];
+        config.profiles.insert(
+            "server".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::Simple(".vimrc".to_string())],
+                dirs: vec![],
+                packages: vec![],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("my-server".to_string(), "server".to_string());
+
+        let files = config.effective_dotfiles("my-server");
+        // Profile has .vimrc, global has .gitconfig — should get both
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path(), ".vimrc"); // profile first
+        assert_eq!(files[1].path(), ".gitconfig"); // global appended
     }
 
     #[test]
@@ -1495,8 +1560,8 @@ packages = ["brew"]
         assert_eq!(profile.dotfiles.len(), 1);
         assert_eq!(profile.packages, vec!["brew"]);
 
-        // Helpers work
-        assert_eq!(parsed.effective_dotfiles("my-server").len(), 1);
+        // Helpers work — profile dotfiles merge with global (profile has .zshrc, global adds .gitconfig)
+        assert_eq!(parsed.effective_dotfiles("my-server").len(), 2);
         assert!(!parsed.is_manager_enabled("my-server", "npm"));
         assert!(parsed.is_manager_enabled("my-server", "brew"));
     }
