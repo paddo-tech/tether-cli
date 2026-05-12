@@ -19,14 +19,44 @@ permissions:
   contents: write
 
 env:
-  # Signing identity - must match certificate installed on runner
+  # Signing identity - codesign matches by name; cert is installed at runtime
+  # via fastlane match into a temporary keychain (see fastlane/Fastfile).
   SIGNING_IDENTITY: "Developer ID Application: Paddo Tech PTY LTD (D9Q57P9D3L)"
 
 jobs:
   build:
-    runs-on: self-hosted
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install fastlane via bundler
+        run: |
+          export GEM_HOME="$HOME/.gem"
+          export PATH="$HOME/.gem/bin:$PATH"
+          gem list bundler -i || gem install bundler --user-install
+          bundle config set --local path "$HOME/.gem"
+          bundle install --jobs 4
+
+      - name: Stash App Store Connect API key on disk
+        run: |
+          mkdir -p "$RUNNER_TEMP/fastlane"
+          echo '${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}' \
+            > "$RUNNER_TEMP/fastlane/asc_api_key.json"
+
+      - name: Sync Developer ID certificate (fastlane match)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_STORE_CONNECT_API_KEY_PATH: ${{ runner.temp }}/fastlane/asc_api_key.json
+          # Override org-level MATCH_GIT_URL (likely SSH) with HTTPS+token —
+          # ephemeral VMs don't have an SSH key for the match repo.
+          MATCH_GIT_URL: https://x-access-token:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/paddo-tech/fastlane-match.git
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_KEYCHAIN_NAME: tether_match
+          MATCH_KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          export PATH="$HOME/.gem/bin:$PATH"
+          bundle exec fastlane mac sync_developer_id
 
       - name: Build release (Apple Silicon)
         run: cargo build --release --target aarch64-apple-darwin
@@ -54,7 +84,6 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          # Notarize Apple Silicon binary
           cd target/aarch64-apple-darwin/release
           zip tether-arm64.zip tether
           xcrun notarytool submit tether-arm64.zip \
@@ -65,7 +94,6 @@ jobs:
           rm tether-arm64.zip
           cd -
 
-          # Notarize Intel binary
           cd target/x86_64-apple-darwin/release
           zip tether-x64.zip tether
           xcrun notarytool submit tether-x64.zip \
@@ -91,7 +119,6 @@ jobs:
         run: |
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          # Detect prerelease (contains -alpha, -beta, -rc)
           if [[ "$VERSION" =~ -alpha|-beta|-rc ]]; then
             echo "prerelease=true" >> $GITHUB_OUTPUT
           else
@@ -113,7 +140,6 @@ jobs:
       - name: Create tag
         if: steps.release_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
         run: |
-          # Only create tag if it doesn't exist
           if ! git ls-remote --tags origin | grep -q "refs/tags/v${{ steps.version.outputs.version }}$"; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -146,25 +172,18 @@ jobs:
           SHA_ARM=$(cat target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
           SHA_X86=$(cat target/x86_64-apple-darwin/release/tether-x86_64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
 
-          # Clone the tap repo
           rm -rf /tmp/homebrew-tap
           git clone https://x-access-token:${COMMITTER_TOKEN}@github.com/paddo-tech/homebrew-tap.git /tmp/homebrew-tap
           cd /tmp/homebrew-tap
 
-          # Determine formula file and class name
           if [ "$IS_PRERELEASE" = "true" ]; then
-            # Versioned formula for prereleases: tether-cli@1.1.0-beta.1.rb
             FORMULA_FILE="Formula/tether-cli@${VERSION}.rb"
-            # Convert version to valid Ruby class name: 1.1.0-beta.1 -> 110Beta1
-            # Remove dots, capitalize after hyphens, remove hyphens
             CLASS_NAME="TetherCliAT$(echo ${VERSION} | perl -pe 's/\.//g; s/-(.)/\u$1/g')"
           else
-            # Main formula for stable releases
             FORMULA_FILE="Formula/tether-cli.rb"
             CLASS_NAME="TetherCli"
           fi
 
-          # Generate formula
           printf '%s\n' \
             "class ${CLASS_NAME} < Formula" \
             '  desc "Sync dotfiles and packages across machines"' \
@@ -201,10 +220,17 @@ jobs:
             '  end' \
             'end' > "$FORMULA_FILE"
 
-          # Commit and push
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$FORMULA_FILE"
           git commit -m "tether-cli ${VERSION}"
           git push
 
+      - name: Cleanup match keychain
+        if: always()
+        env:
+          MATCH_KEYCHAIN_NAME: tether_match
+        run: |
+          export PATH="$HOME/.gem/bin:$PATH"
+          bundle exec fastlane mac cleanup_keychain || true
+          rm -f "$RUNNER_TEMP/fastlane/asc_api_key.json" || true
