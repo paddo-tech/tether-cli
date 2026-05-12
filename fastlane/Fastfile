@@ -1,0 +1,39 @@
+default_platform(:mac)
+
+# tether is signed with a Developer ID Application certificate that lives in
+# fastlane match. Each release run installs the cert into a fresh temporary
+# keychain, codesign signs against it, then the keychain is destroyed. Fits
+# ephemeral runners (ushr's Tart VMs) where state must not persist.
+
+KEYCHAIN_NAME = ENV["MATCH_KEYCHAIN_NAME"] || "tether_match"
+KEYCHAIN_PASSWORD = ENV["MATCH_KEYCHAIN_PASSWORD"] || "tether_match_password"
+APP_IDENTIFIER = ENV["MATCH_APP_IDENTIFIER"] || "dev.paddo.tether-cli"
+
+platform :mac do
+  desc "Install the Developer ID Application certificate via match into a temp keychain"
+  lane :sync_developer_id do
+    create_keychain(
+      name: KEYCHAIN_NAME,
+      password: KEYCHAIN_PASSWORD,
+      default_keychain: true,
+      unlock: true,
+      timeout: 3600,
+      lock_when_sleeps: false,
+    )
+
+    match(
+      type: "developer_id",
+      app_identifier: APP_IDENTIFIER,
+      git_url: ENV["MATCH_GIT_URL"],
+      keychain_name: KEYCHAIN_NAME,
+      keychain_password: KEYCHAIN_PASSWORD,
+      readonly: true,
+      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+    )
+  end
+
+  desc "Delete the temporary match keychain"
+  lane :cleanup_keychain do
+    delete_keychain(name: KEYCHAIN_NAME) rescue UI.message("keychain already gone")
+  end
+end
