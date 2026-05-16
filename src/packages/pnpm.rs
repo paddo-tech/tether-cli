@@ -15,8 +15,10 @@ impl PnpmManager {
         let output = Command::new("pnpm").args(args).output().await?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pnpm command failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "pnpm command failed: {}",
+                pnpm_error_message(&output.stderr, &output.stdout)
+            ));
         }
 
         Ok(String::from_utf8(output.stdout)?)
@@ -93,8 +95,10 @@ impl PackageManager for PnpmManager {
         let output = Command::new("pnpm").args(["update", "-g"]).output().await?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pnpm update failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "pnpm update failed: {}",
+                pnpm_error_message(&output.stderr, &output.stdout)
+            ));
         }
 
         Ok(())
@@ -107,10 +111,22 @@ impl PackageManager for PnpmManager {
             .await?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pnpm remove failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "pnpm remove failed: {}",
+                pnpm_error_message(&output.stderr, &output.stdout)
+            ));
         }
 
         Ok(())
     }
+}
+
+/// pnpm writes failures to stdout, not stderr — fall back when stderr is empty.
+fn pnpm_error_message(stderr: &[u8], stdout: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    let trimmed = err.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    String::from_utf8_lossy(stdout).trim().to_string()
 }
