@@ -1,7 +1,7 @@
 use crate::cli::{Output, Progress, Prompt};
 use crate::config::{Config, FeaturesConfig};
 use crate::github::GitHubCli;
-use crate::sync::{GitBackend, SyncEngine, SyncState};
+use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 
 pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result<()> {
@@ -102,6 +102,8 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         std::fs::create_dir_all(sync_path.join("machines"))?;
 
         crate::sync::check_sync_format_version(&sync_path)?;
+
+        resolve_machine_identity(&sync_path)?;
 
         // Setup encryption if enabled
         if config.security.encrypt_dotfiles {
@@ -277,6 +279,86 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Detect machine_id collisions before the first sync.
+///
+/// machine_id is derived from hostname, so two machines with the same hostname
+/// share a `machines/<id>.json` record. The new machine's first sync would
+/// overwrite the existing record with its (empty) local state and flag every
+/// package as removed. On a fresh onboard, if the id is already taken, ask
+/// whether this is the same machine or a new one and assign a unique id.
+fn resolve_machine_identity(sync_path: &std::path::Path) -> Result<()> {
+    // Established machines already have an identity — don't re-prompt on reinit.
+    if SyncState::state_path()?.exists() {
+        return Ok(());
+    }
+
+    let mut state = SyncState::load()?;
+    let candidate = state.machine_id.clone();
+
+    let existing = match MachineState::load_from_repo(sync_path, &candidate)? {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    let pkg_count: usize = existing.packages.values().map(Vec::len).sum();
+    Output::warning(&format!(
+        "A machine named '{}' already exists in your sync repo",
+        candidate
+    ));
+    Output::dim(&format!("  hostname:  {}", existing.hostname));
+    Output::dim(&format!(
+        "  last sync: {}",
+        existing
+            .last_sync
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+    ));
+    Output::dim(&format!("  packages:  {}", pkg_count));
+    Output::dim(&format!("  dotfiles:  {}", existing.dotfiles.len()));
+    println!();
+
+    let options = vec![
+        "This is a new machine (pick a different name)",
+        "This is the same machine being re-onboarded",
+    ];
+    // idx 1 = same machine: keep the existing id and its record untouched.
+    if Prompt::select("Is this the same machine, or a new one?", options, 0)? == 1 {
+        return Ok(());
+    }
+
+    let machines_dir = sync_path.join("machines");
+    let suggested = suggest_machine_id(&machines_dir, &candidate);
+    loop {
+        let name = Prompt::input("New machine name", Some(&suggested))?;
+        let name = name.trim();
+        // A machine id becomes a `machines/<id>.json` filename.
+        if !Config::is_safe_profile_name(name) {
+            Output::error(&format!("Invalid machine name: '{}'", name));
+            continue;
+        }
+        if machines_dir.join(format!("{}.json", name)).exists() {
+            Output::error(&format!("'{}' is already taken", name));
+            continue;
+        }
+        state.machine_id = name.to_string();
+        state.save()?;
+        Output::success(&format!("This machine will sync as '{}'", name));
+        return Ok(());
+    }
+}
+
+/// Suggest an unused machine id by appending a numeric suffix.
+fn suggest_machine_id(machines_dir: &std::path::Path, base: &str) -> String {
+    let mut n = 2;
+    loop {
+        let candidate = format!("{}-{}", base, n);
+        if !machines_dir.join(format!("{}.json", candidate)).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Try to load config from the synced repo (encrypted).
