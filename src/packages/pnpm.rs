@@ -130,3 +130,23 @@ fn pnpm_error_message(stderr: &[u8], stdout: &[u8]) -> String {
     }
     String::from_utf8_lossy(stdout).trim().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_trimmed_stderr() {
+        assert_eq!(pnpm_error_message(b"  boom  ", b"ignored"), "boom");
+    }
+
+    #[test]
+    fn falls_back_to_stdout_when_stderr_blank() {
+        assert_eq!(pnpm_error_message(b"   \n", b"  ENOENT  "), "ENOENT");
+    }
+
+    #[test]
+    fn empty_when_both_blank() {
+        assert_eq!(pnpm_error_message(b"", b"  "), "");
+    }
+}
