@@ -14,7 +14,7 @@ pub fn generate_key() -> [u8; KEY_SIZE] {
     key
 }
 
-/// Generate a random 12-character hex id.
+/// Generate a random hex id.
 pub fn random_hex_id() -> String {
     let mut bytes = [0u8; 6];
     OsRng.fill_bytes(&mut bytes);
