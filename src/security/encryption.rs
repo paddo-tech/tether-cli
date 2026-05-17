@@ -14,6 +14,13 @@ pub fn generate_key() -> [u8; KEY_SIZE] {
     key
 }
 
+/// Generate a random hex id.
+pub fn random_hex_id() -> String {
+    let mut bytes = [0u8; 6];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 /// Encrypt data using AES-256-GCM
 /// Format: [nonce (12 bytes)][ciphertext + auth tag]
 pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
@@ -94,6 +101,16 @@ mod tests {
         assert_eq!(key1.len(), KEY_SIZE);
         assert_eq!(key2.len(), KEY_SIZE);
         assert_ne!(key1, key2); // Keys should be random
+    }
+
+    #[test]
+    fn test_random_hex_id() {
+        let id1 = random_hex_id();
+        let id2 = random_hex_id();
+
+        assert_eq!(id1.len(), 12);
+        assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(id1, id2);
     }
 
     #[test]

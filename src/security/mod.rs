@@ -58,7 +58,7 @@ pub fn write_owner_only(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub use encryption::{decrypt, encrypt, generate_key};
+pub use encryption::{decrypt, encrypt, generate_key, random_hex_id};
 pub use keychain::{
     clear_cached_key, get_encryption_key, has_encryption_key, is_unlocked,
     store_encryption_key_with_passphrase, unlock_with_passphrase,
