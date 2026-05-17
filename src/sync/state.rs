@@ -278,11 +278,11 @@ impl SyncState {
         }
     }
 
+    /// A random id, not the hostname — hostnames collide across machines, and a
+    /// collision makes one machine's sync overwrite another's `machines/<id>.json`
+    /// record. The human-readable hostname lives on `MachineState` as metadata.
     fn generate_machine_id() -> String {
-        hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string())
+        crate::security::random_hex_id()
     }
 
     pub fn update_file(&mut self, path: &str, hash: String) {
