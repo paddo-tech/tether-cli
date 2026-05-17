@@ -20,6 +20,18 @@ struct PackageManagerDef {
     manifest_file: &'static str,
 }
 
+/// Map a machine-state package key to its manifest filename in `manifests/`.
+/// All three brew keys (`brew_formulae`, `brew_casks`, `brew_taps`) share the Brewfile.
+pub fn manifest_filename(state_key: &str) -> Option<&'static str> {
+    if state_key.starts_with("brew_") {
+        return Some("Brewfile");
+    }
+    SIMPLE_MANAGERS
+        .iter()
+        .find(|d| d.state_key == state_key)
+        .map(|d| d.manifest_file)
+}
+
 const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
     PackageManagerDef {
         state_key: "npm",

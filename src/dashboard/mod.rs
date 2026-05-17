@@ -112,6 +112,31 @@ impl FilesTabState {
     }
 }
 
+pub struct PackagesTabState {
+    pub cursor: usize,
+    /// Manager whose installed-package list is expanded.
+    pub expanded: Option<String>,
+    /// Manager whose manifest history is open.
+    pub history_manager: Option<String>,
+    pub history: Vec<crate::sync::FileLogEntry>,
+    /// History entry whose diff is expanded.
+    pub history_commit: Option<String>,
+    pub history_diff: Vec<String>,
+}
+
+impl PackagesTabState {
+    fn new() -> Self {
+        Self {
+            cursor: 0,
+            expanded: None,
+            history_manager: None,
+            history: Vec::new(),
+            history_commit: None,
+            history_diff: Vec::new(),
+        }
+    }
+}
+
 pub struct App {
     state: DashboardState,
     active_tab: Tab,
@@ -127,8 +152,7 @@ pub struct App {
     flash_error: Option<(Instant, String)>,
     flash_message: Option<(Instant, String)>,
     list_edit: Option<ListEditState>,
-    pkg_expanded: Option<String>,
-    pkg_cursor: usize,
+    packages: PackagesTabState,
     uninstall_confirm: Option<(String, String)>,
     uninstalling: Option<(String, String)>,
     uninstall_rx: Option<std::sync::mpsc::Receiver<std::result::Result<(), String>>>,
@@ -189,9 +213,7 @@ impl App {
     fn item_count(&self) -> usize {
         match self.active_tab {
             Tab::Files => widgets::files::build_rows(&self.state, &self.files).len(),
-            Tab::Packages => {
-                widgets::packages::build_rows(&self.state, self.pkg_expanded.as_deref()).len()
-            }
+            Tab::Packages => widgets::packages::build_rows(&self.state, &self.packages).len(),
             Tab::Machines => {
                 widgets::machines::build_rows(&self.state, self.machine_expanded.as_deref()).len()
             }
@@ -234,8 +256,7 @@ pub fn run() -> Result<()> {
         flash_error: None,
         flash_message: None,
         list_edit: None,
-        pkg_expanded: None,
-        pkg_cursor: 0,
+        packages: PackagesTabState::new(),
         uninstall_confirm: None,
         uninstalling: None,
         uninstall_rx: None,
@@ -1000,22 +1021,21 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         return;
     }
 
-    // Packages tab Enter: expand/collapse or uninstall
+    // Packages tab Enter: expand package list, uninstall, or toggle a history diff
     if app.active_tab == Tab::Packages && key.code == KeyCode::Enter {
-        let rows = widgets::packages::build_rows(&app.state, app.pkg_expanded.as_deref());
-        if app.pkg_cursor < rows.len() {
-            match &rows[app.pkg_cursor] {
+        let rows = widgets::packages::build_rows(&app.state, &app.packages);
+        if app.packages.cursor < rows.len() {
+            match &rows[app.packages.cursor] {
                 widgets::packages::PkgRow::Header { manager_key, .. } => {
-                    if app.pkg_expanded.as_deref() == Some(manager_key.as_str()) {
-                        app.pkg_expanded = None;
+                    if app.packages.expanded.as_deref() == Some(manager_key.as_str()) {
+                        app.packages.expanded = None;
                     } else {
-                        app.pkg_expanded = Some(manager_key.clone());
+                        app.packages.expanded = Some(manager_key.clone());
                     }
                     // Clamp cursor to new row count
-                    let new_rows =
-                        widgets::packages::build_rows(&app.state, app.pkg_expanded.as_deref());
-                    if app.pkg_cursor >= new_rows.len() {
-                        app.pkg_cursor = new_rows.len().saturating_sub(1);
+                    let new_rows = widgets::packages::build_rows(&app.state, &app.packages);
+                    if app.packages.cursor >= new_rows.len() {
+                        app.packages.cursor = new_rows.len().saturating_sub(1);
                     }
                 }
                 widgets::packages::PkgRow::Package {
@@ -1025,6 +1045,18 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         app.uninstall_confirm = Some((manager_key.clone(), name.clone()));
                     }
                 }
+                widgets::packages::PkgRow::HistoryEntry { commit_hash, .. } => {
+                    let commit_hash = commit_hash.clone();
+                    if app.packages.history_commit.as_deref() == Some(commit_hash.as_str()) {
+                        app.packages.history_commit = None;
+                        app.packages.history_diff.clear();
+                    } else {
+                        let manager = app.packages.history_manager.clone().unwrap_or_default();
+                        app.packages.history_diff = load_pkg_diff(&manager, &commit_hash);
+                        app.packages.history_commit = Some(commit_hash);
+                    }
+                }
+                widgets::packages::PkgRow::DiffRow { .. } => {}
             }
         }
         return;
@@ -1277,8 +1309,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 }
             } else if app.active_tab == Tab::Packages {
                 let max = app.item_count().saturating_sub(1);
-                if app.pkg_cursor < max {
-                    app.pkg_cursor += 1;
+                if app.packages.cursor < max {
+                    app.packages.cursor += 1;
                 }
             } else if app.active_tab == Tab::Machines {
                 let max = app.item_count().saturating_sub(1);
@@ -1296,7 +1328,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             if app.active_tab == Tab::Files {
                 app.files.cursor = app.files.cursor.saturating_sub(1);
             } else if app.active_tab == Tab::Packages {
-                app.pkg_cursor = app.pkg_cursor.saturating_sub(1);
+                app.packages.cursor = app.packages.cursor.saturating_sub(1);
             } else if app.active_tab == Tab::Machines {
                 app.machine_cursor = app.machine_cursor.saturating_sub(1);
             } else {
@@ -1304,11 +1336,63 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 *offset = offset.saturating_sub(1);
             }
         }
+        KeyCode::Char('h') => {
+            if app.active_tab == Tab::Packages {
+                let rows = widgets::packages::build_rows(&app.state, &app.packages);
+                if let Some(widgets::packages::PkgRow::Header { manager_key, .. }) =
+                    rows.get(app.packages.cursor)
+                {
+                    let manager_key = manager_key.clone();
+                    let was_open =
+                        app.packages.history_manager.as_deref() == Some(manager_key.as_str());
+                    app.packages.history_commit = None;
+                    app.packages.history_diff.clear();
+                    if was_open {
+                        app.packages.history_manager = None;
+                        app.packages.history.clear();
+                    } else {
+                        app.packages.history = load_pkg_history(&manager_key);
+                        app.packages.history_manager = Some(manager_key);
+                    }
+                    let new_rows = widgets::packages::build_rows(&app.state, &app.packages);
+                    if app.packages.cursor >= new_rows.len() {
+                        app.packages.cursor = new_rows.len().saturating_sub(1);
+                    }
+                }
+            }
+        }
         KeyCode::Char('?') => {
             app.show_help = !app.show_help;
         }
         _ => {}
     }
+}
+
+/// Load manifest commit history for a package manager.
+fn load_pkg_history(manager_key: &str) -> Vec<crate::sync::FileLogEntry> {
+    let Some(manifest) = crate::sync::packages::manifest_filename(manager_key) else {
+        return Vec::new();
+    };
+    let repo_path = format!("manifests/{}", manifest);
+    crate::sync::SyncEngine::sync_path()
+        .ok()
+        .and_then(|p| crate::sync::GitBackend::open(&p).ok())
+        .and_then(|git| git.file_log_changed(&repo_path, 10, false).ok())
+        .unwrap_or_default()
+}
+
+/// Load the manifest diff for a manager at a commit.
+fn load_pkg_diff(manager_key: &str, commit: &str) -> Vec<String> {
+    let Some(manifest) = crate::sync::packages::manifest_filename(manager_key) else {
+        return Vec::new();
+    };
+    let repo_path = format!("manifests/{}", manifest);
+    crate::sync::SyncEngine::sync_path()
+        .ok()
+        .and_then(|p| crate::sync::GitBackend::open(&p).ok())
+        .and_then(|git| git.file_diff(commit, &repo_path, &repo_path, false).ok())
+        .map(|d| d.lines().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 /// Refresh expanded file history/diff after state reload
@@ -1791,13 +1875,7 @@ fn draw(f: &mut Frame, app: &App) {
         Tab::Overview => draw_overview(f, content_chunks[1], app),
         Tab::Files => widgets::files::render(f, content_chunks[1], &app.state, &app.files),
         Tab::Packages => {
-            widgets::packages::render(
-                f,
-                content_chunks[1],
-                &app.state,
-                app.pkg_expanded.as_deref(),
-                app.pkg_cursor,
-            );
+            widgets::packages::render(f, content_chunks[1], &app.state, &app.packages);
         }
         Tab::Machines => widgets::machines::render(
             f,
