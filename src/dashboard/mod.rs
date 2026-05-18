@@ -112,6 +112,14 @@ impl FilesTabState {
     }
 }
 
+pub struct RollbackConfirm {
+    pub manager: String,
+    pub commit: String,
+    pub short_hash: String,
+    pub install: usize,
+    pub uninstall: usize,
+}
+
 pub struct PackagesTabState {
     pub cursor: usize,
     /// Manager whose installed-package list is expanded.
@@ -122,6 +130,7 @@ pub struct PackagesTabState {
     /// History entry whose diff is expanded.
     pub history_commit: Option<String>,
     pub history_diff: Vec<String>,
+    pub rollback_confirm: Option<RollbackConfirm>,
 }
 
 impl PackagesTabState {
@@ -133,6 +142,7 @@ impl PackagesTabState {
             history: Vec::new(),
             history_commit: None,
             history_diff: Vec::new(),
+            rollback_confirm: None,
         }
     }
 }
@@ -195,6 +205,21 @@ impl App {
         let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
         if let Ok(child) = std::process::Command::new(exe)
             .arg("sync")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            self.sync_child = Some(child);
+        }
+    }
+
+    fn spawn_rollback(&mut self, manager: &str, commit: &str) {
+        if self.sync_child.is_some() {
+            return;
+        }
+        let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
+        if let Ok(child) = std::process::Command::new(exe)
+            .args(["rollback", "packages", manager, commit])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -511,6 +536,26 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
             KeyCode::Char('n') | KeyCode::Esc => {
                 app.files.restore_confirm = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Package rollback confirmation popup
+    if app.packages.rollback_confirm.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                if let Some(rb) = app.packages.rollback_confirm.take() {
+                    app.spawn_rollback(&rb.manager, &rb.commit);
+                    app.flash_message = Some((
+                        Instant::now(),
+                        format!("Rolling back {} to {}", rb.manager, rb.short_hash),
+                    ));
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                app.packages.rollback_confirm = None;
             }
             _ => {}
         }
@@ -1160,6 +1205,29 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         }
                     }
                 }
+            } else if app.active_tab == Tab::Packages {
+                let rows = widgets::packages::build_rows(&app.state, &app.packages);
+                if let Some(widgets::packages::PkgRow::HistoryEntry {
+                    commit_hash,
+                    short_hash,
+                    ..
+                }) = rows.get(app.packages.cursor)
+                {
+                    let commit_hash = commit_hash.clone();
+                    let short_hash = short_hash.clone();
+                    if let Some(manager) = app.packages.history_manager.clone() {
+                        if manager.starts_with("brew_") {
+                            app.flash_error = Some((
+                                Instant::now(),
+                                "Rollback for brew is not yet supported".to_string(),
+                            ));
+                        } else if let Some(confirm) =
+                            build_rollback_confirm(&app.state, &manager, &commit_hash, &short_hash)
+                        {
+                            app.packages.rollback_confirm = Some(confirm);
+                        }
+                    }
+                }
             }
         }
         KeyCode::Char('x') => {
@@ -1379,6 +1447,47 @@ fn load_pkg_history(manager_key: &str) -> Vec<crate::sync::FileLogEntry> {
         .and_then(|p| crate::sync::GitBackend::open(&p).ok())
         .and_then(|git| git.file_log_changed(&repo_path, 10, false).ok())
         .unwrap_or_default()
+}
+
+/// Compute the install/uninstall counts for rolling a manager back to a commit.
+fn build_rollback_confirm(
+    state: &DashboardState,
+    manager: &str,
+    commit: &str,
+    short_hash: &str,
+) -> Option<RollbackConfirm> {
+    let manifest = crate::sync::packages::manifest_filename(manager)?;
+    let repo_path = format!("manifests/{}", manifest);
+    let sync_path = crate::sync::SyncEngine::sync_path().ok()?;
+    let git = crate::sync::GitBackend::open(&sync_path).ok()?;
+    let snapshot = git.show_at_commit(commit, &repo_path).ok()?;
+    let snapshot = String::from_utf8_lossy(&snapshot);
+    let target: HashSet<&str> = snapshot
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let current_machine_id = state
+        .sync_state
+        .as_ref()
+        .map(|s| s.machine_id.as_str())
+        .unwrap_or("");
+    let installed: HashSet<&str> = state
+        .machines
+        .iter()
+        .find(|m| m.machine_id == current_machine_id)
+        .and_then(|m| m.packages.get(manager))
+        .map(|v| v.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+
+    Some(RollbackConfirm {
+        manager: manager.to_string(),
+        commit: commit.to_string(),
+        short_hash: short_hash.to_string(),
+        install: target.difference(&installed).count(),
+        uninstall: installed.difference(&target).count(),
+    })
 }
 
 /// Load the manifest diff for a manager at a commit.
@@ -1923,6 +2032,20 @@ fn draw(f: &mut Frame, app: &App) {
             f,
             "Restore",
             &format!("Restore {} to {}?", dotfile_path, short_hash),
+            Color::Yellow,
+        );
+    }
+
+    // Package rollback confirmation popup
+    if let Some(ref rb) = app.packages.rollback_confirm {
+        let label = widgets::manager_label(&rb.manager);
+        render_confirm_popup(
+            f,
+            "Roll back packages",
+            &format!(
+                "Roll back {} to {} (+{} install, -{} uninstall)?",
+                label, rb.short_hash, rb.install, rb.uninstall
+            ),
             Color::Yellow,
         );
     }
