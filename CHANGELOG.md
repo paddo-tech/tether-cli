@@ -10,11 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Onboarding a machine that shares a hostname with an existing machine no longer overwrites that machine's sync state — machine identity is now a random id rather than the hostname
-- `pnpm` failures now surface the real error text (pnpm writes errors to stdout, not stderr, so failures previously showed a blank reason)
+- `pnpm` failures now surface the real error text (pnpm writes errors to stdout, not stderr, so failures previously showed a blank reason). Both streams are reported, so a Node warning on stderr cannot hide the error
 
 ### Changed
 
-- New machines get a random machine id; existing machines keep their hostname-based id, so no migration runs on upgrade. A fleet that already contains two machines sharing a hostname is not auto-repaired — re-id one of them by removing its `~/.tether/state.json` and running `tether init` again
+- New machines get a random machine id; existing machines keep their hostname-based id, so no migration runs on upgrade. A fleet that already contains two machines sharing a hostname is not auto-repaired — re-id one of them by removing its `~/.tether/state.json`, running `tether sync`, then `tether machines profile set <name>` (the new id starts on the default profile)
 
 ## [1.11.10] - 2026-04-08
 

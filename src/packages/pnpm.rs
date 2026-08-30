@@ -1,4 +1,4 @@
-use super::{PackageInfo, PackageManager};
+use super::{command_error_message, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -17,7 +17,7 @@ impl PnpmManager {
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "pnpm command failed: {}",
-                pnpm_error_message(&output.stderr, &output.stdout)
+                command_error_message(&output)
             ));
         }
 
@@ -97,7 +97,7 @@ impl PackageManager for PnpmManager {
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "pnpm update failed: {}",
-                pnpm_error_message(&output.stderr, &output.stdout)
+                command_error_message(&output)
             ));
         }
 
@@ -113,40 +113,10 @@ impl PackageManager for PnpmManager {
         if !output.status.success() {
             return Err(anyhow::anyhow!(
                 "pnpm remove failed: {}",
-                pnpm_error_message(&output.stderr, &output.stdout)
+                command_error_message(&output)
             ));
         }
 
         Ok(())
-    }
-}
-
-/// pnpm writes failures to stdout, not stderr — fall back when stderr is empty.
-fn pnpm_error_message(stderr: &[u8], stdout: &[u8]) -> String {
-    let err = String::from_utf8_lossy(stderr);
-    let trimmed = err.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    String::from_utf8_lossy(stdout).trim().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn prefers_trimmed_stderr() {
-        assert_eq!(pnpm_error_message(b"  boom  ", b"ignored"), "boom");
-    }
-
-    #[test]
-    fn falls_back_to_stdout_when_stderr_blank() {
-        assert_eq!(pnpm_error_message(b"   \n", b"  ENOENT  "), "ENOENT");
-    }
-
-    #[test]
-    fn empty_when_both_blank() {
-        assert_eq!(pnpm_error_message(b"", b"  "), "");
     }
 }

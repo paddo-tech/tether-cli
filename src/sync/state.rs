@@ -252,7 +252,10 @@ impl SyncState {
     pub fn load() -> Result<Self> {
         let path = Self::state_path()?;
         if !path.exists() {
-            return Ok(Self::new());
+            // The random machine id must survive across calls, so persist on first load.
+            let state = Self::new();
+            state.save()?;
+            return Ok(state);
         }
         let content = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&content)?)
@@ -266,7 +269,8 @@ impl SyncState {
 
     fn new() -> Self {
         Self {
-            machine_id: Self::generate_machine_id(),
+            // Random, not the hostname: hostnames are not unique across a fleet.
+            machine_id: crate::security::random_hex_id(),
             last_sync: Utc::now(),
             files: HashMap::new(),
             packages: HashMap::new(),
@@ -276,13 +280,6 @@ impl SyncState {
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
         }
-    }
-
-    /// A random id, not the hostname — hostnames collide across machines, and a
-    /// collision makes one machine's sync overwrite another's `machines/<id>.json`
-    /// record. The human-readable hostname lives on `MachineState` as metadata.
-    fn generate_machine_id() -> String {
-        crate::security::random_hex_id()
     }
 
     pub fn update_file(&mut self, path: &str, hash: String) {
