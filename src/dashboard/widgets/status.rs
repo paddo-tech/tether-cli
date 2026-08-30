@@ -13,7 +13,7 @@ pub fn render(
     f: &mut Frame,
     area: Rect,
     state: &DashboardState,
-    syncing: bool,
+    running: Option<&str>,
     daemon_op: DaemonOp,
     flash: Option<FlashMessage>,
     uninstalling: Option<&(String, String)>,
@@ -68,9 +68,9 @@ pub fn render(
     spans.push(Span::raw("  "));
 
     // Sync status
-    if syncing {
+    if let Some(label) = running {
         spans.push(Span::styled(
-            "syncing...",
+            format!("{}...", label),
             Style::default().fg(Color::Yellow),
         ));
     } else if let Some(ref sync_state) = state.sync_state {

@@ -206,6 +206,7 @@ impl App {
         let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
         match std::process::Command::new(exe)
             .args(args)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1104,6 +1105,10 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         app.packages.history_diff = load_pkg_diff(&manager, &commit_hash);
                         app.packages.history_commit = Some(commit_hash);
                     }
+                    let new_rows = widgets::packages::build_rows(&app.state, &app.packages);
+                    if app.packages.cursor >= new_rows.len() {
+                        app.packages.cursor = new_rows.len().saturating_sub(1);
+                    }
                 }
                 widgets::packages::PkgRow::DiffRow { .. } => {}
             }
@@ -1209,7 +1214,10 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         }
                     }
                 }
-            } else if app.active_tab == Tab::Packages {
+            } else if app.active_tab == Tab::Packages
+                && app.uninstalling.is_none()
+                && app.installing.is_none()
+            {
                 let rows = widgets::packages::build_rows(&app.state, &app.packages);
                 if let Some(widgets::packages::PkgRow::HistoryEntry {
                     commit_hash,
@@ -1229,6 +1237,14 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                             build_rollback_confirm(&app.state, &manager, &commit_hash, &short_hash)
                         {
                             app.packages.rollback_confirm = Some(confirm);
+                        } else {
+                            app.flash_error = Some((
+                                Instant::now(),
+                                format!(
+                                    "Could not read the {} manifest at {}",
+                                    manager, short_hash
+                                ),
+                            ));
                         }
                     }
                 }
@@ -1945,7 +1961,13 @@ fn draw(f: &mut Frame, app: &App) {
         f,
         main_chunks[0],
         &app.state,
-        app.sync_child.is_some(),
+        app.sync_child.as_ref().map(|(label, _)| {
+            if label.starts_with("rollback") {
+                "rolling back"
+            } else {
+                "syncing"
+            }
+        }),
         app.daemon_op,
         flash,
         app.uninstalling.as_ref(),

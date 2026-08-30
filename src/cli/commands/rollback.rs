@@ -52,9 +52,11 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
         Output::list_item(&format!("install {}", pkg));
     }
 
+    let mut failed = 0;
     for pkg in &to_uninstall {
         if let Err(e) = pkg_manager.uninstall(pkg).await {
             Output::warning(&format!("Failed to uninstall {}: {}", pkg, e));
+            failed += 1;
         }
     }
     if !to_install.is_empty() {
@@ -70,5 +72,10 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
     }
 
     Output::success("Rollback applied; syncing...");
-    super::sync::run(false, false, false).await
+    super::sync::run(false, false, false).await?;
+
+    if failed > 0 {
+        anyhow::bail!("{} package(s) failed to uninstall", failed);
+    }
+    Ok(())
 }
