@@ -28,7 +28,9 @@ platform :mac do
       keychain_name: KEYCHAIN_NAME,
       keychain_password: KEYCHAIN_PASSWORD,
       readonly: true,
-      api_key_path: ENV["APP_STORE_CONNECT_API_KEY_PATH"],
+      # The cert was imported with skip_certificate_matching, so its file name
+      # is not a portal certificate id; skip the portal lookup at install time.
+      skip_certificate_matching: true,
     )
   end
 

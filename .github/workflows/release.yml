@@ -37,19 +37,11 @@ jobs:
           bundle config set --local path "$HOME/.gem"
           bundle install --jobs 4
 
-      - name: Stash App Store Connect API key on disk
-        run: |
-          mkdir -p "$RUNNER_TEMP/fastlane"
-          echo '${{ secrets.APP_STORE_CONNECT_API_KEY_CONTENT }}' \
-            > "$RUNNER_TEMP/fastlane/asc_api_key.json"
-
       - name: Sync Developer ID certificate (fastlane match)
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APP_STORE_CONNECT_API_KEY_PATH: ${{ runner.temp }}/fastlane/asc_api_key.json
-          # Override org-level MATCH_GIT_URL (likely SSH) with HTTPS+token —
-          # ephemeral VMs don't have an SSH key for the match repo.
+          # HTTPS+token: ephemeral VMs have no SSH key for the match repo.
           MATCH_GIT_URL: https://x-access-token:${{ secrets.FASTLANE_MATCH_TOKEN }}@github.com/paddo-tech/fastlane-match.git
           MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
           MATCH_KEYCHAIN_NAME: tether_match
@@ -233,4 +225,3 @@ jobs:
         run: |
           export PATH="$HOME/.gem/bin:$PATH"
           bundle exec fastlane mac cleanup_keychain || true
-          rm -f "$RUNNER_TEMP/fastlane/asc_api_key.json" || true
