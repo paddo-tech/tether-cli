@@ -99,16 +99,18 @@ impl Default for MachineState {
     }
 }
 
+pub fn local_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 impl MachineState {
     pub fn new(machine_id: &str) -> Self {
-        let hostname = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string());
-
         Self {
             machine_id: machine_id.to_string(),
-            hostname,
+            hostname: local_hostname(),
             last_sync: Utc::now(),
             os_version: String::new(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),

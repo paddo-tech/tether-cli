@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- New machines get a random machine id; existing machines keep their hostname-based id, so no migration runs on upgrade. A fleet that already contains two machines sharing a hostname is not auto-repaired — re-id one of them by removing its `~/.tether/state.json`, running `tether sync`, then `tether machines profile set <name>` (the new id starts on the default profile)
+- New machines get a random machine id; existing machines keep their hostname-based id, so no migration runs on upgrade. A fleet that already contains two machines sharing a hostname is not auto-repaired — on one of them run `tether machines rename <hostname> <new-name>`; the other machine recreates its own record on its next sync, with empty removed-package and ignore lists
+- Sync commits are authored with the machine hostname, so `tether history` stays readable for machines with random ids
 
 ## [1.11.10] - 2026-04-08
 

@@ -67,7 +67,7 @@ impl GitBackend {
         })
     }
 
-    pub fn commit(&self, message: &str, machine_id: &str) -> Result<()> {
+    pub fn commit(&self, message: &str, author: &str) -> Result<()> {
         let repo = Repository::open(&self.repo_path)?;
         let mut index = repo.index()?;
         index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
@@ -76,7 +76,7 @@ impl GitBackend {
         let oid = index.write_tree()?;
         let tree = repo.find_tree(oid)?;
 
-        let sig = Signature::now(machine_id, "tether@local")?;
+        let sig = Signature::now(author, "tether@local")?;
 
         // Check if this is the first commit
         if self.has_commits() {

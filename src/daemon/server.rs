@@ -448,7 +448,7 @@ impl DaemonServer {
         let has_changes = git.has_changes()?;
         if has_changes {
             log::info!("Committing changes...");
-            git.commit("Auto-sync from daemon", &state.machine_id)?;
+            git.commit("Auto-sync from daemon", &crate::sync::local_hostname())?;
             git.push()?;
             log::info!("Sync complete - changes pushed");
         } else {
@@ -486,7 +486,7 @@ impl DaemonServer {
                                 }
                             }
                         }
-                        team_git.commit("Update team configs", &state.machine_id)?;
+                        team_git.commit("Update team configs", &crate::sync::local_hostname())?;
                         team_git.push()?;
                     }
                 }
@@ -545,8 +545,7 @@ impl DaemonServer {
 
             // Push changes if we have write access
             if !team_config.read_only && team_git.has_changes()? {
-                let state = SyncState::load()?;
-                team_git.commit("Update team configs", &state.machine_id)?;
+                team_git.commit("Update team configs", &crate::sync::local_hostname())?;
                 team_git.push()?;
             }
         }
