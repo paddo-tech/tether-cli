@@ -152,7 +152,7 @@ pub struct App {
     active_tab: Tab,
     scroll_offsets: [usize; 5],
     should_quit: bool,
-    sync_child: Option<std::process::Child>,
+    sync_child: Option<(String, std::process::Child)>,
     daemon_child: Option<std::process::Child>,
     daemon_op: DaemonOp,
     show_help: bool,
@@ -198,40 +198,35 @@ impl App {
         &mut self.scroll_offsets[idx]
     }
 
-    fn spawn_sync(&mut self) {
+    /// Run `tether <args>` in the background; false when a child is already running.
+    fn spawn_tether(&mut self, args: &[&str]) -> bool {
         if self.sync_child.is_some() {
-            return;
+            return false;
         }
         let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
-        if let Ok(child) = std::process::Command::new(exe)
-            .arg("sync")
+        match std::process::Command::new(exe)
+            .args(args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            self.sync_child = Some(child);
+            Ok(child) => {
+                self.sync_child = Some((args.join(" "), child));
+                true
+            }
+            Err(_) => false,
         }
     }
 
-    fn spawn_rollback(&mut self, manager: &str, commit: &str) {
-        if self.sync_child.is_some() {
-            return;
-        }
-        let exe = std::env::current_exe().unwrap_or_else(|_| "tether".into());
-        if let Ok(child) = std::process::Command::new(exe)
-            .args(["rollback", "packages", manager, commit])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            self.sync_child = Some(child);
-        }
+    fn spawn_sync(&mut self) {
+        self.spawn_tether(&["sync"]);
     }
 
     fn reload_state(&mut self) {
         self.state = DashboardState::load();
         self.files.deleted = load_deleted_files(&self.state);
         refresh_files_expanded(self);
+        refresh_packages_expanded(self);
         self.last_refresh = Instant::now();
     }
 
@@ -345,8 +340,11 @@ pub fn run() -> Result<()> {
             }
         }
 
-        if let Some(ref mut child) = app.sync_child {
-            if let Ok(Some(_)) = child.try_wait() {
+        if let Some((ref label, ref mut child)) = app.sync_child {
+            if let Ok(Some(status)) = child.try_wait() {
+                if !status.success() {
+                    app.flash_error = Some((Instant::now(), format!("tether {} failed", label)));
+                }
                 app.sync_child = None;
                 app.reload_state();
             }
@@ -462,7 +460,7 @@ pub fn run() -> Result<()> {
         }
     }
 
-    if let Some(ref mut child) = app.sync_child {
+    if let Some((_, ref mut child)) = app.sync_child {
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -547,11 +545,17 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if let Some(rb) = app.packages.rollback_confirm.take() {
-                    app.spawn_rollback(&rb.manager, &rb.commit);
-                    app.flash_message = Some((
-                        Instant::now(),
-                        format!("Rolling back {} to {}", rb.manager, rb.short_hash),
-                    ));
+                    if app.spawn_tether(&["rollback", "packages", &rb.manager, &rb.commit]) {
+                        app.flash_message = Some((
+                            Instant::now(),
+                            format!("Rolling back {} to {}", rb.manager, rb.short_hash),
+                        ));
+                    } else {
+                        app.flash_error = Some((
+                            Instant::now(),
+                            "Another tether command is still running".to_string(),
+                        ));
+                    }
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => {
@@ -1216,10 +1220,10 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                     let commit_hash = commit_hash.clone();
                     let short_hash = short_hash.clone();
                     if let Some(manager) = app.packages.history_manager.clone() {
-                        if manager.starts_with("brew_") {
+                        if crate::packages::manager_for_key(&manager).is_none() {
                             app.flash_error = Some((
                                 Instant::now(),
-                                "Rollback for brew is not yet supported".to_string(),
+                                format!("Rollback is not supported for {}", manager),
                             ));
                         } else if let Some(confirm) =
                             build_rollback_confirm(&app.state, &manager, &commit_hash, &short_hash)
@@ -1523,6 +1527,19 @@ fn refresh_files_expanded(app: &mut App) {
     }
 }
 
+/// Reload open manifest history and clamp the cursor after state reload
+fn refresh_packages_expanded(app: &mut App) {
+    if let Some(ref manager) = app.packages.history_manager {
+        app.packages.history = load_pkg_history(manager);
+        app.packages.history_commit = None;
+        app.packages.history_diff.clear();
+    }
+    let rows = widgets::packages::build_rows(&app.state, &app.packages).len();
+    if app.packages.cursor >= rows {
+        app.packages.cursor = rows.saturating_sub(1);
+    }
+}
+
 /// Refresh list_edit items from current config state
 fn refresh_list_edit(app: &mut App) {
     let Some(ref le) = app.list_edit else {
@@ -1563,12 +1580,8 @@ async fn run_uninstall(manager_key: &str, package: &str) -> std::result::Result<
 
     let manager: Box<dyn PackageManager> = match manager_key {
         "brew_formulae" | "brew_casks" => Box::new(BrewManager),
-        "npm" => Box::new(NpmManager),
-        "pnpm" => Box::new(PnpmManager),
-        "bun" => Box::new(BunManager),
-        "gem" => Box::new(GemManager),
-        "uv" => Box::new(UvManager),
-        _ => return Err(format!("Unknown manager: {}", manager_key)),
+        _ => manager_for_key(manager_key)
+            .ok_or_else(|| format!("Unknown manager: {}", manager_key))?,
     };
 
     manager.uninstall(package).await.map_err(|e| e.to_string())
@@ -1587,12 +1600,8 @@ async fn run_install(manager_key: &str, package: &str) -> std::result::Result<()
 
     let manager: Box<dyn PackageManager> = match manager_key {
         "brew_formulae" => Box::new(BrewManager),
-        "npm" => Box::new(NpmManager),
-        "pnpm" => Box::new(PnpmManager),
-        "bun" => Box::new(BunManager),
-        "gem" => Box::new(GemManager),
-        "uv" => Box::new(UvManager),
-        _ => return Err(format!("Unknown manager: {}", manager_key)),
+        _ => manager_for_key(manager_key)
+            .ok_or_else(|| format!("Unknown manager: {}", manager_key))?,
     };
 
     manager

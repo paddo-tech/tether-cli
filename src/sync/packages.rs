@@ -1,9 +1,6 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::packages::{
-    normalize_formula_name, BrewManager, BrewfilePackages, BunManager, GemManager, NpmManager,
-    PackageManager, PnpmManager, UvManager,
-};
+use crate::packages::{normalize_formula_name, BrewManager, BrewfilePackages, PackageManager};
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
 use anyhow::Result;
@@ -302,14 +299,8 @@ async fn import_simple_manager(
         return false;
     }
 
-    // Get the appropriate manager
-    let manager: Box<dyn PackageManager> = match def.state_key {
-        "npm" => Box::new(NpmManager::new()),
-        "pnpm" => Box::new(PnpmManager::new()),
-        "bun" => Box::new(BunManager::new()),
-        "gem" => Box::new(GemManager::new()),
-        "uv" => Box::new(UvManager::new()),
-        _ => return false,
+    let Some(manager) = crate::packages::manager_for_key(def.state_key) else {
+        return false;
     };
 
     if !manager.is_available().await {

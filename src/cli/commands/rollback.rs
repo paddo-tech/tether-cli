@@ -1,30 +1,12 @@
 use crate::cli::Output;
-use crate::packages::{BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager};
 use crate::sync::{GitBackend, SyncEngine};
 use anyhow::Result;
 use std::collections::HashSet;
 
-/// Roll back a package manager's installed set to the manifest as of `commit`.
-///
-/// Reverse-delta: install packages the snapshot had but this machine lacks, and
-/// uninstall packages installed since. A follow-up sync records the removals
-/// (via `detect_removed_packages`) and rewrites the union manifest.
+/// Reverse-delta against the union manifest at `commit`; the follow-up sync records removals.
 pub async fn packages(manager: &str, commit: &str) -> Result<()> {
-    if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
-        anyhow::bail!("Invalid commit hash: {}", commit);
-    }
-
-    let pkg_manager: Box<dyn PackageManager> = match manager {
-        "npm" => Box::new(NpmManager::new()),
-        "pnpm" => Box::new(PnpmManager::new()),
-        "bun" => Box::new(BunManager::new()),
-        "gem" => Box::new(GemManager::new()),
-        "uv" => Box::new(UvManager::new()),
-        "brew_formulae" | "brew_casks" | "brew_taps" => {
-            anyhow::bail!("Rollback for brew is not yet supported");
-        }
-        other => anyhow::bail!("Unknown package manager: {}", other),
-    };
+    let pkg_manager = crate::packages::manager_for_key(manager)
+        .ok_or_else(|| anyhow::anyhow!("Rollback is not supported for {}", manager))?;
 
     if !pkg_manager.is_available().await {
         anyhow::bail!("{} is not available on this machine", manager);
