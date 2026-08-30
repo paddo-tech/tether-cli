@@ -457,7 +457,18 @@ pub fn run() -> Result<()> {
         }
 
         if app.should_quit {
-            break;
+            // A killed rollback leaves packages half-removed with no tombstones.
+            let rollback_running =
+                matches!(&app.sync_child, Some((label, _)) if label.starts_with("rollback"));
+            if rollback_running {
+                app.should_quit = false;
+                app.flash_error = Some((
+                    Instant::now(),
+                    "Rollback in progress, wait for it to finish".to_string(),
+                ));
+            } else {
+                break;
+            }
         }
     }
 
