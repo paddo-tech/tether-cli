@@ -557,16 +557,19 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
                 if let Some(rb) = app.packages.rollback_confirm.take() {
-                    if app.spawn_tether(&["rollback", "packages", &rb.manager, &rb.commit]) {
+                    if app.sync_child.is_some() {
+                        app.flash_error = Some((
+                            Instant::now(),
+                            "Another tether command is still running".to_string(),
+                        ));
+                    } else if app.spawn_tether(&["rollback", "packages", &rb.manager, &rb.commit]) {
                         app.flash_message = Some((
                             Instant::now(),
                             format!("Rolling back {} to {}", rb.manager, rb.short_hash),
                         ));
                     } else {
-                        app.flash_error = Some((
-                            Instant::now(),
-                            "Another tether command is still running".to_string(),
-                        ));
+                        app.flash_error =
+                            Some((Instant::now(), "Could not start tether".to_string()));
                     }
                 }
             }
@@ -703,7 +706,11 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             KeyCode::Char('k') | KeyCode::Up => {
                 picker.cursor = picker.cursor.saturating_sub(1);
             }
-            KeyCode::Enter if !picker.items.is_empty() && picker.cursor < picker.items.len() => {
+            KeyCode::Enter
+                if !picker.items.is_empty()
+                    && picker.cursor < picker.items.len()
+                    && app.sync_child.is_none() =>
+            {
                 let item = &picker.items[picker.cursor];
                 app.pkg_install_confirm = Some((item.manager_key.clone(), item.name.clone()));
             }
@@ -1102,7 +1109,10 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 widgets::packages::PkgRow::Package {
                     manager_key, name, ..
                 } => {
-                    if app.uninstalling.is_none() && manager_key != "brew_taps" {
+                    if app.uninstalling.is_none()
+                        && app.sync_child.is_none()
+                        && manager_key != "brew_taps"
+                    {
                         app.uninstall_confirm = Some((manager_key.clone(), name.clone()));
                     }
                 }
@@ -1451,12 +1461,16 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                         app.packages.history.clear();
                     } else {
                         app.packages.history = load_pkg_history(&manager_key);
-                        app.packages.history_manager = Some(manager_key);
+                        app.packages.history_manager = Some(manager_key.clone());
                     }
+                    // Rows above the cursor may have vanished, so re-find the header.
                     let new_rows = widgets::packages::build_rows(&app.state, &app.packages);
-                    if app.packages.cursor >= new_rows.len() {
-                        app.packages.cursor = new_rows.len().saturating_sub(1);
-                    }
+                    app.packages.cursor = new_rows
+                        .iter()
+                        .position(|r| {
+                            matches!(r, widgets::packages::PkgRow::Header { manager_key: k, .. } if *k == manager_key)
+                        })
+                        .unwrap_or(0);
                 }
             }
         }
@@ -1558,8 +1572,9 @@ fn refresh_files_expanded(app: &mut App) {
 fn refresh_packages_expanded(app: &mut App) {
     if let Some(ref manager) = app.packages.history_manager {
         app.packages.history = load_pkg_history(manager);
-        app.packages.history_commit = None;
-        app.packages.history_diff.clear();
+        if let Some(ref commit) = app.packages.history_commit {
+            app.packages.history_diff = load_pkg_diff(manager, commit);
+        }
     }
     let rows = widgets::packages::build_rows(&app.state, &app.packages).len();
     if app.packages.cursor >= rows {
