@@ -543,34 +543,31 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             KeyCode::Char('k') | KeyCode::Up => {
                 picker.cursor = picker.cursor.saturating_sub(1);
             }
-            KeyCode::Enter => {
-                if !picker.items.is_empty() && picker.cursor < picker.items.len() {
-                    let item = picker.items.remove(picker.cursor);
-                    if let (Some(ref mut config), Some(ref ss)) =
-                        (&mut app.state.config, &app.state.sync_state)
-                    {
-                        let ok =
-                            config_edit::add_profile_dotfile(config, &ss.machine_id, &item.path);
-                        if ok {
-                            // Clear from dismissed_imports
-                            if let Ok(mut sync_state) = crate::sync::SyncState::load() {
-                                sync_state.dismissed_imports.remove(&item.path);
-                                let _ = sync_state.save();
-                            }
-                            app.flash_message =
-                                Some((Instant::now(), format!("imported {}", item.path)));
-                            app.reload_state();
-                        } else {
-                            app.flash_error = Some((Instant::now(), "import failed".into()));
+            KeyCode::Enter if !picker.items.is_empty() && picker.cursor < picker.items.len() => {
+                let item = picker.items.remove(picker.cursor);
+                if let (Some(ref mut config), Some(ref ss)) =
+                    (&mut app.state.config, &app.state.sync_state)
+                {
+                    let ok = config_edit::add_profile_dotfile(config, &ss.machine_id, &item.path);
+                    if ok {
+                        // Clear from dismissed_imports
+                        if let Ok(mut sync_state) = crate::sync::SyncState::load() {
+                            sync_state.dismissed_imports.remove(&item.path);
+                            let _ = sync_state.save();
                         }
+                        app.flash_message =
+                            Some((Instant::now(), format!("imported {}", item.path)));
+                        app.reload_state();
+                    } else {
+                        app.flash_error = Some((Instant::now(), "import failed".into()));
                     }
-                    // Clamp cursor
-                    if let Some(ref mut picker) = app.file_import_picker {
-                        if picker.items.is_empty() {
-                            app.file_import_picker = None;
-                        } else if picker.cursor >= picker.items.len() {
-                            picker.cursor = picker.items.len().saturating_sub(1);
-                        }
+                }
+                // Clamp cursor
+                if let Some(ref mut picker) = app.file_import_picker {
+                    if picker.items.is_empty() {
+                        app.file_import_picker = None;
+                    } else if picker.cursor >= picker.items.len() {
+                        picker.cursor = picker.items.len().saturating_sub(1);
                     }
                 }
             }
@@ -624,11 +621,9 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             KeyCode::Char('k') | KeyCode::Up => {
                 picker.cursor = picker.cursor.saturating_sub(1);
             }
-            KeyCode::Enter => {
-                if !picker.items.is_empty() && picker.cursor < picker.items.len() {
-                    let item = &picker.items[picker.cursor];
-                    app.pkg_install_confirm = Some((item.manager_key.clone(), item.name.clone()));
-                }
+            KeyCode::Enter if !picker.items.is_empty() && picker.cursor < picker.items.len() => {
+                let item = &picker.items[picker.cursor];
+                app.pkg_install_confirm = Some((item.manager_key.clone(), item.name.clone()));
             }
             _ => {}
         }
@@ -764,20 +759,18 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                     }
                 }
             }
-            KeyCode::Char('t') => {
-                if le.is_dotfile {
-                    let cursor = le.cursor;
-                    let ok = app
-                        .state
-                        .config
-                        .as_mut()
-                        .map(|c| config_edit::toggle_dotfile_create(c, cursor))
-                        .unwrap_or(false);
-                    if !ok {
-                        app.flash_error = Some((Instant::now(), "save failed".into()));
-                    }
-                    refresh_list_edit(app);
+            KeyCode::Char('t') if le.is_dotfile => {
+                let cursor = le.cursor;
+                let ok = app
+                    .state
+                    .config
+                    .as_mut()
+                    .map(|c| config_edit::toggle_dotfile_create(c, cursor))
+                    .unwrap_or(false);
+                if !ok {
+                    app.flash_error = Some((Instant::now(), "save failed".into()));
                 }
+                refresh_list_edit(app);
             }
             _ => {}
         }

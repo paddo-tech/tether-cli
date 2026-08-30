@@ -580,12 +580,15 @@ fn show_feature_guidance(feature: &str, enabled: bool) {
                 Output::warning("team_layering requires team_dotfiles to be enabled");
             }
         }
-        "personal_dotfiles" | "personal_packages" => {
-            if config.map(|c| c.backend.url.is_empty()).unwrap_or(true) {
-                println!();
-                Output::info("Set up personal sync repo:");
-                println!("  tether init");
-            }
+        "personal_dotfiles" | "personal_packages"
+            if config
+                .as_ref()
+                .map(|c| c.backend.url.is_empty())
+                .unwrap_or(true) =>
+        {
+            println!();
+            Output::info("Set up personal sync repo:");
+            println!("  tether init");
         }
         _ => {}
     }

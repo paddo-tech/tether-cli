@@ -79,12 +79,9 @@ pub fn render(
         0
     };
 
-    let mut y = inner_area.y;
-    for (row_idx, row) in rows.iter().enumerate().skip(scroll) {
-        if y >= inner_area.y + inner_area.height {
-            break;
-        }
-
+    for (y, (row_idx, row)) in
+        (inner_area.y..inner_area.y + inner_area.height).zip(rows.iter().enumerate().skip(scroll))
+    {
         let is_selected = field_row_map[row_idx] == Some(selected);
 
         if row.is_header {
@@ -136,7 +133,6 @@ pub fn render(
                 Rect::new(inner_area.x, y, inner_area.width, 1),
             );
         }
-        y += 1;
     }
 }
 
@@ -208,12 +204,9 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState) {
         0
     };
 
-    let mut y = list_start_y;
-    for (i, item) in le.items.iter().enumerate().skip(scroll) {
-        if y >= list_start_y + items_height as u16 {
-            break;
-        }
-
+    for (y, (i, item)) in (list_start_y..list_start_y + items_height as u16)
+        .zip(le.items.iter().enumerate().skip(scroll))
+    {
         let is_selected = i == le.cursor;
         let style = if is_selected {
             Style::default().fg(Color::White).bg(Color::Indexed(240))
@@ -231,7 +224,6 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState) {
             Paragraph::new(line),
             Rect::new(inner_area.x, y, inner_area.width, 1),
         );
-        y += 1;
     }
 
     // Render add input line
