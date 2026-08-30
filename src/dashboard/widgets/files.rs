@@ -365,12 +365,9 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
         0
     };
 
-    let mut y = inner_area.y;
-    for (row_idx, row) in rows.iter().enumerate().skip(scroll) {
-        if y >= inner_area.y + inner_area.height {
-            break;
-        }
-
+    for (y, (row_idx, row)) in
+        (inner_area.y..inner_area.y + inner_area.height).zip(rows.iter().enumerate().skip(scroll))
+    {
         let is_selected = row_idx == cursor;
         let row_area = Rect::new(inner_area.x, y, inner_area.width, 1);
 
@@ -545,8 +542,6 @@ pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, ft: &FilesTabSt
                 f.render_widget(Paragraph::new(line), row_area);
             }
         }
-
-        y += 1;
     }
 }
 
