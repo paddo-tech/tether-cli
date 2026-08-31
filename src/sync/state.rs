@@ -99,16 +99,18 @@ impl Default for MachineState {
     }
 }
 
+pub fn local_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 impl MachineState {
     pub fn new(machine_id: &str) -> Self {
-        let hostname = hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string());
-
         Self {
             machine_id: machine_id.to_string(),
-            hostname,
+            hostname: local_hostname(),
             last_sync: Utc::now(),
             os_version: String::new(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -252,7 +254,10 @@ impl SyncState {
     pub fn load() -> Result<Self> {
         let path = Self::state_path()?;
         if !path.exists() {
-            return Ok(Self::new());
+            // The random machine id must survive across calls, so persist on first load.
+            let state = Self::new();
+            state.save()?;
+            return Ok(state);
         }
         let content = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&content)?)
@@ -266,7 +271,8 @@ impl SyncState {
 
     fn new() -> Self {
         Self {
-            machine_id: Self::generate_machine_id(),
+            // Random, not the hostname: hostnames are not unique across a fleet.
+            machine_id: crate::security::random_hex_id(),
             last_sync: Utc::now(),
             files: HashMap::new(),
             packages: HashMap::new(),
@@ -276,13 +282,6 @@ impl SyncState {
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
         }
-    }
-
-    fn generate_machine_id() -> String {
-        hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string())
     }
 
     pub fn update_file(&mut self, path: &str, hash: String) {

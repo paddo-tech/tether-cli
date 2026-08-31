@@ -1,4 +1,4 @@
-use super::{PackageInfo, PackageManager};
+use super::{command_error_message, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -15,8 +15,10 @@ impl PnpmManager {
         let output = Command::new("pnpm").args(args).output().await?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pnpm command failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "pnpm command failed: {}",
+                command_error_message(&output)
+            ));
         }
 
         Ok(String::from_utf8(output.stdout)?)
@@ -93,8 +95,10 @@ impl PackageManager for PnpmManager {
         let output = Command::new("pnpm").args(["update", "-g"]).output().await?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pnpm update failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "pnpm update failed: {}",
+                command_error_message(&output)
+            ));
         }
 
         Ok(())
@@ -107,8 +111,10 @@ impl PackageManager for PnpmManager {
             .await?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("pnpm remove failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "pnpm remove failed: {}",
+                command_error_message(&output)
+            ));
         }
 
         Ok(())

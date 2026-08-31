@@ -190,7 +190,10 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 
     // Commit and push
     let git = GitBackend::open(&sync_path)?;
-    git.commit(&format!("Rename machine {} to {}", old, new), new)?;
+    git.commit(
+        &format!("Rename machine {} to {}", old, new),
+        &crate::sync::local_hostname(),
+    )?;
     git.push()?;
 
     Output::success(&format!("Renamed machine '{}' to '{}'", old, new));
@@ -234,7 +237,10 @@ pub async fn remove(name: &str) -> Result<()> {
 
     // Commit and push
     let git = GitBackend::open(&sync_path)?;
-    git.commit(&format!("Remove machine {}", name), &state.machine_id)?;
+    git.commit(
+        &format!("Remove machine {}", name),
+        &crate::sync::local_hostname(),
+    )?;
     git.push()?;
 
     Output::success(&format!("Removed machine '{}'", name));

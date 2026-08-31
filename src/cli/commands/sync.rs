@@ -330,7 +330,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
         if has_changes {
             let pb = Progress::spinner("Pushing changes...");
-            git.commit("Sync dotfiles and packages", &state.machine_id)?;
+            git.commit("Sync dotfiles and packages", &crate::sync::local_hostname())?;
             git.push()?;
             pb.finish_and_clear();
         }
@@ -369,7 +369,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
                             }
                         }
 
-                        team_git.commit("Update team configs", &state.machine_id)?;
+                        team_git.commit("Update team configs", &crate::sync::local_hostname())?;
                         team_git.push()?;
                     }
                 }
@@ -2189,8 +2189,7 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 
             // Push changes if we have write access
             if !team_config.read_only && team_git.has_changes()? {
-                let state = SyncState::load()?;
-                team_git.commit("Update team configs", &state.machine_id)?;
+                team_git.commit("Update team configs", &crate::sync::local_hostname())?;
                 team_git.push()?;
             }
         } else {
