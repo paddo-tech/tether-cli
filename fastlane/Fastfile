@@ -31,6 +31,8 @@ platform :mac do
       # The cert was imported with skip_certificate_matching, so its file name
       # is not a portal certificate id; skip the portal lookup at install time.
       skip_certificate_matching: true,
+      # Developer ID signs binaries, not app bundles, so there is no profile.
+      skip_provisioning_profiles: true,
     )
   end
 
