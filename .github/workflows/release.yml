@@ -70,9 +70,22 @@ jobs:
           KC=$(security list-keychains -d user | tr -d ' "' | grep -i tether_match \
             || echo "$HOME/Library/Keychains/tether_match-db")
           security unlock-keychain -p "$MATCH_KEYCHAIN_PASSWORD" "$KC"
+
+          # Bare CI images lack the Developer ID intermediate, so the leaf can't
+          # chain to Apple's root and codesign rejects it as an invalid identity.
+          tmp=$(mktemp -d)
+          for url in \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer \
+            https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer \
+            https://www.apple.com/appleca/AppleIncRootCertificate.cer ; do
+            f="$tmp/$(basename "$url")"
+            curl -fsSL -o "$f" "$url" && security import "$f" -k "$KC" -A >/dev/null 2>&1 || true
+          done
+
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$MATCH_KEYCHAIN_PASSWORD" "$KC" >/dev/null 2>&1 || true
-          security find-identity -v -p codesigning "$KC"
+          echo "-- identities (incl invalid):"; security find-identity -p codesigning "$KC" || true
+          echo "-- valid identities:"; security find-identity -v -p codesigning "$KC" || true
 
           for bin in aarch64-apple-darwin x86_64-apple-darwin; do
             codesign --sign "$SIGNING_IDENTITY" \
