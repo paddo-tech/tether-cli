@@ -10,6 +10,7 @@ mod machines;
 mod packages;
 mod resolve;
 mod restore;
+mod rollback;
 mod status;
 pub mod sync;
 mod team;
@@ -154,6 +155,23 @@ pub enum Commands {
         /// Maximum number of entries to show
         #[arg(short, long, default_value = "20")]
         limit: usize,
+    },
+
+    /// Roll back synced state to an earlier point
+    Rollback {
+        #[command(subcommand)]
+        action: RollbackAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RollbackAction {
+    /// Roll back a package manager's installed set to a manifest commit
+    Packages {
+        /// Manager key (npm, pnpm, bun, gem, uv)
+        manager: String,
+        /// Manifest commit hash to roll back to
+        commit: String,
     },
 }
 
@@ -676,6 +694,11 @@ impl Cli {
                 IdentityAction::Reset => identity::reset().await,
             },
             Commands::History { file, limit } => history::run(file, *limit).await,
+            Commands::Rollback { action } => match action {
+                RollbackAction::Packages { manager, commit } => {
+                    rollback::packages(manager, commit).await
+                }
+            },
             Commands::Collab { action } => match action {
                 CollabAction::Init { project } => collab::init(project.as_deref()).await,
                 CollabAction::Join { url } => collab::join(url).await,

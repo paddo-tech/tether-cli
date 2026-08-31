@@ -1,9 +1,6 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::packages::{
-    normalize_formula_name, BrewManager, BrewfilePackages, BunManager, GemManager, NpmManager,
-    PackageManager, PnpmManager, UvManager,
-};
+use crate::packages::{normalize_formula_name, BrewManager, BrewfilePackages, PackageManager};
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
 use anyhow::Result;
@@ -18,6 +15,18 @@ struct PackageManagerDef {
     display_name: &'static str,
     /// Manifest filename
     manifest_file: &'static str,
+}
+
+/// Map a machine-state package key to its manifest filename in `manifests/`.
+/// All three brew keys (`brew_formulae`, `brew_casks`, `brew_taps`) share the Brewfile.
+pub fn manifest_filename(state_key: &str) -> Option<&'static str> {
+    if state_key.starts_with("brew_") {
+        return Some("Brewfile");
+    }
+    SIMPLE_MANAGERS
+        .iter()
+        .find(|d| d.state_key == state_key)
+        .map(|d| d.manifest_file)
 }
 
 const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
@@ -290,14 +299,8 @@ async fn import_simple_manager(
         return false;
     }
 
-    // Get the appropriate manager
-    let manager: Box<dyn PackageManager> = match def.state_key {
-        "npm" => Box::new(NpmManager::new()),
-        "pnpm" => Box::new(PnpmManager::new()),
-        "bun" => Box::new(BunManager::new()),
-        "gem" => Box::new(GemManager::new()),
-        "uv" => Box::new(UvManager::new()),
-        _ => return false,
+    let Some(manager) = crate::packages::manager_for_key(def.state_key) else {
+        return false;
     };
 
     if !manager.is_available().await {

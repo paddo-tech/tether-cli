@@ -24,6 +24,18 @@ pub fn command_error_message(output: &std::process::Output) -> String {
         .join("\n")
 }
 
+/// Look up a simple (non-brew) manager by its machine-state key.
+pub fn manager_for_key(key: &str) -> Option<Box<dyn PackageManager>> {
+    Some(match key {
+        "npm" => Box::new(NpmManager::new()),
+        "pnpm" => Box::new(PnpmManager::new()),
+        "bun" => Box::new(BunManager::new()),
+        "gem" => Box::new(GemManager::new()),
+        "uv" => Box::new(UvManager::new()),
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::command_error_message;

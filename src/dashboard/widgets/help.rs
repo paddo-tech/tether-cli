@@ -151,7 +151,15 @@ pub fn render_overlay(f: &mut Frame) {
         )),
         Line::from(vec![
             Span::styled("  Enter     ", Style::default().fg(Color::Yellow).bold()),
-            Span::raw("Expand/uninstall"),
+            Span::raw("Expand/uninstall, toggle history diff"),
+        ]),
+        Line::from(vec![
+            Span::styled("  h         ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Toggle manifest history"),
+        ]),
+        Line::from(vec![
+            Span::styled("  R         ", Style::default().fg(Color::Yellow).bold()),
+            Span::raw("Roll back to history entry"),
         ]),
         Line::from(""),
         Line::from(vec![

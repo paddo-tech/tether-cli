@@ -1,5 +1,7 @@
 use super::manager_label;
+use crate::cli::output::relative_time;
 use crate::dashboard::state::DashboardState;
+use crate::dashboard::PackagesTabState;
 use ratatui::{prelude::*, widgets::*};
 
 /// Row in the flat package list
@@ -13,10 +15,20 @@ pub enum PkgRow {
         manager_key: String,
         name: String,
     },
+    HistoryEntry {
+        commit_hash: String,
+        short_hash: String,
+        date: String,
+        machine_id: String,
+        message: String,
+    },
+    DiffRow {
+        line: String,
+    },
 }
 
 /// Build the flat list of rows from machine state
-pub fn build_rows(state: &DashboardState, expanded: Option<&str>) -> Vec<PkgRow> {
+pub fn build_rows(state: &DashboardState, pt: &PackagesTabState) -> Vec<PkgRow> {
     let current_machine_id = state
         .sync_state
         .as_ref()
@@ -42,7 +54,25 @@ pub fn build_rows(state: &DashboardState, expanded: Option<&str>) -> Vec<PkgRow>
             label: manager_label(key).to_string(),
             count: packages.len(),
         });
-        if expanded == Some(key.as_str()) {
+
+        if pt.history_manager.as_deref() == Some(key.as_str()) {
+            for entry in &pt.history {
+                rows.push(PkgRow::HistoryEntry {
+                    commit_hash: entry.commit_hash.clone(),
+                    short_hash: entry.short_hash.clone(),
+                    date: relative_time(entry.date),
+                    machine_id: entry.machine_id.clone(),
+                    message: entry.message.clone(),
+                });
+                if pt.history_commit.as_deref() == Some(entry.commit_hash.as_str()) {
+                    for line in &pt.history_diff {
+                        rows.push(PkgRow::DiffRow { line: line.clone() });
+                    }
+                }
+            }
+        }
+
+        if pt.expanded.as_deref() == Some(key.as_str()) {
             let mut sorted_pkgs: Vec<_> = (*packages).clone();
             sorted_pkgs.sort();
             for pkg in &sorted_pkgs {
@@ -56,14 +86,9 @@ pub fn build_rows(state: &DashboardState, expanded: Option<&str>) -> Vec<PkgRow>
     rows
 }
 
-pub fn render(
-    f: &mut Frame,
-    area: Rect,
-    state: &DashboardState,
-    expanded: Option<&str>,
-    cursor: usize,
-) {
-    let rows = build_rows(state, expanded);
+pub fn render(f: &mut Frame, area: Rect, state: &DashboardState, pt: &PackagesTabState) {
+    let rows = build_rows(state, pt);
+    let cursor = pt.cursor;
 
     let block = Block::default()
         .title(" Packages ")
@@ -101,7 +126,7 @@ pub fn render(
                 count,
                 ..
             } => {
-                let arrow = if expanded == Some(manager_key.as_str()) {
+                let arrow = if pt.expanded.as_deref() == Some(manager_key.as_str()) {
                     "v"
                 } else {
                     ">"
@@ -144,6 +169,78 @@ pub fn render(
                 let line = Line::from(vec![
                     Span::styled(format!("      {}", name), style),
                     Span::styled(" ".repeat(inner_area.width as usize), style),
+                ]);
+                f.render_widget(Paragraph::new(line), row_area);
+            }
+            PkgRow::HistoryEntry {
+                commit_hash,
+                short_hash,
+                date,
+                machine_id,
+                message,
+            } => {
+                let bg = if is_selected {
+                    Color::Indexed(240)
+                } else {
+                    Color::Reset
+                };
+                let arrow = if pt.history_commit.as_deref() == Some(commit_hash.as_str()) {
+                    "v"
+                } else {
+                    ">"
+                };
+                let line = Line::from(vec![
+                    Span::styled(
+                        format!("     {} ", arrow),
+                        Style::default().fg(Color::Gray).bg(bg),
+                    ),
+                    Span::styled(
+                        short_hash.clone(),
+                        Style::default().fg(Color::Yellow).bg(bg).bold(),
+                    ),
+                    Span::styled(
+                        format!("  {:>12}", date),
+                        Style::default().fg(Color::Gray).bg(bg),
+                    ),
+                    Span::styled(
+                        format!("  {:15}", machine_id),
+                        Style::default().fg(Color::Gray).bg(bg),
+                    ),
+                    Span::styled(
+                        format!("  {}", message),
+                        Style::default().fg(Color::White).bg(bg),
+                    ),
+                    Span::styled(
+                        " ".repeat(inner_area.width as usize),
+                        Style::default().bg(bg),
+                    ),
+                ]);
+                f.render_widget(Paragraph::new(line), row_area);
+            }
+            PkgRow::DiffRow { line: diff_line } => {
+                let bg = if is_selected {
+                    Color::Indexed(240)
+                } else {
+                    Color::Reset
+                };
+                let fg = if diff_line.starts_with("@@") {
+                    Color::Cyan
+                } else if diff_line.starts_with("+++") || diff_line.starts_with("---") {
+                    Color::Gray
+                } else if diff_line.starts_with('+') {
+                    Color::Green
+                } else if diff_line.starts_with('-') {
+                    Color::Red
+                } else {
+                    Color::Gray
+                };
+                let line = Line::from(vec![
+                    Span::styled("        ", Style::default().bg(bg)),
+                    Span::styled(diff_line.clone(), Style::default().fg(fg).bg(bg)),
+                    Span::styled(
+                        " ".repeat(inner_area.width as usize),
+                        Style::default().bg(bg),
+                    ),
                 ]);
                 f.render_widget(Paragraph::new(line), row_area);
             }
