@@ -33,3 +33,6 @@ website/dist/
 website/.astro/
 website/bun.lockb
 *.bun-build
+
+# Local fastlane secrets (MATCH_PASSWORD, KEYCHAIN_PASSWORD)
+.env.local
