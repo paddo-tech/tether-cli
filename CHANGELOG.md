@@ -7,10 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-09-01
+
+### Added
+
+- Packages tab manifest history: `h` on a manager lists its manifest commits and `Enter` shows the diff for an entry
+- `tether rollback packages <manager> <commit>` rolls a package manager's installed set back to an earlier manifest snapshot, then re-syncs so the removals are recorded
+- Dashboard: `R` on a history entry confirms the install/uninstall counts and runs the rollback. Homebrew is not supported yet; its history is still viewable
+
 ### Fixed
 
 - Onboarding a machine that shares a hostname with an existing machine no longer overwrites that machine's sync state — machine identity is now a random id rather than the hostname
 - `pnpm` failures now surface the real error text (pnpm writes errors to stdout, not stderr, so failures previously showed a blank reason). Both streams are reported, so a Node warning on stderr cannot hide the error
+- The dashboard reports a failed background `sync` or `rollback` instead of returning to the normal view as though it had worked
 
 ### Changed
 
