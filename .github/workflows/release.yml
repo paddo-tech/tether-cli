@@ -50,6 +50,11 @@ jobs:
           export PATH="$HOME/.gem/bin:$PATH"
           bundle exec fastlane mac sync_developer_id
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
       - name: Build release (Apple Silicon)
         run: cargo build --release --target aarch64-apple-darwin
 
