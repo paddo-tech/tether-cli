@@ -182,10 +182,21 @@ impl GitBackend {
 
             let error = String::from_utf8_lossy(&output.stderr);
 
-            // Retry on rejection due to remote changes
-            let is_rejection = error.contains("fetch first") || error.contains("non-fast-forward");
+            // Retry on rejection due to remote changes. Git reports the same
+            // non-fast-forward race under several messages depending on the
+            // transport: "fetch first", "non-fast-forward", "stale info",
+            // and "[remote rejected] ... (cannot lock ref ...)".
+            let is_rejection = error.contains("fetch first")
+                || error.contains("non-fast-forward")
+                || error.contains("stale info")
+                || error.contains("cannot lock ref");
             if is_rejection && attempt < 3 {
                 self.pull()?;
+                // Stagger retries so machines on the same sync interval don't
+                // deterministically re-collide on the next push.
+                let backoff_ms =
+                    400 + attempt as u64 * 400 + (Utc::now().timestamp_millis() as u64 % 400);
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 continue;
             }
 
