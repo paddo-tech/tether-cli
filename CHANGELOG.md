@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-09-26
+
+### Fixed
+
+- The launchd daemon now runs with the `PATH`, `GEM_HOME` and `GEM_PATH` of the shell that installed it. launchd's default `PATH` hid Homebrew, so the daemon skipped brew, npm, bun, pnpm and uv, and ran `gem` with the macOS system Ruby. Run `tether daemon install` again to apply
+- `gem` installs and updates respect `GEM_HOME`. `--user-install` is only used when `GEM_HOME` is not set, because it overrides `GEM_HOME` and puts executables outside `$GEM_HOME/bin`
+
+### Changed
+
+- The gem manifest records only top-level gems. Default gems that ship with Ruby and gems that are only dependencies are no longer listed, so a sync no longer installs every dependency one by one
+
 ## [1.12.0] - 2026-09-01
 
 ### Added
