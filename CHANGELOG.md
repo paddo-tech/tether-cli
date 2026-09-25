@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] - 2026-09-26
+
 ### Fixed
 
 - The launchd daemon now runs with the `PATH`, `GEM_HOME` and `GEM_PATH` of the shell that installed it. launchd's default `PATH` hid Homebrew, so the daemon skipped brew, npm, bun, pnpm and uv, and ran `gem` with the macOS system Ruby. Run `tether daemon install` again to apply
