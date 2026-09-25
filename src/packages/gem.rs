@@ -20,7 +20,21 @@ impl GemManager {
 
         Ok(String::from_utf8(output.stdout)?)
     }
+
+    // --user-install ignores GEM_HOME and puts executables outside $GEM_HOME/bin
+    fn user_install_flag() -> Option<&'static str> {
+        std::env::var_os("GEM_HOME")
+            .is_none()
+            .then_some("--user-install")
+    }
 }
+
+// Default gems ship with each Ruby and dependencies follow their parents, so only
+// top-level gems are recorded, matching brew's --installed-on-request. Dependencies of
+// default gems are ignored so a user-installed newer copy (e.g. stringio) still counts
+const TOP_LEVEL_GEMS: &str = "specs = Gem::Specification.reject(&:default_gem?)
+deps = specs.flat_map { |s| s.runtime_dependencies.map(&:name) }
+puts specs.map(&:name).uniq - deps";
 
 impl Default for GemManager {
     fn default() -> Self {
@@ -31,23 +45,24 @@ impl Default for GemManager {
 #[async_trait]
 impl PackageManager for GemManager {
     async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
-        // List local gems (includes user-installed gems in ~/.gem)
-        let output = self.run_gem(&["list", "--local", "--no-versions"]).await?;
+        let output = Command::new("ruby")
+            .args(["-e", TOP_LEVEL_GEMS])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("gem listing failed: {}", stderr));
+        }
 
         let mut packages = Vec::new();
 
-        for line in output.lines() {
+        for line in String::from_utf8(output.stdout)?.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
 
-            // Skip system gems indicators
-            if line.starts_with("***") || line.contains("LOCAL GEMS") {
-                continue;
-            }
-
-            // Gem list format is just gem names, one per line
             packages.push(PackageInfo {
                 name: line.to_string(),
                 version: None,
@@ -65,10 +80,11 @@ impl PackageManager for GemManager {
             package.name.clone()
         };
 
-        // Install to user directory (no sudo needed)
-        // This automatically installs to ~/.gem when user doesn't have system write access
-        self.run_gem(&["install", &pkg_spec, "--user-install"])
-            .await?;
+        // Without GEM_HOME, --user-install avoids needing sudo for a system Ruby
+        // --conservative skips gems present only as dependencies, which the listing omits
+        let mut args = vec!["install", pkg_spec.as_str(), "--conservative"];
+        args.extend(Self::user_install_flag());
+        self.run_gem(&args).await?;
         Ok(())
     }
 
@@ -87,7 +103,8 @@ impl PackageManager for GemManager {
         }
 
         let output = Command::new("gem")
-            .args(["update", "--user-install"])
+            .arg("update")
+            .args(Self::user_install_flag())
             .output()
             .await?;
 

@@ -220,6 +220,21 @@ fn generate_plist() -> Result<String> {
     let exe = std::env::current_exe()?;
     let paths = DaemonPaths::new()?;
 
+    // launchd starts agents with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which hides Homebrew
+    // and version-managed tools, so the installing shell's environment is baked in
+    let mut env = String::new();
+    for key in ["PATH", "GEM_HOME", "GEM_PATH"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            env.push_str(&format!(
+                "        <key>{key}</key>\n        <string>{value}</string>\n"
+            ));
+        }
+    }
+
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -233,6 +248,9 @@ fn generate_plist() -> Result<String> {
         <string>daemon</string>
         <string>run</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+{env}    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
