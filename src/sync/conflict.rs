@@ -347,12 +347,12 @@ pub fn notify_conflicts(count: usize) -> Result<()> {
     Ok(())
 }
 
-/// Send macOS notification that local commits were moved to a branch
+/// Send macOS notification that local commits conflicted with the remote
 pub fn notify_discarded_commits(branch: &str) -> Result<()> {
     use std::process::Command;
 
     let script = format!(
-        r#"display notification "Local commits conflicted and were kept on branch {}" with title "Tether" subtitle "Check the sync logs to recover them""#,
+        r#"display notification "Local commits conflicted with remote changes. Originals kept on branch {}" with title "Tether" subtitle "See the sync output for details""#,
         escape_applescript(branch)
     );
 

@@ -8,11 +8,21 @@ use std::process::{Command, Stdio};
 
 pub struct GitBackend {
     repo_path: PathBuf,
+    /// On a rebase conflict, replay local commits with the remote winning
+    /// overlapping changes. The personal repo resets instead: it re-exports from
+    /// state (SyncState::discard_unpushed), and a partial replay would leave
+    /// state hashes that no longer match the repo. Team and collab repos have
+    /// no re-export, so replaying is the only way their local commits survive.
+    replay_local: bool,
 }
 
 impl GitBackend {
     pub fn new(repo_path: PathBuf) -> Self {
-        Self { repo_path }
+        let replay_local = crate::sync::SyncEngine::sync_path().map_or(true, |p| p != repo_path);
+        Self {
+            repo_path,
+            replay_local,
+        }
     }
 
     /// Check if the repository has any commits
@@ -57,16 +67,12 @@ impl GitBackend {
             return Err(anyhow::anyhow!("Failed to clone repository: {}", error));
         }
 
-        Ok(Self {
-            repo_path: path.to_path_buf(),
-        })
+        Ok(Self::new(path.to_path_buf()))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
         Repository::open(path)?;
-        Ok(Self {
-            repo_path: path.to_path_buf(),
-        })
+        Ok(Self::new(path.to_path_buf()))
     }
 
     pub fn commit(&self, message: &str, author: &str) -> Result<()> {
@@ -96,7 +102,7 @@ impl GitBackend {
         Ok(())
     }
 
-    fn git(&self, args: &[&str]) -> Result<()> {
+    fn git(&self, args: &[&str]) -> Result<String> {
         let output = Command::new("git")
             .args(args)
             .current_dir(&self.repo_path)
@@ -105,7 +111,20 @@ impl GitBackend {
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!("git {} failed: {}", args.join(" "), error));
         }
-        Ok(())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Files that both `local` and origin/main changed since they diverged
+    fn files_changed_on_both_sides(&self, local: &str) -> Result<Vec<String>> {
+        let base = self.git(&["merge-base", local, "origin/main"])?;
+        let base = base.trim();
+        let local_files = self.git(&["diff", "--name-only", base, local])?;
+        let remote_files = self.git(&["diff", "--name-only", base, "origin/main"])?;
+        Ok(local_files
+            .lines()
+            .filter(|f| remote_files.lines().any(|r| r == *f))
+            .map(String::from)
+            .collect())
     }
 
     /// Check if a rebase is currently in progress
@@ -168,10 +187,8 @@ impl GitBackend {
             .output()?;
 
         if !rebase_output.status.success() {
-            // Conflict: reset to remote. SyncState::discard_unpushed rolls back
-            // the discarded files' hashes, so the next sync re-checks them.
-            // Team and collab repos have no such re-export, so keep the local
-            // commits on a branch and any uncommitted changes in a stash.
+            // Keep the local commits on a branch whatever happens next, and any
+            // uncommitted changes in a stash before a reset.
             self.abort_rebase()?;
             if self.is_rebase_in_progress() {
                 self.git(&["rebase", "--quit"])?;
@@ -189,17 +206,52 @@ impl GitBackend {
                 .format("tether-discarded-%Y%m%d-%H%M%S-%3f")
                 .to_string();
             self.git(&["branch", &branch, "refs/heads/main"])?;
+            self.git(&["checkout", "main"])?;
+            let conflict = format!(
+                "Local commits in {} conflicted with remote changes.",
+                self.repo_path.display()
+            );
+
+            if self.replay_local {
+                let both_sides = self.files_changed_on_both_sides(&branch)?;
+                let replayed = self
+                    .git(&["rebase", "--autostash", "-X", "ours", "origin/main"])
+                    .is_ok();
+                if replayed {
+                    crate::cli::Output::warning(&format!(
+                        "{} Re-applied them; where both sides changed {}, the remote version won. Originals kept on branch {}",
+                        conflict,
+                        both_sides.join(", "),
+                        branch
+                    ));
+                    if !cfg!(test) {
+                        crate::sync::conflict::notify_discarded_commits(&branch).ok();
+                    }
+                    return Ok(false);
+                }
+                // e.g. one side deleted a file the other changed
+                self.abort_rebase()?;
+                if self.is_rebase_in_progress() {
+                    self.git(&["rebase", "--quit"])?;
+                }
+            }
+
+            // Personal repo: SyncState::discard_unpushed rolls back the discarded
+            // files' hashes, so the next sync re-checks them.
             let stashed = self.has_changes()?;
             if stashed {
                 self.git(&["stash", "push", "--include-untracked", "-m", &branch])?;
             }
-            self.git(&["checkout", "main"])?;
             self.reset_to_remote()?;
             crate::cli::Output::warning(&format!(
-                "Local commits in {} conflicted with remote changes. Reset to remote; local commits kept on branch {}{}",
-                self.repo_path.display(),
+                "{} Reset to remote; local commits kept on branch {}{}",
+                conflict,
                 branch,
-                if stashed { ", uncommitted changes in git stash" } else { "" }
+                if stashed {
+                    ", uncommitted changes in git stash"
+                } else {
+                    ""
+                }
             ));
             if !cfg!(test) {
                 crate::sync::conflict::notify_discarded_commits(&branch).ok();
@@ -894,9 +946,10 @@ mod tests {
     }
 
     #[test]
-    fn test_push_fails_when_rebase_conflict_discards_commit() {
+    fn test_personal_push_fails_when_rebase_conflict_discards_commit() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (a, b) = two_clones(tmp.path());
+        let (a, mut b) = two_clones(tmp.path());
+        b.replay_local = false;
         std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
         a.commit("a", "a").unwrap();
         a.push().unwrap();
@@ -928,5 +981,36 @@ mod tests {
         assert_eq!(kept, "from b");
         let stashed = git(&b.repo_path, &["show", "stash@{0}:shared"]);
         assert_eq!(stashed, "uncommitted");
+    }
+
+    #[test]
+    fn test_shared_repo_push_replays_commit_with_remote_winning_overlap() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, b) = two_clones(tmp.path());
+        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
+        a.commit("a", "a").unwrap();
+        a.push().unwrap();
+
+        std::fs::write(b.repo_path.join("shared"), "from b").unwrap();
+        std::fs::write(b.repo_path.join("other"), "from b").unwrap();
+        b.commit("b", "b").unwrap();
+        b.push().unwrap();
+
+        a.pull().unwrap();
+        let read = |f: &str| std::fs::read_to_string(a.repo_path.join(f)).unwrap();
+        assert_eq!(read("shared"), "from a");
+        assert_eq!(read("other"), "from b");
+
+        let branch = git(
+            &b.repo_path,
+            &[
+                "branch",
+                "--list",
+                "tether-discarded-*",
+                "--format=%(refname:short)",
+            ],
+        );
+        let kept = git(&b.repo_path, &["show", &format!("{}:shared", branch)]);
+        assert_eq!(kept, "from b");
     }
 }
