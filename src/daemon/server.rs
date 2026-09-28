@@ -226,6 +226,7 @@ impl DaemonServer {
 
         // Load state and machine state
         let mut state = SyncState::load()?;
+        state.discard_unpushed();
 
         // Auto-assign machine to default profile on first run after v2 migration
         if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {

@@ -125,7 +125,8 @@ impl GitBackend {
         Ok(())
     }
 
-    pub fn pull(&self) -> Result<()> {
+    /// Returns true when a conflicting rebase discarded local commits.
+    pub fn pull(&self) -> Result<bool> {
         // Abort any stale rebase from a previous interrupted sync
         if self.is_rebase_in_progress() {
             self.abort_rebase()?;
@@ -133,7 +134,7 @@ impl GitBackend {
 
         // Skip pull if remote branch doesn't exist (empty repository)
         if !self.remote_branch_exists("main") {
-            return Ok(());
+            return Ok(false);
         }
 
         // Fetch first, then rebase explicitly onto origin/main
@@ -155,13 +156,14 @@ impl GitBackend {
             .output()?;
 
         if !rebase_output.status.success() {
-            // Conflict - abort and reset to remote
-            // Safe because sync will re-export local state afterward
+            // Conflict: reset to remote. SyncState::discard_unpushed rolls back
+            // the discarded files' hashes, so the next sync re-checks them.
             self.abort_rebase()?;
             self.reset_to_remote()?;
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     pub fn push(&self) -> Result<()> {
@@ -197,7 +199,12 @@ impl GitBackend {
                 let jitter_ms = RandomState::new().build_hasher().finish() % 400;
                 let backoff_ms = 400 + attempt as u64 * 400 + jitter_ms;
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                self.pull()?;
+                // A retry after a reset would push nothing and report success
+                if self.pull()? {
+                    return Err(anyhow::anyhow!(
+                        "Push rejected and local changes conflicted with remote; the next sync will re-check them"
+                    ));
+                }
                 continue;
             }
 
@@ -773,5 +780,75 @@ mod tests {
 
         // ID should be 8 characters
         assert_eq!(id1.len(), 8);
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {:?}: {:?}", args, out);
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A bare remote and two clones, with `shared` pushed from the first clone.
+    fn two_clones(tmp: &Path) -> (GitBackend, GitBackend) {
+        let remote = tmp.join("remote.git");
+        git(
+            tmp,
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
+        let a = GitBackend::clone(remote.to_str().unwrap(), &tmp.join("a")).unwrap();
+        git(&a.repo_path, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        std::fs::write(a.repo_path.join("shared"), "base").unwrap();
+        a.commit("base", "a").unwrap();
+        a.push().unwrap();
+        let b = GitBackend::clone(remote.to_str().unwrap(), &tmp.join("b")).unwrap();
+        for clone in [&a, &b] {
+            git(&clone.repo_path, &["config", "user.name", "test"]);
+            git(
+                &clone.repo_path,
+                &["config", "user.email", "test@example.com"],
+            );
+        }
+        (a, b)
+    }
+
+    #[test]
+    fn test_push_rebases_non_conflicting_changes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, b) = two_clones(tmp.path());
+        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
+        a.commit("a", "a").unwrap();
+        a.push().unwrap();
+
+        std::fs::write(b.repo_path.join("other"), "from b").unwrap();
+        b.commit("b", "b").unwrap();
+        b.push().unwrap();
+
+        assert!(!a.pull().unwrap());
+        let other = std::fs::read_to_string(a.repo_path.join("other")).unwrap();
+        assert_eq!(other, "from b");
+    }
+
+    #[test]
+    fn test_push_fails_when_rebase_conflict_discards_commit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, b) = two_clones(tmp.path());
+        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
+        a.commit("a", "a").unwrap();
+        a.push().unwrap();
+
+        std::fs::write(b.repo_path.join("shared"), "from b").unwrap();
+        b.commit("b", "b").unwrap();
+        assert!(b.push().is_err());
+
+        let shared = std::fs::read_to_string(b.repo_path.join("shared")).unwrap();
+        assert_eq!(shared, "from a");
+        assert_eq!(
+            git(&b.repo_path, &["rev-parse", "HEAD"]),
+            git(&b.repo_path, &["rev-parse", "origin/main"])
+        );
     }
 }
