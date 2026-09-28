@@ -494,6 +494,8 @@ impl DaemonServer {
                         }
                         team_git.commit("Update team configs", &crate::sync::local_hostname())?;
                         team_git.push()?;
+                    } else if team_git.has_unpushed_commits() {
+                        team_git.push()?;
                     }
                 }
             }
@@ -550,9 +552,13 @@ impl DaemonServer {
             log::debug!("Team '{}' synced", team_name);
 
             // Push changes if we have write access
-            if !team_config.read_only && team_git.has_changes()? {
-                team_git.commit("Update team configs", &crate::sync::local_hostname())?;
-                team_git.push()?;
+            if !team_config.read_only {
+                if team_git.has_changes()? {
+                    team_git.commit("Update team configs", &crate::sync::local_hostname())?;
+                }
+                if team_git.has_unpushed_commits() {
+                    team_git.push()?;
+                }
             }
         }
 

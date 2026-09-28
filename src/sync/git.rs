@@ -158,8 +158,29 @@ impl GitBackend {
         if !rebase_output.status.success() {
             // Conflict: reset to remote. SyncState::discard_unpushed rolls back
             // the discarded files' hashes, so the next sync re-checks them.
+            // Team and collab repos have no such re-export, so keep the local
+            // commits on a branch; without it they are unrecoverable.
             self.abort_rebase()?;
+            let branch = Utc::now()
+                .format("tether-discarded-%Y%m%d-%H%M%S-%3f")
+                .to_string();
+            let branch_output = Command::new("git")
+                .args(["branch", &branch, "HEAD"])
+                .current_dir(&self.repo_path)
+                .output()?;
+            if !branch_output.status.success() {
+                let error = String::from_utf8_lossy(&branch_output.stderr);
+                return Err(anyhow::anyhow!(
+                    "Rebase conflicted and saving local commits failed: {}",
+                    error
+                ));
+            }
             self.reset_to_remote()?;
+            crate::cli::Output::warning(&format!(
+                "Local commits in {} conflicted with remote changes. Reset to remote; local commits kept on branch {}",
+                self.repo_path.display(),
+                branch
+            ));
             return Ok(true);
         }
 
@@ -219,7 +240,7 @@ impl GitBackend {
                 // A retry after a reset would push nothing and report success
                 if self.pull()? {
                     return Err(anyhow::anyhow!(
-                        "Push rejected and local changes conflicted with remote; the next sync will re-check them"
+                        "Push rejected and local changes conflicted with remote changes"
                     ));
                 }
                 continue;
@@ -869,5 +890,17 @@ mod tests {
             git(&b.repo_path, &["rev-parse", "HEAD"]),
             git(&b.repo_path, &["rev-parse", "origin/main"])
         );
+
+        let branch = git(
+            &b.repo_path,
+            &[
+                "branch",
+                "--list",
+                "tether-discarded-*",
+                "--format=%(refname:short)",
+            ],
+        );
+        let kept = git(&b.repo_path, &["show", &format!("{}:shared", branch)]);
+        assert_eq!(kept, "from b");
     }
 }

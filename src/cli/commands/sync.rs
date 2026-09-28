@@ -377,6 +377,8 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
                         team_git.commit("Update team configs", &crate::sync::local_hostname())?;
                         team_git.push()?;
+                    } else if team_git.has_unpushed_commits() {
+                        team_git.push()?;
                     }
                 }
             }
@@ -2194,9 +2196,13 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
             Output::success(&format!("Team '{}' synced", team_name));
 
             // Push changes if we have write access
-            if !team_config.read_only && team_git.has_changes()? {
-                team_git.commit("Update team configs", &crate::sync::local_hostname())?;
-                team_git.push()?;
+            if !team_config.read_only {
+                if team_git.has_changes()? {
+                    team_git.commit("Update team configs", &crate::sync::local_hostname())?;
+                }
+                if team_git.has_unpushed_commits() {
+                    team_git.push()?;
+                }
             }
         } else {
             Output::success(&format!("Team '{}' synced", team_name));
