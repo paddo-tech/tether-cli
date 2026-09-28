@@ -332,8 +332,11 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         let has_changes = git.has_changes()?;
 
         if has_changes {
-            let pb = Progress::spinner("Pushing changes...");
             git.commit("Sync dotfiles and packages", &crate::sync::local_hostname())?;
+        }
+        // Retry a commit left by a failed push, or mark_synced would record it as pushed
+        if has_changes || git.has_unpushed_commits() {
+            let pb = Progress::spinner("Pushing changes...");
             git.push()?;
             pb.finish_and_clear();
         }

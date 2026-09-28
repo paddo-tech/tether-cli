@@ -452,6 +452,9 @@ impl DaemonServer {
         if has_changes {
             log::info!("Committing changes...");
             git.commit("Auto-sync from daemon", &crate::sync::local_hostname())?;
+        }
+        // Retry a commit left by a failed push, or mark_synced would record it as pushed
+        if has_changes || git.has_unpushed_commits() {
             git.push()?;
             log::info!("Sync complete - changes pushed");
         } else {

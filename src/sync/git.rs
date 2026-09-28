@@ -169,6 +169,9 @@ impl GitBackend {
     /// True when HEAD has commits that origin/main lacks, or when that cannot be
     /// determined (e.g. the remote branch does not exist yet).
     pub fn has_unpushed_commits(&self) -> bool {
+        if !self.has_commits() {
+            return false;
+        }
         let output = Command::new("git")
             .args(["rev-list", "--count", "origin/main..HEAD"])
             .current_dir(&self.repo_path)
