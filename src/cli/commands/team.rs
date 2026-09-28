@@ -1743,7 +1743,10 @@ fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) ->
             "--index-filter",
             &filter_cmd,
             "--prune-empty",
-            "HEAD",
+            // Every local branch, so tether-discarded-* branches lose the secrets
+            // too. Not --all: rewriting origin/main breaks --force-with-lease.
+            "--",
+            "--branches",
         ])
         .output()?;
 

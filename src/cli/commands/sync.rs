@@ -350,8 +350,9 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
                 if team_sync_dir.exists() {
                     let team_git = GitBackend::open(&team_sync_dir)?;
 
-                    if team_git.has_changes()? {
-                        // Scan for secrets before pushing to team repo
+                    let has_changes = team_git.has_changes()?;
+                    // Scan stranded commits too: they reach the team on this push
+                    if has_changes || team_git.has_unpushed_commits() {
                         let dotfiles_dir = team_sync_dir.join("dotfiles");
                         if dotfiles_dir.exists() {
                             for entry in std::fs::read_dir(&dotfiles_dir)? {
@@ -375,7 +376,10 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
                             }
                         }
 
-                        team_git.commit("Update team configs", &crate::sync::local_hostname())?;
+                        if has_changes {
+                            team_git
+                                .commit("Update team configs", &crate::sync::local_hostname())?;
+                        }
                         team_git.push()?;
                     }
                 }
@@ -2194,9 +2198,13 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
             Output::success(&format!("Team '{}' synced", team_name));
 
             // Push changes if we have write access
-            if !team_config.read_only && team_git.has_changes()? {
-                team_git.commit("Update team configs", &crate::sync::local_hostname())?;
-                team_git.push()?;
+            if !team_config.read_only {
+                if team_git.has_changes()? {
+                    team_git.commit("Update team configs", &crate::sync::local_hostname())?;
+                }
+                if team_git.has_unpushed_commits() {
+                    team_git.push()?;
+                }
             }
         } else {
             Output::success(&format!("Team '{}' synced", team_name));
