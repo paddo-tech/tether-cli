@@ -101,7 +101,9 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
     }
 
     let mut state = SyncState::load()?;
-    state.discard_unpushed();
+    if !git.has_unpushed_commits() {
+        state.discard_unpushed();
+    }
 
     // Auto-assign machine to default profile on first run after v2 migration
     if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
@@ -330,8 +332,11 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         let has_changes = git.has_changes()?;
 
         if has_changes {
-            let pb = Progress::spinner("Pushing changes...");
             git.commit("Sync dotfiles and packages", &crate::sync::local_hostname())?;
+        }
+        // Retry a commit left by a failed push, or mark_synced would record it as pushed
+        if has_changes || git.has_unpushed_commits() {
+            let pb = Progress::spinner("Pushing changes...");
             git.push()?;
             pb.finish_and_clear();
         }
@@ -617,7 +622,7 @@ pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) 
                         }
                     }
 
-                    state.update_file(&state_key, remote_hash);
+                    state.record_remote_file(&state_key, remote_hash);
                 }
                 Err(e) => {
                     let err_str = e.to_string().to_lowercase();
@@ -1347,7 +1352,7 @@ fn decrypt_project_configs(
                                     #[cfg(unix)]
                                     preserve_executable_bit(enc_file, &canonical_path);
                                 }
-                                state.update_file(&state_key, remote_hash);
+                                state.record_remote_file(&state_key, remote_hash);
                             }
 
                             // Create symlinks in all checkouts
@@ -2123,7 +2128,7 @@ pub fn sync_team_project_secrets(
                                 }
                             }
 
-                            state.update_file(&state_key, remote_hash);
+                            state.record_remote_file(&state_key, remote_hash);
                         }
                         Err(e) => {
                             let err_str = e.to_string().to_lowercase();

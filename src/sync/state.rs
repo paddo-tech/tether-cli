@@ -306,15 +306,29 @@ impl SyncState {
         );
     }
 
-    /// Roll unpushed file hashes back to their last pushed value. A failed push
-    /// or a conflicting rebase can discard the commit that held them, and a
-    /// stale hash makes conflict detection treat the local edit as synced.
+    /// Record a hash imported from a remote. It is already confirmed there, so
+    /// discard_unpushed must not roll it back.
+    pub fn record_remote_file(&mut self, path: &str, hash: String) {
+        self.files.insert(
+            path.to_string(),
+            FileState {
+                hash,
+                last_modified: Utc::now(),
+                synced: true,
+                pushed_hash: None,
+            },
+        );
+    }
+
+    /// Roll unpushed file hashes back to their last pushed value, once a
+    /// conflicting rebase has discarded the commit that held them. A stale hash
+    /// makes conflict detection treat the local edit as synced.
     pub fn discard_unpushed(&mut self) {
-        self.files
-            .retain(|_, f| f.synced || f.pushed_hash.is_some());
         for file in self.files.values_mut() {
-            if let Some(hash) = file.pushed_hash.take() {
-                file.hash = hash;
+            if !file.synced {
+                // Empty hash means the remote never had the file. Removing the
+                // entry would take the first-sync path, where the remote wins.
+                file.hash = file.pushed_hash.take().unwrap_or_default();
                 file.synced = true;
             }
         }
@@ -619,11 +633,21 @@ mod tests {
     }
 
     #[test]
-    fn test_discard_unpushed_removes_never_pushed_file() {
+    fn test_discard_unpushed_empties_never_pushed_file() {
         let mut state = SyncState::new();
         state.update_file(".new", "hash".to_string());
         state.discard_unpushed();
-        assert!(!state.files.contains_key(".new"));
+        assert_eq!(state.files[".new"].hash, "");
+    }
+
+    #[test]
+    fn test_discard_unpushed_keeps_remote_imports() {
+        let mut state = SyncState::new();
+        state.update_file("project", "base".to_string());
+        state.mark_synced();
+        state.record_remote_file("project", "remote".to_string());
+        state.discard_unpushed();
+        assert_eq!(state.files["project"].hash, "remote");
     }
 
     #[test]
