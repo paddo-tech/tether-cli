@@ -30,6 +30,9 @@ pub struct FileState {
     pub hash: String,
     pub last_modified: DateTime<Utc>,
     pub synced: bool,
+    /// Last hash confirmed on the remote while `synced` is false
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pushed_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,20 +288,43 @@ impl SyncState {
     }
 
     pub fn update_file(&mut self, path: &str, hash: String) {
+        let pushed_hash = self.files.get(path).and_then(|f| {
+            if f.synced {
+                Some(f.hash.clone())
+            } else {
+                f.pushed_hash.clone()
+            }
+        });
         self.files.insert(
             path.to_string(),
             FileState {
                 hash,
                 last_modified: Utc::now(),
                 synced: false,
+                pushed_hash,
             },
         );
+    }
+
+    /// Roll unpushed file hashes back to their last pushed value. A failed push
+    /// or a conflicting rebase can discard the commit that held them, and a
+    /// stale hash makes conflict detection treat the local edit as synced.
+    pub fn discard_unpushed(&mut self) {
+        self.files
+            .retain(|_, f| f.synced || f.pushed_hash.is_some());
+        for file in self.files.values_mut() {
+            if let Some(hash) = file.pushed_hash.take() {
+                file.hash = hash;
+                file.synced = true;
+            }
+        }
     }
 
     pub fn mark_synced(&mut self) {
         self.last_sync = Utc::now();
         for file in self.files.values_mut() {
             file.synced = true;
+            file.pushed_hash = None;
         }
     }
 }
@@ -574,5 +600,45 @@ mod tests {
         assert!(loaded.last_modified.is_none());
         assert!(loaded.last_upgrade.is_none());
         assert_eq!(loaded.hash, "abc123");
+    }
+
+    #[test]
+    fn test_discard_unpushed_restores_pushed_hash() {
+        let mut state = SyncState::new();
+        state.update_file(".zshrc", "base".to_string());
+        state.mark_synced();
+        state.update_file(".zshrc", "edit1".to_string());
+        state.update_file(".zshrc", "edit2".to_string());
+
+        state.discard_unpushed();
+
+        let file = &state.files[".zshrc"];
+        assert_eq!(file.hash, "base");
+        assert!(file.synced);
+        assert!(file.pushed_hash.is_none());
+    }
+
+    #[test]
+    fn test_discard_unpushed_removes_never_pushed_file() {
+        let mut state = SyncState::new();
+        state.update_file(".new", "hash".to_string());
+        state.discard_unpushed();
+        assert!(!state.files.contains_key(".new"));
+    }
+
+    #[test]
+    fn test_discard_unpushed_keeps_synced_files() {
+        let mut state = SyncState::new();
+        state.update_file(".zshrc", "base".to_string());
+        state.mark_synced();
+        state.discard_unpushed();
+        assert_eq!(state.files[".zshrc"].hash, "base");
+    }
+
+    #[test]
+    fn test_file_state_old_json_has_no_pushed_hash() {
+        let old_json = r#"{"hash":"abc","last_modified":"2024-01-01T00:00:00Z","synced":true}"#;
+        let loaded: FileState = serde_json::from_str(old_json).unwrap();
+        assert!(loaded.pushed_hash.is_none());
     }
 }
