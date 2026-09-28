@@ -166,6 +166,20 @@ impl GitBackend {
         Ok(false)
     }
 
+    /// True when HEAD has commits that origin/main lacks, or when that cannot be
+    /// determined (e.g. the remote branch does not exist yet).
+    pub fn has_unpushed_commits(&self) -> bool {
+        let output = Command::new("git")
+            .args(["rev-list", "--count", "origin/main..HEAD"])
+            .current_dir(&self.repo_path)
+            .output();
+
+        match output {
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() != "0",
+            _ => true,
+        }
+    }
+
     pub fn push(&self) -> Result<()> {
         let args = if self.remote_branch_exists("main") {
             vec!["push", "origin", "main"]
@@ -842,7 +856,9 @@ mod tests {
 
         std::fs::write(b.repo_path.join("shared"), "from b").unwrap();
         b.commit("b", "b").unwrap();
+        assert!(b.has_unpushed_commits());
         assert!(b.push().is_err());
+        assert!(!b.has_unpushed_commits());
 
         let shared = std::fs::read_to_string(b.repo_path.join("shared")).unwrap();
         assert_eq!(shared, "from a");
