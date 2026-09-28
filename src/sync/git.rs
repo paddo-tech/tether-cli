@@ -1,6 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use git2::{Repository, Signature};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -182,9 +184,19 @@ impl GitBackend {
 
             let error = String::from_utf8_lossy(&output.stderr);
 
-            // Retry on rejection due to remote changes
-            let is_rejection = error.contains("fetch first") || error.contains("non-fast-forward");
+            // Retry on rejection due to remote changes. GitHub reports a push
+            // race as "[remote rejected] ... (cannot lock ref ...)" as well as
+            // the usual "fetch first" / "non-fast-forward".
+            let is_rejection = error.contains("fetch first")
+                || error.contains("non-fast-forward")
+                || error.contains("cannot lock ref");
             if is_rejection && attempt < 3 {
+                // Sleep before pulling so the later machine rebases onto the
+                // earlier machine's push. Jitter is random, not clock-based:
+                // machines on the same sync interval fail at the same instant.
+                let jitter_ms = RandomState::new().build_hasher().finish() % 400;
+                let backoff_ms = 400 + attempt as u64 * 400 + jitter_ms;
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 self.pull()?;
                 continue;
             }
