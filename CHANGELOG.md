@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.4] - 2026-09-28
+
+### Fixed
+
+- Team and collab commits are no longer lost when they conflict with remote changes. Tether reset these repos to the remote and discarded the local commits. It now keeps them on a `tether-discarded-<time>` branch, keeps uncommitted changes in `git stash`, and shows a warning and a macOS notification with the branch name
+- A dirty sync repo no longer counts as a conflict when Tether pulls
+- A team commit left by a failed push is pushed on the next sync, after the secret scan, even if nothing else changed
+- Purging project history with `git filter-branch` also removes the secrets from other local branches
+
 ## [1.12.3] - 2026-09-28
 
 ### Fixed
