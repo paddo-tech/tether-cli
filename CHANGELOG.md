@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.3] - 2026-09-28
+
+### Fixed
+
+- Fixed regressions from 1.12.2 that could overwrite local edits:
+  - The daemon could overwrite local edits to a new collab secret with the remote version on every sync
+  - Imported collab secrets, project configs and team secrets could roll back to an older hash, so an unchanged file looked edited and was pushed over newer remote content
+  - After a push failed from a network error, a file changed back to its earlier content could be overwritten on the next sync
+  - A new file that was never pushed could be overwritten by the remote copy without a conflict prompt
+- A commit left by a failed push is now pushed on the next sync, even if nothing else changed. Before, that sync skipped the push and marked the files as synced
+
 ## [1.12.2] - 2026-09-28
 
 ### Fixed
