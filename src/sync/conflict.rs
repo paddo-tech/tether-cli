@@ -347,6 +347,20 @@ pub fn notify_conflicts(count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Send macOS notification that local commits were moved to a branch
+pub fn notify_discarded_commits(branch: &str) -> Result<()> {
+    use std::process::Command;
+
+    let script = format!(
+        r#"display notification "Local commits conflicted and were kept on branch {}" with title "Tether" subtitle "Check the sync logs to recover them""#,
+        escape_applescript(branch)
+    );
+
+    Command::new("osascript").args(["-e", &script]).output()?;
+
+    Ok(())
+}
+
 /// Send macOS notification about deferred casks
 pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
     use std::process::Command;

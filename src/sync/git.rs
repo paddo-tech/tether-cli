@@ -96,6 +96,18 @@ impl GitBackend {
         Ok(())
     }
 
+    fn git(&self, args: &[&str]) -> Result<()> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.repo_path)
+            .output()?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("git {} failed: {}", args.join(" "), error));
+        }
+        Ok(())
+    }
+
     /// Check if a rebase is currently in progress
     fn is_rebase_in_progress(&self) -> bool {
         self.repo_path.join(".git/rebase-merge").exists()
@@ -151,7 +163,7 @@ impl GitBackend {
         }
 
         let rebase_output = Command::new("git")
-            .args(["rebase", "origin/main"])
+            .args(["rebase", "--autostash", "origin/main"])
             .current_dir(&self.repo_path)
             .output()?;
 
@@ -159,36 +171,47 @@ impl GitBackend {
             // Conflict: reset to remote. SyncState::discard_unpushed rolls back
             // the discarded files' hashes, so the next sync re-checks them.
             // Team and collab repos have no such re-export, so keep the local
-            // commits on a branch; without it they are unrecoverable.
+            // commits on a branch and any uncommitted changes in a stash.
             self.abort_rebase()?;
+            if self.is_rebase_in_progress() {
+                self.git(&["rebase", "--quit"])?;
+            }
+            // refs/heads/main still holds the local tip even if the abort failed.
+            // An empty clone has no local commits to keep.
+            if self
+                .git(&["rev-parse", "--verify", "refs/heads/main"])
+                .is_err()
+            {
+                self.reset_to_remote()?;
+                return Ok(false);
+            }
             let branch = Utc::now()
                 .format("tether-discarded-%Y%m%d-%H%M%S-%3f")
                 .to_string();
-            let branch_output = Command::new("git")
-                .args(["branch", &branch, "HEAD"])
-                .current_dir(&self.repo_path)
-                .output()?;
-            if !branch_output.status.success() {
-                let error = String::from_utf8_lossy(&branch_output.stderr);
-                return Err(anyhow::anyhow!(
-                    "Rebase conflicted and saving local commits failed: {}",
-                    error
-                ));
+            self.git(&["branch", &branch, "refs/heads/main"])?;
+            let stashed = self.has_changes()?;
+            if stashed {
+                self.git(&["stash", "push", "--include-untracked", "-m", &branch])?;
             }
+            self.git(&["checkout", "main"])?;
             self.reset_to_remote()?;
             crate::cli::Output::warning(&format!(
-                "Local commits in {} conflicted with remote changes. Reset to remote; local commits kept on branch {}",
+                "Local commits in {} conflicted with remote changes. Reset to remote; local commits kept on branch {}{}",
                 self.repo_path.display(),
-                branch
+                branch,
+                if stashed { ", uncommitted changes in git stash" } else { "" }
             ));
+            if !cfg!(test) {
+                crate::sync::conflict::notify_discarded_commits(&branch).ok();
+            }
             return Ok(true);
         }
 
         Ok(false)
     }
 
-    /// True when HEAD has commits that origin/main lacks, or when that cannot be
-    /// determined (e.g. the remote branch does not exist yet).
+    /// True when HEAD has commits that origin/main lacks. False when origin/main
+    /// does not exist: push only knows how to push main.
     pub fn has_unpushed_commits(&self) -> bool {
         if !self.has_commits() {
             return false;
@@ -200,7 +223,7 @@ impl GitBackend {
 
         match output {
             Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() != "0",
-            _ => true,
+            _ => false,
         }
     }
 
@@ -880,6 +903,7 @@ mod tests {
 
         std::fs::write(b.repo_path.join("shared"), "from b").unwrap();
         b.commit("b", "b").unwrap();
+        std::fs::write(b.repo_path.join("shared"), "uncommitted").unwrap();
         assert!(b.has_unpushed_commits());
         assert!(b.push().is_err());
         assert!(!b.has_unpushed_commits());
@@ -902,5 +926,7 @@ mod tests {
         );
         let kept = git(&b.repo_path, &["show", &format!("{}:shared", branch)]);
         assert_eq!(kept, "from b");
+        let stashed = git(&b.repo_path, &["show", "stash@{0}:shared"]);
+        assert_eq!(stashed, "uncommitted");
     }
 }

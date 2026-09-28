@@ -469,7 +469,9 @@ impl DaemonServer {
                 let team_sync_dir = Config::team_sync_dir()?;
                 if team_sync_dir.exists() {
                     let team_git = GitBackend::open(&team_sync_dir)?;
-                    if team_git.has_changes()? {
+                    let has_changes = team_git.has_changes()?;
+                    // Scan stranded commits too: they reach the team on this push
+                    if has_changes || team_git.has_unpushed_commits() {
                         let dotfiles_dir = team_sync_dir.join("dotfiles");
                         if dotfiles_dir.exists() {
                             for entry in std::fs::read_dir(&dotfiles_dir)? {
@@ -492,9 +494,10 @@ impl DaemonServer {
                                 }
                             }
                         }
-                        team_git.commit("Update team configs", &crate::sync::local_hostname())?;
-                        team_git.push()?;
-                    } else if team_git.has_unpushed_commits() {
+                        if has_changes {
+                            team_git
+                                .commit("Update team configs", &crate::sync::local_hostname())?;
+                        }
                         team_git.push()?;
                     }
                 }
