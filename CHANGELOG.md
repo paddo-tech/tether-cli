@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.2] - 2026-09-28
+
+### Fixed
+
+- A push rejected with `cannot lock ref` is now retried. GitHub reports a push race between machines this way, so one machine could fail every sync while others kept pushing. Retries wait a random delay, then pull, so the later machine builds on the earlier push
+- Local edits are no longer lost when a push races with another machine that changed the same file. Tether reset the sync repo to the remote and then treated the edits as synced, so the next sync overwrote them with the remote version and showed no conflict. The next sync now reports a conflict, and a file that only this machine changed is exported again
+
 ## [1.12.1] - 2026-09-26
 
 ### Fixed
