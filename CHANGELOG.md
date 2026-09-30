@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-10-01
+
+### Added
+
+- New per-dotfile option `on_conflict = "prompt" | "local" | "remote"` (default `prompt`). Use `local` or `remote` for files that an app rewrites on every machine, such as timestamps or caches. Tether then settles their conflicts without a prompt or a notification
+
+### Fixed
+
+- The daemon no longer sends the same conflict notification every 5 minutes. It notifies once for each newly conflicted file, and the notification names the file
+- `tether resolve` choices now stick. Before, "Keep local" and "Merge" were detected as the same conflict again on the next sync
+- `tether status` shows when a conflict was first detected, not the time of the last sync
+
 ## [1.12.4] - 2026-09-28
 
 ### Fixed
