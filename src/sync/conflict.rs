@@ -290,13 +290,18 @@ impl ConflictState {
     }
 
     pub fn add_conflict(&mut self, file_path: &str, local_hash: &str, remote_hash: &str) {
-        // Remove existing conflict for same file
+        // Keep the first detection time; a re-detected conflict is the same conflict.
+        let detected_at = self
+            .conflicts
+            .iter()
+            .find(|c| c.file_path == file_path)
+            .map_or_else(Utc::now, |c| c.detected_at);
         self.conflicts.retain(|c| c.file_path != file_path);
         self.conflicts.push(PendingConflict {
             file_path: file_path.to_string(),
             local_hash: local_hash.to_string(),
             remote_hash: remote_hash.to_string(),
-            detected_at: Utc::now(),
+            detected_at,
         });
     }
 
@@ -317,29 +322,17 @@ fn escape_applescript(s: &str) -> String {
     sanitized.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Send macOS notification about conflict
-pub fn notify_conflict(file_path: &str) -> Result<()> {
+/// Send macOS notification naming the newly conflicted files
+pub fn notify_conflicts(files: &[&str]) -> Result<()> {
     use std::process::Command;
 
-    let safe_path = escape_applescript(file_path);
+    let message = match files {
+        [file] => format!("Conflict in {}", file),
+        _ => format!("{} file conflicts: {}", files.len(), files.join(", ")),
+    };
     let script = format!(
-        r#"display notification "Conflict detected in {}" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
-        safe_path
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
-    Ok(())
-}
-
-/// Send macOS notification about multiple conflicts
-pub fn notify_conflicts(count: usize) -> Result<()> {
-    use std::process::Command;
-
-    // count is a usize, no escaping needed
-    let script = format!(
-        r#"display notification "{} file conflicts detected" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
-        count
+        r#"display notification "{}" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
+        escape_applescript(&message)
     );
 
     Command::new("osascript").args(["-e", &script]).output()?;
@@ -471,6 +464,17 @@ mod tests {
     }
 
     // ConflictState tests
+    #[test]
+    fn test_conflict_state_readd_keeps_detected_at() {
+        let mut state = ConflictState::default();
+        state.add_conflict(".zshrc", "aaa", "bbb");
+        let first = state.conflicts[0].detected_at;
+
+        state.add_conflict(".zshrc", "ccc", "ddd");
+        assert_eq!(state.conflicts[0].detected_at, first);
+        assert_eq!(state.conflicts[0].local_hash, "ccc");
+    }
+
     #[test]
     fn test_conflict_state_add_remove() {
         let mut state = ConflictState::default();

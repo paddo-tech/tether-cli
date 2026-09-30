@@ -12,6 +12,10 @@ pub async fn run(file: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    // Hold the lock while prompting, so a daemon sync cannot overwrite the
+    // state.json baselines that the resolutions below record.
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+
     let mut conflict_state = ConflictState::load()?;
 
     if conflict_state.conflicts.is_empty() {
@@ -21,9 +25,8 @@ pub async fn run(file: Option<&str>) -> Result<()> {
 
     let home = crate::home_dir()?;
     let sync_path = SyncEngine::sync_path()?;
-    let state = crate::sync::SyncState::load()?;
-    let machine_id = &state.machine_id;
-    let profile = config.profile_name(machine_id);
+    let machine_id = crate::sync::SyncState::load()?.machine_id;
+    let profile = config.profile_name(&machine_id);
 
     // Get encryption key if needed
     let key = if config.security.encrypt_dotfiles {
@@ -61,6 +64,7 @@ pub async fn run(file: Option<&str>) -> Result<()> {
     );
     println!();
 
+    let mut resolved = Vec::new();
     for pending in &conflicts_to_resolve {
         // Load local and remote content
         let local_path = home.join(&pending.file_path);
@@ -71,7 +75,7 @@ pub async fn run(file: Option<&str>) -> Result<()> {
         };
 
         // Get remote content
-        let shared = config.is_dotfile_shared(machine_id, &pending.file_path);
+        let shared = config.is_dotfile_shared(&machine_id, &pending.file_path);
         let repo_rel = crate::sync::resolve_dotfile_repo_path(
             &sync_path,
             &pending.file_path,
@@ -122,11 +126,22 @@ pub async fn run(file: Option<&str>) -> Result<()> {
                 Output::info(&format!("  {} (skipped)", pending.file_path));
             }
         }
+        if resolution != ConflictResolution::Skip {
+            // Baseline on the remote so the next sync pushes the kept or merged
+            // local file instead of detecting the same conflict again.
+            resolved.push((pending.file_path.clone(), conflict.remote_hash.clone()));
+        }
 
         println!();
     }
 
     conflict_state.save()?;
+    // Reload after the prompts: package updates save state.json without the sync lock.
+    let mut state = crate::sync::SyncState::load()?;
+    for (file, remote_hash) in resolved {
+        state.record_remote_file(&file, remote_hash);
+    }
+    state.save()?;
 
     let remaining = conflict_state.conflicts.len();
     if remaining > 0 {

@@ -242,11 +242,30 @@ pub enum DotfileEntry {
         path: String,
         #[serde(default = "default_create_if_missing")]
         create_if_missing: bool,
+        #[serde(default, skip_serializing_if = "OnConflict::is_prompt")]
+        on_conflict: OnConflict,
     },
 }
 
 fn default_create_if_missing() -> bool {
     true
+}
+
+/// How the daemon settles a file changed both locally and remotely.
+/// `local`/`remote` suit app-managed files that rewrite themselves (timestamps, caches).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnConflict {
+    #[default]
+    Prompt,
+    Local,
+    Remote,
+}
+
+impl OnConflict {
+    fn is_prompt(&self) -> bool {
+        *self == OnConflict::Prompt
+    }
 }
 
 impl DotfileEntry {
@@ -263,6 +282,13 @@ impl DotfileEntry {
             DotfileEntry::WithOptions {
                 create_if_missing, ..
             } => *create_if_missing,
+        }
+    }
+
+    pub fn on_conflict(&self) -> OnConflict {
+        match self {
+            DotfileEntry::Simple(_) => OnConflict::Prompt,
+            DotfileEntry::WithOptions { on_conflict, .. } => *on_conflict,
         }
     }
 
@@ -314,6 +340,8 @@ pub enum ProfileDotfileEntry {
         shared: bool,
         #[serde(default)]
         create_if_missing: bool,
+        #[serde(default, skip_serializing_if = "OnConflict::is_prompt")]
+        on_conflict: OnConflict,
     },
 }
 
@@ -341,20 +369,30 @@ impl ProfileDotfileEntry {
         }
     }
 
+    pub fn on_conflict(&self) -> OnConflict {
+        match self {
+            ProfileDotfileEntry::Simple(_) => OnConflict::Prompt,
+            ProfileDotfileEntry::WithOptions { on_conflict, .. } => *on_conflict,
+        }
+    }
+
     /// Convert to DotfileEntry (dropping shared flag)
     pub fn to_dotfile_entry(&self) -> DotfileEntry {
         match self {
             ProfileDotfileEntry::Simple(p) => DotfileEntry::WithOptions {
                 path: p.clone(),
                 create_if_missing: false,
+                on_conflict: OnConflict::Prompt,
             },
             ProfileDotfileEntry::WithOptions {
                 path,
                 create_if_missing,
+                on_conflict,
                 ..
             } => DotfileEntry::WithOptions {
                 path: path.clone(),
                 create_if_missing: *create_if_missing,
+                on_conflict: *on_conflict,
             },
         }
     }
@@ -915,6 +953,7 @@ impl Config {
                 path: entry.path().to_string(),
                 shared: false,
                 create_if_missing: entry.create_if_missing(),
+                on_conflict: entry.on_conflict(),
             })
             .collect();
 
@@ -986,26 +1025,32 @@ impl Default for Config {
                     DotfileEntry::WithOptions {
                         path: ".zshrc".to_string(),
                         create_if_missing: false,
+                        on_conflict: OnConflict::Prompt,
                     },
                     DotfileEntry::WithOptions {
                         path: ".zprofile".to_string(),
                         create_if_missing: false,
+                        on_conflict: OnConflict::Prompt,
                     },
                     DotfileEntry::WithOptions {
                         path: ".zshenv".to_string(),
                         create_if_missing: false,
+                        on_conflict: OnConflict::Prompt,
                     },
                     DotfileEntry::WithOptions {
                         path: ".bashrc".to_string(),
                         create_if_missing: false,
+                        on_conflict: OnConflict::Prompt,
                     },
                     DotfileEntry::WithOptions {
                         path: ".bash_profile".to_string(),
                         create_if_missing: false,
+                        on_conflict: OnConflict::Prompt,
                     },
                     DotfileEntry::WithOptions {
                         path: ".profile".to_string(),
                         create_if_missing: false,
+                        on_conflict: OnConflict::Prompt,
                     },
                     // Common configs - create on all machines
                     DotfileEntry::Simple(".gitconfig".to_string()),
@@ -1139,9 +1184,39 @@ mod tests {
         let entry = DotfileEntry::WithOptions {
             path: ".bashrc".to_string(),
             create_if_missing: false,
+            on_conflict: OnConflict::Prompt,
         };
         assert_eq!(entry.path(), ".bashrc");
         assert!(!entry.create_if_missing());
+    }
+
+    #[test]
+    fn test_profile_dotfile_on_conflict_parses_and_omits_default() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            dotfiles: Vec<ProfileDotfileEntry>,
+        }
+        let parsed: Wrapper = toml::from_str(
+            r#"
+[[dotfiles]]
+path = ".claude/plugins/known_marketplaces.json"
+on_conflict = "local"
+
+[[dotfiles]]
+path = ".zshrc"
+shared = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.dotfiles[0].on_conflict(), OnConflict::Local);
+        assert_eq!(
+            parsed.dotfiles[0].to_dotfile_entry().on_conflict(),
+            OnConflict::Local
+        );
+        assert_eq!(parsed.dotfiles[1].on_conflict(), OnConflict::Prompt);
+
+        let out = toml::to_string(&parsed).unwrap();
+        assert_eq!(out.matches("on_conflict").count(), 1);
     }
 
     #[test]
@@ -1419,6 +1494,7 @@ files = []
                     path: ".zshrc".to_string(),
                     shared: false,
                     create_if_missing: true,
+                    on_conflict: Default::default(),
                 }],
                 dirs: vec![],
                 packages: vec![],
@@ -1504,6 +1580,7 @@ files = []
                         path: ".gitconfig".to_string(),
                         shared: true,
                         create_if_missing: false,
+                        on_conflict: Default::default(),
                     },
                 ],
                 dirs: vec![],
@@ -1625,6 +1702,7 @@ files = [".zshrc"]
             DotfileEntry::WithOptions {
                 path: ".zshrc".to_string(),
                 create_if_missing: false,
+                on_conflict: OnConflict::Prompt,
             },
         ];
         config.dotfiles.dirs = vec![".config/karabiner".to_string()];
@@ -1651,6 +1729,7 @@ files = [".zshrc"]
             path: ".gitconfig".to_string(),
             shared: true,
             create_if_missing: false,
+            on_conflict: Default::default(),
         };
         assert!(entry.shared());
         assert_eq!(entry.path(), ".gitconfig");
@@ -1858,6 +1937,7 @@ files = [".zshrc"]
             DotfileEntry::WithOptions {
                 path: ".zshrc".to_string(),
                 create_if_missing: false,
+                on_conflict: OnConflict::Prompt,
             },
         ];
 

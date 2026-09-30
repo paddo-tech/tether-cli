@@ -704,6 +704,10 @@ tether daemon logs`} />
 
     <h3>Sync conflicts</h3>
     <Code code="tether resolve" />
+    <p>For files an app rewrites on every machine, such as timestamps or caches, set a rule. Tether then settles conflicts without asking:</p>
+    <Code code={`[[profiles.dev.dotfiles]]
+path = ".claude/plugins/known_marketplaces.json"
+on_conflict = "local"   # or "remote"; default "prompt"`} />
     <p>Or force one direction:</p>
     <Code code="tether sync --force" />
 
