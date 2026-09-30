@@ -3,6 +3,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 import Icon from '../components/Icon.astro';
 import NetworkDiagram from '../components/NetworkDiagram.astro';
 import ProfileDiagram from '../components/ProfileDiagram.astro';
+import RestoreDiagram from '../components/RestoreDiagram.astro';
 import InstallSection from '../components/InstallSection.astro';
 import Code from '../components/Code.astro';
 const packages = ['Homebrew', 'npm', 'pnpm', 'bun', 'gem', 'uv'];
@@ -42,11 +43,13 @@ const features = [
         <li><span class="step-number">3</span><h3>Get back to work.</h3><p>The daemon syncs every five minutes. Run a sync yourself whenever you need one.</p><Code code="tether sync" /></li>
       </ol>
     </section>
+    <section class="split-section wrap"><RestoreDiagram /><div class="section-copy"><p class="eyebrow">MACHINE STATE BACKUP</p><h2>New machine.<br /><em>Nothing lost.</em></h2><p>Tether keeps a record of your dotfiles and global packages in Git. Replace or reformat a machine, then run setup.</p><p>Tether restores your files and installs your packages. Your new machine starts where the old one stopped.</p><a class="text-link" href="/docs#cmd-init">See how setup works <Icon name="arrow" size={17} /></a></div></section>
     <section class="team-callout wrap"><div class="feature-symbol"><Icon name="users" size={31} /></div><div><p class="eyebrow">BETTER TOGETHER</p><h2>Share the setup.<br />Keep your own keys.</h2><p>Sync team dotfiles and encrypted project secrets. Give each teammate access through their own age key.</p></div><a class="button secondary" href="/teams">Explore team sync <Icon name="arrow" size={18} /></a></section>
     <section class="faq-section wrap"><div class="section-heading"><p class="eyebrow">A FEW THINGS TO KNOW</p><h2>Your setup.<br />Your decisions.</h2></div><div class="faq-list">
       <details><summary>Do I need a Tether account?</summary><p>No. Tether uses your existing Git repository and Git authentication. You do not need a separate Tether account.</p></details>
       <details><summary>What gets encrypted?</summary><p>Tether encrypts personal dotfiles by default. Package manifests remain readable in Git. Team secrets use age public-key encryption.</p><a href="/security">Read the security model ↗</a></details>
       <details><summary>Can I choose what syncs?</summary><p>Yes. Select your dotfiles and package managers. Use machine profiles and feature toggles to control each machine.</p><a href="/docs#configuration">See configuration options ↗</a></details>
+      <details><summary>What if I replace my machine?</summary><p>Run <code>tether init</code> on the new machine. Select the same repo and enter your passphrase. Tether restores your dotfiles and reinstalls your packages.</p><a href="/docs#cmd-init">See how setup works ↗</a></details>
       <details><summary>What happens when files conflict?</summary><p>Tether lets you keep the local version, use the remote version, merge the files, or skip the conflict.</p><a href="/docs#cmd-resolve">Learn about conflict resolution ↗</a></details>
     </div></section>
     <InstallSection />

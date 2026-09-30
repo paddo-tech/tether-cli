@@ -1,0 +1,13 @@
+---
+import Icon from './Icon.astro';
+---
+
+<figure class="restore-diagram diagram" aria-label="Restore dotfiles and packages from Git after replacing or wiping a machine">
+  <div class="diagram-label"><span>YOUR SETUP. KEPT IN GIT.</span><Icon name="git" size={16} /></div>
+  <ol class="restore-nodes">
+    <li><div class="flow-icon"><Icon name="laptop" size={26} /></div><div><strong>Old machine</strong><span>Wiped or replaced</span></div></li>
+    <li><svg class="restore-connector" viewBox="0 0 24 30" fill="none" aria-hidden="true"><path d="M12 0v28m-5-5 5 5 5-5" /></svg><div class="flow-icon"><Icon name="git" size={26} /></div><div><strong>Your Git repo</strong><span>Dotfiles + package manifests</span></div></li>
+    <li><svg class="restore-connector" viewBox="0 0 24 30" fill="none" aria-hidden="true"><path d="M12 0v28m-5-5 5 5 5-5" /></svg><div class="flow-icon"><Icon name="monitor" size={26} /></div><div><strong>New machine</strong><span><code>tether init</code></span><div class="device-check"><Icon name="check" size={12} /> Files + packages restored</div></div></li>
+  </ol>
+  <figcaption class="diagram-caption">Same repo. Same passphrase. Familiar setup.</figcaption>
+</figure>
