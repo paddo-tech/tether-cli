@@ -380,6 +380,7 @@ pub fn add_dotfile(config: &mut Config, path: &str, create_if_missing: bool) -> 
     config.dotfiles.files.push(DotfileEntry::WithOptions {
         path: path.to_string(),
         create_if_missing,
+        on_conflict: Default::default(),
     });
     config.save().is_ok()
 }
@@ -401,9 +402,11 @@ pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> bool {
     let entry = &config.dotfiles.files[index];
     let path = entry.path().to_string();
     let new_create = !entry.create_if_missing();
+    let on_conflict = entry.on_conflict();
     config.dotfiles.files[index] = DotfileEntry::WithOptions {
         path,
         create_if_missing: new_create,
+        on_conflict,
     };
     config.save().is_ok()
 }
@@ -427,6 +430,7 @@ pub fn toggle_profile_dotfile_shared(config: &mut Config, machine_id: &str, path
         path: entry_path,
         shared: new_shared,
         create_if_missing: entry.create_if_missing(),
+        on_conflict: entry.on_conflict(),
     };
     config.save().is_ok()
 }

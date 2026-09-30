@@ -698,6 +698,7 @@ pub fn decrypt_from_repo(
     machine_state: &MachineState,
     interactive: bool,
 ) -> Result<()> {
+    use crate::config::OnConflict;
     use crate::sync::{detect_conflict, ConflictResolution, ConflictState};
 
     let key = crate::security::get_encryption_key()?;
@@ -731,6 +732,7 @@ pub fn decrypt_from_repo(
         let pattern = entry.path();
         // Glob patterns default to create_if_missing = true (sync all matching files from other machines)
         let create_if_missing = entry.create_if_missing() || crate::sync::is_glob_pattern(pattern);
+        let on_conflict = entry.on_conflict();
 
         let shared = config.is_dotfile_shared(machine_id, pattern);
 
@@ -801,49 +803,52 @@ pub fn decrypt_from_repo(
                                     &remote_hash,
                                     last_synced_hash,
                                 ) {
-                                    if interactive {
-                                        conflict.show_diff()?;
-                                        let resolution = conflict.prompt_resolution()?;
-
-                                        match resolution {
-                                            ConflictResolution::KeepLocal => {
-                                                conflict_state.remove_conflict(&file);
-                                            }
-                                            ConflictResolution::UseRemote => {
-                                                backup_and_write_dotfile(
-                                                    &mut backup_dir,
-                                                    &file,
-                                                    &local_file,
-                                                    &enc_file,
-                                                    &plaintext,
-                                                )?;
-                                                conflict_state.remove_conflict(&file);
-                                            }
-                                            ConflictResolution::Merged => {
-                                                conflict.launch_merge_tool(&config.merge, home)?;
-                                                conflict_state.remove_conflict(&file);
-                                            }
-                                            ConflictResolution::Skip => {
-                                                new_conflicts.push((
-                                                    file.to_string(),
-                                                    conflict.local_hash.clone(),
-                                                    conflict.remote_hash.clone(),
-                                                ));
-                                            }
+                                    let resolution = match on_conflict {
+                                        OnConflict::Local => ConflictResolution::KeepLocal,
+                                        OnConflict::Remote => ConflictResolution::UseRemote,
+                                        OnConflict::Prompt if interactive => {
+                                            conflict.show_diff()?;
+                                            conflict.prompt_resolution()?
                                         }
-                                        continue;
-                                    } else {
-                                        Output::warning(&format!(
-                                            "  {} (conflict - skipped)",
-                                            file
-                                        ));
-                                        new_conflicts.push((
-                                            file.to_string(),
-                                            conflict.local_hash.clone(),
-                                            conflict.remote_hash.clone(),
-                                        ));
-                                        continue;
+                                        OnConflict::Prompt => {
+                                            Output::warning(&format!(
+                                                "  {} (conflict - skipped)",
+                                                file
+                                            ));
+                                            ConflictResolution::Skip
+                                        }
+                                    };
+
+                                    match resolution {
+                                        ConflictResolution::Skip => {
+                                            new_conflicts.push((
+                                                file.to_string(),
+                                                conflict.local_hash.clone(),
+                                                conflict.remote_hash.clone(),
+                                            ));
+                                            continue;
+                                        }
+                                        ConflictResolution::UseRemote => {
+                                            backup_and_write_dotfile(
+                                                &mut backup_dir,
+                                                &file,
+                                                &local_file,
+                                                &enc_file,
+                                                &plaintext,
+                                            )?;
+                                        }
+                                        ConflictResolution::Merged => {
+                                            conflict.launch_merge_tool(&config.merge, home)?;
+                                        }
+                                        ConflictResolution::KeepLocal => {}
                                     }
+                                    // Baseline on the remote so the next export pushes the
+                                    // local (kept or merged) file instead of re-detecting.
+                                    state.record_remote_file(&file, remote_hash);
+                                    conflict_state.remove_conflict(&file);
+                                    // A glob and an exact entry can both match this file.
+                                    new_conflicts.retain(|(f, _, _)| f != &file);
+                                    continue;
                                 }
                             }
                         }
@@ -874,20 +879,26 @@ pub fn decrypt_from_repo(
         }
     }
 
-    // Save any new conflicts
+    // Notify only for files not already pending, so an unresolved conflict
+    // does not toast on every daemon tick.
+    let newly_conflicted: Vec<&str> = new_conflicts
+        .iter()
+        .map(|(file, _, _)| file.as_str())
+        .filter(|file| {
+            !conflict_state
+                .conflicts
+                .iter()
+                .any(|c| c.file_path == *file)
+        })
+        .collect();
+    if !interactive && !newly_conflicted.is_empty() {
+        crate::sync::notify_conflicts(&newly_conflicted).ok();
+    }
+
     for (file, local_hash, remote_hash) in &new_conflicts {
         conflict_state.add_conflict(file, local_hash, remote_hash);
     }
-
-    if !new_conflicts.is_empty() {
-        conflict_state.save()?;
-        if !interactive {
-            // Send notification for daemon mode
-            crate::sync::notify_conflicts(new_conflicts.len()).ok();
-        }
-    } else {
-        conflict_state.save()?;
-    }
+    conflict_state.save()?;
 
     // Decrypt global config directories
     let configs_dir = sync_path.join("configs");

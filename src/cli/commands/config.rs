@@ -389,6 +389,7 @@ fn manage_dotfile_list(
                     entries.push(DotfileEntry::WithOptions {
                         path: value.to_string(),
                         create_if_missing: false,
+                        on_conflict: Default::default(),
                     });
                 }
                 entries.sort_by(|a, b| a.path().cmp(b.path()));
@@ -428,6 +429,7 @@ fn manage_dotfile_list(
                     *entry = DotfileEntry::WithOptions {
                         path: selection.clone(),
                         create_if_missing: new_value,
+                        on_conflict: entry.on_conflict(),
                     };
                     changed = true;
                     Output::success(&format!("{}: create_if_missing = {}", selection, new_value));
