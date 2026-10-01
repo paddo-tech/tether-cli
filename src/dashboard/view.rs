@@ -41,11 +41,12 @@ pub fn view(f: &mut Frame, app: &App) {
     for overlay in &app.overlays {
         if overlay.is_modal() {
             backdrop(f, t);
-            // Only the modal's own regions stay clickable.
-            app.hits.borrow_mut().clear();
         }
+        // Only the top overlay's own regions stay clickable. Help is not modal for keys,
+        // but a click on it must not reach the row underneath.
+        app.hits.borrow_mut().clear();
         match overlay {
-            Overlay::Help => help::render_overlay(f, t),
+            Overlay::Help => help::render_overlay(f, app),
             Overlay::Confirm(c) => confirm::render(f, app, c),
             Overlay::FileImport(p) => file_import::render(f, app, p),
             Overlay::PkgImport(p) => pkg_import::render(f, app, p),
@@ -54,5 +55,5 @@ pub fn view(f: &mut Frame, app: &App) {
         }
     }
 
-    toast::render(f, &app.toasts, t);
+    toast::render(f, app);
 }

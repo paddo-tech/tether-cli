@@ -304,6 +304,8 @@ fn run_target(app: &mut App, target: Target) -> Option<Cmd> {
 /// Clicks hit what the last draw recorded; the wheel scrolls like arrow keys.
 fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
     match m.kind {
+        // Help covers the tab, so the wheel does not scroll it.
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if app.help_open() => None,
         MouseEventKind::ScrollDown => on_key(app, KeyEvent::from(KeyCode::Down)),
         MouseEventKind::ScrollUp => on_key(app, KeyEvent::from(KeyCode::Up)),
         MouseEventKind::Down(MouseButton::Left) => match app.hit_at(m.column, m.row)? {
@@ -317,6 +319,17 @@ fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
             Hit::Key(key) => on_key(app, key),
             Hit::Row(i) => click_row(app, i),
             Hit::Item(i) => click_item(app, i),
+            Hit::CloseHelp => {
+                app.overlays.retain(|o| !matches!(o, Overlay::Help));
+                None
+            }
+            Hit::Block => None,
+            Hit::Toast(i) => {
+                if i < app.toasts.len() {
+                    app.toasts.remove(i);
+                }
+                None
+            }
         },
         _ => None,
     }
@@ -732,6 +745,51 @@ mod tests {
         assert!(click(&mut app, 2, 5).is_none());
         assert_eq!(app.overlays.len(), 1);
         assert!(app.uninstalling.is_none());
+    }
+
+    #[test]
+    fn help_and_toasts_take_clicks_before_the_tab() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        app.active_tab = Tab::Config;
+        run_action(&mut app, Action::Help);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert_eq!(app.hit_at(40, 12), Some(Hit::Block));
+        click(&mut app, 40, 12);
+        assert!(app.help_open());
+        assert_eq!(app.config.selected, 0);
+        update(
+            &mut app,
+            Msg::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 40,
+                row: 12,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(app.config.selected, 0);
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        click(&mut app, 0, 23);
+        assert!(!app.help_open());
+
+        app.flash_info("hello");
+        // Past the slide-in, so the toast is fully on screen.
+        app.toasts[0].born = Instant::now() - Duration::from_secs(1);
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let (x, y) = (0..80u16)
+            .flat_map(|x| (0..24u16).map(move |y| (x, y)))
+            .find(|&(x, y)| app.hit_at(x, y) == Some(Hit::Toast(0)))
+            .expect("toast is clickable");
+        click(&mut app, x, y);
+        assert!(app.toasts.is_empty());
     }
 
     #[test]

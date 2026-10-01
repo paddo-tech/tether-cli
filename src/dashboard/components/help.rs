@@ -1,6 +1,5 @@
 use super::{centered, popup};
 use crate::dashboard::app::{App, Hit, Tab};
-use crate::dashboard::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::Paragraph};
 
@@ -94,8 +93,10 @@ pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
     draw(f, GLOBAL, right_start, area.right());
 }
 
-pub fn render_overlay(f: &mut Frame, t: &Theme) {
+pub fn render_overlay(f: &mut Frame, app: &App) {
+    let t = &app.theme;
     let area = f.area();
+    app.add_hit(area, Hit::CloseHelp);
     if area.height < 10 || area.width < 30 {
         let y = area.height.saturating_sub(2);
         f.render_widget(
@@ -157,6 +158,7 @@ pub fn render_overlay(f: &mut Frame, t: &Theme) {
     let height = if two_col { 21 } else { 38 }.min(area.height.saturating_sub(2));
     let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
     let rect = centered(area, width, height);
+    app.add_hit(rect, Hit::Block);
     let block = popup(f, rect, "Keyboard shortcuts", t.accent, t);
     let inner = block.inner(rect);
     f.render_widget(block, rect);

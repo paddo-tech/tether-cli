@@ -133,6 +133,12 @@ pub enum Hit {
     Item(usize),
     /// Acts like pressing this key.
     Key(KeyEvent),
+    /// Outside the help overlay: closes it.
+    CloseHelp,
+    /// Inside the help overlay: absorbs the click.
+    Block,
+    /// Toast `n` of `App::toasts`: dismisses it.
+    Toast(usize),
 }
 
 pub struct App {
