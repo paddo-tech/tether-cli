@@ -1060,11 +1060,20 @@ mod tests {
         assert_eq!(approved_names(cmd), vec!["left-pad"]);
     }
 
+    fn draw(app: &App) {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, app))
+            .unwrap();
+    }
+
     #[test]
     fn reload_keeps_the_selection_on_its_item() {
         let mut app = with_inbox();
         app.active_tab = Tab::Security;
         key(&mut app, KeyCode::Char('j'));
+        draw(&app);
         // A reload puts a new item first, so the old index now holds another item
         app.state
             .inbox
@@ -1074,6 +1083,27 @@ mod tests {
         assert_eq!(app.security.cursor, 2);
         let cmd = key(&mut app, KeyCode::Char('a'));
         assert_eq!(approved_names(cmd), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn item_replaced_since_the_last_draw_is_not_approved() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('j'));
+        // Moving the cursor alone does not show the item
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        draw(&app);
+        // A reload replaces the version under the same id before the next draw
+        app.state.inbox.items[1].version = Some("6.6.6".into());
+        security::reselect(&mut app);
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        assert!(key(&mut app, KeyCode::Char('x')).is_none());
+        assert_eq!(last_toast(&app).map(|(k, _)| k), Some(ToastKind::Error));
+        draw(&app);
+        let Some(Cmd::ApprovePackages { items, .. }) = key(&mut app, KeyCode::Char('a')) else {
+            panic!("expected an approval");
+        };
+        assert_eq!(items[0].version.as_deref(), Some("6.6.6"));
     }
 
     #[test]
@@ -1104,6 +1134,7 @@ mod tests {
         let mut app = with_inbox();
         app.active_tab = Tab::Security;
         key(&mut app, KeyCode::Char('j'));
+        draw(&app);
         let Some(Cmd::Reject(item)) = key(&mut app, KeyCode::Char('x')) else {
             panic!("expected a reject command");
         };

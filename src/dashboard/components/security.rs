@@ -30,6 +30,10 @@ pub struct SecurityTabState {
     /// None after the selected item left the inbox: keys that decide wait until the next
     /// draw has shown which item the cursor is on.
     pub selected: RefCell<Option<String>>,
+    /// The item at the cursor as the last draw showed it. A reload can replace an item
+    /// under the same id, so keys that decide act on this copy, and only while it still
+    /// matches the inbox.
+    pub shown: RefCell<Option<InboxItem>>,
     /// Narrow layouts show the detail pane only after Enter.
     pub detail: bool,
 }
@@ -63,9 +67,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
 }
 
 /// The item the user has selected, as displayed.
-fn selected(app: &App) -> Option<InboxItem> {
-    let item = app.state.inbox.items.get(app.security.cursor)?;
-    (app.security.selected.borrow().as_deref() == Some(item.id().as_str())).then(|| item.clone())
+fn selected(app: &mut App) -> Option<InboxItem> {
+    let current = app.state.inbox.items.get(app.security.cursor)?;
+    let id = current.id();
+    let shown = app.security.shown.borrow().clone()?;
+    if app.security.selected.borrow().as_deref() != Some(id.as_str()) || shown.id() != id {
+        return None;
+    }
+    if shown != *current {
+        app.flash_error(format!("{} changed. Review it again", id));
+        return None;
+    }
+    Some(shown)
 }
 
 pub fn move_cursor(app: &mut App, index: usize) {
@@ -512,6 +525,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         .selected
         .borrow_mut()
         .get_or_insert_with(|| items[cursor].id());
+    *app.security.shown.borrow_mut() = Some(items[cursor].clone());
     let view = item_view(app, &items[cursor]);
     if area.width >= SPLIT_MIN_W {
         let [left, detail_area] =
