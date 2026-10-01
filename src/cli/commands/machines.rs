@@ -164,6 +164,8 @@ pub async fn profile_unset() -> Result<()> {
     Ok(())
 }
 
+/// Rename this machine. Only a machine can sign its own record, so another machine's record
+/// is never moved: it would no longer verify under the new id.
 pub async fn rename(old: &str, new: &str) -> Result<()> {
     let mut config = Config::load()?;
     if !config.has_personal_features() {
@@ -172,6 +174,16 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     }
 
     let sync_path = SyncEngine::sync_path()?;
+    // No other writer may save this machine's record between its read and the save
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    let mut state = SyncState::load()?;
+    if state.machine_id != old {
+        Output::error(&format!(
+            "Only machine '{}' can rename itself. Run 'tether machines rename' on that machine",
+            old
+        ));
+        return Ok(());
+    }
     let machines_dir = sync_path.join("machines");
 
     let old_file = machines_dir.join(format!("{}.json", old));
@@ -192,26 +204,9 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Read and update the machine info
-    let mut machine = MachineState::load_from_repo(&sync_path, old)?
-        .ok_or_else(|| anyhow::anyhow!("Machine not found"))?;
-    machine.machine_id = new.to_string();
-
-    // Write to new file
-    let content = serde_json::to_string_pretty(&machine)?;
-    std::fs::write(&new_file, content)?;
-
-    // Remove old file
-    std::fs::remove_file(&old_file)?;
-    // The signature binds the old id; the machine signs its renamed record on its next sync
-    remove_signature(&sync_path, old)?;
-
-    // Update local state if this is the current machine
-    let mut state = SyncState::load()?;
-    if state.machine_id == old {
-        state.machine_id = new.to_string();
-        state.save()?;
-    }
+    signing::rename_own_record(&sync_path, old, new)?;
+    state.machine_id = new.to_string();
+    state.save()?;
 
     // Migrate profile assignment if one exists
     if let Some(profile) = config.machine_profiles.remove(old) {
@@ -228,6 +223,12 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     git.push()?;
 
     Output::success(&format!("Renamed machine '{}' to '{}'", old, new));
+    Output::info(&format!(
+        "Other machines trust this key only as '{}'. On each of them, run 'tether machines trust {} {}'",
+        old,
+        new,
+        signing::fingerprint(signing::load_or_create(new)?.public_key())
+    ));
     Ok(())
 }
 

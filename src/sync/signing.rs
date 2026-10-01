@@ -110,6 +110,47 @@ pub fn save_record(sync_path: &Path, record: &MachineState) -> Result<()> {
     generations.save()
 }
 
+/// Move this machine's record from `old` to `new`: build it from [`own_record`], save and
+/// sign it under the new id, and remove the old record and signature. A signature binds the
+/// id, so a record is never moved without signing it again. The caller holds the sync lock.
+pub fn rename_own_record(sync_path: &Path, old: &str, new: &str) -> Result<()> {
+    let key = load_or_create(old)?;
+    let mut generations = Generations::load()?;
+    rename_record_at(
+        sync_path,
+        old,
+        new,
+        &local_record_path()?,
+        &key,
+        &mut generations,
+    )?;
+    generations.save()
+}
+
+fn rename_record_at(
+    sync_path: &Path,
+    old: &str,
+    new: &str,
+    local: &Path,
+    key: &PrivateKey,
+    generations: &mut Generations,
+) -> Result<()> {
+    let mut record = own_record_from(local, sync_path, old, key.public_key(), generations)?
+        .unwrap_or_else(|| MachineState::new(new));
+    record.machine_id = new.to_string();
+    save_record_at(sync_path, &record, local, key, generations)?;
+    for path in [
+        record_path(sync_path, old),
+        record_sig_path(sync_path, old),
+        sync_path.join("machines").join(format!("{}.pub", old)),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
 fn save_record_at(
     sync_path: &Path,
     record: &MachineState,
@@ -685,6 +726,44 @@ mod tests {
         std::fs::remove_file(record_sig_path(dir, "me")).unwrap();
         assert_eq!(recover(&seen), None);
         assert_eq!(recover(&Generations::default()), Some(1));
+    }
+
+    #[test]
+    fn rename_signs_this_machines_record_under_the_new_id() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("machines")).unwrap();
+        let (local, none) = (dir.join("machine.json"), dir.join("none.json"));
+        let me = key();
+        let mut seen = Generations::default();
+        let mut record = MachineState::new("me");
+        record.ignored_dotfiles.push(".zshrc".to_string());
+        save_record_at(dir, &record, &local, &me, &mut seen).unwrap();
+
+        // A repo writer injects an ignore; the rename reads the local copy, not the repo copy
+        let mut injected = record.clone();
+        injected.ignored_dotfiles.push(".ssh/config".to_string());
+        write_record(dir, "me", &injected);
+        rename_record_at(dir, "me", "me2", &local, &me, &mut seen).unwrap();
+        assert!(!record_path(dir, "me").exists());
+        assert!(!record_sig_path(dir, "me").exists());
+        let found = records(dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].record.machine_id, "me2");
+        assert_eq!(found[0].record.ignored_dotfiles, vec![".zshrc"]);
+        assert_eq!(found[0].record.generation, 2);
+        assert_eq!(
+            found[0].signer.as_ref().unwrap().key_data(),
+            me.public_key().key_data()
+        );
+        let own = own_record_from(&none, dir, "me2", me.public_key(), &seen).unwrap();
+        assert_eq!(own.unwrap().generation, 2);
+
+        // A renamed copy that nobody signed, as earlier builds wrote, is not this machine's
+        std::fs::remove_file(record_sig_path(dir, "me2")).unwrap();
+        assert!(own_record_from(&none, dir, "me2", me.public_key(), &seen)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
