@@ -1,5 +1,6 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Style};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Every color the dashboard draws with. Components read colors from here, never from `Color`.
 pub struct Theme {
@@ -166,15 +167,148 @@ pub fn truecolor_env() -> bool {
         .unwrap_or(false)
 }
 
+/// What the background probe found, and the input it read on the way.
+#[derive(Default)]
+pub struct Probe {
+    pub dark: Option<bool>,
+    /// Keys typed while the query waited, to replay into the event loop.
+    pub typed: Vec<KeyEvent>,
+    /// The terminal did not answer in time, so its reply may still arrive as input.
+    pub late_reply: bool,
+}
+
 /// Whether the terminal background is dark: COLORFGBG first, then an OSC 11 query.
 /// Must run in raw mode, before the event loop reads input.
-pub fn detect_dark_background() -> Option<bool> {
+pub fn probe_background() -> Probe {
     if let Ok(v) = std::env::var("COLORFGBG") {
         if let Some(dark) = parse_colorfgbg(&v) {
-            return Some(dark);
+            return Probe {
+                dark: Some(dark),
+                ..Probe::default()
+            };
         }
     }
-    query_osc11().and_then(|reply| parse_osc11(&reply))
+    let Some(raw) = query_osc11() else {
+        return Probe::default();
+    };
+    let (reply, typed) = split_reply(&raw);
+    Probe {
+        dark: parse_osc11(&reply),
+        typed: keys_from_bytes(&typed),
+        late_reply: !da1_done(&raw),
+    }
+}
+
+/// Separate terminal replies (OSC `ESC ] ... BEL|ST` and DA1 `ESC [ ? ... c`) from typed bytes.
+/// An unterminated reply counts as reply, so its tail is never read as keys.
+pub fn split_reply(raw: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let (mut reply, mut typed) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < raw.len() {
+        let rest = &raw[i..];
+        let end = if rest.starts_with(b"\x1b]") {
+            let bel = rest.iter().position(|&b| b == 0x07);
+            let st = rest.windows(2).position(|w| w == b"\x1b\\").map(|p| p + 1);
+            Some(match (bel, st) {
+                (Some(a), Some(b)) => a.min(b),
+                (a, b) => a.or(b).unwrap_or(rest.len() - 1),
+            })
+        } else if rest.starts_with(b"\x1b[?") {
+            Some(
+                rest.iter()
+                    .position(|&b| b == b'c')
+                    .unwrap_or(rest.len() - 1),
+            )
+        } else {
+            None
+        };
+        match end {
+            Some(end) => {
+                reply.extend_from_slice(&rest[..=end]);
+                i += end + 1;
+            }
+            None => {
+                typed.push(raw[i]);
+                i += 1;
+            }
+        }
+    }
+    (reply, typed)
+}
+
+/// Plain keys from raw input bytes. Escape sequences such as arrows are dropped.
+pub fn keys_from_bytes(bytes: &[u8]) -> Vec<KeyEvent> {
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        i += 1;
+        let key = match b {
+            0x1b if i < bytes.len() => {
+                // Skip a CSI or SS3 sequence up to its final byte.
+                if matches!(bytes[i], b'[' | b'O') {
+                    i += 1;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            0x1b => KeyEvent::from(KeyCode::Esc),
+            b'\r' | b'\n' => KeyEvent::from(KeyCode::Enter),
+            b'\t' => KeyEvent::from(KeyCode::Tab),
+            0x7f => KeyEvent::from(KeyCode::Backspace),
+            0x01..=0x1a => {
+                KeyEvent::new(KeyCode::Char((b - 1 + b'a') as char), KeyModifiers::CONTROL)
+            }
+            0x20..=0x7e => KeyEvent::from(KeyCode::Char(b as char)),
+            _ => continue,
+        };
+        keys.push(key);
+    }
+    keys
+}
+
+/// How long after a timed-out query a late reply is still expected.
+const LATE_REPLY_WINDOW: Duration = Duration::from_secs(3);
+
+/// Drops a late OSC reply from key input. Crossterm reads `ESC ] 11;rgb:...` as Alt+]
+/// and then plain keys (`d` would toggle the daemon), ended by Alt+\ or Ctrl+G (BEL).
+/// The DA1 reply needs no filter: crossterm parses it as an internal event.
+pub struct LateReplyFilter {
+    until: Instant,
+    in_reply: bool,
+}
+
+impl LateReplyFilter {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            until: now + LATE_REPLY_WINDOW,
+            in_reply: false,
+        }
+    }
+
+    /// Whether the key is user input rather than part of a reply.
+    pub fn allow(&mut self, key: &KeyEvent, now: Instant) -> bool {
+        if now > self.until {
+            return true;
+        }
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.in_reply {
+            if (alt && key.code == KeyCode::Char('\\')) || (ctrl && key.code == KeyCode::Char('g'))
+            {
+                self.in_reply = false;
+            }
+            return false;
+        }
+        if alt && key.code == KeyCode::Char(']') {
+            self.in_reply = true;
+            return false;
+        }
+        true
+    }
 }
 
 /// `COLORFGBG="15;0"`: the last field is the background's ANSI index.
@@ -212,11 +346,11 @@ fn query_osc11() -> Option<Vec<u8>> {
     tty.write_all(b"\x1b]11;?\x1b\\\x1b[c").ok()?;
     tty.flush().ok()?;
 
-    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    let deadline = Instant::now() + Duration::from_millis(300);
     let mut reply = Vec::new();
     let mut buf = [0u8; 128];
     loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
@@ -295,6 +429,48 @@ mod tests {
         assert_eq!(parse_colorfgbg("15;0"), Some(true));
         assert_eq!(parse_colorfgbg("0;default;15"), Some(false));
         assert_eq!(parse_colorfgbg("garbage"), None);
+    }
+
+    #[test]
+    fn typed_bytes_survive_the_query() {
+        let raw = b"q\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\\x03\x1b[?62;22cs";
+        let (reply, typed) = split_reply(raw);
+        assert_eq!(parse_osc11(&reply), Some(true));
+        assert!(da1_done(&reply));
+        assert_eq!(typed, b"q\x03s");
+        assert_eq!(
+            keys_from_bytes(&typed),
+            vec![
+                KeyEvent::from(KeyCode::Char('q')),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                KeyEvent::from(KeyCode::Char('s')),
+            ]
+        );
+        assert_eq!(
+            keys_from_bytes(b"\x1b[Aj\x1b"),
+            vec![
+                KeyEvent::from(KeyCode::Char('j')),
+                KeyEvent::from(KeyCode::Esc),
+            ]
+        );
+        // An unterminated reply is never read as keys.
+        assert_eq!(split_reply(b"\x1b]11;rgb:dd").1, b"");
+    }
+
+    #[test]
+    fn late_reply_is_dropped_from_key_input() {
+        let start = Instant::now();
+        let mut filter = LateReplyFilter::new(start);
+        let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+        let key = |c| KeyEvent::from(KeyCode::Char(c));
+        assert!(filter.allow(&key('j'), start));
+        assert!(!filter.allow(&alt(']'), start));
+        for c in "11;rgb:dddd/0000/0000".chars() {
+            assert!(!filter.allow(&key(c), start));
+        }
+        assert!(!filter.allow(&alt('\\'), start));
+        assert!(filter.allow(&key('d'), start));
+        assert!(filter.allow(&alt(']'), start + Duration::from_secs(5)));
     }
 
     #[test]

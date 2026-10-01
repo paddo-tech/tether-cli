@@ -72,11 +72,14 @@ pub fn run() -> Result<()> {
         .config
         .as_ref()
         .and_then(|c| c.dashboard.theme.clone());
-    app.theme = theme::Theme::select(
-        setting.as_deref(),
-        theme::truecolor_env(),
-        theme::detect_dark_background,
-    );
+    let mut probe = theme::Probe::default();
+    app.theme = theme::Theme::select(setting.as_deref(), theme::truecolor_env(), || {
+        probe = theme::probe_background();
+        probe.dark
+    });
+    let mut late_reply = probe
+        .late_reply
+        .then(|| theme::LateReplyFilter::new(Instant::now()));
     stdout().execute(EnterAlternateScreen)?;
     stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout());
@@ -84,6 +87,9 @@ pub fn run() -> Result<()> {
     terminal.clear()?;
     let size = terminal.size()?;
     app.viewport = Rect::new(0, 0, size.width, size.height);
+    for key in probe.typed {
+        dispatch(&mut app, &mut rt, Msg::Key(key));
+    }
 
     // Draw only when something changed, at frame rate while animating.
     let mut dirty = true;
@@ -100,7 +106,11 @@ pub fn run() -> Result<()> {
         if event::poll(wait)? {
             // Drain bursts such as wheel scrolls before the next draw.
             loop {
-                if let Some(msg) = event_to_msg(event::read()?) {
+                let msg = event_to_msg(event::read()?).filter(|msg| match (msg, &mut late_reply) {
+                    (Msg::Key(key), Some(filter)) => filter.allow(key, Instant::now()),
+                    _ => true,
+                });
+                if let Some(msg) = msg {
                     dispatch(&mut app, &mut rt, msg);
                     dirty = true;
                 }
