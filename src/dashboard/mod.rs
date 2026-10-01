@@ -134,7 +134,10 @@ pub fn run() -> Result<()> {
             dispatch(&mut app, &mut rt, msg);
             dirty = true;
         }
+        // A tick can reload the inbox; keys must not act on items the screen does not show yet
+        let refreshed = app.last_refresh;
         dispatch(&mut app, &mut rt, Msg::Tick);
+        dirty |= app.last_refresh != refreshed;
     }
 
     rt.shutdown();

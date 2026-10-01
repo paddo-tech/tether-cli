@@ -683,13 +683,17 @@ async fn gate_brew(
             continue;
         }
         let tap = brew.tap_for(&name, manager == "brew_casks").await;
-        let mut checks = trust.checks(manager, &name, None, tap.as_deref());
-        checks.untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
+        let untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
+        // Items record only an untrusted tap, so the approval lookup must use the same tap
+        let tap = tap.filter(|_| untrusted_tap);
+        let checks = Checks {
+            untrusted_tap,
+            ..trust.checks(manager, &name, None, tap.as_deref())
+        };
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
             allowed.push(name);
         } else {
-            let tap = tap.filter(|_| checks.untrusted_tap);
             queued.push(trust.item(manager, &name, None, tap, reasons));
         }
     }
