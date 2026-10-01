@@ -5,7 +5,9 @@ use super::msg::{Cmd, Msg};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 /// Days of history in the Overview activity chart.
 const ACTIVITY_DAYS: usize = 90;
@@ -15,6 +17,8 @@ pub struct Runtime {
     pub rx: Receiver<Msg>,
     job: Option<(Job, Child)>,
     daemon: Option<Child>,
+    /// A refresh skips the activity count while the last one still runs.
+    activity_running: Arc<AtomicBool>,
 }
 
 impl Runtime {
@@ -25,6 +29,7 @@ impl Runtime {
             rx,
             job: None,
             daemon: None,
+            activity_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -88,9 +93,21 @@ impl Runtime {
                 );
             }
             Cmd::LoadActivity => {
+                if self.activity_running.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let running = self.activity_running.clone();
+                let failed = self.activity_running.clone();
                 self.spawn(
-                    async { Msg::Activity(super::repo::commit_activity(ACTIVITY_DAYS)) },
-                    |_| None,
+                    async move {
+                        let counts = super::repo::commit_activity(ACTIVITY_DAYS).await;
+                        running.store(false, Ordering::SeqCst);
+                        Msg::Activity(counts)
+                    },
+                    move |_| {
+                        failed.store(false, Ordering::SeqCst);
+                        None
+                    },
                 );
             }
             Cmd::CollectPackages { config, machine_id } => {

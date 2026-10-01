@@ -254,17 +254,22 @@ fn repo_path_to_dotfile_with_profiles(
     }
 }
 
-/// Sync commits per local day, oldest first, ending today. Empty without a sync repo.
-pub fn commit_activity(days: usize) -> Vec<u64> {
+/// A chart is not worth waiting on a git that hangs, for example on a repo lock.
+const ACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Sync commits per local day, oldest first, ending today. Empty without a sync repo
+/// or when git does not finish in time.
+pub async fn commit_activity(days: usize) -> Vec<u64> {
     let Ok(sync_path) = SyncEngine::sync_path() else {
         return Vec::new();
     };
     let since = format!("--since={}.days", days);
-    let Ok(output) = std::process::Command::new("git")
+    let log = tokio::process::Command::new("git")
         .args(["log", &since, "--format=%at"])
         .current_dir(&sync_path)
-        .output()
-    else {
+        .kill_on_drop(true)
+        .output();
+    let Ok(Ok(output)) = tokio::time::timeout(ACTIVITY_TIMEOUT, log).await else {
         return Vec::new();
     };
     if !output.status.success() {
