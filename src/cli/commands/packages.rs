@@ -217,15 +217,59 @@ pub async fn inbox_list() -> Result<()> {
     for item in &items {
         Output::list_item(&describe(item));
     }
-    Output::dim("Run 'tether packages approve <id>' or 'tether packages reject <id>'");
+    Output::dim(
+        "Run 'tether packages approve <id> <version, tap or key>' or 'tether packages reject <id>'",
+    );
     Ok(())
 }
 
-/// Approve a held package and install it now, or trust a held machine key. The sync lock
-/// keeps the daemon from installing the same package while this install runs.
-pub async fn approve(id: &str) -> Result<()> {
-    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+/// What a sync can replace under an item's id and the user must confirm: the key
+/// fingerprint, the version, or the Homebrew tap.
+fn binding(item: &InboxItem) -> Option<&str> {
+    match &item.kind {
+        Kind::TrustMachine { fingerprint, .. } => Some(fingerprint),
+        Kind::Package => item.version.as_deref().or(item.tap.as_deref()),
+    }
+}
+
+fn check_expected(item: &InboxItem, expected: &str) -> Result<()> {
+    if binding(item) != Some(expected) {
+        anyhow::bail!(
+            "{} is now {}, not {}. Review it with 'tether packages inbox'",
+            item.id(),
+            binding(item).unwrap_or("unpinned"),
+            expected
+        );
+    }
+    Ok(())
+}
+
+/// Approve a held package and install it now, or trust a held machine key. The user
+/// confirms the item as shown, or names its version, tap or key, so a replacement that a
+/// sync queued under the same id is not approved. The sync lock keeps the daemon from
+/// installing the same package while this install runs.
+pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
     let item = inbox::Inbox::load()?.find(id)?.clone();
+    match expected {
+        Some(expected) => check_expected(&item, expected)?,
+        None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+            Output::info(&describe(&item));
+            if !Prompt::confirm("Approve this item?", false)? {
+                return Ok(());
+            }
+        }
+        None => {
+            if let Some(binding) = binding(&item) {
+                anyhow::bail!(
+                    "Check {}, then run 'tether packages approve {} {}'",
+                    describe(&item),
+                    item.id(),
+                    binding
+                );
+            }
+        }
+    }
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     Output::info(&format!("Approving {}", describe(&item)));
     approve_locked(&item).await
 }
@@ -303,4 +347,43 @@ pub async fn review_inbox() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approve_requires_the_reviewed_version_tap_or_key() {
+        let mut item = InboxItem {
+            kind: Kind::Package,
+            manager: "npm".to_string(),
+            name: "example".to_string(),
+            version: Some("1.0.0".to_string()),
+            tap: None,
+            source_machine: None,
+            commit: None,
+            signer: None,
+            reasons: vec![Reason::Unsigned],
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        };
+        assert!(check_expected(&item, "1.0.0").is_ok());
+        // A sync replaced the version under the same id
+        item.version = Some("1.0.1".to_string());
+        assert!(check_expected(&item, "1.0.0").is_err());
+
+        item.manager = "brew_formulae".to_string();
+        item.version = None;
+        item.tap = Some("evil/tap".to_string());
+        assert!(check_expected(&item, "good/tap").is_err());
+        assert!(check_expected(&item, "evil/tap").is_ok());
+
+        item.kind = Kind::TrustMachine {
+            public_key: String::new(),
+            fingerprint: "SHA256:new".to_string(),
+        };
+        assert!(check_expected(&item, "SHA256:old").is_err());
+        assert!(check_expected(&item, "SHA256:new").is_ok());
+    }
 }

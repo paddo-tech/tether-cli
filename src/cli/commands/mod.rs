@@ -175,6 +175,8 @@ pub enum PackagesAction {
     Approve {
         /// Item id (manager:name) or a package name
         id: String,
+        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a terminal
+        expected: Option<String>,
     },
     /// Reject a held package so syncs stop offering it
     Reject {
@@ -711,7 +713,9 @@ impl Cli {
             Commands::Packages { list, action } => match action {
                 None => packages::run(*list, self.yes).await,
                 Some(PackagesAction::Inbox) => packages::inbox_list().await,
-                Some(PackagesAction::Approve { id }) => packages::approve(id).await,
+                Some(PackagesAction::Approve { id, expected }) => {
+                    packages::approve(id, expected.as_deref()).await
+                }
                 Some(PackagesAction::Reject { id }) => packages::reject(id).await,
             },
             Commands::Restore { action } => match action {
