@@ -83,6 +83,13 @@ impl PackageManager for UvManager {
         args.extend(cooldown.args().iter().map(String::as_str));
         args.push(&pkg_spec);
         self.run_uv(&args).await?;
+        // uv saves `==version` in the tool receipt, and `uv tool upgrade` never moves past it.
+        // Installing the bare name again replaces that requirement and keeps the installed version.
+        if package.version.is_some() {
+            args.pop();
+            args.push(&package.name);
+            self.run_uv(&args).await?;
+        }
         Ok(())
     }
 

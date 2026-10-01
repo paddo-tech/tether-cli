@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Homebrew upgrades now upgrade only outdated formulae and casks from trusted taps. Before, Tether ran a plain `brew upgrade`, which also upgraded packages from untrusted taps
 - `tether packages approve` now takes the sync lock while it installs, so the daemon cannot install the same package at the same time
 
+### Fixed
+
+- A uv tool that Tether installed at a pinned version now upgrades again. uv saves `name==version` in the tool receipt, so Tether installs the bare name a second time to drop that pin and keep the installed version
+
 ### Changed
 
 - The dashboard has a new look. It uses Catppuccin Mocha or Latte colors when the terminal supports true color, and it picks one from the terminal background. Set `dashboard.theme` to `mocha`, `latte`, `ansi` or `auto` to choose. Terminals without true color keep the 16-color theme
