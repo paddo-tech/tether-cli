@@ -4,6 +4,21 @@ use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, P
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// Name and latest version from `uv tool list --outdated` lines like `ruff v0.6.0 [latest: 0.7.1]`.
+fn parse_outdated(stdout: &str) -> Vec<(String, String)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (head, latest) = line.split_once("[latest: ")?;
+            let name = head.split_whitespace().next()?;
+            Some((
+                name.to_string(),
+                latest.trim_end().trim_end_matches(']').to_string(),
+            ))
+        })
+        .collect()
+}
+
 pub struct UvManager;
 
 impl UvManager {
@@ -119,11 +134,24 @@ impl PackageManager for UvManager {
             return Ok(());
         }
 
-        let output = command("uv")?
-            .args(["tool", "upgrade", "--all"])
-            .args(self.cooldown().await.args())
-            .output()
-            .await?;
+        let held = super::inbox::hold_malicious_upgrades(self).await;
+        let mut upgrade = command("uv")?;
+        upgrade.args(["tool", "upgrade"]);
+        if held.is_empty() {
+            upgrade.arg("--all");
+        } else {
+            let rest: Vec<String> = packages
+                .into_iter()
+                .map(|p| p.name)
+                .filter(|name| !held.contains(name))
+                .filter(|name| validate_name(Ecosystem::Python, name).is_ok())
+                .collect();
+            if rest.is_empty() {
+                return Ok(());
+            }
+            upgrade.args(rest);
+        }
+        let output = upgrade.args(self.cooldown().await.args()).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -131,6 +159,13 @@ impl PackageManager for UvManager {
         }
 
         Ok(())
+    }
+
+    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+        let mut args = vec!["tool", "list", "--outdated"];
+        let cooldown = self.cooldown().await;
+        args.extend(cooldown.args().iter().map(String::as_str));
+        Ok(parse_outdated(&self.run_uv(&args).await?))
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -146,5 +181,23 @@ impl PackageManager for UvManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outdated_lines_yield_latest_versions() {
+        let stdout = "cowsay v5.0 [latest: 6.1]\n- cowsay\nruff v0.6.0 [latest: 0.7.1]\n- ruff\n";
+        assert_eq!(
+            parse_outdated(stdout),
+            vec![
+                ("cowsay".to_string(), "6.1".to_string()),
+                ("ruff".to_string(), "0.7.1".to_string())
+            ]
+        );
+        assert!(parse_outdated("").is_empty());
     }
 }

@@ -141,7 +141,13 @@ pub async fn import_packages(
     }
 
     outcome.queued = inbox::add(outcome.queued)?;
-    for item in &outcome.queued {
+    report_held(&outcome.queued);
+
+    Ok(outcome)
+}
+
+fn report_held(items: &[InboxItem]) {
+    for item in items {
         Output::warning(&format!(
             "Holding {} ({}) for approval: {}. Run 'tether packages inbox'",
             item.name,
@@ -153,8 +159,6 @@ pub async fn import_packages(
                 .join(", ")
         ));
     }
-
-    Ok(outcome)
 }
 
 /// Pending items for packages the user has since installed are settled.
@@ -577,6 +581,76 @@ async fn import_simple_manager(
         return false;
     }
 
+    let allowed = gate_simple(def, manager.as_ref(), trust, missing, queued).await;
+
+    if allowed.is_empty() {
+        return false;
+    }
+
+    Output::info(&format!(
+        "Installing {} {} package{}...",
+        allowed.len(),
+        def.display_name,
+        if allowed.len() == 1 { "" } else { "s" }
+    ));
+
+    let filtered_manifest = allowed.join("\n") + "\n";
+
+    match manager.import_manifest(&filtered_manifest).await {
+        Ok(_) => true,
+        Err(e) => {
+            Output::warning(&format!(
+                "Failed to import {}: {}",
+                manifest_path.display(),
+                e
+            ));
+            false
+        }
+    }
+}
+
+/// Gate the manifest lines a rollback would install exactly like a synced import.
+/// Returns the lines that may install; the rest go to the approval inbox.
+pub async fn gate_rollback(
+    config: &Config,
+    sync_path: &Path,
+    machine_id: &str,
+    state_key: &str,
+    lines: Vec<String>,
+) -> Result<Vec<String>> {
+    let (Some(def), Some(manager)) = (
+        SIMPLE_MANAGERS.iter().find(|d| d.state_key == state_key),
+        crate::packages::manager_for_key(state_key),
+    ) else {
+        anyhow::bail!("Rollback is not supported for {}", state_key);
+    };
+    let trust = Trust {
+        inbox: Inbox::load()?,
+        provenance: Provenance::load(sync_path, machine_id),
+        auto_install_from_trusted: config.packages.auto_install_from_trusted,
+    };
+    let candidates = lines
+        .into_iter()
+        .map(|line| {
+            let (name, version) = parse_pin(def.ecosystem, &line);
+            (name, version, line)
+        })
+        .filter(|(name, _, _)| !trust.settled(state_key, name))
+        .collect();
+    let mut queued = Vec::new();
+    let allowed = gate_simple(def, manager.as_ref(), &trust, candidates, &mut queued).await;
+    report_held(&inbox::add(queued)?);
+    Ok(allowed)
+}
+
+/// Keep the lines that may install and queue the rest with their OSV advisories.
+async fn gate_simple(
+    def: &PackageManagerDef,
+    manager: &dyn PackageManager,
+    trust: &Trust,
+    missing: Vec<(String, Option<String>, String)>,
+    queued: &mut Vec<InboxItem>,
+) -> Vec<String> {
     let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
     let pins: Vec<(String, Option<String>)> = missing
         .iter()
@@ -606,31 +680,7 @@ async fn import_simple_manager(
             queued.push(item);
         }
     }
-
-    if allowed.is_empty() {
-        return false;
-    }
-
-    Output::info(&format!(
-        "Installing {} {} package{}...",
-        allowed.len(),
-        def.display_name,
-        if allowed.len() == 1 { "" } else { "s" }
-    ));
-
-    let filtered_manifest = allowed.join("\n") + "\n";
-
-    match manager.import_manifest(&filtered_manifest).await {
-        Ok(_) => true,
-        Err(e) => {
-            Output::warning(&format!(
-                "Failed to import {}: {}",
-                manifest_path.display(),
-                e
-            ));
-            false
-        }
-    }
+    allowed
 }
 
 /// Export package manifests using union of all machine states

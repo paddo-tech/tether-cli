@@ -233,10 +233,12 @@ impl Inbox {
         Ok(item)
     }
 
-    /// Drop pending items for packages that are now installed by other means.
+    /// Drop pending items for packages that are now installed by other means. Malicious
+    /// items stay, because a held upgrade is for a package that is already installed.
     pub fn prune_installed(&mut self, manager: &str, installed: impl Fn(&str) -> bool) {
-        self.items
-            .retain(|i| i.manager != manager || !installed(&i.name));
+        self.items.retain(|i| {
+            i.manager != manager || i.reasons.contains(&Reason::Malicious) || !installed(&i.name)
+        });
     }
 }
 
@@ -299,6 +301,61 @@ pub fn approve(query: &str) -> Result<InboxItem> {
 
 pub fn reject(query: &str) -> Result<InboxItem> {
     Inbox::update(|inbox| inbox.reject(query))
+}
+
+/// Names whose upgrade target OSV lists as malicious. They go to the inbox, and
+/// `update_all` leaves them at the installed version. Like a failed OSV request, a manager
+/// that cannot list its upgrade targets does not stop upgrades.
+pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String> {
+    if osv::ecosystem_name(manager.ecosystem()).is_none() {
+        return Vec::new();
+    }
+    let candidates = match manager.upgrade_candidates().await {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            eprintln!(
+                "Warning: {} upgrades not checked against OSV: {}",
+                manager.name(),
+                e
+            );
+            return Vec::new();
+        }
+    };
+    let pins: Vec<(String, Option<String>)> = candidates
+        .into_iter()
+        .map(|(name, version)| (name, Some(version)))
+        .collect();
+    let found = osv::advisories(manager.ecosystem(), &pins).await;
+    let mut held = Vec::new();
+    let mut items = Vec::new();
+    for ((name, version), advisories) in pins.into_iter().zip(found) {
+        if !advisories.iter().any(|id| osv::is_malicious(id)) {
+            continue;
+        }
+        eprintln!(
+            "Warning: Skipping {} upgrade of {} to {}: OSV lists it as malicious ({})",
+            manager.name(),
+            name,
+            version.as_deref().unwrap_or_default(),
+            advisories.join(", ")
+        );
+        held.push(name.clone());
+        items.push(InboxItem {
+            manager: manager.name().to_string(),
+            name,
+            version,
+            tap: None,
+            source_machine: None,
+            commit: None,
+            reasons: vec![Reason::Malicious],
+            advisories,
+            first_seen: Utc::now(),
+        });
+    }
+    if let Err(e) = add(items) {
+        eprintln!("Warning: Could not hold malicious upgrades: {}", e);
+    }
+    held
 }
 
 /// Install an approved item now. `interactive` lets a cask prompt for a password.
@@ -423,9 +480,13 @@ mod tests {
         let mut inbox = Inbox::default();
         inbox.add(item("npm", "a"));
         inbox.add(item("pnpm", "a"));
-        inbox.prune_installed("npm", |name| name == "a");
-        assert_eq!(inbox.items.len(), 1);
-        assert_eq!(inbox.items[0].manager, "pnpm");
+        inbox.add(InboxItem {
+            reasons: vec![Reason::Malicious],
+            ..item("npm", "b")
+        });
+        inbox.prune_installed("npm", |name| name == "a" || name == "b");
+        let left: Vec<String> = inbox.items.iter().map(|i| i.id()).collect();
+        assert_eq!(left, vec!["pnpm:a", "npm:b"]);
     }
 
     #[test]

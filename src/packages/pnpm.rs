@@ -140,9 +140,11 @@ impl PackageManager for PnpmManager {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let version = policy::tool_version("pnpm").await;
+        let held = super::inbox::hold_malicious_upgrades(self).await;
         let names: Vec<String> = packages
             .into_iter()
             .map(|p| p.name)
+            .filter(|name| !held.contains(name))
             .filter(|name| match validate_name(Ecosystem::Npm, name) {
                 Ok(()) => true,
                 Err(e) => {
@@ -191,6 +193,17 @@ impl PackageManager for PnpmManager {
         }
 
         Ok(())
+    }
+
+    /// `wanted` is what `pnpm update -g` installs; pnpm applies the release-age limit to it.
+    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+        let output = command("pnpm")?
+            .args(["outdated", "-g", "--format", "json"])
+            .args(self.cooldown_args().await)
+            .output()
+            .await?;
+        // pnpm exits 1 when something is outdated, so the JSON decides
+        super::npm::parse_outdated_json(&output.stdout)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {

@@ -110,6 +110,11 @@ pub trait PackageManager: Send + Sync {
     /// Update all installed packages to latest versions
     async fn update_all(&self) -> Result<()>;
 
+    /// Packages `update_all` would change, with the version each would move to.
+    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+        anyhow::bail!("{} cannot list upgrade candidates", self.name())
+    }
+
     /// Compute a hash of the current manifest for change detection
     async fn compute_manifest_hash(&self) -> Result<String> {
         let manifest = self.export_manifest().await?;
