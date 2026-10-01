@@ -131,7 +131,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
 
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
-        MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
+        crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
     // Apply dotfiles from sync repo (if encrypted) - with conflict detection
     // Interactive mode when run manually, non-interactive when run by daemon
@@ -1787,12 +1787,13 @@ pub async fn build_machine_state(
     state: &SyncState,
     sync_path: &Path,
 ) -> Result<MachineState> {
-    // Load existing machine state to preserve removed_packages
-    let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
+    // This machine's last record keeps removals and ignores; the repo copy is not trusted
+    let mut machine_state = crate::sync::signing::own_record(sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Update last_sync time, CLI and OS version, and profile
+    // Update last_sync time, hostname, CLI and OS version, and profile
     machine_state.last_sync = chrono::Utc::now();
+    machine_state.hostname = crate::sync::local_hostname();
     machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
     machine_state.os_version = crate::sync::state::local_os_version();
     machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
@@ -2268,6 +2269,22 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_package_uninstalled_since_the_last_record_is_tombstoned() {
+        // The last record, signed by this machine, still lists evilpkg; the user has since
+        // uninstalled it, so a manifest line for it must not install it again this sync
+        let previous = HashMap::from([(
+            "npm".to_string(),
+            vec!["evilpkg".to_string(), "kept".to_string()],
+        )]);
+        let mut machine = MachineState::new("me");
+        machine
+            .packages
+            .insert("npm".to_string(), vec!["kept".to_string()]);
+        detect_removed_packages(&mut machine, &previous);
+        assert_eq!(machine.removed_packages["npm"], vec!["evilpkg"]);
+    }
 
     #[test]
     fn test_write_decrypted_creates_file_with_content() {

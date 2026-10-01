@@ -425,24 +425,28 @@ fn on_install_done(app: &mut App, op: InstallOp, result: Result<(), String>) -> 
 /// Live package lists replace this machine's state and persist, so disk reloads keep them.
 fn on_local_packages(app: &mut App, packages: std::collections::HashMap<String, Vec<String>>) {
     let machine_id = app.machine_id().to_string();
-    let sync_path = crate::sync::SyncEngine::sync_path().ok();
-    if let Some(machine) = app
+    if machine_id.is_empty() {
+        return;
+    }
+    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
+        if let Ok(own) = crate::sync::signing::own_record(&sync_path, &machine_id) {
+            let mut record = own.unwrap_or_else(|| crate::sync::MachineState::new(&machine_id));
+            record.packages = packages.clone();
+            let _ = crate::sync::signing::save_record(&sync_path, &record);
+        }
+    }
+    match app
         .state
         .machines
         .iter_mut()
         .find(|m| m.machine_id == machine_id)
     {
-        machine.packages = packages;
-        if let Some(ref sync_path) = sync_path {
-            let _ = machine.save_to_repo(sync_path);
+        Some(machine) => machine.packages = packages,
+        None => {
+            let mut ms = crate::sync::MachineState::new(&machine_id);
+            ms.packages = packages;
+            app.state.machines.push(ms);
         }
-    } else if !machine_id.is_empty() {
-        let mut ms = crate::sync::MachineState::new(&machine_id);
-        ms.packages = packages;
-        if let Some(ref sync_path) = sync_path {
-            let _ = ms.save_to_repo(sync_path);
-        }
-        app.state.machines.push(ms);
     }
 }
 

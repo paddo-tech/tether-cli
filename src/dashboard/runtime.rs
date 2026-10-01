@@ -418,17 +418,13 @@ fn remove_from_removed_packages(machine_id: &str, manager_key: &str, pkg_name: &
         return;
     }
     if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
-        let machines_dir = sync_path.join("machines");
-        let path = machines_dir.join(format!("{}.json", machine_id));
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(mut machine) = serde_json::from_str::<crate::sync::MachineState>(&content) {
-                if let Some(removed) = machine.removed_packages.get_mut(manager_key) {
-                    removed.retain(|p| p != pkg_name);
-                    if removed.is_empty() {
-                        machine.removed_packages.remove(manager_key);
-                    }
-                    let _ = machine.save_to_repo(&sync_path);
+        if let Ok(Some(mut machine)) = crate::sync::signing::own_record(&sync_path, machine_id) {
+            if let Some(removed) = machine.removed_packages.get_mut(manager_key) {
+                removed.retain(|p| p != pkg_name);
+                if removed.is_empty() {
+                    machine.removed_packages.remove(manager_key);
                 }
+                let _ = crate::sync::signing::save_record(&sync_path, &machine);
             }
         }
     }

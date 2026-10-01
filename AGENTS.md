@@ -75,6 +75,7 @@ Managed via `tether config features`. Available toggles:
 - `conflicts.json` - Conflict state
 - `inbox.json` - Approval inbox (never synced)
 - `inbox.lock` - Lock for inbox and trust store changes
+- `machine.json` - This machine's last record (never synced). Its removals and ignores carry into the next record; the repo copy is never read for them
 - `run/` - Empty working directory for package managers
 - `signing_key` - This machine's ed25519 SSH key for record and commit signatures (0600)
 - `trusted_keys` - Trusted machine keys (never synced). TOML: `version = 1`, then `[machines."<id>"]` with `public_key` (OpenSSH line) and `fingerprint` (`SHA256:...`). Earlier builds wrote git allowed signers lines; Tether reads them and rewrites the file as TOML on the next trust change

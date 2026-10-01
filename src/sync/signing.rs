@@ -92,15 +92,74 @@ pub fn sign_record(sync_path: &Path, machine_id: &str, key: &PrivateKey) -> Resu
     Ok(())
 }
 
-/// Write this machine's record and sign it. The signature vouches for the record's
-/// packages, so call it only with packages just read from this machine's managers.
+/// Write this machine's record, sign it, and keep a local copy. The signature vouches for
+/// the record's packages, so build the record with [`own_record`] and packages just read
+/// from this machine's managers.
 pub fn save_record(sync_path: &Path, record: &MachineState) -> Result<()> {
     // Other machines distrust a record that validation would change
     let mut record = record.clone();
     record.validate()?;
     record.save_to_repo(sync_path)?;
     let key = load_or_create(&record.machine_id)?;
-    sign_record(sync_path, &record.machine_id, &key)
+    sign_record(sync_path, &record.machine_id, &key)?;
+    crate::sync::atomic_write(
+        &local_record_path()?,
+        &std::fs::read(record_path(sync_path, &record.machine_id))?,
+    )
+}
+
+/// This machine's copy of its last record. Anyone who can push writes the repo copy, so
+/// removals and ignores this machine keeps come only from here.
+fn local_record_path() -> Result<PathBuf> {
+    Ok(crate::home_dir()?.join(".tether").join("machine.json"))
+}
+
+/// This machine's last saved record, the base for its next one.
+pub fn own_record(sync_path: &Path, machine_id: &str) -> Result<Option<MachineState>> {
+    let key = load_or_create(machine_id)?;
+    own_record_from(
+        &local_record_path()?,
+        sync_path,
+        machine_id,
+        key.public_key(),
+    )
+}
+
+/// The local copy when there is one. Before the first save that writes it, the repo copy
+/// counts when this machine's key signed it, or when it has no signature because an
+/// earlier build wrote it: that first upgrade trusts the repo as earlier builds did.
+fn own_record_from(
+    local: &Path,
+    sync_path: &Path,
+    machine_id: &str,
+    own_key: &PublicKey,
+) -> Result<Option<MachineState>> {
+    if local.exists() {
+        let mut record: MachineState = serde_json::from_slice(&std::fs::read(local)?)
+            .with_context(|| format!("Invalid machine record {}", local.display()))?;
+        record.validate()?;
+        // A renamed machine keeps its record
+        record.machine_id = machine_id.to_string();
+        return Ok(Some(record));
+    }
+    let Some(found) = records(sync_path)
+        .into_iter()
+        .find(|r| r.record.machine_id == machine_id)
+    else {
+        return Ok(None);
+    };
+    let own = found
+        .signer
+        .is_some_and(|k| k.key_data() == own_key.key_data());
+    let legacy = !record_sig_path(sync_path, machine_id).exists();
+    if !own && !legacy {
+        Output::warning(&format!(
+            "machines/{}.json is not signed by this machine. Tether rebuilds this machine's \
+             record from local state",
+            machine_id
+        ));
+    }
+    Ok((own || legacy).then_some(found.record))
 }
 
 /// The ed25519 key whose signature over `record` as `machine_id`'s record verifies, or None.
@@ -389,6 +448,50 @@ mod tests {
             .insert("npm".to_string(), vec!["evil".to_string()]);
         write_record(tmp.path(), "m1", &record);
         assert!(signer_of(tmp.path(), "m1").is_none());
+    }
+
+    #[test]
+    fn own_record_comes_from_the_local_copy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (dir, local) = (tmp.path(), tmp.path().join("machine.json"));
+        let me = key();
+        let mut mine = MachineState::new("me");
+        mine.removed_packages
+            .insert("npm".to_string(), vec!["old".to_string()]);
+        std::fs::write(&local, serde_json::to_vec(&mine).unwrap()).unwrap();
+
+        // A repo writer injects removals and ignores into the repo copy
+        let mut injected = mine.clone();
+        injected
+            .removed_packages
+            .insert("npm".to_string(), vec!["needed".to_string()]);
+        injected.ignored_dotfiles.push(".zshrc".to_string());
+        write_record(dir, "me", &injected);
+        let own = own_record_from(&local, dir, "me", me.public_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(own.removed_packages["npm"], vec!["old"]);
+        assert!(own.ignored_dotfiles.is_empty());
+        let renamed = own_record_from(&local, dir, "me2", me.public_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.machine_id, "me2");
+
+        // Without a local copy, a repo copy signed by another key is not used
+        let none = tmp.path().join("none.json");
+        sign_record(dir, "me", &key()).unwrap();
+        assert!(own_record_from(&none, dir, "me", me.public_key())
+            .unwrap()
+            .is_none());
+        sign_record(dir, "me", &me).unwrap();
+        assert!(own_record_from(&none, dir, "me", me.public_key())
+            .unwrap()
+            .is_some());
+        // An unsigned copy from an earlier build is used once, on the upgrade
+        std::fs::remove_file(record_sig_path(dir, "me")).unwrap();
+        assert!(own_record_from(&none, dir, "me", me.public_key())
+            .unwrap()
+            .is_some());
     }
 
     #[test]

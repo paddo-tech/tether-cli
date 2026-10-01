@@ -95,7 +95,7 @@ pub async fn ignore_dotfile(file: &str) -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
 
-    let mut machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
+    let mut machine_state = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
     // Normalize dotfile name (ensure it starts with .)
@@ -112,7 +112,7 @@ pub async fn ignore_dotfile(file: &str) -> Result<()> {
 
     machine_state.ignored_dotfiles.push(file.clone());
     machine_state.ignored_dotfiles.sort();
-    machine_state.save_to_repo(&sync_path)?;
+    crate::sync::signing::save_record(&sync_path, &machine_state)?;
 
     Output::success(&format!(
         "Ignoring '{}' on this machine (won't be overwritten during sync)",
@@ -126,7 +126,7 @@ pub async fn ignore_project(project: &str, path: &str) -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
 
-    let mut machine_state = MachineState::load_from_repo(&sync_path, &state.machine_id)?
+    let mut machine_state = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
     let ignored = machine_state
@@ -144,7 +144,7 @@ pub async fn ignore_project(project: &str, path: &str) -> Result<()> {
 
     ignored.push(path.to_string());
     ignored.sort();
-    machine_state.save_to_repo(&sync_path)?;
+    crate::sync::signing::save_record(&sync_path, &machine_state)?;
 
     Output::success(&format!(
         "Ignoring '{}:{}' on this machine (won't be overwritten during sync)",
@@ -158,7 +158,7 @@ pub async fn sync_list() -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
 
-    let machine_state = match MachineState::load_from_repo(&sync_path, &state.machine_id)? {
+    let machine_state = match crate::sync::signing::own_record(&sync_path, &state.machine_id)? {
         Some(ms) => ms,
         None => {
             Output::info("No machine state found");
@@ -201,7 +201,7 @@ pub async fn sync_remove(file: &str) -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
 
-    let mut machine_state = match MachineState::load_from_repo(&sync_path, &state.machine_id)? {
+    let mut machine_state = match crate::sync::signing::own_record(&sync_path, &state.machine_id)? {
         Some(ms) => ms,
         None => {
             Output::error("No machine state found");
@@ -219,7 +219,7 @@ pub async fn sync_remove(file: &str) -> Result<()> {
                 if ignored.is_empty() {
                     machine_state.ignored_project_configs.remove(project);
                 }
-                machine_state.save_to_repo(&sync_path)?;
+                crate::sync::signing::save_record(&sync_path, &machine_state)?;
                 Output::success(&format!("Unignored '{}:{}'", project, path));
                 return Ok(());
             }
@@ -231,7 +231,7 @@ pub async fn sync_remove(file: &str) -> Result<()> {
         machine_state.ignored_dotfiles.retain(|f| f != file);
 
         if machine_state.ignored_dotfiles.len() < len_before {
-            machine_state.save_to_repo(&sync_path)?;
+            crate::sync::signing::save_record(&sync_path, &machine_state)?;
             Output::success(&format!("Unignored '{}'", file));
             return Ok(());
         }

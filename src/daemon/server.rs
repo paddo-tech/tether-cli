@@ -4,8 +4,7 @@ use crate::packages::{
     UvManager,
 };
 use crate::sync::{
-    import_packages, notify_deferred_casks, notify_inbox, GitBackend, MachineState, SyncEngine,
-    SyncState,
+    import_packages, notify_deferred_casks, notify_inbox, GitBackend, SyncEngine, SyncState,
 };
 use anyhow::Result;
 use chrono::Local;
@@ -242,7 +241,7 @@ impl DaemonServer {
         }
 
         let machine_state_for_decrypt =
-            MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
+            crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
         // Apply remote changes (dotfiles, config dirs, project configs)
         if config.security.encrypt_dotfiles {
