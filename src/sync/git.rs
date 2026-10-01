@@ -6,6 +6,31 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+fn write_signed(
+    repo: &Repository,
+    key: &ssh_key::PrivateKey,
+    author: &Signature,
+    committer: &Signature,
+    message: &str,
+    tree: &git2::Tree,
+    parents: &[&git2::Commit],
+) -> Result<git2::Oid> {
+    let buffer = repo.commit_create_buffer(author, committer, message, tree, parents)?;
+    let content = buffer
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Commit is not valid UTF-8"))?;
+    let signature = crate::sync::signing::sign(key, content.as_bytes())?;
+    Ok(repo.commit_signed(content, &signature, None)?)
+}
+
+/// Point the branch HEAD names (or a detached HEAD) at `oid`.
+fn set_head(repo: &Repository, oid: git2::Oid, message: &str) -> Result<()> {
+    let head = repo.find_reference("HEAD")?;
+    let name = head.symbolic_target().unwrap_or("HEAD").to_string();
+    repo.reference(&name, oid, true, message)?;
+    Ok(())
+}
+
 pub struct GitBackend {
     repo_path: PathBuf,
 }
@@ -26,6 +51,13 @@ impl GitBackend {
             Ok(out) => out.status.success(),
             Err(_) => false,
         }
+    }
+
+    /// HEAD's commit id, or None before the first commit.
+    pub fn head_commit(&self) -> Result<Option<String>> {
+        let repo = Repository::open(&self.repo_path)?;
+        let head = repo.head().ok().and_then(|h| h.target());
+        Ok(head.map(|oid| oid.to_string()))
     }
 
     /// Check if remote branch exists
@@ -69,7 +101,31 @@ impl GitBackend {
         })
     }
 
+    /// This machine's signing key when this is the personal sync repo. Only that repo's
+    /// commits are verified, so team and collab commits stay unsigned.
+    fn signing_key(&self) -> Result<Option<(String, ssh_key::PrivateKey)>> {
+        if self.repo_path != crate::sync::SyncEngine::sync_path()? {
+            return Ok(None);
+        }
+        let machine_id = crate::sync::SyncState::load()?.machine_id;
+        let key = crate::sync::signing::load_or_create(&machine_id)?;
+        Ok(Some((machine_id, key)))
+    }
+
     pub fn commit(&self, message: &str, author: &str) -> Result<()> {
+        let key = self.signing_key()?;
+        if let Some((machine_id, key)) = &key {
+            crate::sync::signing::publish(&self.repo_path, machine_id, key.public_key())?;
+        }
+        self.commit_with_key(message, author, key.as_ref().map(|(_, k)| k))
+    }
+
+    pub(crate) fn commit_with_key(
+        &self,
+        message: &str,
+        author: &str,
+        key: Option<&ssh_key::PrivateKey>,
+    ) -> Result<()> {
         let repo = Repository::open(&self.repo_path)?;
         let mut index = repo.index()?;
         index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
@@ -81,18 +137,68 @@ impl GitBackend {
         let sig = Signature::now(author, "tether@local")?;
 
         // Check if this is the first commit
-        if self.has_commits() {
+        let parent = if self.has_commits() {
             let parent = repo.head()?.peel_to_commit()?;
             // Skip empty commits (tree unchanged from parent)
             if parent.tree()?.id() == oid {
                 return Ok(());
             }
-            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
+            Some(parent)
         } else {
-            // Initial commit (no parent)
-            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
+            None
+        };
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+
+        match key {
+            Some(key) => {
+                let commit = write_signed(&repo, key, &sig, &sig, message, &tree, &parents)?;
+                set_head(&repo, commit, message)?;
+            }
+            None => {
+                repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Rebase rewrites local commits without their signatures, so sign them again before
+    /// they are pushed.
+    fn sign_unpushed(&self, key: &ssh_key::PrivateKey) -> Result<()> {
+        let repo = Repository::open(&self.repo_path)?;
+        let Ok(base) = repo.revparse_single("origin/main") else {
+            return Ok(());
+        };
+        let mut walk = repo.revwalk()?;
+        walk.push_head()?;
+        walk.hide(base.id())?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
+        let local: Vec<git2::Oid> = walk.collect::<std::result::Result<_, _>>()?;
+
+        let mut parent: Option<git2::Commit> = None;
+        for oid in local {
+            let commit = repo.find_commit(oid)?;
+            if parent.is_none() && repo.extract_signature(&oid, None).is_ok() {
+                continue;
+            }
+            let parents: Vec<git2::Commit> = match parent.take() {
+                Some(p) => vec![p],
+                None => commit.parents().collect(),
+            };
+            let new = write_signed(
+                &repo,
+                key,
+                &commit.author(),
+                &commit.committer(),
+                commit.message_raw().unwrap_or_default(),
+                &commit.tree()?,
+                &parents.iter().collect::<Vec<_>>(),
+            )?;
+            parent = Some(repo.find_commit(new)?);
+        }
+        if let Some(tip) = parent {
+            set_head(&repo, tip.id(), "tether: sign rebased commits")?;
+        }
         Ok(())
     }
 
@@ -207,6 +313,9 @@ impl GitBackend {
             return Ok(true);
         }
 
+        if let Some((_, key)) = self.signing_key()? {
+            self.sign_unpushed(&key)?;
+        }
         Ok(false)
     }
 
@@ -874,6 +983,82 @@ mod tests {
             );
         }
         (a, b)
+    }
+
+    /// Verify HEAD with git itself, trusting `key` through an allowed signers file.
+    fn git_verifies_head(dir: &Path, key: &ssh_key::PrivateKey) -> bool {
+        let allowed = dir.join("allowed_signers");
+        std::fs::write(
+            &allowed,
+            format!("m1 {}\n", key.public_key().to_openssh().unwrap()),
+        )
+        .unwrap();
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "gpg.format=ssh",
+                "-c",
+                &format!("gpg.ssh.allowedSignersFile={}", allowed.display()),
+                "log",
+                "-1",
+                "--show-signature",
+            ])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains("Good \"git\" signature for m1")
+    }
+
+    fn signing_key() -> ssh_key::PrivateKey {
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_signed_commits_verify_with_git() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, _) = two_clones(tmp.path());
+        let key = signing_key();
+        std::fs::write(a.repo_path.join("shared"), "signed").unwrap();
+        a.commit_with_key("signed", "a", Some(&key)).unwrap();
+        assert!(git_verifies_head(&a.repo_path, &key));
+        assert!(!git_verifies_head(&a.repo_path, &signing_key()));
+
+        let repo = Repository::open(&a.repo_path).unwrap();
+        let head = repo.head().unwrap().target().unwrap();
+        let signer = crate::sync::signing::commit_signer(&repo, head).unwrap();
+        assert_eq!(signer.key_data(), key.public_key().key_data());
+        let parent = repo.find_commit(head).unwrap().parent_id(0).unwrap();
+        assert!(crate::sync::signing::commit_signer(&repo, parent).is_none());
+    }
+
+    #[test]
+    fn test_rebased_commits_are_signed_again() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, b) = two_clones(tmp.path());
+        let key = signing_key();
+        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
+        a.commit("a", "a").unwrap();
+        a.push().unwrap();
+
+        std::fs::write(b.repo_path.join("one"), "1").unwrap();
+        b.commit_with_key("one", "b", Some(&key)).unwrap();
+        std::fs::write(b.repo_path.join("two"), "2").unwrap();
+        b.commit_with_key("two", "b", Some(&key)).unwrap();
+        git(&b.repo_path, &["fetch", "origin", "main"]);
+        git(&b.repo_path, &["rebase", "origin/main"]);
+        assert!(!git_verifies_head(&b.repo_path, &key));
+
+        b.sign_unpushed(&key).unwrap();
+        assert!(git_verifies_head(&b.repo_path, &key));
+        assert!(b.git(&["diff", "--quiet", "HEAD"]).is_ok());
+        let repo = Repository::open(&b.repo_path).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert!(crate::sync::signing::commit_signer(&repo, head.parent_id(0).unwrap()).is_some());
+        assert_eq!(
+            head.parent(0).unwrap().parent_id(0).unwrap().to_string(),
+            git(&b.repo_path, &["rev-parse", "origin/main"])
+        );
     }
 
     #[test]

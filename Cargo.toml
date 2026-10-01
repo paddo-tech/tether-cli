@@ -73,6 +73,9 @@ aes-gcm = "0.10"
 base64 = "0.22"
 age = "0.11"
 
+# Commit signing (OpenSSH keys and sshsig, as git verifies them)
+ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ed25519", "getrandom"] }
+
 # Secret detection
 regex = "1.10"
 
