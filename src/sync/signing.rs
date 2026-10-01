@@ -95,6 +95,9 @@ pub fn sign_record(sync_path: &Path, machine_id: &str, key: &PrivateKey) -> Resu
 /// Write this machine's record and sign it. The signature vouches for the record's
 /// packages, so call it only with packages just read from this machine's managers.
 pub fn save_record(sync_path: &Path, record: &MachineState) -> Result<()> {
+    // Other machines distrust a record that validation would change
+    let mut record = record.clone();
+    record.validate()?;
     record.save_to_repo(sync_path)?;
     let key = load_or_create(&record.machine_id)?;
     sign_record(sync_path, &record.machine_id, &key)
@@ -136,13 +139,26 @@ pub fn records(sync_path: &Path) -> Vec<SignedRecord> {
                 return None;
             }
             let bytes = std::fs::read(entry.path()).ok()?;
-            let mut record: MachineState = serde_json::from_slice(&bytes).ok()?;
+            let signed: MachineState = serde_json::from_slice(&bytes).ok()?;
+            let mut record = signed.clone();
             if record.machine_id != id || record.validate().is_err() {
                 return None;
             }
-            let signer = std::fs::read_to_string(record_sig_path(sync_path, id))
-                .ok()
-                .and_then(|sig| record_signer(id, &bytes, &sig));
+            // The signature covers the record as written. Validation drops invalid entries,
+            // so a record it changed would vouch for something nobody signed, such as an
+            // unpinned name where the signer wrote a range.
+            let signer = if serde_json::to_value(&record).ok() == serde_json::to_value(&signed).ok()
+            {
+                std::fs::read_to_string(record_sig_path(sync_path, id))
+                    .ok()
+                    .and_then(|sig| record_signer(id, &bytes, &sig))
+            } else {
+                Output::warning(&format!(
+                    "Not trusting machines/{}.json: it has entries Tether drops",
+                    name
+                ));
+                None
+            };
             Some(SignedRecord { record, signer })
         })
         .collect();
@@ -373,6 +389,24 @@ mod tests {
             .insert("npm".to_string(), vec!["evil".to_string()]);
         write_record(tmp.path(), "m1", &record);
         assert!(signer_of(tmp.path(), "m1").is_none());
+    }
+
+    #[test]
+    fn signed_record_that_validation_changes_is_unsigned() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut record = MachineState::new("m1");
+        record
+            .packages
+            .insert("npm".to_string(), vec!["widget".to_string()]);
+        record.package_versions.insert(
+            "npm".to_string(),
+            std::collections::HashMap::from([("widget".to_string(), "^1.2.3".to_string())]),
+        );
+        write_record(tmp.path(), "m1", &record);
+        sign_record(tmp.path(), "m1", &key()).unwrap();
+        let found = records(tmp.path());
+        assert!(found[0].record.package_versions["npm"].is_empty());
+        assert!(found[0].signer.is_none());
     }
 
     #[test]
