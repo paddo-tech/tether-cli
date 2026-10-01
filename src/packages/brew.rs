@@ -149,6 +149,64 @@ fn tap_of(name: &str) -> Option<&str> {
     name.rsplit_once('/').map(|(tap, _)| tap)
 }
 
+/// Installed taps under `taps_dir` that could provide a short formula or cask name. It reads
+/// file names and JSON only, never Ruby. It mirrors brew's lookup: a formula file in
+/// `Formula/` or `HomebrewFormula/` (sharded or not), else a top-level `*.rb`, a cask file in
+/// `Casks/`, an alias, a rename or a tap migration. A broader match only holds a package.
+fn taps_providing(taps_dir: &std::path::Path, name: &str, cask: bool) -> Vec<String> {
+    let file = format!("{}.rb", name.to_lowercase());
+    let has_file = |dir: PathBuf, recursive: bool| {
+        walkdir::WalkDir::new(dir)
+            .max_depth(if recursive { usize::MAX } else { 1 })
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_type().is_file() && e.file_name() == file.as_str())
+    };
+    let json_key = |path: PathBuf| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .is_some_and(|json| json.get(name).is_some())
+    };
+    let mut taps = Vec::new();
+    let Ok(users) = std::fs::read_dir(taps_dir) else {
+        return taps;
+    };
+    for user in users.filter_map(|e| e.ok()) {
+        let Ok(repos) = std::fs::read_dir(user.path()) else {
+            continue;
+        };
+        for repo in repos.filter_map(|e| e.ok()) {
+            let path = repo.path();
+            let repo_name = repo.file_name().to_string_lossy().to_string();
+            let Some(short) = repo_name.strip_prefix("homebrew-") else {
+                continue;
+            };
+            let provides = if cask {
+                has_file(path.join("Casks"), true) || json_key(path.join("cask_renames.json"))
+            } else {
+                let file_found = match ["Formula", "HomebrewFormula"]
+                    .iter()
+                    .map(|d| path.join(d))
+                    .find(|d| d.is_dir())
+                {
+                    Some(dir) => has_file(dir, true),
+                    None => has_file(path.clone(), false),
+                };
+                file_found
+                    || path.join("Aliases").join(name).exists()
+                    || json_key(path.join("formula_renames.json"))
+            };
+            let provides = provides || json_key(path.join("tap_migrations.json"));
+            if provides {
+                taps.push(format!("{}/{}", user.file_name().to_string_lossy(), short));
+            }
+        }
+    }
+    taps.sort();
+    taps
+}
+
 /// Untrusted taps and their packages go to the approval inbox instead of brew.
 /// The daemon re-reads the Brewfile every cycle, so only newly held items are reported.
 pub fn hold_untrusted(untrusted: &BrewfilePackages) {
@@ -216,26 +274,46 @@ impl BrewManager {
 
     /// The tap a formula or cask installs from. A short name resolves to whichever tapped
     /// repository brew picks, which can be an untrusted one, so it is looked up.
+    /// `brew info <short name>` would run the Ruby of a formula or cask from any tap before
+    /// Tether checks that tap, so brew is asked only about the qualified core name.
     pub async fn tap_for(&self, name: &str, cask: bool) -> Option<String> {
         if let Some(tap) = tap_of(name) {
             return Some(tap.to_string());
         }
-        let kind = if cask { "--cask" } else { "--formula" };
+        // brew resolves a short name in the core tap first, from API data or the core tap
+        let (kind, core) = if cask {
+            ("--cask", "homebrew/cask")
+        } else {
+            ("--formula", "homebrew/core")
+        };
+        let qualified = format!("{}/{}", core, name);
         let output = command("brew")
             .ok()?
-            .args(["info", "--json=v2", kind, name])
+            .args(["info", "--json=v2", kind, &qualified])
             .output()
             .await
             .ok()?;
-        if !output.status.success() {
-            return None;
+        if output.status.success() {
+            let info: BrewInfo = serde_json::from_slice(&output.stdout).ok()?;
+            return info
+                .formulae
+                .into_iter()
+                .chain(info.casks)
+                .next()
+                .and_then(|entry| entry.tap);
         }
-        let info: BrewInfo = serde_json::from_slice(&output.stdout).ok()?;
-        info.formulae
-            .into_iter()
-            .chain(info.casks)
-            .next()
-            .and_then(|entry| entry.tap)
+        let repository = self.run_brew(&["--repository"]).await.ok()?;
+        let mut taps = taps_providing(
+            &PathBuf::from(repository.trim()).join("Library/Taps"),
+            name,
+            cask,
+        );
+        // brew refuses a short name that more than one other tap provides
+        if taps.len() == 1 {
+            taps.pop()
+        } else {
+            None
+        }
     }
 
     /// Validate and trust-filter a Brewfile before brew sees it.
@@ -815,5 +893,39 @@ brew "git"
     #[test]
     fn test_normalize_formula_name_empty() {
         assert_eq!(normalize_formula_name(""), "");
+    }
+
+    #[test]
+    fn taps_providing_reads_files_without_loading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let tap = |path: &str, content: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        tap("oven-sh/homebrew-bun/Formula/bun.rb", "");
+        tap("evil/homebrew-tap/Formula/b/bd.rb", "");
+        tap("evil/homebrew-tap/Casks/a/app.rb", "");
+        tap("flat/homebrew-tools/tool.rb", "");
+        tap("flat/homebrew-tools/cmd/brew-x.rb", "");
+        tap("alias/homebrew-tap/Formula/real.rb", "");
+        tap("alias/homebrew-tap/Aliases/nick", "");
+        tap(
+            "moved/homebrew-tap/tap_migrations.json",
+            r#"{"gone": "other/tap"}"#,
+        );
+        tap("other/homebrew-bun/HomebrewFormula/bun.rb", "");
+
+        let taps = |name, cask| taps_providing(dir.path(), name, cask);
+        assert_eq!(taps("bun", false), vec!["other/bun", "oven-sh/bun"]);
+        assert_eq!(taps("bd", false), vec!["evil/tap"]);
+        assert_eq!(taps("app", true), vec!["evil/tap"]);
+        assert!(taps("app", false).is_empty());
+        assert_eq!(taps("tool", false), vec!["flat/tools"]);
+        assert!(taps("brew-x", false).is_empty());
+        assert_eq!(taps("nick", false), vec!["alias/tap"]);
+        assert_eq!(taps("gone", false), vec!["moved/tap"]);
+        assert_eq!(taps("gone", true), vec!["moved/tap"]);
+        assert!(taps("wget", false).is_empty());
     }
 }
