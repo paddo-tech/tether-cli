@@ -15,6 +15,7 @@ use ratatui::{
     prelude::*,
     widgets::{Paragraph, Wrap},
 };
+use std::cell::RefCell;
 
 /// Rows per inbox item in the list: two lines and a gap.
 const ITEM_H: u16 = 3;
@@ -25,6 +26,10 @@ const SPLIT_MIN_W: u16 = 110;
 pub struct SecurityTabState {
     /// Index into `state.inbox.items`.
     pub cursor: usize,
+    /// Id of the selected item. A reload keeps the selection on this id, not on the index.
+    /// None after the selected item left the inbox: keys that decide wait until the next
+    /// draw has shown which item the cursor is on.
+    pub selected: RefCell<Option<String>>,
     /// Narrow layouts show the detail pane only after Enter.
     pub detail: bool,
 }
@@ -33,24 +38,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     let len = app.state.inbox.items.len();
     let cmd = match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
-            cursor_down(&mut app.security.cursor, len);
+            let mut cursor = app.security.cursor;
+            cursor_down(&mut cursor, len);
+            move_cursor(app, cursor);
             None
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.security.cursor = app.security.cursor.saturating_sub(1);
+            move_cursor(app, app.security.cursor.saturating_sub(1));
             None
         }
         KeyCode::Enter => {
             app.security.detail = !app.security.detail;
             None
         }
-        KeyCode::Char('a') => selected_id(app).and_then(|id| approve(app, &id)),
-        KeyCode::Char('x') => {
-            if let Some(id) = selected_id(app) {
-                reject(app, &id);
-            }
-            None
-        }
+        KeyCode::Char('a') => selected(app).and_then(|item| approve(app, item)),
+        KeyCode::Char('x') => selected(app).map(|item| Cmd::Reject(Box::new(item))),
         KeyCode::Char('A') => {
             confirm_approve_all(app);
             None
@@ -60,65 +62,71 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     KeyOutcome::Handled(cmd)
 }
 
-fn selected_id(app: &App) -> Option<String> {
-    app.state
-        .inbox
-        .items
-        .get(app.security.cursor)
-        .map(|i| i.id())
+/// The item the user has selected, as displayed.
+fn selected(app: &App) -> Option<InboxItem> {
+    let item = app.state.inbox.items.get(app.security.cursor)?;
+    (app.security.selected.borrow().as_deref() == Some(item.id().as_str())).then(|| item.clone())
 }
 
-/// Move the cursor to an item, for palette actions.
-pub fn select(app: &mut App, id: &str) {
+pub fn move_cursor(app: &mut App, index: usize) {
+    app.security.cursor = index;
+    *app.security.selected.borrow_mut() = app.state.inbox.items.get(index).map(InboxItem::id);
+}
+
+/// Show an item with its details, for the palette. The palette never decides: the user
+/// sees the fingerprint or warning here first.
+pub fn open(app: &mut App, id: &str) {
     if let Some(i) = app.state.inbox.items.iter().position(|i| i.id() == id) {
-        app.security.cursor = i;
+        move_cursor(app, i);
+        app.security.detail = true;
     }
 }
 
-fn reload(app: &mut App) {
-    app.state.inbox = Inbox::load().unwrap_or_default();
-    app.state.trusted = inbox::trusted_machines().unwrap_or_default();
-    clamp_cursor(&mut app.security.cursor, app.state.inbox.items.len());
-}
-
-/// Record approval of the item as displayed, then install a package in the background.
-/// A machine item trusts its key.
-pub fn approve(app: &mut App, id: &str) -> Option<Cmd> {
-    let shown = app.state.inbox.items.iter().find(|i| i.id() == id)?.clone();
-    if shown.kind == Kind::Package && app.install_busy() {
-        return None;
-    }
-    let result = inbox::approve(&shown);
-    reload(app);
-    match result {
-        Ok(item) => match &item.kind {
-            Kind::Package => Some(app.start_inbox_install(item.name.clone(), vec![item])),
-            Kind::TrustMachine { fingerprint, .. } => {
-                app.flash_success(format!(
-                    "Trusted {} ({})",
-                    machine_name(app, &item.name),
-                    fingerprint
-                ));
-                None
-            }
-        },
-        Err(e) => {
-            app.flash_error(e.to_string());
-            None
+/// After the inbox changed, put the cursor back on the selected item.
+pub fn reselect(app: &mut App) {
+    let items = &app.state.inbox.items;
+    let found = app
+        .security
+        .selected
+        .borrow()
+        .as_ref()
+        .and_then(|id| items.iter().position(|i| i.id() == *id));
+    match found {
+        Some(i) => app.security.cursor = i,
+        None => {
+            clamp_cursor(&mut app.security.cursor, items.len());
+            *app.security.selected.borrow_mut() = None;
         }
     }
 }
 
-pub fn reject(app: &mut App, id: &str) {
-    let result = inbox::reject(id);
-    reload(app);
-    match result {
-        Ok(item) => app.flash_success(format!("Rejected {}", item.name)),
-        Err(e) => app.flash_error(e.to_string()),
+pub fn reload(app: &mut App) {
+    app.state.inbox = Inbox::load().unwrap_or_default();
+    app.state.trusted = inbox::trusted_machines().unwrap_or_default();
+    reselect(app);
+}
+
+/// Approve the item as displayed in the background: install a package, or trust a key.
+pub fn approve(app: &mut App, item: InboxItem) -> Option<Cmd> {
+    match &item.kind {
+        Kind::Package => {
+            if app.install_busy() {
+                return None;
+            }
+            Some(app.start_inbox_install(item.name.clone(), vec![item]))
+        }
+        Kind::TrustMachine { .. } => {
+            let label = machine_name(app, &item.name);
+            Some(Cmd::TrustKey {
+                item: Box::new(item),
+                label,
+            })
+        }
     }
 }
 
 /// Machine keys are left out: each needs its fingerprint checked on its own.
+/// The confirm keeps the items it shows, so items that arrive while it is open wait.
 pub fn confirm_approve_all(app: &mut App) {
     let packages = app
         .state
@@ -127,42 +135,26 @@ pub fn confirm_approve_all(app: &mut App) {
         .iter()
         .filter(|i| i.kind == Kind::Package);
     let malicious = packages.clone().filter(|i| is_malicious(i)).count();
-    let count = packages.count() - malicious;
-    if count == 0 {
+    let items: Vec<InboxItem> = packages.filter(|i| !is_malicious(i)).cloned().collect();
+    if items.is_empty() {
         app.flash_info("Nothing to approve");
     } else if !app.install_busy() {
         app.overlays
-            .push(Overlay::Confirm(Confirm::ApproveAll { count, malicious }));
+            .push(Overlay::Confirm(Confirm::ApproveAll { items, malicious }));
     }
 }
 
-/// Approve every item that approval allows, then install them in one background run.
-pub fn approve_all(app: &mut App) -> Option<Cmd> {
+/// Approve and install exactly the items the confirm showed, in one background run.
+pub fn approve_all(app: &mut App, items: Vec<InboxItem>) -> Option<Cmd> {
     if app.install_busy() {
         return None;
     }
-    let shown: Vec<InboxItem> = app
-        .state
-        .inbox
-        .items
-        .iter()
-        .filter(|i| i.kind == Kind::Package && !is_malicious(i))
-        .cloned()
-        .collect();
-    let mut approved = Vec::new();
-    for item in &shown {
-        match inbox::approve(item) {
-            Ok(item) => approved.push(item),
-            Err(e) => app.flash_error(e.to_string()),
-        }
-    }
-    reload(app);
-    let label = match approved.as_slice() {
+    let label = match items.as_slice() {
         [] => return None,
         [one] => one.name.clone(),
         many => format!("{} packages", many.len()),
     };
-    Some(app.start_inbox_install(label, approved))
+    Some(app.start_inbox_install(label, items))
 }
 
 fn is_malicious(item: &InboxItem) -> bool {
@@ -516,6 +508,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let cursor = app.security.cursor.min(items.len() - 1);
+    app.security
+        .selected
+        .borrow_mut()
+        .get_or_insert_with(|| items[cursor].id());
     let view = item_view(app, &items[cursor]);
     if area.width >= SPLIT_MIN_W {
         let [left, detail_area] =

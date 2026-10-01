@@ -1,4 +1,3 @@
-use super::components::clamp_cursor;
 use super::components::config::ConfigTabState;
 use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
@@ -8,7 +7,7 @@ use super::components::packages::{self, PackagesTabState};
 use super::components::palette::Palette;
 use super::components::pkg_import::PkgImport;
 use super::components::profile_picker::ProfilePicker;
-use super::components::security::SecurityTabState;
+use super::components::security::{self, SecurityTabState};
 use super::components::toast::{Toast, ToastKind};
 use super::msg::Cmd;
 use super::repo;
@@ -305,12 +304,12 @@ impl App {
         })
     }
 
-    /// Track an install of approved inbox items. `label` names them in the header and toasts.
-    /// The caller checks `install_busy` before it records the approval.
+    /// Track the approval and install of inbox items as displayed. `label` names them in the
+    /// header and toasts. The caller checks `install_busy` first.
     pub fn start_inbox_install(&mut self, label: String, items: Vec<InboxItem>) -> Cmd {
         let manager_key = items.first().map(|i| i.manager.clone()).unwrap_or_default();
         let op = self.track_install(manager_key, label);
-        Cmd::InstallApproved { op, items }
+        Cmd::ApprovePackages { op, items }
     }
 
     fn track_install(&mut self, manager_key: String, name: String) -> InstallOp {
@@ -336,7 +335,7 @@ impl App {
         self.files.deleted = repo::load_deleted_files(&self.state);
         files::refresh_expanded(self);
         packages::refresh_expanded(self);
-        clamp_cursor(&mut self.security.cursor, self.state.inbox.items.len());
+        security::reselect(self);
         self.last_refresh = Instant::now();
     }
 }

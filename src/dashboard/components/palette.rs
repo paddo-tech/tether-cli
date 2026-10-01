@@ -21,10 +21,8 @@ pub enum Target {
         manager_key: String,
         name: String,
     },
-    /// Approve and install an inbox item by id.
-    Approve(String),
-    /// Reject an inbox item by id.
-    Reject(String),
+    /// Show an inbox item by id with its details. Deciding happens on the Security tab.
+    Inbox(String),
 }
 
 pub struct Entry {
@@ -178,24 +176,14 @@ pub fn entries(app: &App) -> Vec<Entry> {
         });
     }
     for item in pending {
-        let (verb, name) = match item.kind {
-            Kind::Package => (
-                "Approve",
-                format!("{} ({})", item.name, manager_label(&item.manager)),
-            ),
-            Kind::TrustMachine { .. } => ("Trust", format!("machine key of {}", item.name)),
+        let name = match item.kind {
+            Kind::Package => format!("{} ({})", item.name, manager_label(&item.manager)),
+            Kind::TrustMachine { .. } => format!("machine key of {}", item.name),
         };
-        if !item.reasons.contains(&Reason::Malicious) {
-            out.push(Entry {
-                label: format!("{} {}", verb, name),
-                kind: "inbox".into(),
-                target: Target::Approve(item.id()),
-            });
-        }
         out.push(Entry {
-            label: format!("Reject {}", name),
+            label: format!("Review {}", name),
             kind: "inbox".into(),
-            target: Target::Reject(item.id()),
+            target: Target::Inbox(item.id()),
         });
     }
     for tab in Tab::all() {
@@ -363,8 +351,7 @@ pub fn render(f: &mut Frame, app: &App, p: &Palette) {
             Target::Tab(_) => ("#", t.info),
             Target::File { .. } => ("◇", t.ok),
             Target::Package { .. } => ("▪", t.key),
-            Target::Approve(_) => ("✓", t.ok),
-            Target::Reject(_) => ("✗", t.error),
+            Target::Inbox(_) => ("◆", t.warn),
         };
         let max_label = (list.width as usize).saturating_sub(entry.kind.len() + 6);
         let label = truncate(&entry.label, max_label);

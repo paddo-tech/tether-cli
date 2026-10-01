@@ -22,9 +22,9 @@ pub enum Confirm {
     RemoveFile {
         path: String,
     },
-    /// Approve and install every pending inbox item OSV does not list as malicious.
+    /// Approve and install these inbox items, as displayed when the confirm opened.
     ApproveAll {
-        count: usize,
+        items: Vec<crate::packages::inbox::InboxItem>,
         malicious: usize,
     },
 }
@@ -79,7 +79,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             clamp_cursor(&mut app.files.cursor, len);
             app.follow_up_sync()
         }
-        Confirm::ApproveAll { .. } => security::approve_all(app),
+        Confirm::ApproveAll { items, .. } => security::approve_all(app, items),
     }
 }
 
@@ -124,11 +124,11 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             &format!("Remove {} from profile?", path),
             t.error,
         ),
-        Confirm::ApproveAll { count, malicious } => {
+        Confirm::ApproveAll { items, malicious } => {
             let mut msg = format!(
                 "Approve and install {} package{}?",
-                count,
-                if *count == 1 { "" } else { "s" }
+                items.len(),
+                if items.len() == 1 { "" } else { "s" }
             );
             if *malicious > 0 {
                 msg.push_str(&format!(" {} malicious stay held.", malicious));

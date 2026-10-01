@@ -89,6 +89,14 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
         }
         Msg::InstallDone { op, result } => on_install_done(app, op, result),
+        Msg::InboxDone(result) => {
+            security::reload(app);
+            match result {
+                Ok(msg) => app.flash_success(msg),
+                Err(e) => app.flash_error(e),
+            }
+            None
+        }
         Msg::RollbackChecked { plan, result } => match result {
             Err(e) => {
                 app.flash_error(e);
@@ -260,15 +268,9 @@ fn open_or_report(app: &mut App, open: fn(&mut App), empty: &str) {
 fn run_target(app: &mut App, target: Target) -> Option<Cmd> {
     match target {
         Target::Action(action) => return run_action(app, action),
-        Target::Approve(id) => {
+        Target::Inbox(id) => {
             app.active_tab = Tab::Security;
-            security::select(app, &id);
-            return security::approve(app, &id);
-        }
-        Target::Reject(id) => {
-            app.active_tab = Tab::Security;
-            security::select(app, &id);
-            security::reject(app, &id);
+            security::open(app, &id);
         }
         Target::Tab(tab) => app.active_tab = tab,
         Target::File { section, path } => {
@@ -337,6 +339,10 @@ fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
 
 /// The first click selects a row; a click on the selected row opens it like Enter.
 fn click_row(app: &mut App, i: usize) -> Option<Cmd> {
+    if app.active_tab == Tab::Security && app.security.cursor != i {
+        security::move_cursor(app, i);
+        return None;
+    }
     let cursor = match app.active_tab {
         Tab::Overview => return None,
         Tab::Files => &mut app.files.cursor,
@@ -960,18 +966,97 @@ mod tests {
         assert_eq!(app.state.inbox.items.len(), 2);
     }
 
+    fn approve_all_names(app: &App) -> Option<(Vec<String>, usize)> {
+        match app.overlays.last() {
+            Some(Overlay::Confirm(Confirm::ApproveAll { items, malicious })) => {
+                Some((items.iter().map(|i| i.name.clone()).collect(), *malicious))
+            }
+            _ => None,
+        }
+    }
+
+    fn approved_names(cmd: Option<Cmd>) -> Vec<String> {
+        match cmd {
+            Some(Cmd::ApprovePackages { items, .. }) => items.into_iter().map(|i| i.name).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     #[test]
     fn approve_all_confirm_counts_only_safe_items() {
         let mut app = with_inbox();
         app.active_tab = Tab::Security;
         key(&mut app, KeyCode::Char('A'));
-        assert!(matches!(
-            app.overlays.last(),
-            Some(Overlay::Confirm(Confirm::ApproveAll {
-                count: 1,
-                malicious: 1
-            }))
-        ));
+        assert_eq!(
+            approve_all_names(&app),
+            Some((vec!["left-pad".to_string()], 1))
+        );
+    }
+
+    #[test]
+    fn approve_all_approves_only_the_items_it_showed() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('A'));
+        // A sync adds an item while the confirm is open
+        app.state
+            .inbox
+            .items
+            .push(inbox_item("late", vec![Reason::Unsigned]));
+        let cmd = key(&mut app, KeyCode::Char('y'));
+        assert_eq!(approved_names(cmd), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn reload_keeps_the_selection_on_its_item() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('j'));
+        // A reload puts a new item first, so the old index now holds another item
+        app.state
+            .inbox
+            .items
+            .insert(0, inbox_item("new", vec![Reason::Unsigned]));
+        security::reselect(&mut app);
+        assert_eq!(app.security.cursor, 2);
+        let cmd = key(&mut app, KeyCode::Char('a'));
+        assert_eq!(approved_names(cmd), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn selection_that_left_the_inbox_waits_for_a_draw() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('j'));
+        app.state.inbox.items.pop();
+        app.state
+            .inbox
+            .items
+            .push(inbox_item("other", vec![Reason::Unsigned]));
+        security::reselect(&mut app);
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        assert!(key(&mut app, KeyCode::Char('x')).is_none());
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let cmd = key(&mut app, KeyCode::Char('a'));
+        assert_eq!(approved_names(cmd), vec!["other"]);
+    }
+
+    #[test]
+    fn decisions_go_to_the_runtime_with_the_displayed_item() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('j'));
+        let Some(Cmd::Reject(item)) = key(&mut app, KeyCode::Char('x')) else {
+            panic!("expected a reject command");
+        };
+        assert_eq!(item.name, "left-pad");
+        // Nothing changes on the UI thread until the runtime reports back
+        assert_eq!(app.state.inbox.items.len(), 2);
     }
 
     #[test]
@@ -996,26 +1081,32 @@ mod tests {
         assert!(text.contains("SHA256:abc"));
         assert!(text.contains("trust key"));
         key(&mut app, KeyCode::Char('A'));
-        assert!(matches!(
-            app.overlays.last(),
-            Some(Overlay::Confirm(Confirm::ApproveAll {
-                count: 1,
-                malicious: 1
-            }))
-        ));
+        assert_eq!(
+            approve_all_names(&app),
+            Some((vec!["left-pad".to_string()], 1))
+        );
+        app.overlays.clear();
+        let Some(Cmd::TrustKey { item, label }) = key(&mut app, KeyCode::Char('a')) else {
+            panic!("expected a trust command");
+        };
+        assert_eq!((item.name.as_str(), label.as_str()), ("laptop", "laptop"));
     }
 
     #[test]
-    fn palette_offers_inbox_actions_but_never_approves_malicious() {
-        let app = with_inbox();
+    fn palette_shows_inbox_items_but_never_decides() {
+        let mut app = with_inbox();
         let targets: Vec<Target> = palette::entries(&app)
             .into_iter()
             .map(|e| e.target)
             .collect();
-        assert!(targets.contains(&Target::Approve("npm:left-pad".into())));
-        assert!(targets.contains(&Target::Reject("npm:evil".into())));
-        assert!(!targets.contains(&Target::Approve("npm:evil".into())));
+        assert!(targets.contains(&Target::Inbox("npm:left-pad".into())));
+        assert!(targets.contains(&Target::Inbox("npm:evil".into())));
         assert!(targets.contains(&Target::Action(Action::ApproveAll)));
+        assert!(run_target(&mut app, Target::Inbox("npm:left-pad".into())).is_none());
+        assert_eq!(app.active_tab, Tab::Security);
+        assert_eq!(app.security.cursor, 1);
+        assert!(app.security.detail);
+        assert!(app.overlays.is_empty());
     }
 
     #[test]

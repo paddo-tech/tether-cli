@@ -2,6 +2,7 @@
 
 use super::app::{DaemonOp, Job};
 use super::msg::{Cmd, Msg};
+use crate::packages::inbox::{InboxItem, Kind};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Child, Command, Stdio};
@@ -62,11 +63,11 @@ impl Runtime {
                     },
                 );
             }
-            Cmd::InstallApproved { op, items } => {
+            Cmd::ApprovePackages { op, items } => {
                 let failed_op = op.clone();
                 self.spawn(
                     async move {
-                        let result = install_approved(&items).await;
+                        let result = approve_and_install(&items).await;
                         Msg::InstallDone { op, result }
                     },
                     move |e| {
@@ -75,6 +76,34 @@ impl Runtime {
                             result: Err(e),
                         })
                     },
+                );
+            }
+            Cmd::TrustKey { item, label } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(match crate::packages::inbox::approve(&item) {
+                            Ok(item) => match item.kind {
+                                Kind::TrustMachine { fingerprint, .. } => {
+                                    Ok(format!("Trusted {} ({})", label, fingerprint))
+                                }
+                                Kind::Package => Ok(format!("Approved {}", item.name)),
+                            },
+                            Err(e) => Err(e.to_string()),
+                        })
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::Reject(item) => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::packages::inbox::reject(&item.id())
+                                .map(|item| format!("Rejected {}", item.name))
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
                 );
             }
             Cmd::CheckRollback(plan) => {
@@ -283,11 +312,16 @@ async fn osv_guard(manager_key: &str, packages: &[(String, Option<String>)]) -> 
     }
 }
 
-/// Install each item and report every failure together.
-async fn install_approved(items: &[crate::packages::inbox::InboxItem]) -> Result<(), String> {
+/// Approve each item as displayed and install it, and report every failure together.
+/// An item that changed since it was displayed is not approved.
+async fn approve_and_install(items: &[InboxItem]) -> Result<(), String> {
     let mut failed = Vec::new();
     for item in items {
-        if let Err(e) = crate::packages::inbox::install(item, false).await {
+        let result = match crate::packages::inbox::approve(item) {
+            Ok(item) => crate::packages::inbox::install(&item, false).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
             failed.push(format!("{}: {}", item.name, e));
         }
     }

@@ -33,6 +33,8 @@ pub enum Msg {
         short_hash: String,
         result: Result<(), String>,
     },
+    /// A machine key was trusted or an item rejected: the toast text, or the error.
+    InboxDone(Result<String, String>),
     /// OSV verdict on the packages a rollback would install.
     RollbackChecked {
         plan: RollbackPlan,
@@ -52,11 +54,19 @@ pub enum Cmd {
         op: InstallOp,
         machine_id: String,
     },
-    /// Install approved inbox items one after another. Reports one `InstallDone`.
-    InstallApproved {
+    /// Approve inbox items exactly as displayed, then install them one after another.
+    /// Reports one `InstallDone`. Inbox writes wait on its lock, so they run off the UI thread.
+    ApprovePackages {
         op: InstallOp,
         items: Vec<InboxItem>,
     },
+    /// Trust the machine key of an inbox item as displayed. `label` names the machine.
+    TrustKey {
+        item: Box<InboxItem>,
+        label: String,
+    },
+    /// Reject an inbox item.
+    Reject(Box<InboxItem>),
     /// Ask OSV about the packages a rollback would install before it runs.
     CheckRollback(RollbackPlan),
     /// Count sync commits per day; `git log` over the sync repo is too slow for the UI thread.
