@@ -176,8 +176,11 @@ impl PackageManager for PnpmManager {
                 }
                 continue;
             }
+            // `pnpm add -g name@1.2.3` saves that exact version as the range, and a plain
+            // update never moves past it. `--latest` ignores the saved range and still
+            // applies the release-age limit.
             let output = command("pnpm")?
-                .args(["update", "-g"])
+                .args(["update", "-g", "--latest"])
                 .args(&cooldown)
                 .args(script_args)
                 .args(&batch)
@@ -195,7 +198,8 @@ impl PackageManager for PnpmManager {
         Ok(())
     }
 
-    /// `wanted` is what `pnpm update -g` installs; pnpm applies the release-age limit to it.
+    /// `latest` is what `pnpm update -g --latest` installs; pnpm applies the release-age
+    /// limit to it.
     async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
         let output = command("pnpm")?
             .args(["outdated", "-g", "--format", "json"])
@@ -203,7 +207,7 @@ impl PackageManager for PnpmManager {
             .output()
             .await?;
         // pnpm exits 1 when something is outdated, so the JSON decides
-        super::npm::parse_outdated_json(&output.stdout)
+        super::npm::parse_outdated_json(&output.stdout, true)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {

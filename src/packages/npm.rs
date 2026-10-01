@@ -20,11 +20,13 @@ struct NpmPackage {
 struct OutdatedEntry {
     current: Option<String>,
     wanted: Option<String>,
+    latest: Option<String>,
 }
 
-/// Name and `wanted` version from `npm outdated --json` or `pnpm outdated --format json`,
-/// for each package whose `wanted` differs from `current`.
-pub(super) fn parse_outdated_json(stdout: &[u8]) -> Result<Vec<(String, String)>> {
+/// Name and upgrade target from `npm outdated --json` or `pnpm outdated --format json`, for
+/// each package whose target differs from `current`. The target is `latest` when the
+/// upgrade ignores the saved range, else `wanted`.
+pub(super) fn parse_outdated_json(stdout: &[u8], latest: bool) -> Result<Vec<(String, String)>> {
     let value: serde_json::Value = serde_json::from_slice(stdout)?;
     if let Some(summary) = value.get("error").and_then(|e| e.get("summary")) {
         anyhow::bail!("{}", summary.as_str().unwrap_or("outdated check failed"));
@@ -33,8 +35,8 @@ pub(super) fn parse_outdated_json(stdout: &[u8]) -> Result<Vec<(String, String)>
     let mut candidates: Vec<(String, String)> = entries
         .into_iter()
         .filter_map(|(name, entry)| {
-            let wanted = entry.wanted?;
-            (entry.current.as_ref() != Some(&wanted)).then_some((name, wanted))
+            let target = if latest { entry.latest } else { entry.wanted }?;
+            (entry.current.as_ref() != Some(&target)).then_some((name, target))
         })
         .collect();
     candidates.sort();
@@ -215,7 +217,7 @@ impl PackageManager for NpmManager {
             .output()
             .await?;
         // npm exits 1 when something is outdated, so the JSON decides
-        parse_outdated_json(&output.stdout)
+        parse_outdated_json(&output.stdout, false)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -246,19 +248,28 @@ mod tests {
             "missing": {"wanted": "1.0.0", "latest": "1.0.0"}
         }"#;
         assert_eq!(
-            parse_outdated_json(stdout).unwrap(),
+            parse_outdated_json(stdout, false).unwrap(),
             vec![
                 ("cowsay".to_string(), "1.6.0".to_string()),
                 ("missing".to_string(), "1.0.0".to_string())
             ]
         );
-        assert!(parse_outdated_json(b"{}").unwrap().is_empty());
+        // pnpm saves an exact pin, so `wanted` stays at `current` and only `latest` moves
+        assert_eq!(
+            parse_outdated_json(stdout, true).unwrap(),
+            vec![
+                ("@scope/same".to_string(), "3.0.0".to_string()),
+                ("cowsay".to_string(), "1.6.0".to_string()),
+                ("missing".to_string(), "1.0.0".to_string())
+            ]
+        );
+        assert!(parse_outdated_json(b"{}", false).unwrap().is_empty());
     }
 
     #[test]
     fn outdated_json_error_is_an_error() {
         let stdout =
             br#"{"error": {"code": "ENOVERSIONS", "summary": "No versions", "detail": ""}}"#;
-        assert!(parse_outdated_json(stdout).is_err());
+        assert!(parse_outdated_json(stdout, false).is_err());
     }
 }
