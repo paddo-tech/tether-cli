@@ -263,7 +263,9 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
         let remote_manifest = std::fs::read_to_string(&manifest_path)?;
         let local_manifest = manager.export_manifest().await?;
 
-        let remote_packages: Vec<_> = remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+        let remote_names =
+            crate::packages::pin::manifest_names(manager.ecosystem(), &remote_manifest);
+        let remote_packages: Vec<_> = remote_names.iter().map(String::as_str).collect();
         let local_packages: Vec<_> = local_manifest.lines().filter(|l| !l.is_empty()).collect();
 
         let diff = diff_package_lists(&remote_packages, &local_packages);

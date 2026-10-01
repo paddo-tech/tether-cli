@@ -36,10 +36,12 @@ impl GemManager {
 
 // Default gems ship with each Ruby and dependencies follow their parents, so only
 // top-level gems are recorded, matching brew's --installed-on-request. Dependencies of
-// default gems are ignored so a user-installed newer copy (e.g. stringio) still counts
+// default gems are ignored so a user-installed newer copy (e.g. stringio) still counts.
+// Each line is "name version" with the newest installed version
 const TOP_LEVEL_GEMS: &str = "specs = Gem::Specification.reject(&:default_gem?)
 deps = specs.flat_map { |s| s.runtime_dependencies.map(&:name) }
-puts specs.map(&:name).uniq - deps";
+latest = specs.group_by(&:name).transform_values { |v| v.map(&:version).max }
+(latest.keys - deps).each { |n| puts \"#{n} #{latest[n]}\" }";
 
 impl Default for GemManager {
     fn default() -> Self {
@@ -63,14 +65,14 @@ impl PackageManager for GemManager {
         let mut packages = Vec::new();
 
         for line in String::from_utf8(output.stdout)?.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            let mut parts = line.split_whitespace();
+            let Some(name) = parts.next() else {
                 continue;
-            }
+            };
 
             packages.push(PackageInfo {
-                name: line.to_string(),
-                version: None,
+                name: name.to_string(),
+                version: parts.next().map(str::to_string),
             });
         }
 

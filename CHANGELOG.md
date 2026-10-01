@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Package manifests now record the version each machine has installed: `name@1.2.3` in `npm.txt`, `pnpm.txt` and `bun.txt`, `name==1.2.3` in `uv.txt`, and `name:1.2.3` in `gems.txt`. When machines differ, the manifest keeps the newest version. A new machine installs that exact version. Lines without a version still work and install the newest release that passes the release-age limit. The Brewfile stays unpinned, because Homebrew installs only the current release
+
 ### Security
 
 - Tether now checks every package name from a manifest before it runs a package manager. It skips names that look like flags, URLs, paths, tarballs or `git+`/`github:`/`file:`/`link:` specs, and shows a warning

@@ -3,6 +3,7 @@ pub mod bun;
 pub mod gem;
 pub mod manager;
 pub mod npm;
+pub mod pin;
 pub mod pnpm;
 pub mod policy;
 pub mod uv;

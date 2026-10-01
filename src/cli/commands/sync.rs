@@ -1846,12 +1846,20 @@ pub async fn build_machine_state(
         ),
     ];
 
+    machine_state.package_versions.clear();
     for (enabled, manager) in managers {
         if enabled && manager.is_available().await {
             if let Ok(packages) = manager.list_installed().await {
                 machine_state.packages.insert(
                     manager.name().to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
+                );
+                machine_state.package_versions.insert(
+                    manager.name().to_string(),
+                    packages
+                        .into_iter()
+                        .filter_map(|p| Some((p.name, p.version?)))
+                        .collect(),
                 );
             }
         }

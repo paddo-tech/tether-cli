@@ -1,6 +1,6 @@
 use super::command;
 use super::policy::{self, PackagePolicy};
-use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager};
+use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -71,10 +71,17 @@ impl PackageManager for UvManager {
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
         validate_name(Ecosystem::Python, &package.name)?;
+        let pkg_spec = match &package.version {
+            Some(version) => {
+                validate_version(version)?;
+                format!("{}=={}", package.name, version)
+            }
+            None => package.name.clone(),
+        };
         let cooldown = self.cooldown().await;
         let mut args = vec!["tool", "install"];
         args.extend(cooldown.args().iter().map(String::as_str));
-        args.push(&package.name);
+        args.push(&pkg_spec);
         self.run_uv(&args).await?;
         Ok(())
     }

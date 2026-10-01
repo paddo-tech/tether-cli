@@ -1,6 +1,9 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::packages::{normalize_formula_name, BrewManager, BrewfilePackages, PackageManager};
+use crate::packages::pin::{format_pin, parse_pin};
+use crate::packages::{
+    normalize_formula_name, BrewManager, BrewfilePackages, Ecosystem, PackageManager,
+};
 use crate::sync::state::PackageState;
 use crate::sync::{MachineState, SyncState};
 use anyhow::Result;
@@ -15,6 +18,8 @@ struct PackageManagerDef {
     display_name: &'static str,
     /// Manifest filename
     manifest_file: &'static str,
+    /// Naming and version-pin syntax of the manifest lines
+    ecosystem: Ecosystem,
 }
 
 /// Map a machine-state package key to its manifest filename in `manifests/`.
@@ -34,26 +39,31 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
         state_key: "npm",
         display_name: "npm",
         manifest_file: "npm.txt",
+        ecosystem: Ecosystem::Npm,
     },
     PackageManagerDef {
         state_key: "pnpm",
         display_name: "pnpm",
         manifest_file: "pnpm.txt",
+        ecosystem: Ecosystem::Npm,
     },
     PackageManagerDef {
         state_key: "bun",
         display_name: "bun",
         manifest_file: "bun.txt",
+        ecosystem: Ecosystem::Npm,
     },
     PackageManagerDef {
         state_key: "gem",
         display_name: "gem",
         manifest_file: "gems.txt",
+        ecosystem: Ecosystem::Gem,
     },
     PackageManagerDef {
         state_key: "uv",
         display_name: "uv",
         manifest_file: "uv.txt",
+        ecosystem: Ecosystem::Python,
     },
 ];
 
@@ -343,9 +353,10 @@ async fn import_simple_manager(
     // Filter to only missing packages
     let missing: Vec<_> = manifest
         .lines()
+        .map(str::trim)
         .filter(|line| {
-            let pkg = line.trim();
-            !pkg.is_empty() && !removed_packages.contains(pkg) && !local_packages.contains(pkg)
+            let (name, _) = parse_pin(def.ecosystem, line);
+            !line.is_empty() && !removed_packages.contains(&name) && !local_packages.contains(&name)
         })
         .map(|s| s.to_string())
         .collect();
@@ -401,6 +412,7 @@ pub async fn sync_packages(
     }
 
     let union_packages = MachineState::compute_union_packages(&machines);
+    let union_versions = MachineState::compute_union_versions(&machines);
 
     // Homebrew - generate manifest from union
     if config.packages.brew.enabled {
@@ -419,7 +431,14 @@ pub async fn sync_packages(
         };
 
         if enabled {
-            sync_simple_manager(def, &union_packages, state, &manifests_dir, dry_run)?;
+            sync_simple_manager(
+                def,
+                &union_packages,
+                &union_versions,
+                state,
+                &manifests_dir,
+                dry_run,
+            )?;
         }
     }
 
@@ -484,19 +503,16 @@ fn sync_brew(
 fn sync_simple_manager(
     def: &PackageManagerDef,
     union_packages: &HashMap<String, Vec<String>>,
+    union_versions: &HashMap<String, HashMap<String, String>>,
     state: &mut SyncState,
     manifests_dir: &Path,
     dry_run: bool,
 ) -> Result<()> {
-    let packages = union_packages
-        .get(def.state_key)
-        .cloned()
-        .unwrap_or_default();
-    let manifest = if packages.is_empty() {
-        String::new()
-    } else {
-        packages.join("\n") + "\n"
-    };
+    let manifest = manifest_lines(
+        def.ecosystem,
+        union_packages.get(def.state_key),
+        union_versions.get(def.state_key),
+    );
     let hash = crate::sha256_hex(manifest.as_bytes());
     let manifest_path = manifests_dir.join(def.manifest_file);
 
@@ -531,9 +547,41 @@ fn sync_simple_manager(
     Ok(())
 }
 
+/// One pinned line per package; packages no machine reports a version for stay unpinned.
+fn manifest_lines(
+    ecosystem: Ecosystem,
+    packages: Option<&Vec<String>>,
+    versions: Option<&HashMap<String, String>>,
+) -> String {
+    let lines: Vec<String> = packages
+        .into_iter()
+        .flatten()
+        .map(|name| {
+            let version = versions.and_then(|v| v.get(name)).map(String::as_str);
+            format_pin(ecosystem, name, version)
+        })
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_manifest_lines_pin_known_versions() {
+        let packages = vec!["@types/node".to_string(), "left-pad".to_string()];
+        let versions = HashMap::from([("@types/node".to_string(), "24.1.0".to_string())]);
+        assert_eq!(
+            manifest_lines(Ecosystem::Npm, Some(&packages), Some(&versions)),
+            "@types/node@24.1.0\nleft-pad\n"
+        );
+        assert_eq!(manifest_lines(Ecosystem::Npm, None, None), "");
+    }
 
     #[test]
     fn test_update_last_upgrade_creates_entry() {
