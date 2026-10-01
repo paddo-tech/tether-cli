@@ -218,8 +218,15 @@ pub async fn inbox_list() -> Result<()> {
     Ok(())
 }
 
-/// Approve a held package and install it now.
+/// Approve a held package and install it now. The sync lock keeps the daemon from
+/// installing the same package while this install runs.
 pub async fn approve(id: &str) -> Result<()> {
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    approve_locked(id).await
+}
+
+/// The caller holds the sync lock.
+async fn approve_locked(id: &str) -> Result<()> {
     let item = inbox::approve(id)?;
     Output::info(&format!("Approved {}. Installing...", item.id()));
     inbox::install(&item, true).await?;
@@ -235,6 +242,7 @@ pub async fn reject(id: &str) -> Result<()> {
 }
 
 /// Ask about each held package. Only a terminal user can answer, so callers check for one.
+/// The caller holds the sync lock.
 pub async fn review_inbox() -> Result<()> {
     let items = inbox::list()?;
     if items.is_empty() {
@@ -254,7 +262,7 @@ pub async fn review_inbox() -> Result<()> {
                     if item.reasons.contains(&Reason::Malicious) {
                         continue;
                     }
-                    if let Err(e) = approve(&item.id()).await {
+                    if let Err(e) = approve_locked(&item.id()).await {
                         Output::warning(&format!("{}: {}", item.name, e));
                     }
                 }
@@ -271,7 +279,7 @@ pub async fn review_inbox() -> Result<()> {
         };
         let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
         let result = match choice {
-            "Install" => approve(&item.id()).await,
+            "Install" => approve_locked(&item.id()).await,
             "Reject" => reject(&item.id()).await,
             _ => Ok(()),
         };
