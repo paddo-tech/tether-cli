@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::packages::inbox::Inbox;
+use crate::packages::inbox::{self, Inbox, TrustedMachine};
 use crate::sync::{ConflictState, MachineState, SyncEngine, SyncState, TeamManifest};
 
 pub struct DashboardState {
@@ -12,6 +12,7 @@ pub struct DashboardState {
     pub daemon_running: bool,
     pub activity_lines: Vec<String>,
     pub inbox: Inbox,
+    pub trusted: Vec<TrustedMachine>,
 }
 
 impl DashboardState {
@@ -40,6 +41,7 @@ impl DashboardState {
             daemon_running,
             activity_lines,
             inbox: Inbox::load().unwrap_or_default(),
+            trusted: inbox::trusted_machines().unwrap_or_default(),
         }
     }
 

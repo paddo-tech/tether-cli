@@ -23,6 +23,10 @@ pub struct SyncState {
     /// Dotfile paths dismissed when prompted to import from other profiles
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub dismissed_imports: std::collections::HashSet<String>,
+    /// Sync repo HEAD when package import last checked commit signatures. Only commits
+    /// after it are checked, so history from before signing never floods the inbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signatures_checked: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +220,13 @@ impl MachineState {
         let content = std::fs::read_to_string(path)?;
         let mut state: Self = serde_json::from_str(&content)?;
         state.validate()?;
+        if state.machine_id != machine_id {
+            anyhow::bail!(
+                "machines/{}.json names machine {}",
+                machine_id,
+                state.machine_id
+            );
+        }
         Ok(Some(state))
     }
 
@@ -241,6 +252,15 @@ impl MachineState {
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(mut state) = serde_json::from_str::<MachineState>(&content) {
+                        // A record under another file name could pose as another machine
+                        if path.file_stem().and_then(|s| s.to_str()) != Some(&state.machine_id) {
+                            crate::cli::Output::warning(&format!(
+                                "Ignoring {}: it claims to be machine {}",
+                                path.display(),
+                                state.machine_id
+                            ));
+                            continue;
+                        }
                         // Skip invalid machine states
                         if state.validate().is_ok() {
                             machines.push(state);
@@ -337,6 +357,7 @@ impl SyncState {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
+            signatures_checked: None,
         }
     }
 
@@ -668,6 +689,21 @@ mod tests {
         assert!(loaded.ignored_dotfiles.is_empty());
         assert!(loaded.project_configs.is_empty());
         assert!(loaded.ignored_project_configs.is_empty());
+    }
+
+    #[test]
+    fn test_machine_record_must_match_its_file_name() {
+        let temp = TempDir::new().unwrap();
+        let sync_path = temp.path();
+        MachineState::new("real").save_to_repo(sync_path).unwrap();
+        let impostor = serde_json::to_string(&MachineState::new("real")).unwrap();
+        std::fs::write(sync_path.join("machines/extra.json"), &impostor).unwrap();
+        std::fs::write(sync_path.join("machines/other.json"), &impostor).unwrap();
+
+        let all = MachineState::list_all(sync_path).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].machine_id, "real");
+        assert!(MachineState::load_from_repo(sync_path, "other").is_err());
     }
 
     #[test]

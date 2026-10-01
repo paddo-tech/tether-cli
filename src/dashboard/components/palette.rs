@@ -2,7 +2,7 @@
 
 use super::{cursor_down, files, manager_label, scroll_for, select_row, truncate};
 use crate::dashboard::app::{Action, App, Hit, Overlay, Tab};
-use crate::packages::inbox::Reason;
+use crate::packages::inbox::{Kind, Reason};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -177,10 +177,16 @@ pub fn entries(app: &App) -> Vec<Entry> {
         });
     }
     for item in pending {
-        let name = format!("{} ({})", item.name, manager_label(&item.manager));
+        let (verb, name) = match item.kind {
+            Kind::Package => (
+                "Approve",
+                format!("{} ({})", item.name, manager_label(&item.manager)),
+            ),
+            Kind::TrustMachine { .. } => ("Trust", format!("machine key of {}", item.name)),
+        };
         if !item.reasons.contains(&Reason::Malicious) {
             out.push(Entry {
-                label: format!("Approve {}", name),
+                label: format!("{} {}", verb, name),
                 kind: "inbox".into(),
                 target: Target::Approve(item.id()),
             });

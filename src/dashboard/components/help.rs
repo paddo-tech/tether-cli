@@ -129,7 +129,7 @@ pub fn render_overlay(f: &mut Frame, t: &Theme) {
         key("click", "Select; again to open"),
         Line::from(""),
         section("Security"),
-        key("a", "Approve and install"),
+        key("a", "Approve, or trust key"),
         key("x", "Reject"),
         key("A", "Approve all safe items"),
         key("Enter", "Details"),

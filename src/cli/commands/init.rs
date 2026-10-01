@@ -137,6 +137,9 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
     // Create initial state
     let state = SyncState::load()?;
     state.save()?;
+    if needs_personal_repo {
+        crate::sync::signing::load_or_create(&state.machine_id)?;
+    }
 
     // Initial sync (only if personal features enabled)
     if needs_personal_repo {

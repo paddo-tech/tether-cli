@@ -1,5 +1,7 @@
 use crate::cli::{Output, Prompt};
 use crate::config::Config;
+use crate::packages::inbox;
+use crate::sync::signing;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
@@ -23,6 +25,8 @@ pub async fn list() -> Result<()> {
 
     let state = SyncState::load()?;
     let current_machine = &state.machine_id;
+    let published = signing::published_keys(&sync_path);
+    let trusted = inbox::trusted_machines()?;
 
     println!();
     println!("{}", "Synced Machines".bright_cyan().bold());
@@ -45,6 +49,9 @@ pub async fn list() -> Result<()> {
         Cell::new("Last Sync")
             .add_attribute(Attribute::Bold)
             .fg(Color::Cyan),
+        Cell::new("Signing Key")
+            .add_attribute(Attribute::Bold)
+            .fg(Color::Cyan),
         Cell::new("").add_attribute(Attribute::Bold).fg(Color::Cyan),
     ]);
 
@@ -64,6 +71,18 @@ pub async fn list() -> Result<()> {
             .as_deref()
             .unwrap_or(config.profile_name(&machine.machine_id));
 
+        let key = published
+            .iter()
+            .find(|(id, _)| id == &machine.machine_id)
+            .map(|(_, key)| signing::fingerprint(key));
+        let key_cell = match key {
+            Some(fp) if trusted.iter().any(|t| t.fingerprint == fp) => {
+                Cell::new(format!("{} (trusted)", fp)).fg(Color::Green)
+            }
+            Some(fp) => Cell::new(format!("{} (untrusted)", fp)).fg(Color::Yellow),
+            None => Cell::new("-"),
+        };
+
         table.add_row(vec![
             if is_current {
                 Cell::new(&machine.machine_id).fg(Color::Green)
@@ -74,6 +93,7 @@ pub async fn list() -> Result<()> {
             Cell::new(&machine.hostname),
             Cell::new(version),
             Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
+            key_cell,
             Cell::new(marker).fg(Color::Green),
         ]);
     }
@@ -174,6 +194,10 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 
     // Remove old file
     std::fs::remove_file(&old_file)?;
+    let old_key = signing::published_key_path(&sync_path, old);
+    if old_key.exists() {
+        std::fs::rename(&old_key, signing::published_key_path(&sync_path, new))?;
+    }
 
     // Update local state if this is the current machine
     let mut state = SyncState::load()?;
@@ -229,6 +253,10 @@ pub async fn remove(name: &str) -> Result<()> {
     }
 
     std::fs::remove_file(&machine_file)?;
+    let key_file = signing::published_key_path(&sync_path, name);
+    if key_file.exists() {
+        std::fs::remove_file(&key_file)?;
+    }
 
     // Clean up profile assignment
     if config.machine_profiles.remove(name).is_some() {
@@ -244,6 +272,33 @@ pub async fn remove(name: &str) -> Result<()> {
     git.push()?;
 
     Output::success(&format!("Removed machine '{}'", name));
+    Ok(())
+}
+
+pub async fn trust(name: &str) -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        Output::warning("Machine management not available in team-only mode");
+        return Ok(());
+    }
+    let trusted = inbox::trust_machine(&SyncEngine::sync_path()?, name)?;
+    Output::success(&format!(
+        "Trusted machine {} with key {}",
+        trusted.machine_id, trusted.fingerprint
+    ));
+    Ok(())
+}
+
+pub async fn untrust(name: &str) -> Result<()> {
+    if SyncState::load()?.machine_id == name {
+        Output::error("Cannot untrust the current machine");
+        return Ok(());
+    }
+    if inbox::untrust_machine(name)? {
+        Output::success(&format!("Machine {} is no longer trusted", name));
+    } else {
+        Output::info(&format!("Machine {} was not trusted", name));
+    }
     Ok(())
 }
 

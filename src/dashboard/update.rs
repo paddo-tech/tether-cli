@@ -432,7 +432,7 @@ mod tests {
     use crate::dashboard::components::confirm::Confirm;
     use crate::dashboard::components::toast::{Toast, ToastKind, MAX_TOASTS};
     use crate::dashboard::state::DashboardState;
-    use crate::packages::inbox::{InboxItem, Reason};
+    use crate::packages::inbox::{InboxItem, Kind, Reason};
     use crate::sync::{ConflictState, TeamManifest};
     use std::collections::HashMap;
     use std::time::Instant;
@@ -448,6 +448,7 @@ mod tests {
             daemon_running: false,
             activity_lines: Vec::new(),
             inbox: Default::default(),
+            trusted: Vec::new(),
         };
         App::new(state, HashMap::new())
     }
@@ -786,6 +787,8 @@ mod tests {
 
     fn inbox_item(name: &str, reasons: Vec<Reason>) -> InboxItem {
         InboxItem {
+            kind: Kind::Package,
+            signer: None,
             manager: "npm".into(),
             name: name.into(),
             version: Some("1.0.0".into()),
@@ -894,6 +897,37 @@ mod tests {
     fn approve_all_confirm_counts_only_safe_items() {
         let mut app = with_inbox();
         app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('A'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::ApproveAll {
+                count: 1,
+                malicious: 1
+            }))
+        ));
+    }
+
+    #[test]
+    fn machine_key_items_render_and_stay_out_of_approve_all() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        let mut machine = inbox_item("laptop", vec![Reason::KeyChanged]);
+        machine.manager = "machine".into();
+        machine.kind = Kind::TrustMachine {
+            public_key: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:abc".into(),
+        };
+        app.state.inbox.items.insert(0, machine);
+        app.active_tab = Tab::Security;
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("KEY CHANGED"));
+        assert!(text.contains("SHA256:abc"));
+        assert!(text.contains("trust key"));
         key(&mut app, KeyCode::Char('A'));
         assert!(matches!(
             app.overlays.last(),

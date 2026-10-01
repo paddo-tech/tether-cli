@@ -6,6 +6,7 @@ pub mod git;
 pub mod layers;
 pub mod merge;
 pub mod packages;
+pub mod signing;
 pub mod state;
 pub mod team;
 

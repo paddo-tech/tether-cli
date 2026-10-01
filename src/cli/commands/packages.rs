@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
-use crate::packages::inbox::{self, InboxItem, Reason};
+use crate::packages::inbox::{self, InboxItem, Kind, Reason};
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
     UvManager,
@@ -189,6 +189,9 @@ async fn uninstall_package(
 
 fn describe(item: &InboxItem) -> String {
     let mut text = item.id();
+    if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
+        text.push_str(&format!(" key {}", fingerprint));
+    }
     if let Some(version) = &item.version {
         text.push_str(&format!(" {}", version));
     }
@@ -218,9 +221,16 @@ pub async fn inbox_list() -> Result<()> {
     Ok(())
 }
 
-/// Approve a held package and install it now.
+/// Approve a held package and install it now, or trust a held machine key.
 pub async fn approve(id: &str) -> Result<()> {
     let item = inbox::approve(id)?;
+    if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
+        Output::success(&format!(
+            "Trusted machine {} with key {}",
+            item.name, fingerprint
+        ));
+        return Ok(());
+    }
     Output::info(&format!("Approved {}. Installing...", item.id()));
     inbox::install(&item, true).await?;
     Output::success(&format!("Installed {}", item.name));
@@ -250,8 +260,9 @@ pub async fn review_inbox() -> Result<()> {
         match Prompt::select("Install these packages?", options, 0)? {
             0 => {}
             1 => {
+                // A machine key needs its own answer, so "Install all" leaves it pending
                 for item in items {
-                    if item.reasons.contains(&Reason::Malicious) {
+                    if item.reasons.contains(&Reason::Malicious) || item.kind != Kind::Package {
                         continue;
                     }
                     if let Err(e) = approve(&item.id()).await {
@@ -266,12 +277,14 @@ pub async fn review_inbox() -> Result<()> {
     for item in items {
         let options = if item.reasons.contains(&Reason::Malicious) {
             vec!["Reject", "Decide later"]
+        } else if item.kind != Kind::Package {
+            vec!["Trust", "Reject", "Decide later"]
         } else {
             vec!["Install", "Reject", "Decide later"]
         };
         let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
         let result = match choice {
-            "Install" => approve(&item.id()).await,
+            "Install" | "Trust" => approve(&item.id()).await,
             "Reject" => reject(&item.id()).await,
             _ => Ok(()),
         };

@@ -221,6 +221,10 @@ pub enum MachineAction {
     Rename { old: String, new: String },
     /// Remove a machine from sync
     Remove { name: String },
+    /// Trust the signing key a machine published, so its package changes install on their own
+    Trust { name: String },
+    /// Stop trusting a machine's signing key
+    Untrust { name: String },
     /// Manage machine profile assignment
     Profile {
         #[command(subcommand)]
@@ -599,6 +603,8 @@ impl Cli {
                 MachineAction::List => machines::list().await,
                 MachineAction::Rename { old, new } => machines::rename(old, new).await,
                 MachineAction::Remove { name } => machines::remove(name).await,
+                MachineAction::Trust { name } => machines::trust(name).await,
+                MachineAction::Untrust { name } => machines::untrust(name).await,
                 MachineAction::Profile { action } => match action {
                     MachineProfileAction::Set { profile } => machines::profile_set(profile).await,
                     MachineProfileAction::Unset => machines::profile_unset().await,
