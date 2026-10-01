@@ -175,6 +175,8 @@ pub struct Probe {
     pub typed: Vec<KeyEvent>,
     /// The terminal did not answer in time, so its reply may still arrive as input.
     pub late_reply: bool,
+    /// The OSC reply had begun but not ended when the wait gave up.
+    pub mid_reply: bool,
 }
 
 /// Whether the terminal background is dark: COLORFGBG first, then an OSC 11 query.
@@ -196,7 +198,18 @@ pub fn probe_background() -> Probe {
         dark: parse_osc11(&reply),
         typed: keys_from_bytes(&typed),
         late_reply: !da1_done(&raw),
+        mid_reply: osc_open(&raw),
     }
+}
+
+/// Whether the last OSC reply in `raw` lacks its BEL or ST terminator.
+fn osc_open(raw: &[u8]) -> bool {
+    raw.windows(2)
+        .rposition(|w| w == b"\x1b]")
+        .is_some_and(|start| {
+            let rest = &raw[start + 2..];
+            !rest.contains(&0x07) && !rest.windows(2).any(|w| w == b"\x1b\\")
+        })
 }
 
 /// Separate terminal replies (OSC `ESC ] ... BEL|ST` and DA1 `ESC [ ? ... c`) from typed bytes.
@@ -282,10 +295,11 @@ pub struct LateReplyFilter {
 }
 
 impl LateReplyFilter {
-    pub fn new(now: Instant) -> Self {
+    /// `in_reply` is set when the reply's start was already read, so its tail comes next.
+    pub fn new(now: Instant, in_reply: bool) -> Self {
         Self {
             until: now + LATE_REPLY_WINDOW,
-            in_reply: false,
+            in_reply,
         }
     }
 
@@ -460,7 +474,7 @@ mod tests {
     #[test]
     fn late_reply_is_dropped_from_key_input() {
         let start = Instant::now();
-        let mut filter = LateReplyFilter::new(start);
+        let mut filter = LateReplyFilter::new(start, false);
         let alt = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
         let key = |c| KeyEvent::from(KeyCode::Char(c));
         assert!(filter.allow(&key('j'), start));
@@ -471,6 +485,14 @@ mod tests {
         assert!(!filter.allow(&alt('\\'), start));
         assert!(filter.allow(&key('d'), start));
         assert!(filter.allow(&alt(']'), start + Duration::from_secs(5)));
+
+        // The reply began before the query gave up, so its tail arrives without Alt+].
+        assert!(osc_open(b"\x1b]11;rgb:dd"));
+        assert!(!osc_open(b"\x1b]11;rgb:dddd/0000/0000\x07"));
+        let mut filter = LateReplyFilter::new(start, true);
+        assert!(!filter.allow(&key('d'), start));
+        assert!(!filter.allow(&alt('\\'), start));
+        assert!(filter.allow(&key('d'), start));
     }
 
     #[test]

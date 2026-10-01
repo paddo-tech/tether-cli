@@ -166,9 +166,10 @@ pub fn entries(app: &App) -> Vec<Entry> {
         });
     }
     let pending = &app.state.inbox.items;
+    // Approve all skips machine keys, so only a safe package makes the action useful.
     if pending
         .iter()
-        .any(|i| !i.reasons.contains(&Reason::Malicious))
+        .any(|i| i.kind == Kind::Package && !i.reasons.contains(&Reason::Malicious))
     {
         out.push(Entry {
             label: "Approve all pending packages".into(),

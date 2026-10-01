@@ -85,7 +85,7 @@ pub fn run() -> Result<()> {
     });
     let mut late_reply = probe
         .late_reply
-        .then(|| theme::LateReplyFilter::new(Instant::now()));
+        .then(|| theme::LateReplyFilter::new(Instant::now(), probe.mid_reply));
     stdout().execute(EnterAlternateScreen)?;
     stdout().write_all(MOUSE_ON)?;
     stdout().flush()?;
