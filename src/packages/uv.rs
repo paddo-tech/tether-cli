@@ -92,7 +92,11 @@ impl PackageManager for UvManager {
     }
 
     async fn cooldown(&self) -> Cooldown {
-        policy::uv_cooldown(self.policy().min_release_age_days, chrono::Utc::now())
+        policy::uv_cooldown(
+            self.policy().min_release_age_days,
+            policy::tool_version("uv").await,
+            chrono::Utc::now(),
+        )
     }
 
     async fn update_all(&self) -> Result<()> {

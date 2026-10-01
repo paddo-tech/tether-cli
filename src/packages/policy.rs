@@ -156,17 +156,31 @@ pub fn bun_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cool
     }
 }
 
-/// uv takes an absolute cutoff. A timestamp works on every uv release with `uv tool`,
-/// unlike the duration syntax, which only newer releases accept.
-pub fn uv_cooldown(days: u32, now: DateTime<Utc>) -> Cooldown {
+/// uv saves `--exclude-newer` in the tool receipt, and later upgrades reuse it unless they
+/// pass their own. uv 0.9.17 and later accept a duration, which the receipt keeps relative
+/// (`exclude-newer-span`); older uv gets a timestamp, which each upgrade with the flag replaces.
+/// uv 0.11.24 and later accept `false`, which clears a saved cutoff when the limit is 0.
+/// On older uv a saved cutoff stays until `uv tool install --force <name>` reinstalls the tool.
+pub fn uv_cooldown(
+    days: u32,
+    version: Option<((u64, u64, u64), bool)>,
+    now: DateTime<Utc>,
+) -> Cooldown {
+    let v = version.map(|(v, _)| v);
     if days == 0 {
-        return Cooldown::Off;
+        return if v >= Some((0, 11, 24)) {
+            Cooldown::Args(vec!["--exclude-newer".to_string(), "false".to_string()])
+        } else {
+            Cooldown::Off
+        };
     }
-    let cutoff = now - chrono::Duration::days(i64::from(days));
-    Cooldown::Args(vec![
-        "--exclude-newer".to_string(),
-        cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    ])
+    let value = if v >= Some((0, 9, 17)) {
+        format!("{} days", days)
+    } else {
+        let cutoff = now - chrono::Duration::days(i64::from(days));
+        cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    Cooldown::Args(vec!["--exclude-newer".to_string(), value])
 }
 
 /// npm and pnpm run dependency scripts unless told not to, so scripts stay off
@@ -325,18 +339,21 @@ mod tests {
     }
 
     #[test]
-    fn uv_cooldown_is_rfc3339_cutoff() {
+    fn uv_cooldown_duration_or_cutoff() {
         let now = DateTime::parse_from_rfc3339("2026-10-02T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let args =
+            |value: &str| Cooldown::Args(vec!["--exclude-newer".to_string(), value.to_string()]);
+        assert_eq!(uv_cooldown(7, v("uv 0.12.21"), now), args("7 days"));
+        assert_eq!(uv_cooldown(7, v("uv 0.9.17"), now), args("7 days"));
         assert_eq!(
-            uv_cooldown(7, now),
-            Cooldown::Args(vec![
-                "--exclude-newer".to_string(),
-                "2026-09-25T12:00:00Z".to_string()
-            ])
+            uv_cooldown(7, v("uv 0.9.16"), now),
+            args("2026-09-25T12:00:00Z")
         );
-        assert_eq!(uv_cooldown(0, now), Cooldown::Off);
+        assert_eq!(uv_cooldown(7, None, now), args("2026-09-25T12:00:00Z"));
+        assert_eq!(uv_cooldown(0, v("uv 0.11.24"), now), args("false"));
+        assert_eq!(uv_cooldown(0, v("uv 0.11.23"), now), Cooldown::Off);
     }
 
     #[test]
