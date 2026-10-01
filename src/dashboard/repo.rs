@@ -233,3 +233,65 @@ fn repo_path_to_dotfile_with_profiles(
         format!(".{}", name)
     }
 }
+
+/// Sync commits per local day, oldest first, ending today. Empty without a sync repo.
+pub fn commit_activity(days: usize) -> Vec<u64> {
+    let Ok(sync_path) = SyncEngine::sync_path() else {
+        return Vec::new();
+    };
+    let since = format!("--since={}.days", days);
+    let Ok(output) = std::process::Command::new("git")
+        .args(["log", &since, "--format=%at"])
+        .current_dir(&sync_path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stamps: Vec<i64> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    daily_counts(&stamps, chrono::Local::now().date_naive(), days)
+}
+
+/// Bucket unix timestamps into `days` local-day counts ending on `today`.
+pub fn daily_counts(stamps: &[i64], today: chrono::NaiveDate, days: usize) -> Vec<u64> {
+    let mut counts = vec![0u64; days];
+    for &ts in stamps {
+        let Some(dt) = chrono::DateTime::from_timestamp(ts, 0) else {
+            continue;
+        };
+        let date = dt.with_timezone(&chrono::Local).date_naive();
+        let ago = (today - date).num_days();
+        if (0..days as i64).contains(&ago) {
+            counts[days - 1 - ago as usize] += 1;
+        }
+    }
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn daily_counts_bucket_by_local_day() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let at = |d: u32, h: u32| {
+            chrono::Local
+                .with_ymd_and_hms(2026, 10, d, h, 0, 0)
+                .unwrap()
+                .timestamp()
+        };
+        let stamps = [at(2, 9), at(2, 23), at(1, 0), at(1, 1), at(1, 2)];
+        assert_eq!(daily_counts(&stamps, today, 3), vec![0, 3, 2]);
+        assert_eq!(
+            daily_counts(&[at(2, 9) + 86_400 * 5], today, 3),
+            vec![0, 0, 0]
+        );
+    }
+}

@@ -4,12 +4,17 @@ use super::components::file_import::FileImport;
 use super::components::files::{self, FilesTabState};
 use super::components::machines::MachinesTabState;
 use super::components::packages::{self, PackagesTabState};
+use super::components::palette::Palette;
 use super::components::pkg_import::PkgImport;
 use super::components::profile_picker::ProfilePicker;
+use super::components::toast::{Toast, ToastKind};
 use super::msg::Cmd;
 use super::repo;
 use super::state::DashboardState;
 use super::theme::Theme;
+use crossterm::event::KeyEvent;
+use ratatui::layout::{Position, Rect};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -20,6 +25,9 @@ pub enum Tab {
     Packages,
     Machines,
     Config,
+    // Security goes here: add the variant, its title and its slot in `all()`, then
+    // route it in `view::view` and `update::on_key`. Tab bar, number keys,
+    // mouse and palette read `Tab::all()`.
 }
 
 impl Tab {
@@ -73,6 +81,14 @@ impl Job {
     }
 }
 
+/// A package install in flight. `id` tells its result apart from an earlier install of the same package.
+#[derive(Clone, PartialEq, Debug)]
+pub struct InstallOp {
+    pub id: u64,
+    pub manager_key: String,
+    pub name: String,
+}
+
 /// Layers drawn over the active tab, bottom to top.
 pub enum Overlay {
     /// Not modal: keys still reach the tab underneath.
@@ -81,12 +97,38 @@ pub enum Overlay {
     FileImport(FileImport),
     PkgImport(PkgImport),
     ProfilePicker(ProfilePicker),
+    Palette(Palette),
 }
 
 impl Overlay {
     pub fn is_modal(&self) -> bool {
         !matches!(self, Overlay::Help)
     }
+}
+
+/// Something the user can run from a key, a footer hint or the command palette.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Action {
+    Sync,
+    ToggleDaemon,
+    Refresh,
+    Help,
+    Quit,
+    ImportPackages,
+    ImportDotfile,
+    PickProfile,
+}
+
+/// A clickable region recorded by the last draw.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Hit {
+    Tab(Tab),
+    /// Row `n` of the active tab's list.
+    Row(usize),
+    /// Item `n` of the top overlay's list.
+    Item(usize),
+    /// Acts like pressing this key.
+    Key(KeyEvent),
 }
 
 pub struct App {
@@ -97,8 +139,7 @@ pub struct App {
     pub running: Option<Job>,
     pub daemon_op: DaemonOp,
     pub last_refresh: Instant,
-    pub flash_error: Option<(Instant, String)>,
-    pub flash_message: Option<(Instant, String)>,
+    pub toasts: Vec<Toast>,
     pub overlays: Vec<Overlay>,
     pub overview_scroll: usize,
     pub files: FilesTabState,
@@ -106,7 +147,18 @@ pub struct App {
     pub machines: MachinesTabState,
     pub config: ConfigTabState,
     pub uninstalling: Option<(String, String)>,
-    pub installing: Option<(String, String)>,
+    pub installing: Option<InstallOp>,
+    next_op_id: u64,
+    /// A sync was asked for while a job ran; it starts when that job exits.
+    pub sync_pending: bool,
+    /// Sync commits per day, oldest first, ending today.
+    pub sync_activity: Vec<u64>,
+    /// Terminal size, for layout math outside `view`.
+    pub viewport: Rect,
+    /// Clickable regions from the last draw, topmost last. `view` refills it.
+    pub hits: RefCell<Vec<(Rect, Hit)>>,
+    /// Animation clock origin.
+    started: Instant,
 }
 
 impl App {
@@ -119,8 +171,7 @@ impl App {
             running: None,
             daemon_op: DaemonOp::None,
             last_refresh: Instant::now(),
-            flash_error: None,
-            flash_message: None,
+            toasts: Vec::new(),
             overlays: Vec::new(),
             overview_scroll: 0,
             files: FilesTabState::new(deleted),
@@ -129,15 +180,63 @@ impl App {
             config: ConfigTabState::default(),
             uninstalling: None,
             installing: None,
+            next_op_id: 0,
+            sync_pending: false,
+            sync_activity: Vec::new(),
+            viewport: Rect::new(0, 0, 80, 24),
+            hits: RefCell::new(Vec::new()),
+            started: Instant::now(),
         }
     }
 
     pub fn flash_error(&mut self, msg: impl Into<String>) {
-        self.flash_error = Some((Instant::now(), msg.into()));
+        self.toast(ToastKind::Error, msg);
     }
 
     pub fn flash_success(&mut self, msg: impl Into<String>) {
-        self.flash_message = Some((Instant::now(), msg.into()));
+        self.toast(ToastKind::Success, msg);
+    }
+
+    pub fn flash_info(&mut self, msg: impl Into<String>) {
+        self.toast(ToastKind::Info, msg);
+    }
+
+    fn toast(&mut self, kind: ToastKind, msg: impl Into<String>) {
+        self.toasts
+            .push(Toast::new(kind, msg.into(), Instant::now()));
+        let excess = self
+            .toasts
+            .len()
+            .saturating_sub(super::components::toast::MAX_TOASTS);
+        self.toasts.drain(..excess);
+    }
+
+    /// Something on screen moves, so the loop draws at frame rate.
+    pub fn animating(&self) -> bool {
+        self.running.is_some()
+            || self.daemon_op != DaemonOp::None
+            || self.installing.is_some()
+            || self.uninstalling.is_some()
+            || !self.toasts.is_empty()
+    }
+
+    /// Milliseconds since start, for spinners and pulses.
+    pub fn clock_ms(&self) -> u128 {
+        self.started.elapsed().as_millis()
+    }
+
+    /// Topmost clickable region under a cell.
+    pub fn hit_at(&self, x: u16, y: u16) -> Option<Hit> {
+        self.hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(r, _)| r.contains(Position::new(x, y)))
+            .map(|(_, h)| *h)
+    }
+
+    pub fn add_hit(&self, area: Rect, hit: Hit) {
+        self.hits.borrow_mut().push((area, hit));
     }
 
     pub fn machine_id(&self) -> &str {
@@ -171,6 +270,28 @@ impl App {
         } else {
             Some(Cmd::Run(Job::Sync))
         }
+    }
+
+    /// Track a new install, replacing any earlier one, and return the command that runs it.
+    pub fn start_install(&mut self, manager_key: String, name: String) -> Cmd {
+        self.next_op_id += 1;
+        let op = InstallOp {
+            id: self.next_op_id,
+            manager_key,
+            name,
+        };
+        self.installing = Some(op.clone());
+        Cmd::Install {
+            op,
+            machine_id: self.machine_id().to_string(),
+        }
+    }
+
+    /// Sync after a change, or once the running job exits.
+    pub fn follow_up_sync(&mut self) -> Option<Cmd> {
+        let cmd = self.sync_cmd();
+        self.sync_pending = cmd.is_none();
+        cmd
     }
 
     pub fn reload_state(&mut self) {

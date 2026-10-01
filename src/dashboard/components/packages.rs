@@ -1,13 +1,14 @@
 use super::confirm::Confirm;
+use super::diff::{self, DiffLine};
 use super::pkg_import::{PkgImport, PkgImportItem};
-use super::{clamp_cursor, cursor_down, manager_label};
+use super::{clamp_cursor, cursor_down, list, manager_label, panel, row};
 use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::msg::KeyOutcome;
 use crate::dashboard::repo;
 use crate::dashboard::state::DashboardState;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::Paragraph};
 use std::collections::{HashMap, HashSet};
 
 pub struct PackagesTabState {
@@ -19,7 +20,7 @@ pub struct PackagesTabState {
     pub history: Vec<crate::sync::FileLogEntry>,
     /// History entry whose diff is expanded.
     pub history_commit: Option<String>,
-    pub history_diff: Vec<String>,
+    pub history_diff: Vec<DiffLine>,
 }
 
 impl PackagesTabState {
@@ -88,7 +89,7 @@ fn toggle_row(app: &mut App) {
                 app.packages.history_diff.clear();
             } else {
                 let manager = app.packages.history_manager.clone().unwrap_or_default();
-                app.packages.history_diff = repo::pkg_diff(&manager, commit_hash);
+                app.packages.history_diff = diff::annotate(&repo::pkg_diff(&manager, commit_hash));
                 app.packages.history_commit = Some(commit_hash.clone());
             }
             let len = build_rows(&app.state, &app.packages).len();
@@ -124,7 +125,7 @@ fn confirm_rollback(app: &mut App) {
 }
 
 /// Offer packages that other machines have and this machine neither has nor removed.
-fn open_import(app: &mut App) {
+pub fn open_import(app: &mut App) {
     let current_machine_id = app.machine_id().to_string();
     let current_machine = app
         .state
@@ -219,7 +220,7 @@ pub fn refresh_expanded(app: &mut App) {
     if let Some(ref manager) = app.packages.history_manager {
         app.packages.history = repo::pkg_history(manager);
         if let Some(ref commit) = app.packages.history_commit {
-            app.packages.history_diff = repo::pkg_diff(manager, commit);
+            app.packages.history_diff = diff::annotate(&repo::pkg_diff(manager, commit));
         }
     }
     let len = build_rows(&app.state, &app.packages).len();
@@ -245,7 +246,7 @@ pub enum PkgRow {
         message: String,
     },
     DiffRow {
-        line: String,
+        line: DiffLine,
     },
 }
 
@@ -312,84 +313,96 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let pt = &app.packages;
     let rows = build_rows(&app.state, pt);
-    let cursor = pt.cursor;
-
-    let block = Block::default()
-        .title(" Packages ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.border));
-    let inner_area = block.inner(area);
+    let total: usize = rows
+        .iter()
+        .map(|r| match r {
+            PkgRow::Header { count, .. } => *count,
+            _ => 0,
+        })
+        .sum();
+    let block = panel(" Packages ", true, t).title_top(
+        Line::from(Span::styled(
+            format!(" {} installed ", total),
+            Style::default().fg(t.muted),
+        ))
+        .right_aligned(),
+    );
+    let inner = block.inner(area);
     f.render_widget(block, area);
 
     if rows.is_empty() {
-        let msg = Paragraph::new(Span::styled(
-            "  No package data for this machine",
-            Style::default().fg(t.muted),
-        ));
-        f.render_widget(msg, inner_area);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "No package data for this machine",
+                Style::default().fg(t.dim),
+            )),
+            inner,
+        );
         return;
     }
+    let max = rows
+        .iter()
+        .map(|r| match r {
+            PkgRow::Header { count, .. } => *count,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1);
 
-    let visible_height = inner_area.height as usize;
-    let scroll = if cursor >= visible_height {
-        cursor - visible_height + 1
-    } else {
-        0
-    };
-
-    for (y, (row_idx, row)) in
-        (inner_area.y..inner_area.y + inner_area.height).zip(rows.iter().enumerate().skip(scroll))
-    {
-        let is_selected = row_idx == cursor;
-        let row_area = Rect::new(inner_area.x, y, inner_area.width, 1);
-
-        match row {
+    list(
+        f,
+        app,
+        area,
+        inner,
+        &rows,
+        pt.cursor,
+        |f, r, pkg_row, selected| match pkg_row {
             PkgRow::Header {
                 manager_key,
                 label,
                 count,
-                ..
             } => {
-                let arrow = if pt.expanded.as_deref() == Some(manager_key.as_str()) {
-                    "v"
-                } else {
-                    ">"
-                };
-                let style = if is_selected {
-                    Style::default().fg(t.accent).bg(t.selection).bold()
-                } else {
-                    Style::default().fg(t.accent).bold()
-                };
-                let bg_style = if is_selected {
-                    Style::default().bg(t.selection)
-                } else {
-                    Style::default()
-                };
-                let line = Line::from(vec![
-                    Span::styled(format!("  {} {} ", arrow, label), style),
+                let open = pt.expanded.as_deref() == Some(manager_key.as_str());
+                let history = pt.history_manager.as_deref() == Some(manager_key.as_str());
+                let bar_w = 16usize;
+                let filled = (count * bar_w).div_ceil(max);
+                let mut left = vec![
                     Span::styled(
-                        format!("({})", count),
-                        if is_selected {
-                            Style::default().fg(t.selection).bg(t.selection)
-                        } else {
-                            Style::default().fg(t.muted)
-                        },
+                        if open { "▾ " } else { "▸ " },
+                        Style::default().fg(t.accent),
                     ),
-                    Span::styled(" ".repeat(inner_area.width as usize), bg_style),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
+                    Span::styled(label.as_str(), Style::default().fg(t.accent).bold()),
+                ];
+                if history {
+                    left.push(Span::styled("  history", Style::default().fg(t.info)));
+                }
+                row(
+                    f,
+                    r,
+                    Line::from(left),
+                    Line::from(vec![
+                        Span::styled("━".repeat(filled), Style::default().fg(t.accent)),
+                        Span::styled("━".repeat(bar_w - filled), Style::default().fg(t.border)),
+                        Span::styled(format!(" {:>4}", count), Style::default().fg(t.text)),
+                    ]),
+                );
             }
             PkgRow::Package { name, .. } => {
-                let style = if is_selected {
-                    Style::default().fg(t.text).bg(t.selection)
-                } else {
-                    Style::default().fg(t.text)
-                };
-                let line = Line::from(vec![
-                    Span::styled(format!("      {}", name), style),
-                    Span::styled(" ".repeat(inner_area.width as usize), style),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
+                f.render_widget(
+                    Line::from(vec![
+                        Span::styled("    • ", Style::default().fg(t.dim)),
+                        Span::styled(
+                            name.as_str(),
+                            if selected {
+                                Style::default().fg(t.text).bold()
+                            } else {
+                                Style::default().fg(t.text)
+                            },
+                        ),
+                    ]),
+                    r,
+                );
             }
             PkgRow::HistoryEntry {
                 commit_hash,
@@ -398,109 +411,71 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 machine_id,
                 message,
             } => {
-                let bg = if is_selected { t.selection } else { t.base_bg };
-                let arrow = if pt.history_commit.as_deref() == Some(commit_hash.as_str()) {
-                    "v"
-                } else {
-                    ">"
-                };
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("     {} ", arrow),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(
-                        short_hash.clone(),
-                        Style::default().fg(t.hash).bg(bg).bold(),
-                    ),
-                    Span::styled(
-                        format!("  {:>12}", date),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(
-                        format!("  {:15}", machine_id),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(format!("  {}", message), Style::default().fg(t.text).bg(bg)),
-                    Span::styled(
-                        " ".repeat(inner_area.width as usize),
-                        Style::default().bg(bg),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
+                let open = pt.history_commit.as_deref() == Some(commit_hash.as_str());
+                super::files::history_row(f, r, open, short_hash, date, machine_id, message, app);
             }
-            PkgRow::DiffRow { line: diff_line } => {
-                let bg = if is_selected { t.selection } else { t.base_bg };
-                let line = Line::from(vec![
-                    Span::styled("        ", Style::default().bg(bg)),
-                    Span::styled(
-                        diff_line.clone(),
-                        Style::default().fg(t.diff_fg(diff_line)).bg(bg),
-                    ),
-                    Span::styled(
-                        " ".repeat(inner_area.width as usize),
-                        Style::default().bg(bg),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
-            }
-        }
-    }
+            PkgRow::DiffRow { line } => diff::render_line(f, r, line, selected, t),
+        },
+    );
 }
 
-/// Simple overview render (for the Overview tab) - shows manager summary
+/// Manager summary for the Overview tab, with a bar per manager.
 pub fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let state = &app.state;
-    let current_machine_id = state
-        .sync_state
-        .as_ref()
-        .map(|s| s.machine_id.as_str())
-        .unwrap_or("");
+    let machine_id = app.machine_id();
+    let machine = state.machines.iter().find(|m| m.machine_id == machine_id);
+    let mut managers: Vec<_> = machine
+        .map(|m| m.packages.iter().collect())
+        .unwrap_or_default();
+    managers.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+    let total: usize = managers.iter().map(|(_, p)| p.len()).sum();
 
-    let machine = state
-        .machines
-        .iter()
-        .find(|m| m.machine_id == current_machine_id);
-
-    let items: Vec<ListItem> = match machine {
-        Some(machine) => {
-            let mut managers: Vec<_> = machine.packages.iter().collect();
-            managers.sort_by(|a, b| a.0.cmp(b.0));
-
-            if managers.is_empty() {
-                vec![ListItem::new(Span::styled(
-                    "  No packages tracked",
-                    Style::default().fg(t.muted),
-                ))]
-            } else {
-                managers
-                    .into_iter()
-                    .map(|(key, packages)| {
-                        let label = manager_label(key);
-                        ListItem::new(Line::from(vec![
-                            Span::styled(format!(" {} ", label), Style::default().fg(t.accent)),
-                            Span::raw("  "),
-                            Span::styled(
-                                format!("{} packages", packages.len()),
-                                Style::default().fg(t.muted),
-                            ),
-                        ]))
-                    })
-                    .collect()
-            }
-        }
-        None => vec![ListItem::new(Span::styled(
-            "  No package data",
-            Style::default().fg(t.muted),
-        ))],
-    };
-
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Packages ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border)),
+    let block = panel(" Packages ", false, t).title_top(
+        Line::from(Span::styled(
+            format!(" {} ", total),
+            Style::default().fg(t.dim),
+        ))
+        .right_aligned(),
     );
-    f.render_widget(list, area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if managers.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "No packages tracked",
+                Style::default().fg(t.dim),
+            )),
+            inner,
+        );
+        return;
+    }
+    let max = managers
+        .iter()
+        .map(|(_, p)| p.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let label_w = 15usize;
+    let bar_w = (inner.width as usize).saturating_sub(label_w + 6).max(1);
+    for (i, (key, pkgs)) in managers.iter().take(inner.height as usize).enumerate() {
+        let rect = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        let filled = if pkgs.is_empty() {
+            0
+        } else {
+            (pkgs.len() * bar_w).div_ceil(max)
+        };
+        f.render_widget(
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<w$}", manager_label(key), w = label_w),
+                    Style::default().fg(t.text),
+                ),
+                Span::styled("▆".repeat(filled), Style::default().fg(t.accent)),
+                Span::styled("▁".repeat(bar_w - filled), Style::default().fg(t.border)),
+                Span::styled(format!(" {:>4}", pkgs.len()), Style::default().fg(t.muted)),
+            ]),
+            rect,
+        );
+    }
 }

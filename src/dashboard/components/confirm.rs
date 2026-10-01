@@ -1,9 +1,8 @@
-use super::{centered, clamp_cursor, files, manager_label};
-use crate::dashboard::app::{App, Job, Overlay};
+use super::{centered, clamp_cursor, files, manager_label, popup};
+use crate::dashboard::app::{App, Hit, Job, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
-use crate::dashboard::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 
@@ -77,19 +76,20 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             app.reload_state();
             let len = files::build_rows(&app.state, &app.files).len();
             clamp_cursor(&mut app.files.cursor, len);
-            app.sync_cmd()
+            app.follow_up_sync()
         }
     }
 }
 
-pub fn render(f: &mut Frame, confirm: &Confirm, t: &Theme) {
+pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
+    let t = &app.theme;
     match confirm {
         Confirm::Uninstall { manager_key, name } => render_popup(
             f,
+            app,
             "Uninstall",
             &format!("Uninstall {} ({})?", name, manager_label(manager_key)),
             t.error,
-            t,
         ),
         Confirm::Restore {
             dotfile,
@@ -97,13 +97,14 @@ pub fn render(f: &mut Frame, confirm: &Confirm, t: &Theme) {
             ..
         } => render_popup(
             f,
+            app,
             "Restore",
             &format!("Restore {} to {}?", dotfile, short_hash),
             t.warn,
-            t,
         ),
         Confirm::Rollback(plan) => render_popup(
             f,
+            app,
             "Roll back packages",
             &format!(
                 "Roll back {} to {} (+{} install, -{} uninstall)?",
@@ -113,46 +114,60 @@ pub fn render(f: &mut Frame, confirm: &Confirm, t: &Theme) {
                 plan.uninstall
             ),
             t.warn,
-            t,
         ),
         Confirm::RemoveFile { path } => render_popup(
             f,
+            app,
             "Remove",
             &format!("Remove {} from profile?", path),
             t.error,
-            t,
         ),
     }
 }
 
-pub fn render_popup(f: &mut Frame, title: &str, msg: &str, border: Color, t: &Theme) {
+/// A question with clickable confirm and cancel buttons.
+pub fn render_popup(f: &mut Frame, app: &App, title: &str, msg: &str, color: Color) {
+    let t = &app.theme;
     let area = f.area();
-    let width = (msg.len() as u16 + 8).min(area.width.saturating_sub(4));
-    let height = 5u16.min(area.height.saturating_sub(2));
-    let popup_area = centered(area, width, height);
-
-    f.render_widget(Clear, popup_area);
-
-    let text = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {}", msg),
-            Style::default().fg(t.text),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  y", t.key_hint()),
-            Span::styled(" confirm    ", Style::default().fg(t.muted)),
-            Span::styled("n/Esc", t.key_hint()),
-            Span::styled(" cancel", Style::default().fg(t.muted)),
-        ]),
-    ];
-
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .title(format!(" {} ", title))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border)),
+    let width = (msg.chars().count() as u16 + 8)
+        .max(36)
+        .min(area.width.saturating_sub(4));
+    let inner_w = width.saturating_sub(4).max(1) as usize;
+    let msg_lines = msg.chars().count().div_ceil(inner_w).max(1) as u16;
+    let height = (msg_lines + 5).min(area.height.saturating_sub(2));
+    let rect = centered(area, width, height);
+    let block = popup(f, rect, title, color, t);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(msg)
+            .style(Style::default().fg(t.text))
+            .wrap(Wrap { trim: true }),
+        Rect {
+            y: inner.y + 1,
+            height: msg_lines,
+            ..inner
+        },
     );
-    f.render_widget(paragraph, popup_area);
+
+    let yes = " y  confirm ";
+    let no = " n  cancel ";
+    let by = inner.bottom().saturating_sub(1);
+    let yes_w = yes.chars().count() as u16;
+    let no_w = no.chars().count() as u16;
+    let x = inner.right().saturating_sub(yes_w + no_w + 2);
+    let yes_rect = Rect::new(x, by, yes_w, 1);
+    let no_rect = Rect::new(x + yes_w + 2, by, no_w, 1);
+    if no_rect.right() <= inner.right() {
+        f.render_widget(
+            Paragraph::new(yes).style(Style::default().fg(t.brand_fg).bg(color).bold()),
+            yes_rect,
+        );
+        f.render_widget(
+            Paragraph::new(no).style(Style::default().fg(t.text).bg(t.selection)),
+            no_rect,
+        );
+        app.add_hit(yes_rect, Hit::Key(KeyEvent::from(KeyCode::Char('y'))));
+        app.add_hit(no_rect, Hit::Key(KeyEvent::from(KeyCode::Char('n'))));
+    }
 }

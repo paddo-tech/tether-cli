@@ -1,24 +1,32 @@
 use super::app::{App, Overlay, Tab};
 use super::components::{
-    config, confirm, file_import, files, header, help, machines, overview, packages, pkg_import,
-    profile_picker, tabs,
+    backdrop, config, confirm, file_import, files, header, help, machines, overview, packages,
+    palette, pkg_import, profile_picker, tabs, toast,
 };
-use ratatui::prelude::*;
+use ratatui::{prelude::*, widgets::Block};
 
 pub fn view(f: &mut Frame, app: &App) {
-    let main_chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(4),
+    app.hits.borrow_mut().clear();
+    let t = &app.theme;
+    f.render_widget(
+        Block::default().style(Style::default().bg(t.base_bg).fg(t.text)),
+        f.area(),
+    );
+
+    let [head, tab_bar, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(3),
         Constraint::Length(1),
     ])
-    .split(f.area());
-    let content_chunks =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).split(main_chunks[1]);
+    .areas(f.area().inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    }));
 
-    header::render(f, main_chunks[0], app);
-    tabs::render(f, content_chunks[0], app);
+    header::render(f, head, app);
+    tabs::render(f, tab_bar, app);
 
-    let body = content_chunks[1];
     match app.active_tab {
         Tab::Overview => overview::render(f, body, app),
         Tab::Files => files::render(f, body, app),
@@ -27,15 +35,23 @@ pub fn view(f: &mut Frame, app: &App) {
         Tab::Config => config::render(f, body, app),
     }
 
-    help::render_bar(f, main_chunks[2], app.active_tab, &app.theme);
+    help::render_bar(f, footer, app);
 
     for overlay in &app.overlays {
+        if overlay.is_modal() {
+            backdrop(f, t);
+            // Only the modal's own regions stay clickable.
+            app.hits.borrow_mut().clear();
+        }
         match overlay {
-            Overlay::Help => help::render_overlay(f, &app.theme),
-            Overlay::Confirm(c) => confirm::render(f, c, &app.theme),
-            Overlay::FileImport(p) => file_import::render(f, p, &app.theme),
-            Overlay::PkgImport(p) => pkg_import::render(f, p, &app.theme),
-            Overlay::ProfilePicker(p) => profile_picker::render(f, p, &app.theme),
+            Overlay::Help => help::render_overlay(f, t),
+            Overlay::Confirm(c) => confirm::render(f, app, c),
+            Overlay::FileImport(p) => file_import::render(f, app, p),
+            Overlay::PkgImport(p) => pkg_import::render(f, app, p),
+            Overlay::ProfilePicker(p) => profile_picker::render(f, app, p),
+            Overlay::Palette(p) => palette::render(f, app, p),
         }
     }
+
+    toast::render(f, &app.toasts, t);
 }

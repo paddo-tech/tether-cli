@@ -55,6 +55,22 @@ pub struct Config {
     /// Named profiles that restrict what a machine syncs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub profiles: HashMap<String, ProfileConfig>,
+    #[serde(default, skip_serializing_if = "DashboardConfig::is_default")]
+    pub dashboard: DashboardConfig,
+}
+
+/// Dashboard appearance
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DashboardConfig {
+    /// "auto" (default), "mocha", "latte" or "ansi"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+}
+
+impl DashboardConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Feature toggles - what tether should sync
@@ -1080,6 +1096,7 @@ impl Default for Config {
             project_configs: ProjectConfigSettings::default(),
             machine_profiles: HashMap::new(),
             profiles: HashMap::new(),
+            dashboard: DashboardConfig::default(),
         }
     }
 }
