@@ -1,9 +1,8 @@
-use super::{centered, cursor_down};
+use super::{cursor_down, picker as picker_popup};
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::msg::Cmd;
-use crate::dashboard::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::prelude::*;
 
 /// Picker for this machine's profile.
 pub struct ProfilePicker {
@@ -42,49 +41,35 @@ fn select(app: &mut App, picker: ProfilePicker) {
     app.reload_state();
 }
 
-pub fn render(f: &mut Frame, picker: &ProfilePicker, t: &Theme) {
-    let area = f.area();
-    let title = " Profile (this machine) ";
-    let hint = "  New: tether machines profile create <name>";
-    let max_option_len = picker.options.iter().map(|o| o.len()).max().unwrap_or(10);
-    let min_width = (max_option_len + 10)
-        .max(title.len() + 2)
-        .max(hint.len() + 4);
-    let width = (min_width as u16).min(area.width.saturating_sub(4));
-    let height = ((picker.options.len() + 5) as u16).min(area.height.saturating_sub(2));
-    let popup_area = centered(area, width, height);
-
-    f.render_widget(Clear, popup_area);
-
-    let mut text = vec![Line::from("")];
-    for (i, option) in picker.options.iter().enumerate() {
-        let marker = if i == picker.cursor { "> " } else { "  " };
-        let style = if i == picker.cursor {
-            Style::default().fg(t.text).bg(t.selection).bold()
-        } else {
-            Style::default().fg(t.text)
-        };
-        text.push(Line::from(Span::styled(
-            format!("  {}{}", marker, option),
-            style,
-        )));
-    }
-    text.push(Line::from(""));
-    text.push(Line::from(vec![
-        Span::styled("  j/k", t.key_hint()),
-        Span::styled(" navigate  ", Style::default().fg(t.muted)),
-        Span::styled("Enter", t.key_hint()),
-        Span::styled(" select  ", Style::default().fg(t.muted)),
-        Span::styled("Esc", t.key_hint()),
-        Span::styled(" cancel", Style::default().fg(t.muted)),
-    ]));
-    text.push(Line::from(Span::styled(hint, Style::default().fg(t.muted))));
-
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent)),
+pub fn render(f: &mut Frame, app: &App, picker: &ProfilePicker) {
+    let t = &app.theme;
+    let current = app
+        .state
+        .config
+        .as_ref()
+        .map(|c| c.profile_name(app.machine_id()).to_string());
+    let rows = picker
+        .options
+        .iter()
+        .map(|o| {
+            let right = if current.as_deref() == Some(o.as_str()) {
+                Span::styled("current", Style::default().fg(t.ok))
+            } else {
+                Span::raw("")
+            };
+            (
+                Line::from(Span::styled(o.clone(), Style::default().fg(t.text))),
+                Line::from(right),
+            )
+        })
+        .collect();
+    picker_popup(
+        f,
+        app,
+        "Profile for this machine",
+        rows,
+        picker.cursor,
+        &[("⏎", "select"), ("esc", "cancel")],
+        Some("New: tether machines profile create <name>"),
     );
-    f.render_widget(paragraph, popup_area);
 }

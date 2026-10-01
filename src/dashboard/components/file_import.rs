@@ -1,10 +1,9 @@
-use super::{centered, clamp_cursor, cursor_down};
+use super::{clamp_cursor, cursor_down, picker as picker_popup};
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
-use crate::dashboard::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::prelude::*;
 
 pub struct ImportItem {
     pub path: String,
@@ -53,70 +52,28 @@ fn import(app: &mut App, path: &str) {
     app.reload_state();
 }
 
-pub fn render(f: &mut Frame, picker: &FileImport, t: &Theme) {
-    let area = f.area();
-    let title = " Import file from profile ";
-    let max_item_len = picker
+pub fn render(f: &mut Frame, app: &App, picker: &FileImport) {
+    let t = &app.theme;
+    let rows = picker
         .items
         .iter()
-        .map(|i| i.path.len() + i.source_profile.len() + 3)
-        .max()
-        .unwrap_or(20);
-    let min_width = max_item_len.max(title.len() + 2).max(40) + 6;
-    let width = (min_width as u16).min(area.width.saturating_sub(4));
-    let max_visible = 15usize;
-    let visible = picker.items.len().min(max_visible);
-    let height = ((visible + 5) as u16).min(area.height.saturating_sub(2));
-    let popup_area = centered(area, width, height);
-
-    f.render_widget(Clear, popup_area);
-
-    let scroll = if picker.cursor >= max_visible {
-        picker.cursor - max_visible + 1
-    } else {
-        0
-    };
-
-    let mut text = vec![Line::from("")];
-    for (i, item) in picker
-        .items
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(max_visible)
-    {
-        let selected = i == picker.cursor;
-        let marker = if selected { "> " } else { "  " };
-        let style = if selected {
-            Style::default().fg(t.text).bg(t.selection).bold()
-        } else {
-            Style::default().fg(t.text)
-        };
-        let dim = if selected {
-            Style::default().fg(t.selection).bg(t.selection)
-        } else {
-            Style::default().fg(t.muted)
-        };
-        text.push(Line::from(vec![
-            Span::styled(format!("  {}{}", marker, item.path), style),
-            Span::styled(format!(" [{}]", item.source_profile), dim),
-        ]));
-    }
-    text.push(Line::from(""));
-    text.push(Line::from(vec![
-        Span::styled("  j/k", t.key_hint()),
-        Span::styled(" navigate  ", Style::default().fg(t.muted)),
-        Span::styled("Enter", t.key_hint()),
-        Span::styled(" import  ", Style::default().fg(t.muted)),
-        Span::styled("Esc", t.key_hint()),
-        Span::styled(" close", Style::default().fg(t.muted)),
-    ]));
-
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent)),
+        .map(|i| {
+            (
+                Line::from(Span::styled(i.path.clone(), Style::default().fg(t.text))),
+                Line::from(Span::styled(
+                    i.source_profile.clone(),
+                    Style::default().fg(t.team),
+                )),
+            )
+        })
+        .collect();
+    picker_popup(
+        f,
+        app,
+        "Import file from profile",
+        rows,
+        picker.cursor,
+        &[("⏎", "import"), ("esc", "close")],
+        None,
     );
-    f.render_widget(paragraph, popup_area);
 }

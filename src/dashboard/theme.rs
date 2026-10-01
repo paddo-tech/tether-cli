@@ -1,11 +1,17 @@
 use ratatui::style::{Color, Style};
+use std::time::Duration;
 
 /// Every color the dashboard draws with. Components read colors from here, never from `Color`.
 pub struct Theme {
+    /// True-color palettes blend colors for fades; the ANSI palette cannot.
+    pub rgb: bool,
     pub text: Color,
     pub muted: Color,
+    pub dim: Color,
     pub border: Color,
+    pub border_focus: Color,
     pub accent: Color,
+    pub info: Color,
     pub key: Color,
     pub hash: Color,
     pub value: Color,
@@ -15,18 +21,29 @@ pub struct Theme {
     pub team: Color,
     pub selection: Color,
     pub base_bg: Color,
+    pub popup_bg: Color,
     pub brand_fg: Color,
     pub brand_bg: Color,
+    pub diff_add_bg: Color,
+    pub diff_del_bg: Color,
+}
+
+const fn hex(v: u32) -> Color {
+    Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
 impl Theme {
     /// The 16-color ANSI palette, so the terminal's own color scheme applies.
     pub fn ansi() -> Self {
         Self {
+            rgb: false,
             text: Color::White,
             muted: Color::Gray,
-            border: Color::Gray,
+            dim: Color::DarkGray,
+            border: Color::DarkGray,
+            border_focus: Color::Cyan,
             accent: Color::Cyan,
+            info: Color::Blue,
             key: Color::Yellow,
             hash: Color::Yellow,
             value: Color::Yellow,
@@ -34,10 +51,92 @@ impl Theme {
             warn: Color::Yellow,
             error: Color::Red,
             team: Color::Magenta,
-            selection: Color::Indexed(240),
+            selection: Color::Indexed(237),
             base_bg: Color::Reset,
+            popup_bg: Color::Reset,
             brand_fg: Color::Black,
             brand_bg: Color::Cyan,
+            diff_add_bg: Color::Reset,
+            diff_del_bg: Color::Reset,
+        }
+    }
+
+    /// Catppuccin Mocha, for dark backgrounds.
+    pub fn mocha() -> Self {
+        let base = hex(0x1e1e2e);
+        let green = hex(0xa6e3a1);
+        let red = hex(0xf38ba8);
+        Self {
+            rgb: true,
+            text: hex(0xcdd6f4),
+            muted: hex(0xa6adc8),
+            dim: hex(0x6c7086),
+            border: hex(0x45475a),
+            border_focus: hex(0xb4befe),
+            accent: hex(0xcba6f7),
+            info: hex(0x89b4fa),
+            key: hex(0xfab387),
+            hash: hex(0xf9e2af),
+            value: hex(0xfab387),
+            ok: green,
+            warn: hex(0xf9e2af),
+            error: red,
+            team: hex(0xf5c2e7),
+            selection: hex(0x313244),
+            base_bg: base,
+            popup_bg: hex(0x181825),
+            brand_fg: hex(0x11111b),
+            brand_bg: hex(0xcba6f7),
+            diff_add_bg: mix(base, green, 0.14),
+            diff_del_bg: mix(base, red, 0.14),
+        }
+    }
+
+    /// Catppuccin Latte, for light backgrounds.
+    pub fn latte() -> Self {
+        let base = hex(0xeff1f5);
+        let green = hex(0x40a02b);
+        let red = hex(0xd20f39);
+        Self {
+            rgb: true,
+            text: hex(0x4c4f69),
+            muted: hex(0x6c6f85),
+            dim: hex(0x9ca0b0),
+            border: hex(0xbcc0cc),
+            border_focus: hex(0x7287fd),
+            accent: hex(0x8839ef),
+            info: hex(0x1e66f5),
+            key: hex(0xfe640b),
+            hash: hex(0xdf8e1d),
+            value: hex(0xfe640b),
+            ok: green,
+            warn: hex(0xdf8e1d),
+            error: red,
+            team: hex(0xea76cb),
+            selection: hex(0xccd0da),
+            base_bg: base,
+            popup_bg: hex(0xe6e9ef),
+            brand_fg: hex(0xeff1f5),
+            brand_bg: hex(0x8839ef),
+            diff_add_bg: mix(base, green, 0.12),
+            diff_del_bg: mix(base, red, 0.12),
+        }
+    }
+
+    /// Pick a theme from the config setting. `auto` uses true color when the terminal
+    /// advertises it, and Latte only when the background is known to be light.
+    pub fn select(
+        setting: Option<&str>,
+        truecolor: bool,
+        dark: impl FnOnce() -> Option<bool>,
+    ) -> Self {
+        match setting.map(str::to_ascii_lowercase).as_deref() {
+            Some("mocha") => Self::mocha(),
+            Some("latte") => Self::latte(),
+            Some("ansi") => Self::ansi(),
+            _ if !truecolor => Self::ansi(),
+            _ if dark() == Some(false) => Self::latte(),
+            _ => Self::mocha(),
         }
     }
 
@@ -45,19 +144,169 @@ impl Theme {
     pub fn key_hint(&self) -> Style {
         Style::default().fg(self.key).bold()
     }
+}
 
-    /// Foreground for one line of unified diff output.
-    pub fn diff_fg(&self, line: &str) -> Color {
-        if line.starts_with("@@") {
-            self.accent
-        } else if line.starts_with("+++") || line.starts_with("---") {
-            self.muted
-        } else if line.starts_with('+') {
-            self.ok
-        } else if line.starts_with('-') {
-            self.error
-        } else {
-            self.muted
+/// Linear blend of two RGB colors. Non-RGB colors switch over at the midpoint.
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    match (a, b) {
+        (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) => {
+            let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+            Color::Rgb(l(ar, br), l(ag, bg), l(ab, bb))
         }
+        _ if t < 0.5 => a,
+        _ => b,
+    }
+}
+
+/// COLORTERM is how terminals advertise 24-bit color.
+pub fn truecolor_env() -> bool {
+    std::env::var("COLORTERM")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "truecolor" | "24bit"))
+        .unwrap_or(false)
+}
+
+/// Whether the terminal background is dark: COLORFGBG first, then an OSC 11 query.
+/// Must run in raw mode, before the event loop reads input.
+pub fn detect_dark_background() -> Option<bool> {
+    if let Ok(v) = std::env::var("COLORFGBG") {
+        if let Some(dark) = parse_colorfgbg(&v) {
+            return Some(dark);
+        }
+    }
+    query_osc11().and_then(|reply| parse_osc11(&reply))
+}
+
+/// `COLORFGBG="15;0"`: the last field is the background's ANSI index.
+pub fn parse_colorfgbg(v: &str) -> Option<bool> {
+    let bg: u8 = v.rsplit(';').next()?.trim().parse().ok()?;
+    Some(!matches!(bg, 7 | 15))
+}
+
+/// Parse `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` and judge darkness by relative luminance.
+pub fn parse_osc11(reply: &[u8]) -> Option<bool> {
+    let s = String::from_utf8_lossy(reply);
+    let rgb = &s[s.find("rgb:")? + 4..];
+    let mut chans = rgb.split('/').map(|c| {
+        let digits: String = c.chars().take_while(|ch| ch.is_ascii_hexdigit()).collect();
+        let max = 16f32.powi(digits.len() as i32) - 1.0;
+        u32::from_str_radix(&digits, 16)
+            .ok()
+            .map(|v| v as f32 / max)
+    });
+    let (r, g, b) = (chans.next()??, chans.next()??, chans.next()??);
+    Some(0.2126 * r + 0.7152 * g + 0.0722 * b < 0.5)
+}
+
+/// Ask for the background color, then for device attributes. Every terminal answers
+/// the second query, so its reply ends the wait without a timeout on silent terminals.
+fn query_osc11() -> Option<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    tty.write_all(b"\x1b]11;?\x1b\\\x1b[c").ok()?;
+    tty.flush().ok()?;
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(300);
+    let mut reply = Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd {
+            fd: tty.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut pfd, 1, left.as_millis() as libc::c_int) } <= 0 {
+            break;
+        }
+        let n = tty.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        reply.extend_from_slice(&buf[..n]);
+        if da1_done(&reply) {
+            break;
+        }
+    }
+    Some(reply)
+}
+
+/// The device attributes reply looks like `ESC [ ? ... c`.
+fn da1_done(reply: &[u8]) -> bool {
+    reply
+        .windows(3)
+        .position(|w| w == b"\x1b[?")
+        .is_some_and(|start| reply[start..].contains(&b'c'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_respects_override_and_terminal() {
+        assert_eq!(
+            Theme::select(Some("latte"), false, || None).base_bg,
+            Theme::latte().base_bg
+        );
+        assert_eq!(
+            Theme::select(Some("ANSI"), true, || None).base_bg,
+            Theme::ansi().base_bg
+        );
+        assert_eq!(
+            Theme::select(None, false, || Some(true)).base_bg,
+            Theme::ansi().base_bg
+        );
+        assert_eq!(
+            Theme::select(Some("auto"), true, || Some(false)).base_bg,
+            Theme::latte().base_bg
+        );
+        assert_eq!(
+            Theme::select(None, true, || Some(true)).base_bg,
+            Theme::mocha().base_bg
+        );
+        assert_eq!(
+            Theme::select(None, true, || None).base_bg,
+            Theme::mocha().base_bg
+        );
+    }
+
+    #[test]
+    fn auto_skips_detection_without_truecolor() {
+        let theme = Theme::select(None, false, || panic!("must not query the terminal"));
+        assert_eq!(theme.base_bg, Theme::ansi().base_bg);
+    }
+
+    #[test]
+    fn parses_background_replies() {
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"), Some(true));
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:efef/f1f1/f5f5\x07"), Some(false));
+        assert_eq!(parse_osc11(b"\x1b]11;rgb:ff/ff/ff\x07"), Some(false));
+        assert_eq!(parse_osc11(b"\x1b[?62;22c"), None);
+        assert_eq!(parse_colorfgbg("15;0"), Some(true));
+        assert_eq!(parse_colorfgbg("0;default;15"), Some(false));
+        assert_eq!(parse_colorfgbg("garbage"), None);
+    }
+
+    #[test]
+    fn da1_reply_ends_query() {
+        assert!(da1_done(b"\x1b]11;rgb:0/0/0\x07\x1b[?1;2c"));
+        assert!(!da1_done(b"\x1b]11;rgb:0/0/0\x07"));
+    }
+
+    #[test]
+    fn mix_blends_rgb() {
+        assert_eq!(mix(hex(0x000000), hex(0xffffff), 0.5), hex(0x808080));
+        assert_eq!(mix(Color::Red, Color::Blue, 0.2), Color::Red);
+        assert_eq!(mix(Color::Red, Color::Blue, 0.8), Color::Blue);
     }
 }

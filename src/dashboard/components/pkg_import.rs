@@ -1,9 +1,8 @@
-use super::{centered, confirm, cursor_down, manager_label};
+use super::{backdrop, confirm, cursor_down, manager_label, picker as picker_popup};
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::msg::Cmd;
-use crate::dashboard::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::prelude::*;
 
 pub struct PkgImportItem {
     pub manager_key: String,
@@ -60,86 +59,59 @@ pub fn handle_key(app: &mut App, mut picker: PkgImport, key: KeyEvent) -> Option
     cmd
 }
 
-pub fn render(f: &mut Frame, picker: &PkgImport, t: &Theme) {
-    if let Some((manager_key, name)) = &picker.confirm {
-        confirm::render_popup(
-            f,
-            "Install",
-            &format!("Install {} ({})?", name, manager_label(manager_key)),
-            t.ok,
-            t,
-        );
+/// First source host, then how many more have the package.
+fn sources_label(sources: &[String]) -> String {
+    let first = sources
+        .first()
+        .map(|s| s.trim_end_matches(".local"))
+        .unwrap_or("");
+    match sources.len() {
+        0 | 1 => first.to_string(),
+        n => format!("{} +{}", first, n - 1),
     }
+}
 
-    let area = f.area();
-    let title = " Import package ";
-    let max_item_len = picker
+/// The picker first, then its install question on top of it.
+pub fn render(f: &mut Frame, app: &App, picker: &PkgImport) {
+    let t = &app.theme;
+    let rows = picker
         .items
         .iter()
         .map(|i| {
-            let sources = i.sources.join(", ");
-            i.name.len() + manager_label(&i.manager_key).len() + sources.len() + 6
+            (
+                Line::from(vec![
+                    Span::styled(i.name.clone(), Style::default().fg(t.text)),
+                    Span::styled(
+                        format!("  {}", manager_label(&i.manager_key)),
+                        Style::default().fg(t.dim),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    sources_label(&i.sources),
+                    Style::default().fg(t.team),
+                )),
+            )
         })
-        .max()
-        .unwrap_or(20);
-    let min_width = max_item_len.max(title.len() + 2).max(40) + 6;
-    let width = (min_width as u16).min(area.width.saturating_sub(4));
-    let max_visible = 15usize;
-    let visible = picker.items.len().min(max_visible);
-    let height = ((visible + 5) as u16).min(area.height.saturating_sub(2));
-    let popup_area = centered(area, width, height);
-
-    f.render_widget(Clear, popup_area);
-
-    let scroll = if picker.cursor >= max_visible {
-        picker.cursor - max_visible + 1
-    } else {
-        0
-    };
-
-    let mut text = vec![Line::from("")];
-    for (i, item) in picker
-        .items
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(max_visible)
-    {
-        let selected = i == picker.cursor;
-        let marker = if selected { "> " } else { "  " };
-        let label = manager_label(&item.manager_key);
-        let sources = item.sources.join(", ");
-        let style = if selected {
-            Style::default().fg(t.text).bg(t.selection).bold()
-        } else {
-            Style::default().fg(t.text)
-        };
-        let dim = if selected {
-            Style::default().fg(t.selection).bg(t.selection)
-        } else {
-            Style::default().fg(t.muted)
-        };
-        text.push(Line::from(vec![
-            Span::styled(format!("  {}{}", marker, item.name), style),
-            Span::styled(format!(" ({}) ", label), dim),
-            Span::styled(format!("[{}]", sources), dim),
-        ]));
-    }
-    text.push(Line::from(""));
-    text.push(Line::from(vec![
-        Span::styled("  j/k", t.key_hint()),
-        Span::styled(" navigate  ", Style::default().fg(t.muted)),
-        Span::styled("Enter", t.key_hint()),
-        Span::styled(" install  ", Style::default().fg(t.muted)),
-        Span::styled("Esc", t.key_hint()),
-        Span::styled(" close", Style::default().fg(t.muted)),
-    ]));
-
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent)),
+        .collect();
+    picker_popup(
+        f,
+        app,
+        "Import package",
+        rows,
+        picker.cursor,
+        &[("⏎", "install"), ("esc", "close")],
+        None,
     );
-    f.render_widget(paragraph, popup_area);
+
+    if let Some((manager_key, name)) = &picker.confirm {
+        backdrop(f, t);
+        app.hits.borrow_mut().clear();
+        confirm::render_popup(
+            f,
+            app,
+            "Install",
+            &format!("Install {} ({})?", name, manager_label(manager_key)),
+            t.ok,
+        );
+    }
 }

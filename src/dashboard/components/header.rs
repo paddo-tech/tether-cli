@@ -1,123 +1,141 @@
+use super::{pulse, spinner};
 use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, DaemonOp, Job};
-use ratatui::{prelude::*, widgets::*};
+use crate::dashboard::theme::mix;
+use ratatui::prelude::*;
 
+/// One-line header: logo, machine, then daemon and sync status on the right.
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let state = &app.state;
-    let mut spans = vec![Span::styled(
-        " Tether ",
-        Style::default().fg(t.brand_fg).bg(t.brand_bg).bold(),
-    )];
+    let ms = app.clock_ms();
+    let busy = app.running.is_some();
 
-    // Machine name
-    if let Some(ref sync_state) = state.sync_state {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            &sync_state.machine_id,
-            Style::default().fg(t.text).bold(),
+    // The logo pulses while a job runs.
+    let brand_bg = if busy && t.rgb {
+        mix(t.brand_bg, t.info, pulse(ms, 1400))
+    } else {
+        t.brand_bg
+    };
+    let mut left = vec![
+        Span::styled(
+            " ◆ tether ",
+            Style::default().fg(t.brand_fg).bg(brand_bg).bold(),
+        ),
+        Span::styled(
+            format!(" v{}", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(t.dim),
+        ),
+    ];
+    let machine_id = app.machine_id();
+    if !machine_id.is_empty() {
+        let host = state
+            .machines
+            .iter()
+            .find(|m| m.machine_id == machine_id)
+            .map(|m| m.hostname.trim_end_matches(".local").to_string())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| machine_id.to_string());
+        left.push(Span::styled("  ", Style::default()));
+        left.push(Span::styled(host, Style::default().fg(t.text).bold()));
+    }
+    if let Some(profile) = state
+        .config
+        .as_ref()
+        .map(|c| c.profile_name(machine_id).to_string())
+    {
+        left.push(Span::styled(
+            format!("  {}", profile),
+            Style::default().fg(t.dim),
         ));
     }
 
-    spans.push(Span::raw("  "));
+    let sep = || Span::styled("  │  ", Style::default().fg(t.border));
+    let mut right: Vec<Span> = Vec::new();
 
-    // Daemon status
+    if let Some(op) = &app.installing {
+        right.push(Span::styled(
+            format!("{} installing {}", spinner(ms), op.name),
+            Style::default().fg(t.info),
+        ));
+        right.push(sep());
+    }
+    if let Some((_, name)) = &app.uninstalling {
+        right.push(Span::styled(
+            format!("{} uninstalling {}", spinner(ms), name),
+            Style::default().fg(t.warn),
+        ));
+        right.push(sep());
+    }
+    if state.conflicts.has_conflicts() {
+        right.push(Span::styled(
+            format!("▲ {} conflict(s)", state.conflicts.conflicts.len()),
+            Style::default().fg(t.error).bold(),
+        ));
+        right.push(sep());
+    }
+    if state
+        .config
+        .as_ref()
+        .is_some_and(|c| c.features.team_dotfiles)
+    {
+        right.push(Span::styled("team", Style::default().fg(t.team)));
+        right.push(sep());
+    }
+
     match app.daemon_op {
-        DaemonOp::Starting => {
-            spans.push(Span::styled(
-                "daemon: starting...",
-                Style::default().fg(t.warn),
-            ));
-        }
-        DaemonOp::Stopping => {
-            spans.push(Span::styled(
-                "daemon: stopping...",
-                Style::default().fg(t.warn),
-            ));
-        }
-        DaemonOp::None => {
-            if state.daemon_running {
-                let pid_info = state
-                    .daemon_pid
-                    .map(|p| format!("daemon: running ({})", p))
-                    .unwrap_or_else(|| "daemon: running".to_string());
-                spans.push(Span::styled(pid_info, Style::default().fg(t.ok)));
+        DaemonOp::Starting | DaemonOp::Stopping => {
+            let verb = if app.daemon_op == DaemonOp::Starting {
+                "starting"
             } else {
-                spans.push(Span::styled(
-                    "daemon: stopped",
-                    Style::default().fg(t.error),
+                "stopping"
+            };
+            right.push(Span::styled(
+                format!("{} daemon {}", spinner(ms), verb),
+                Style::default().fg(t.warn),
+            ));
+        }
+        DaemonOp::None if state.daemon_running => {
+            right.push(Span::styled("● ", Style::default().fg(t.ok)));
+            right.push(Span::styled("daemon", Style::default().fg(t.text)));
+            if let Some(pid) = state.daemon_pid {
+                right.push(Span::styled(
+                    format!(" {}", pid),
+                    Style::default().fg(t.dim),
                 ));
             }
         }
+        DaemonOp::None => {
+            right.push(Span::styled("○ ", Style::default().fg(t.error)));
+            right.push(Span::styled("daemon stopped", Style::default().fg(t.muted)));
+        }
     }
+    right.push(sep());
 
-    spans.push(Span::raw("  "));
-
-    // Sync status
     if let Some(job) = &app.running {
         let label = match job {
             Job::Sync => "syncing",
             Job::Rollback { .. } => "rolling back",
         };
-        spans.push(Span::styled(
-            format!("{}...", label),
-            Style::default().fg(t.warn),
+        let color = if t.rgb {
+            mix(t.accent, t.info, pulse(ms, 1400))
+        } else {
+            t.accent
+        };
+        right.push(Span::styled(
+            format!("{} {}", spinner(ms), label),
+            Style::default().fg(color).bold(),
         ));
-    } else if let Some(ref sync_state) = state.sync_state {
-        spans.push(Span::styled(
-            format!("last sync: {}", relative_time(sync_state.last_sync)),
+    } else if let Some(ss) = &state.sync_state {
+        right.push(Span::styled("✓ ", Style::default().fg(t.ok)));
+        right.push(Span::styled(
+            format!("synced {}", relative_time(ss.last_sync)),
             Style::default().fg(t.muted),
         ));
+    } else {
+        right.push(Span::styled("not initialized", Style::default().fg(t.warn)));
     }
+    right.push(Span::raw(" "));
 
-    // Conflicts
-    if state.conflicts.has_conflicts() {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("{} conflict(s)", state.conflicts.conflicts.len()),
-            Style::default().fg(t.error).bold(),
-        ));
-    }
-
-    if let Some((_, pkg_name)) = &app.uninstalling {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("uninstalling {}...", pkg_name),
-            Style::default().fg(t.warn),
-        ));
-    }
-
-    if let Some(op) = &app.installing {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("installing {}...", op.name),
-            Style::default().fg(t.warn),
-        ));
-    }
-
-    // Flash message: an error hides a concurrent success message
-    let flash = app
-        .flash_error
-        .as_ref()
-        .map(|(_, m)| (m, t.error))
-        .or_else(|| app.flash_message.as_ref().map(|(_, m)| (m, t.ok)));
-    if let Some((msg, color)) = flash {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(msg, Style::default().fg(color).bold()));
-    }
-
-    // Features from config
-    if let Some(ref config) = state.config {
-        if config.features.team_dotfiles {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled("team", Style::default().fg(t.team)));
-        }
-    }
-
-    let paragraph = Paragraph::new(Line::from(spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border)),
-    );
-    f.render_widget(paragraph, area);
+    super::row(f, area, Line::from(left), Line::from(right));
 }

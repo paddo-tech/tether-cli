@@ -1,19 +1,26 @@
-use super::app::{App, DaemonOp, InstallOp, Job, Overlay, Tab};
+use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
+use super::components::palette::{self, Palette, Target};
 use super::components::{
     config, confirm, file_import, files, machines, overview, packages, pkg_import, profile_picker,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use std::time::Duration;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
+use std::time::{Duration, Instant};
 
-const FLASH_TTL: Duration = Duration::from_secs(3);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
     match msg {
         Msg::Key(key) => on_key(app, key),
-        Msg::Tick => {
-            on_tick(app);
+        Msg::Mouse(m) => on_mouse(app, m),
+        Msg::Resize(w, h) => {
+            app.viewport = Rect::new(0, 0, w, h);
+            None
+        }
+        Msg::Tick => on_tick(app),
+        Msg::Activity(counts) => {
+            app.sync_activity = counts;
             None
         }
         Msg::JobStarted(job) => {
@@ -87,30 +94,28 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
     }
 }
 
-fn on_tick(app: &mut App) {
-    if app
-        .flash_error
-        .as_ref()
-        .is_some_and(|(t, _)| t.elapsed() >= FLASH_TTL)
-    {
-        app.flash_error = None;
-    }
-    if app
-        .flash_message
-        .as_ref()
-        .is_some_and(|(t, _)| t.elapsed() >= FLASH_TTL)
-    {
-        app.flash_message = None;
-    }
+/// Expire toasts; every refresh interval reload state and recount sync activity.
+fn on_tick(app: &mut App) -> Option<Cmd> {
+    let now = Instant::now();
+    app.toasts.retain(|t| t.alive(now));
     if app.last_refresh.elapsed() >= REFRESH_INTERVAL {
         app.reload_state();
+        return Some(Cmd::LoadActivity);
     }
+    None
 }
 
 /// Keys go to the top modal overlay, then the active tab, then the global keymap.
 fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && key.code == KeyCode::Char('c') {
         request_quit(app);
+        return None;
+    }
+    if ctrl && key.code == KeyCode::Char('k') && !app.overlays.last().is_some_and(Overlay::is_modal)
+    {
+        let entries = palette::entries(app);
+        app.overlays.push(Overlay::Palette(Palette::new(entries)));
         return None;
     }
 
@@ -120,6 +125,10 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
             Overlay::FileImport(p) => file_import::handle_key(app, p, key),
             Overlay::PkgImport(p) => pkg_import::handle_key(app, p, key),
             Overlay::ProfilePicker(p) => profile_picker::handle_key(app, p, key),
+            Overlay::Palette(p) => match palette::handle_key(app, p, key) {
+                Some(target) => run_target(app, target),
+                None => None,
+            },
             Overlay::Help => unreachable!("help is not modal"),
         };
     }
@@ -143,18 +152,9 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
                 request_quit(app);
             }
         }
-        KeyCode::Char('s') => return app.sync_cmd(),
-        KeyCode::Char('d') => {
-            if app.daemon_op == DaemonOp::None {
-                let op = if app.state.daemon_running {
-                    DaemonOp::Stopping
-                } else {
-                    DaemonOp::Starting
-                };
-                return Some(Cmd::Daemon(op));
-            }
-        }
-        KeyCode::Char('r') => app.reload_state(),
+        KeyCode::Char('s') => return run_action(app, Action::Sync),
+        KeyCode::Char('d') => return run_action(app, Action::ToggleDaemon),
+        KeyCode::Char('r') => return run_action(app, Action::Refresh),
         KeyCode::Tab => {
             let tabs = Tab::all();
             let current = tabs.iter().position(|t| *t == app.active_tab).unwrap_or(0);
@@ -165,16 +165,153 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
                 app.active_tab = *tab;
             }
         }
-        KeyCode::Char('?') => {
+        KeyCode::Char('?') => return run_action(app, Action::Help),
+        _ => {}
+    }
+    None
+}
+
+pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
+    match action {
+        Action::Sync => return app.sync_cmd(),
+        Action::ToggleDaemon => {
+            if app.daemon_op == DaemonOp::None {
+                let op = if app.state.daemon_running {
+                    DaemonOp::Stopping
+                } else {
+                    DaemonOp::Starting
+                };
+                return Some(Cmd::Daemon(op));
+            }
+        }
+        Action::Refresh => app.reload_state(),
+        Action::Help => {
             if app.help_open() {
                 app.overlays.retain(|o| !matches!(o, Overlay::Help));
             } else {
                 app.overlays.push(Overlay::Help);
             }
         }
-        _ => {}
+        Action::Quit => request_quit(app),
+        Action::ImportPackages => {
+            app.active_tab = Tab::Packages;
+            if app.installing.is_none() {
+                open_or_report(app, packages::open_import, "No packages to import");
+            }
+        }
+        Action::ImportDotfile => {
+            app.active_tab = Tab::Files;
+            open_or_report(app, files::open_import, "No dotfiles to import");
+        }
+        Action::PickProfile => {
+            app.active_tab = Tab::Machines;
+            machines::open_profile_picker(app);
+        }
     }
     None
+}
+
+fn open_or_report(app: &mut App, open: fn(&mut App), empty: &str) {
+    let before = app.overlays.len();
+    open(app);
+    if app.overlays.len() == before {
+        app.flash_info(empty);
+    }
+}
+
+/// Run what the palette picked: an action, or a jump to a tab, file or package.
+fn run_target(app: &mut App, target: Target) -> Option<Cmd> {
+    match target {
+        Target::Action(action) => return run_action(app, action),
+        Target::Tab(tab) => app.active_tab = tab,
+        Target::File { section, path } => {
+            app.active_tab = Tab::Files;
+            app.files.collapsed.remove(&section);
+            let rows = files::build_rows(&app.state, &app.files);
+            let mut in_section = false;
+            for (i, row) in rows.iter().enumerate() {
+                match row {
+                    files::FileRow::SectionHeader { label, .. } => in_section = *label == section,
+                    files::FileRow::File { path: p, .. } if in_section && *p == path => {
+                        app.files.cursor = i;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Target::Package { manager_key, name } => {
+            app.active_tab = Tab::Packages;
+            app.packages.expanded = Some(manager_key.clone());
+            let rows = packages::build_rows(&app.state, &app.packages);
+            if let Some(i) = rows.iter().position(|r| {
+                matches!(r, packages::PkgRow::Package { manager_key: k, name: n } if *k == manager_key && *n == name)
+            }) {
+                app.packages.cursor = i;
+            }
+        }
+    }
+    None
+}
+
+/// Clicks hit what the last draw recorded; the wheel scrolls like arrow keys.
+fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
+    match m.kind {
+        MouseEventKind::ScrollDown => on_key(app, KeyEvent::from(KeyCode::Down)),
+        MouseEventKind::ScrollUp => on_key(app, KeyEvent::from(KeyCode::Up)),
+        MouseEventKind::Down(MouseButton::Left) => match app.hit_at(m.column, m.row)? {
+            Hit::Tab(tab) => {
+                app.active_tab = tab;
+                None
+            }
+            Hit::Key(key) => on_key(app, key),
+            Hit::Row(i) => click_row(app, i),
+            Hit::Item(i) => click_item(app, i),
+        },
+        _ => None,
+    }
+}
+
+/// The first click selects a row; a click on the selected row opens it like Enter.
+fn click_row(app: &mut App, i: usize) -> Option<Cmd> {
+    let cursor = match app.active_tab {
+        Tab::Overview => return None,
+        Tab::Files => &mut app.files.cursor,
+        Tab::Packages => &mut app.packages.cursor,
+        Tab::Machines => &mut app.machines.cursor,
+        Tab::Config => {
+            // A click mid-edit would move the edit to another field.
+            if app.config.editing || app.config.list_edit.as_ref().is_some_and(|l| l.adding) {
+                return None;
+            }
+            match app.config.list_edit.as_mut() {
+                Some(le) => &mut le.cursor,
+                None => &mut app.config.selected,
+            }
+        }
+    };
+    if *cursor == i {
+        on_key(app, KeyEvent::from(KeyCode::Enter))
+    } else {
+        *cursor = i;
+        None
+    }
+}
+
+fn click_item(app: &mut App, i: usize) -> Option<Cmd> {
+    let cursor = match app.overlays.last_mut()? {
+        Overlay::Palette(p) => &mut p.cursor,
+        Overlay::FileImport(p) => &mut p.cursor,
+        Overlay::PkgImport(p) if p.confirm.is_none() => &mut p.cursor,
+        Overlay::ProfilePicker(p) => &mut p.cursor,
+        _ => return None,
+    };
+    if *cursor == i {
+        on_key(app, KeyEvent::from(KeyCode::Enter))
+    } else {
+        *cursor = i;
+        None
+    }
 }
 
 /// A killed rollback leaves packages half-removed with no tombstones.
@@ -242,6 +379,7 @@ fn on_local_packages(app: &mut App, packages: std::collections::HashMap<String, 
 mod tests {
     use super::*;
     use crate::dashboard::components::confirm::Confirm;
+    use crate::dashboard::components::toast::{Toast, ToastKind, MAX_TOASTS};
     use crate::dashboard::state::DashboardState;
     use crate::sync::{ConflictState, TeamManifest};
     use std::collections::HashMap;
@@ -259,6 +397,10 @@ mod tests {
             activity_lines: Vec::new(),
         };
         App::new(state, HashMap::new())
+    }
+
+    fn last_toast(app: &App) -> Option<(ToastKind, &str)> {
+        app.toasts.last().map(|t| (t.kind, t.text.as_str()))
     }
 
     fn key(app: &mut App, code: KeyCode) -> Option<Cmd> {
@@ -311,15 +453,15 @@ mod tests {
         };
         update(&mut app, Msg::JobStarted(job));
         assert_eq!(
-            app.flash_message.as_ref().map(|(_, m)| m.as_str()),
-            Some("Rolling back npm to abc")
+            last_toast(&app),
+            Some((ToastKind::Success, "Rolling back npm to abc"))
         );
         update(
             &mut app,
             Msg::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         );
         assert!(!app.should_quit);
-        assert!(app.flash_error.is_some());
+        assert_eq!(last_toast(&app).map(|t| t.0), Some(ToastKind::Error));
     }
 
     #[test]
@@ -353,8 +495,8 @@ mod tests {
         update(&mut app, Msg::UninstallDone(Err("boom".into())));
         assert!(app.uninstalling.is_none());
         assert_eq!(
-            app.flash_error.as_ref().map(|(_, m)| m.as_str()),
-            Some("uninstall failed: boom")
+            last_toast(&app),
+            Some((ToastKind::Error, "uninstall failed: boom"))
         );
     }
 
@@ -403,13 +545,174 @@ mod tests {
     }
 
     #[test]
-    fn tick_expires_flash_messages() {
+    fn tick_expires_old_toasts() {
         let mut app = app();
-        let old = Instant::now() - Duration::from_secs(4);
-        app.flash_error = Some((old, "old".into()));
         app.flash_success("fresh");
+        app.toasts.insert(
+            0,
+            Toast::new(
+                ToastKind::Info,
+                "old".into(),
+                Instant::now() - Duration::from_secs(4),
+            ),
+        );
         update(&mut app, Msg::Tick);
-        assert!(app.flash_error.is_none());
-        assert!(app.flash_message.is_some());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(last_toast(&app), Some((ToastKind::Success, "fresh")));
+    }
+
+    #[test]
+    fn toasts_are_capped() {
+        let mut app = app();
+        for i in 0..10 {
+            app.flash_info(format!("n{}", i));
+        }
+        assert_eq!(app.toasts.len(), MAX_TOASTS);
+        assert_eq!(last_toast(&app), Some((ToastKind::Info, "n9")));
+    }
+
+    #[test]
+    fn ctrl_k_opens_palette_and_runs_tab_jump() {
+        let mut app = app();
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+        );
+        assert!(matches!(app.overlays.last(), Some(Overlay::Palette(_))));
+        for c in "machines".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        // Typed letters reach the palette, not the global keymap.
+        assert_eq!(app.active_tab, Tab::Overview);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.active_tab, Tab::Machines);
+    }
+
+    #[test]
+    fn palette_closes_on_escape() {
+        let mut app = app();
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(app.overlays.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) -> Option<Cmd> {
+        update(
+            app,
+            Msg::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+    }
+
+    #[test]
+    fn clicks_hit_recorded_regions() {
+        let mut app = app();
+        app.add_hit(Rect::new(10, 1, 8, 1), Hit::Tab(Tab::Config));
+        click(&mut app, 12, 1);
+        assert_eq!(app.active_tab, Tab::Config);
+        click(&mut app, 30, 1);
+        assert_eq!(app.active_tab, Tab::Config);
+
+        app.active_tab = Tab::Files;
+        app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(3));
+        click(&mut app, 2, 5);
+        assert_eq!(app.files.cursor, 3);
+    }
+
+    #[test]
+    fn clicked_key_hint_acts_like_the_key() {
+        let mut app = app();
+        app.add_hit(
+            Rect::new(0, 0, 5, 1),
+            Hit::Key(KeyEvent::from(KeyCode::Char('?'))),
+        );
+        click(&mut app, 1, 0);
+        assert!(app.help_open());
+    }
+
+    #[test]
+    fn wheel_scrolls_like_arrow_keys() {
+        let mut app = app();
+        app.active_tab = Tab::Config;
+        let wheel = |kind| {
+            Msg::Mouse(MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        update(&mut app, wheel(MouseEventKind::ScrollDown));
+        update(&mut app, wheel(MouseEventKind::ScrollDown));
+        update(&mut app, wheel(MouseEventKind::ScrollUp));
+        assert_eq!(app.config.selected, 1);
+    }
+
+    #[test]
+    fn install_confirm_draws_over_the_picker() {
+        use crate::dashboard::components::pkg_import::{PkgImport, PkgImportItem};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        app.overlays.push(Overlay::PkgImport(PkgImport {
+            items: (0..20)
+                .map(|i| PkgImportItem {
+                    manager_key: "npm".into(),
+                    name: format!("package-with-a-long-name-{}", i),
+                    sources: vec!["other".into()],
+                })
+                .collect(),
+            cursor: 0,
+            confirm: Some(("npm".into(), "left-pad".into())),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains("Install left-pad (npm)?"));
+    }
+
+    #[test]
+    fn every_view_renders_at_tiny_and_large_sizes() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        app.flash_error("a long error message that has to wrap inside the toast box somehow");
+        for (w, h) in [(20, 6), (80, 24), (200, 60)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            for tab in Tab::all() {
+                app.active_tab = *tab;
+                terminal
+                    .draw(|f| crate::dashboard::view::view(f, &app))
+                    .unwrap();
+            }
+            run_action(&mut app, Action::Help);
+            terminal
+                .draw(|f| crate::dashboard::view::view(f, &app))
+                .unwrap();
+            run_action(&mut app, Action::Help);
+            app.overlays
+                .push(Overlay::Palette(Palette::new(palette::entries(&app))));
+            terminal
+                .draw(|f| crate::dashboard::view::view(f, &app))
+                .unwrap();
+            app.overlays.clear();
+        }
     }
 }

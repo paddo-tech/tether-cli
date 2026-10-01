@@ -1,6 +1,7 @@
 use super::confirm::Confirm;
+use super::diff::{self, DiffLine};
 use super::file_import::{FileImport, ImportItem};
-use super::{clamp_cursor, cursor_down};
+use super::{clamp_cursor, cursor_down, list, panel, row, truncate};
 use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::config_edit;
@@ -8,7 +9,7 @@ use crate::dashboard::msg::KeyOutcome;
 use crate::dashboard::repo;
 use crate::dashboard::state::DashboardState;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::Paragraph};
 use std::collections::{HashMap, HashSet};
 
 pub struct FilesTabState {
@@ -17,7 +18,7 @@ pub struct FilesTabState {
     pub expanded_file: Option<String>,
     pub expanded_history: Vec<crate::sync::FileLogEntry>,
     pub expanded_commit: Option<String>,
-    pub expanded_diff: Vec<String>,
+    pub expanded_diff: Vec<DiffLine>,
     pub deleted: HashMap<String, Vec<String>>,
     pub show_deleted: HashSet<String>,
 }
@@ -96,7 +97,12 @@ fn toggle_row(app: &mut App) {
                             encrypted,
                             app.state.config.as_ref(),
                         );
-                        repo::file_diff(commit_hash, repo_path, &dotfile, encrypted)
+                        diff::annotate(&repo::file_diff(
+                            commit_hash,
+                            repo_path,
+                            &dotfile,
+                            encrypted,
+                        ))
                     })
                     .unwrap_or_default();
                 app.files.expanded_commit = Some(commit_hash.clone());
@@ -177,7 +183,7 @@ fn confirm_remove(app: &mut App) {
 }
 
 /// Offer dotfiles that other profiles track and this machine's profile does not.
-fn open_import(app: &mut App) {
+pub fn open_import(app: &mut App) {
     let (Some(config), Some(ss)) = (&app.state.config, &app.state.sync_state) else {
         return;
     };
@@ -243,7 +249,7 @@ pub enum FileRow {
         message: String,
     },
     DiffRow {
-        line: String,
+        line: DiffLine,
     },
     DeletedHeader {
         section: String,
@@ -560,239 +566,239 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let ft = &app.files;
     let rows = build_rows(&app.state, ft);
-    let cursor = ft.cursor;
-
-    let block = Block::default()
-        .title(" Files ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.border));
-    let inner_area = block.inner(area);
+    let (total, pending) = rows.iter().fold((0, 0), |(n, p), r| match r {
+        FileRow::File { synced, .. } => (n + 1, p + usize::from(!synced)),
+        _ => (n, p),
+    });
+    let mut summary = vec![Span::styled(
+        format!(" {} shown ", total),
+        Style::default().fg(t.muted),
+    )];
+    if pending > 0 {
+        summary.push(Span::styled(
+            format!("● {} pending ", pending),
+            Style::default().fg(t.warn),
+        ));
+    }
+    let block = panel(" Files ", true, t).title_top(Line::from(summary).right_aligned());
+    let inner = block.inner(area);
     f.render_widget(block, area);
 
     if rows.is_empty() {
-        let msg = Paragraph::new(Span::styled(
-            "  No sync state",
-            Style::default().fg(t.muted),
-        ));
-        f.render_widget(msg, inner_area);
+        f.render_widget(
+            Paragraph::new(Span::styled("No sync state", Style::default().fg(t.dim))),
+            inner,
+        );
         return;
     }
 
-    let visible_height = inner_area.height as usize;
-    let scroll = if cursor >= visible_height {
-        cursor - visible_height + 1
-    } else {
-        0
-    };
+    list(
+        f,
+        app,
+        area,
+        inner,
+        &rows,
+        ft.cursor,
+        |f, r, file_row, selected| draw_row(f, r, file_row, selected, app),
+    );
+}
 
-    for (y, (row_idx, row)) in
-        (inner_area.y..inner_area.y + inner_area.height).zip(rows.iter().enumerate().skip(scroll))
-    {
-        let is_selected = row_idx == cursor;
-        let row_area = Rect::new(inner_area.x, y, inner_area.width, 1);
-
-        let bg = if is_selected { t.selection } else { t.base_bg };
-
-        match row {
-            FileRow::SectionHeader { label, url, count } => {
-                let is_collapsed = ft.collapsed.contains(label.as_str());
-                let arrow = if is_collapsed { ">" } else { "v" };
-
-                let mut spans = vec![
-                    Span::styled(format!(" {} ", arrow), Style::default().fg(t.accent).bg(bg)),
-                    Span::styled(
-                        format!("{} ", label),
-                        Style::default().fg(t.accent).bg(bg).bold(),
-                    ),
-                    Span::styled(format!("({})", count), Style::default().fg(t.muted).bg(bg)),
-                ];
-                if !url.is_empty() {
-                    spans.push(Span::styled(
-                        format!("  {}", url),
-                        Style::default().fg(t.muted).bg(bg),
-                    ));
-                }
-                spans.push(Span::styled(
-                    " ".repeat(inner_area.width as usize),
-                    Style::default().bg(bg),
-                ));
-                f.render_widget(Paragraph::new(Line::from(spans)), row_area);
-            }
-            FileRow::File {
-                path,
-                shared,
-                synced,
-                time,
-                repo_path,
-            } => {
-                let is_expanded = ft.expanded_file.as_deref() == Some(repo_path.as_str());
-                let arrow = if !repo_path.is_empty() {
-                    if is_expanded {
-                        "v"
-                    } else {
-                        ">"
-                    }
-                } else {
-                    " "
-                };
-                let badge = if *synced {
-                    Span::styled(" ok ", Style::default().fg(t.ok).bg(bg))
-                } else {
-                    Span::styled(" ** ", Style::default().fg(t.warn).bg(bg))
-                };
-                let mut spans = vec![
-                    Span::styled(format!(" {}", arrow), Style::default().fg(t.muted).bg(bg)),
-                    badge,
-                    Span::styled(" ", Style::default().bg(bg)),
-                    Span::styled(path, Style::default().fg(t.text).bg(bg)),
-                ];
-                if *shared {
-                    spans.push(Span::styled(
-                        " [shared]",
-                        Style::default().fg(t.muted).bg(bg),
-                    ));
-                }
-                if !time.is_empty() {
-                    spans.push(Span::styled("  ", Style::default().bg(bg)));
-                    spans.push(Span::styled(time, Style::default().fg(t.muted).bg(bg)));
-                }
-                spans.push(Span::styled(
-                    " ".repeat(inner_area.width as usize),
-                    Style::default().bg(bg),
-                ));
-                f.render_widget(Paragraph::new(Line::from(spans)), row_area);
-            }
-            FileRow::HistoryEntry {
-                commit_hash,
-                short_hash,
-                date,
-                machine_id,
-                message,
-            } => {
-                let is_diff_expanded = ft.expanded_commit.as_deref() == Some(commit_hash.as_str());
-                let arrow = if is_diff_expanded { "v" } else { ">" };
-                let line = Line::from(vec![
-                    Span::styled(
-                        format!("     {} ", arrow),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(short_hash, Style::default().fg(t.hash).bg(bg).bold()),
-                    Span::styled(
-                        format!("  {:>12}", date),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(
-                        format!("  {:15}", machine_id),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(format!("  {}", message), Style::default().fg(t.text).bg(bg)),
-                    Span::styled(
-                        " ".repeat(inner_area.width as usize),
-                        Style::default().bg(bg),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
-            }
-            FileRow::DeletedHeader { section, count } => {
-                let is_expanded = ft.show_deleted.contains(section.as_str());
-                let arrow = if is_expanded { "v" } else { ">" };
-                let line = Line::from(vec![
-                    Span::styled(format!("  {} ", arrow), Style::default().fg(t.muted).bg(bg)),
-                    Span::styled(
-                        format!("Deleted ({})", count),
-                        Style::default().fg(t.muted).bg(bg),
-                    ),
-                    Span::styled(
-                        " ".repeat(inner_area.width as usize),
-                        Style::default().bg(bg),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
-            }
-            FileRow::DeletedFile { path } => {
-                let line = Line::from(vec![
-                    Span::styled("      ", Style::default().bg(bg)),
-                    Span::styled(path, Style::default().fg(t.error).bg(bg)),
-                    Span::styled(
-                        " ".repeat(inner_area.width as usize),
-                        Style::default().bg(bg),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
-            }
-            FileRow::DiffRow { line: diff_line } => {
-                let line = Line::from(vec![
-                    Span::styled("        ", Style::default().bg(bg)),
-                    Span::styled(diff_line, Style::default().fg(t.diff_fg(diff_line)).bg(bg)),
-                    Span::styled(
-                        " ".repeat(inner_area.width as usize),
-                        Style::default().bg(bg),
-                    ),
-                ]);
-                f.render_widget(Paragraph::new(line), row_area);
-            }
+fn draw_row(f: &mut Frame, area: Rect, file_row: &FileRow, selected: bool, app: &App) {
+    let t = &app.theme;
+    let ft = &app.files;
+    let chevron = |open: bool| if open { "▾ " } else { "▸ " };
+    match file_row {
+        FileRow::SectionHeader { label, url, count } => {
+            let open = !ft.collapsed.contains(label.as_str());
+            let color = if label.starts_with("Team") {
+                t.team
+            } else {
+                t.accent
+            };
+            row(
+                f,
+                area,
+                Line::from(vec![
+                    Span::styled(chevron(open), Style::default().fg(color)),
+                    Span::styled(label.as_str(), Style::default().fg(color).bold()),
+                    Span::styled(format!("  {}", count), Style::default().fg(t.dim)),
+                ]),
+                Line::from(Span::styled(
+                    truncate(url, (area.width as usize) / 2),
+                    Style::default().fg(t.dim),
+                )),
+            );
         }
+        FileRow::File {
+            path,
+            shared,
+            synced,
+            time,
+            repo_path,
+        } => {
+            let expandable = !repo_path.is_empty();
+            let open = ft.expanded_file.as_deref() == Some(repo_path.as_str());
+            let (dot, dot_color) = if *synced {
+                ("●", t.ok)
+            } else {
+                ("◐", t.warn)
+            };
+            let mut left = vec![
+                Span::styled(
+                    if expandable { chevron(open) } else { "  " },
+                    Style::default().fg(t.dim),
+                ),
+                Span::styled(format!("  {} ", dot), Style::default().fg(dot_color)),
+                Span::styled(
+                    path.as_str(),
+                    if selected || open {
+                        Style::default().fg(t.text).bold()
+                    } else {
+                        Style::default().fg(t.text)
+                    },
+                ),
+            ];
+            if *shared {
+                left.push(Span::styled("  shared", Style::default().fg(t.info)));
+            }
+            let mut right = Vec::new();
+            if !synced {
+                right.push(Span::styled("pending  ", Style::default().fg(t.warn)));
+            }
+            right.push(Span::styled(time.as_str(), Style::default().fg(t.dim)));
+            row(f, area, Line::from(left), Line::from(right));
+        }
+        FileRow::HistoryEntry {
+            commit_hash,
+            short_hash,
+            date,
+            machine_id,
+            message,
+        } => {
+            let open = ft.expanded_commit.as_deref() == Some(commit_hash.as_str());
+            history_row(f, area, open, short_hash, date, machine_id, message, app);
+        }
+        FileRow::DeletedHeader { section, count } => {
+            let open = ft.show_deleted.contains(section.as_str());
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled(format!("  {}", chevron(open)), Style::default().fg(t.dim)),
+                    Span::styled(
+                        format!("Deleted  {}", count),
+                        Style::default().fg(t.muted).italic(),
+                    ),
+                ]),
+                area,
+            );
+        }
+        FileRow::DeletedFile { path } => {
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled("      ✗ ", Style::default().fg(t.error)),
+                    Span::styled(path.as_str(), Style::default().fg(t.muted).crossed_out()),
+                ]),
+                area,
+            );
+        }
+        FileRow::DiffRow { line } => diff::render_line(f, area, line, selected, t),
     }
 }
 
-/// Render compact file list for the Overview tab (non-interactive, uses List widget)
+/// A commit in a file or manifest history: hash, machine, message, and age on the right.
+#[allow(clippy::too_many_arguments)]
+pub fn history_row(
+    f: &mut Frame,
+    area: Rect,
+    open: bool,
+    short_hash: &str,
+    date: &str,
+    machine_id: &str,
+    message: &str,
+    app: &App,
+) {
+    let t = &app.theme;
+    row(
+        f,
+        area,
+        Line::from(vec![
+            Span::styled(
+                if open { "    ▾ " } else { "    ▸ " },
+                Style::default().fg(t.dim),
+            ),
+            Span::styled(short_hash.to_string(), Style::default().fg(t.hash)),
+            Span::styled(
+                format!("  {}", truncate(machine_id, 24)),
+                Style::default().fg(t.team),
+            ),
+            Span::styled(format!("  {}", message), Style::default().fg(t.muted)),
+        ]),
+        Line::from(Span::styled(date.to_string(), Style::default().fg(t.dim))),
+    );
+}
+
+/// Compact file list for the Overview tab.
 pub fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
-    let scroll_offset = app.overview_scroll;
     let rows = build_overview_rows(&app.state);
-
-    let items: Vec<ListItem> = if rows.is_empty() {
-        vec![ListItem::new(Span::styled(
-            "  No sync state",
-            Style::default().fg(t.muted),
-        ))]
-    } else {
-        rows.into_iter()
-            .skip(scroll_offset)
-            .map(|row| match row {
-                FileRow::SectionHeader { label, url, count } => {
-                    let mut spans = vec![
-                        Span::styled(format!(" {} ", label), Style::default().fg(t.accent).bold()),
-                        Span::styled(format!("({})", count), Style::default().fg(t.muted)),
-                    ];
-                    if !url.is_empty() {
-                        spans.push(Span::styled(
-                            format!("  {}", url),
-                            Style::default().fg(t.muted),
-                        ));
-                    }
-                    ListItem::new(Line::from(spans))
-                }
-                FileRow::File {
-                    path, synced, time, ..
-                } => {
-                    let badge = if synced {
-                        Span::styled(" ok ", Style::default().fg(t.ok))
-                    } else {
-                        Span::styled(" ** ", Style::default().fg(t.warn))
-                    };
-                    let mut spans = vec![
-                        Span::raw("  "),
-                        badge,
-                        Span::raw(" "),
-                        Span::styled(path, Style::default().fg(t.text)),
-                    ];
-                    if !time.is_empty() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(time, Style::default().fg(t.muted)));
-                    }
-                    ListItem::new(Line::from(spans))
-                }
-                _ => ListItem::new(Span::raw("")),
-            })
-            .collect()
-    };
-
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Dotfiles ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.border)),
+    let files = rows
+        .iter()
+        .filter(|r| matches!(r, FileRow::File { .. }))
+        .count();
+    let block = panel(" Dotfiles ", false, t).title_top(
+        Line::from(Span::styled(
+            format!(" {} ", files),
+            Style::default().fg(t.dim),
+        ))
+        .right_aligned(),
     );
-    f.render_widget(list, area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("No sync state", Style::default().fg(t.dim))),
+            inner,
+        );
+        return;
+    }
+    let visible = inner.height as usize;
+    let scroll = app.overview_scroll.min(rows.len().saturating_sub(visible));
+    for (i, r) in rows.iter().skip(scroll).take(visible).enumerate() {
+        let rect = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        match r {
+            FileRow::SectionHeader { label, count, .. } => {
+                let color = if label.starts_with("Team") {
+                    t.team
+                } else {
+                    t.accent
+                };
+                f.render_widget(
+                    Line::from(vec![
+                        Span::styled(label.as_str(), Style::default().fg(color).bold()),
+                        Span::styled(format!("  {}", count), Style::default().fg(t.dim)),
+                    ]),
+                    rect,
+                );
+            }
+            FileRow::File {
+                path, synced, time, ..
+            } => {
+                let (dot, color) = if *synced {
+                    ("●", t.ok)
+                } else {
+                    ("◐", t.warn)
+                };
+                row(
+                    f,
+                    rect,
+                    Line::from(vec![
+                        Span::styled(format!(" {} ", dot), Style::default().fg(color)),
+                        Span::styled(path.as_str(), Style::default().fg(t.text)),
+                    ]),
+                    Line::from(Span::styled(time.as_str(), Style::default().fg(t.dim))),
+                );
+            }
+            _ => {}
+        }
+    }
+    super::scrollbar(f, area, rows.len(), scroll, visible, t);
 }

@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - npm, pnpm and bun now install and upgrade with install scripts turned off. List packages that need their scripts in `packages.allow_scripts`
 - Homebrew taps outside `homebrew/*` must be listed in `packages.brew.trusted_taps`. Tether skips other taps, and formulae and casks from them, and shows a warning
 
+### Changed
+
+- The dashboard has a new look. It uses Catppuccin Mocha or Latte colors when the terminal supports true color, and it picks one from the terminal background. Set `dashboard.theme` to `mocha`, `latte`, `ansi` or `auto` to choose. Terminals without true color keep the 16-color theme
+- The dashboard header shows the machine, the daemon state and a spinner while a sync runs. The Overview tab shows a chart of sync commits per day
+- The Machines tab shows a card for each machine with its last sync, online/idle/stale state, OS and tether version
+- File and manifest diffs in the dashboard show line numbers and colored added and removed lines
+- Dashboard messages appear as notices in the top-right corner and disappear after a few seconds
+- The dashboard supports the mouse: click a tab, a row or a key hint, and scroll lists with the wheel
+- Press Ctrl+K in the dashboard to search actions, tabs, files and packages
+- The dashboard redraws only when something changes, so it uses almost no CPU when idle
+- In the package import list, the "Install?" question now shows above the list. Before, the list hid it
+
 ## [1.13.1] - 2026-10-02
 
 ### Fixed

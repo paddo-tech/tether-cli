@@ -1,10 +1,9 @@
-use super::cursor_down;
-use crate::dashboard::app::App;
+use super::{cursor_down, list, panel, row, scroll_for, scrollbar, select_row};
+use crate::dashboard::app::{App, Hit};
 use crate::dashboard::config_edit::{self, FieldKind};
 use crate::dashboard::msg::KeyOutcome;
-use crate::dashboard::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{prelude::*, widgets::*};
+use ratatui::{prelude::*, widgets::Paragraph};
 
 #[derive(Default)]
 pub struct ConfigTabState {
@@ -20,8 +19,8 @@ pub struct ListEditState {
     field_label: &'static str,
     is_dotfile: bool,
     items: Vec<String>,
-    cursor: usize,
-    adding: bool,
+    pub cursor: usize,
+    pub adding: bool,
     add_buf: String,
 }
 
@@ -217,239 +216,161 @@ fn refresh_list_edit(app: &mut App) {
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let selected = app.config.selected;
-    let editing = app.config.editing;
-    let edit_buf = app.config.edit_buf.as_str();
     let Some(config) = &app.state.config else {
-        let msg = Paragraph::new(Span::styled(
-            "  No config loaded",
-            Style::default().fg(t.muted),
-        ))
-        .block(
-            Block::default()
-                .title(" Config ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(t.border)),
+        let block = panel(" Config ", true, t);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(Span::styled("No config loaded", Style::default().fg(t.dim))),
+            inner,
         );
-        f.render_widget(msg, area);
         return;
     };
 
-    // If list sub-view is active, render that instead
     if let Some(le) = &app.config.list_edit {
-        render_list_edit(f, area, le, t);
+        render_list_edit(f, area, le, app);
         return;
     }
 
-    let fields = config_edit::fields();
-
-    let inner = Block::default()
-        .title(" Config ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.border));
-    let inner_area = inner.inner(area);
-    f.render_widget(inner, area);
-
-    let visible_height = inner_area.height as usize;
-    let mut rows: Vec<Row> = Vec::new();
-    let mut field_row_map: Vec<Option<usize>> = Vec::new();
-    let mut last_section = "";
-
-    for (i, field) in fields.iter().enumerate() {
-        if field.section != last_section {
-            rows.push(Row {
-                is_header: true,
-                label: field.section.to_string(),
-                value: String::new(),
-                kind: FieldKind::Bool,
-            });
-            field_row_map.push(None);
-            last_section = field.section;
-        }
-        let value = config_edit::get_value(config, i);
-        rows.push(Row {
-            is_header: false,
-            label: field.label.to_string(),
-            value,
-            kind: field.kind,
-        });
-        field_row_map.push(Some(i));
-    }
-
-    let selected_row = field_row_map
-        .iter()
-        .position(|m| *m == Some(selected))
-        .unwrap_or(0);
-
-    let scroll = if selected_row >= visible_height {
-        selected_row - visible_height + 1
-    } else {
-        0
-    };
-
-    for (y, (row_idx, row)) in
-        (inner_area.y..inner_area.y + inner_area.height).zip(rows.iter().enumerate().skip(scroll))
-    {
-        let is_selected = field_row_map[row_idx] == Some(selected);
-
-        if row.is_header {
-            let span = Span::styled(
-                format!("  {}", row.label),
-                Style::default().fg(t.accent).bold(),
-            );
-            f.render_widget(
-                Paragraph::new(Line::from(span)),
-                Rect::new(inner_area.x, y, inner_area.width, 1),
-            );
-        } else {
-            let (prefix, val_display) = match row.kind {
-                FieldKind::Bool => {
-                    let cb = if row.value == "true" { "[x]" } else { "[ ]" };
-                    (format!("    {} ", cb), String::new())
-                }
-                FieldKind::Text => {
-                    let val = if is_selected && editing {
-                        format!("{}_ ", edit_buf)
-                    } else {
-                        row.value.clone()
-                    };
-                    ("       ".to_string(), val)
-                }
-                FieldKind::List | FieldKind::DotfileList => {
-                    ("    >  ".to_string(), row.value.clone())
-                }
-            };
-
-            let style = if is_selected {
-                Style::default().fg(t.text).bg(t.selection)
-            } else {
-                Style::default().fg(t.text)
-            };
-
-            let line = Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(&row.label, style),
-                if !val_display.is_empty() {
-                    Span::styled(format!("  {}", val_display), style.fg(t.value))
-                } else {
-                    Span::raw("")
-                },
-                Span::styled(" ".repeat(inner_area.width as usize), style),
-            ]);
-            f.render_widget(
-                Paragraph::new(line),
-                Rect::new(inner_area.x, y, inner_area.width, 1),
-            );
-        }
-    }
-}
-
-fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState, t: &Theme) {
-    let title = format!(" {} ({}) ", le.field_label, le.items.len());
-
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.border));
-    let inner_area = block.inner(area);
+    let block = panel(" Config ", true, t);
+    let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if inner_area.height == 0 {
-        return;
+    // Section headers interleave with fields; `None` marks a header row.
+    let mut rows: Vec<(Option<usize>, &str)> = Vec::new();
+    let mut last_section = "";
+    for (i, field) in config_edit::fields().iter().enumerate() {
+        if field.section != last_section {
+            rows.push((None, field.section));
+            last_section = field.section;
+        }
+        rows.push((Some(i), field.label));
     }
+    let selected_row = rows
+        .iter()
+        .position(|(i, _)| *i == Some(selected))
+        .unwrap_or(0);
+    let visible = inner.height as usize;
+    let scroll = scroll_for(selected_row, visible);
 
-    // Header line with keybindings
-    let header = Line::from(vec![
-        Span::styled("  Esc", t.key_hint()),
+    for (n, (field, label)) in rows.iter().enumerate().skip(scroll).take(visible) {
+        let r = Rect::new(inner.x, inner.y + (n - scroll) as u16, inner.width, 1);
+        let Some(idx) = *field else {
+            let rule = "─".repeat((inner.width as usize).saturating_sub(label.len() + 1));
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled(format!("{} ", label), Style::default().fg(t.accent).bold()),
+                    Span::styled(rule, Style::default().fg(t.border)),
+                ]),
+                r,
+            );
+            continue;
+        };
+        let is_selected = idx == selected;
+        if is_selected {
+            select_row(f, r, t);
+        }
+        app.add_hit(r, Hit::Row(idx));
+        let value = config_edit::get_value(config, idx);
+        let label_style = if is_selected {
+            Style::default().fg(t.text).bold()
+        } else {
+            Style::default().fg(t.text)
+        };
+        let left = Line::from(Span::styled(format!("  {}", label), label_style));
+        let right = match config_edit::fields()[idx].kind {
+            FieldKind::Bool => {
+                if value == "true" {
+                    Line::from(vec![
+                        Span::styled("on ", Style::default().fg(t.ok)),
+                        Span::styled("●━━", Style::default().fg(t.ok)),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled("off ", Style::default().fg(t.dim)),
+                        Span::styled("━━○", Style::default().fg(t.dim)),
+                    ])
+                }
+            }
+            FieldKind::Text if is_selected && app.config.editing => Line::from(vec![
+                Span::styled(
+                    app.config.edit_buf.as_str(),
+                    Style::default().fg(t.value).bold(),
+                ),
+                Span::styled("▏", Style::default().fg(t.accent)),
+            ]),
+            FieldKind::Text => Line::from(Span::styled(value, Style::default().fg(t.value))),
+            FieldKind::List | FieldKind::DotfileList => Line::from(vec![
+                Span::styled(value, Style::default().fg(t.muted)),
+                Span::styled("  ›", Style::default().fg(t.dim)),
+            ]),
+        };
+        row(f, r, left, right);
+    }
+    scrollbar(f, area, rows.len(), scroll, visible, t);
+}
+
+fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState, app: &App) {
+    let t = &app.theme;
+    let mut hints = vec![
+        Span::styled(" esc", t.key_hint()),
         Span::styled(" back  ", Style::default().fg(t.muted)),
         Span::styled("a", t.key_hint()),
         Span::styled(" add  ", Style::default().fg(t.muted)),
         Span::styled("d", t.key_hint()),
-        Span::styled(" delete", Style::default().fg(t.muted)),
-        if le.is_dotfile {
-            Span::styled("  t", t.key_hint())
-        } else {
-            Span::raw("")
-        },
-        if le.is_dotfile {
-            Span::styled(" toggle create", Style::default().fg(t.muted))
-        } else {
-            Span::raw("")
-        },
-    ]);
-    f.render_widget(
-        Paragraph::new(header),
-        Rect::new(inner_area.x, inner_area.y, inner_area.width, 1),
-    );
-
-    // Separator
-    if inner_area.height < 2 {
+        Span::styled(" delete ", Style::default().fg(t.muted)),
+    ];
+    if le.is_dotfile {
+        hints.push(Span::styled(" t", t.key_hint()));
+        hints.push(Span::styled(
+            " toggle create ",
+            Style::default().fg(t.muted),
+        ));
+    }
+    let block = panel(
+        format!(" Config › {} ({}) ", le.field_label, le.items.len()),
+        true,
+        t,
+    )
+    .title_bottom(Line::from(hints).right_aligned());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 {
         return;
     }
-    let sep = "─".repeat(inner_area.width as usize);
-    f.render_widget(
-        Paragraph::new(Span::styled(sep, Style::default().fg(t.muted))),
-        Rect::new(inner_area.x, inner_area.y + 1, inner_area.width, 1),
+
+    let list_area = if le.adding {
+        let input = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        f.render_widget(
+            Line::from(vec![
+                Span::styled("+ ", Style::default().fg(t.ok).bold()),
+                Span::styled(le.add_buf.as_str(), Style::default().fg(t.text)),
+                Span::styled("▏", Style::default().fg(t.accent)),
+            ]),
+            input,
+        );
+        Rect {
+            height: inner.height - 1,
+            ..inner
+        }
+    } else {
+        inner
+    };
+
+    list(
+        f,
+        app,
+        area,
+        list_area,
+        &le.items,
+        le.cursor,
+        |f, r, item, selected| {
+            let style = if selected {
+                Style::default().fg(t.text).bold()
+            } else {
+                Style::default().fg(t.text)
+            };
+            f.render_widget(Line::from(Span::styled(item.as_str(), style)), r);
+        },
     );
-
-    let list_start_y = inner_area.y + 2;
-    let list_height = (inner_area.height as usize).saturating_sub(2);
-
-    // Add mode input at the bottom
-    let (items_height, add_line) = if le.adding {
-        (
-            list_height.saturating_sub(1),
-            Some(list_start_y + list_height.saturating_sub(1) as u16),
-        )
-    } else {
-        (list_height, None)
-    };
-
-    // Scroll for items
-    let scroll = if le.cursor >= items_height {
-        le.cursor - items_height + 1
-    } else {
-        0
-    };
-
-    for (y, (i, item)) in (list_start_y..list_start_y + items_height as u16)
-        .zip(le.items.iter().enumerate().skip(scroll))
-    {
-        let is_selected = i == le.cursor;
-        let style = if is_selected {
-            Style::default().fg(t.text).bg(t.selection)
-        } else {
-            Style::default().fg(t.text)
-        };
-
-        let marker = if is_selected { ">" } else { " " };
-        let line = Line::from(vec![
-            Span::styled(format!("  {} ", marker), style),
-            Span::styled(item, style),
-            Span::styled(" ".repeat(inner_area.width as usize), style),
-        ]);
-        f.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner_area.x, y, inner_area.width, 1),
-        );
-    }
-
-    // Render add input line
-    if let Some(add_y) = add_line {
-        let line = Line::from(vec![
-            Span::styled("  + ", Style::default().fg(t.ok).bold()),
-            Span::styled(&le.add_buf, Style::default().fg(t.text)),
-            Span::styled("_", Style::default().fg(t.key)),
-        ]);
-        f.render_widget(
-            Paragraph::new(line),
-            Rect::new(inner_area.x, add_y, inner_area.width, 1),
-        );
-    }
-}
-
-struct Row {
-    is_header: bool,
-    label: String,
-    value: String,
-    kind: FieldKind,
 }

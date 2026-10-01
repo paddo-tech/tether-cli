@@ -7,6 +7,9 @@ use std::future::Future;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+/// Days of history in the Overview activity chart.
+const ACTIVITY_DAYS: usize = 90;
+
 pub struct Runtime {
     tx: Sender<Msg>,
     pub rx: Receiver<Msg>,
@@ -52,6 +55,12 @@ impl Runtime {
                             result: Err(e),
                         })
                     },
+                );
+            }
+            Cmd::LoadActivity => {
+                self.spawn(
+                    async { Msg::Activity(super::repo::commit_activity(ACTIVITY_DAYS)) },
+                    |_| None,
                 );
             }
             Cmd::CollectPackages { config, machine_id } => {

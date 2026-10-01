@@ -1,184 +1,165 @@
-use crate::dashboard::app::Tab;
+use super::{centered, popup};
+use crate::dashboard::app::{App, Hit, Tab};
 use crate::dashboard::theme::Theme;
-use ratatui::{prelude::*, widgets::*};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{prelude::*, widgets::Paragraph};
 
-pub fn render_bar(f: &mut Frame, area: Rect, active_tab: Tab, t: &Theme) {
-    let mut spans = vec![
-        Span::styled(" q", t.key_hint()),
-        Span::styled("uit ", Style::default().fg(t.muted)),
-        Span::styled("s", t.key_hint()),
-        Span::styled("ync ", Style::default().fg(t.muted)),
-        Span::styled("d", t.key_hint()),
-        Span::styled("aemon ", Style::default().fg(t.muted)),
-        Span::styled("r", t.key_hint()),
-        Span::styled("efresh ", Style::default().fg(t.muted)),
-    ];
+type Hint = (&'static str, &'static str, KeyEvent);
 
-    match active_tab {
-        Tab::Config => {
-            spans.extend([
-                Span::styled("Enter", t.key_hint()),
-                Span::styled(" edit ", Style::default().fg(t.muted)),
-            ]);
-        }
-        Tab::Packages => {
-            spans.extend([
-                Span::styled("Enter", t.key_hint()),
-                Span::styled(" expand/uninstall ", Style::default().fg(t.muted)),
-            ]);
-        }
-        Tab::Machines => {
-            spans.extend([
-                Span::styled("Enter", t.key_hint()),
-                Span::styled(" expand ", Style::default().fg(t.muted)),
-                Span::styled("p", t.key_hint()),
-                Span::styled(" profile ", Style::default().fg(t.muted)),
-            ]);
-        }
-        Tab::Files => {
-            spans.extend([
-                Span::styled("Enter", t.key_hint()),
-                Span::styled(" expand/diff ", Style::default().fg(t.muted)),
-                Span::styled("t", t.key_hint()),
-                Span::styled(" shared ", Style::default().fg(t.muted)),
-                Span::styled("R", t.key_hint()),
-                Span::styled("estore ", Style::default().fg(t.muted)),
-            ]);
-        }
-        _ => {}
+const fn k(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+const FILES: &[Hint] = &[
+    ("⏎", "expand/diff", k(KeyCode::Enter)),
+    ("i", "import", k(KeyCode::Char('i'))),
+    ("t", "shared", k(KeyCode::Char('t'))),
+    ("R", "restore", k(KeyCode::Char('R'))),
+    ("x", "remove", k(KeyCode::Char('x'))),
+];
+const PACKAGES: &[Hint] = &[
+    ("⏎", "expand/uninstall", k(KeyCode::Enter)),
+    ("i", "import", k(KeyCode::Char('i'))),
+    ("h", "history", k(KeyCode::Char('h'))),
+    ("R", "rollback", k(KeyCode::Char('R'))),
+];
+const MACHINES: &[Hint] = &[
+    ("⏎", "details", k(KeyCode::Enter)),
+    ("p", "profile", k(KeyCode::Char('p'))),
+];
+const CONFIG: &[Hint] = &[("⏎", "edit", k(KeyCode::Enter))];
+
+fn tab_hints(tab: Tab) -> &'static [Hint] {
+    match tab {
+        Tab::Overview => &[],
+        Tab::Files => FILES,
+        Tab::Packages => PACKAGES,
+        Tab::Machines => MACHINES,
+        Tab::Config => CONFIG,
     }
+}
 
-    spans.extend([
-        Span::styled("?", t.key_hint()),
-        Span::styled(" help", Style::default().fg(t.muted)),
-    ]);
+const GLOBAL: &[Hint] = &[
+    ("s", "sync", k(KeyCode::Char('s'))),
+    ("d", "daemon", k(KeyCode::Char('d'))),
+    ("r", "refresh", k(KeyCode::Char('r'))),
+    (
+        "^K",
+        "commands",
+        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+    ),
+    ("?", "help", k(KeyCode::Char('?'))),
+    ("q", "quit", k(KeyCode::Char('q'))),
+];
 
-    let paragraph = Paragraph::new(Line::from(spans));
-    f.render_widget(paragraph, area);
+/// Key hints: the active tab's on the left, global ones on the right. Each hint is clickable.
+pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
+    let t = &app.theme;
+    let draw = |f: &mut Frame, hints: &[Hint], mut x: u16, limit: u16| {
+        for (key, desc, code) in hints {
+            let w = (key.chars().count() + desc.len() + 3) as u16;
+            if x + w > limit {
+                break;
+            }
+            let rect = Rect::new(x, area.y, w, 1);
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled(format!(" {}", key), t.key_hint()),
+                    Span::styled(format!(" {} ", desc), Style::default().fg(t.muted)),
+                ]),
+                rect,
+            );
+            app.add_hit(rect, Hit::Key(*code));
+            x += w;
+        }
+    };
+    let global_w: u16 = GLOBAL
+        .iter()
+        .map(|(k, d, _)| (k.chars().count() + d.len() + 3) as u16)
+        .sum();
+    let right_start = area.right().saturating_sub(global_w + 1).max(area.x);
+    draw(f, tab_hints(app.active_tab), area.x, right_start);
+    draw(f, GLOBAL, right_start, area.right());
 }
 
 pub fn render_overlay(f: &mut Frame, t: &Theme) {
     let area = f.area();
     if area.height < 10 || area.width < 30 {
-        let hint = Paragraph::new(Span::styled(
-            " Press ? to close help ",
-            Style::default().fg(t.key),
-        ));
         let y = area.height.saturating_sub(2);
-        f.render_widget(hint, Rect::new(0, y, area.width, 1));
+        f.render_widget(
+            Paragraph::new(Span::styled(" Press ? to close help ", t.key_hint())),
+            Rect::new(0, y, area.width, 1),
+        );
         return;
     }
 
-    let width = 50u16.min(area.width.saturating_sub(4));
-    let height = 29u16.min(area.height.saturating_sub(4));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup_area = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, popup_area);
-
-    let help_text = vec![
+    let tabs = format!("1-{}", Tab::all().len());
+    let section =
+        |s: &'static str| Line::from(Span::styled(s, Style::default().fg(t.accent).bold()));
+    let key = |k: &str, d: &'static str| {
+        Line::from(vec![
+            Span::styled(format!("  {:<10}", k), t.key_hint()),
+            Span::styled(d, Style::default().fg(t.text)),
+        ])
+    };
+    let left = vec![
+        section("Global"),
+        key("Ctrl+K", "Command palette"),
+        key("s", "Sync now"),
+        key("d", "Start/stop daemon"),
+        key("r", "Refresh"),
+        key("Tab", "Next tab"),
+        key(&tabs, "Switch tab"),
+        key("j/k ↑↓", "Move"),
+        key("Enter", "Expand / edit"),
+        key("?", "Toggle help"),
+        key("q / Esc", "Quit"),
+        key("Ctrl+C", "Force quit"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  q / Esc   ", t.key_hint()),
-            Span::raw("Quit"),
-        ]),
-        Line::from(vec![
-            Span::styled("  s         ", t.key_hint()),
-            Span::raw("Trigger sync"),
-        ]),
-        Line::from(vec![
-            Span::styled("  d         ", t.key_hint()),
-            Span::raw("Start/stop daemon"),
-        ]),
-        Line::from(vec![
-            Span::styled("  r         ", t.key_hint()),
-            Span::raw("Refresh data"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Tab       ", t.key_hint()),
-            Span::raw("Next tab"),
-        ]),
-        Line::from(vec![
-            Span::styled("  1-5       ", t.key_hint()),
-            Span::raw("Switch tab"),
-        ]),
-        Line::from(vec![
-            Span::styled("  j/k       ", t.key_hint()),
-            Span::raw("Scroll down/up"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Enter     ", t.key_hint()),
-            Span::raw("Expand/edit (context)"),
-        ]),
+        section("Mouse"),
+        key("click", "Tab, row; again to open"),
+        key("wheel", "Scroll"),
+    ];
+    let right = vec![
+        section("Files"),
+        key("Enter", "Open history, diff"),
+        key("i", "Import from profile"),
+        key("t", "Toggle shared"),
+        key("R", "Restore to commit"),
+        key("x", "Remove from profile"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  Files tab:",
-            Style::default().fg(t.accent).bold(),
-        )),
-        Line::from(vec![
-            Span::styled("  Enter     ", t.key_hint()),
-            Span::raw("Expand section/file/history/diff"),
-        ]),
-        Line::from(vec![
-            Span::styled("  t         ", t.key_hint()),
-            Span::raw("Toggle shared across profiles"),
-        ]),
-        Line::from(vec![
-            Span::styled("  R         ", t.key_hint()),
-            Span::raw("Restore file to selected commit"),
-        ]),
+        section("Packages"),
+        key("Enter", "Expand / uninstall"),
+        key("i", "Import from machines"),
+        key("h", "Manifest history"),
+        key("R", "Roll back to entry"),
         Line::from(""),
-        Line::from(Span::styled(
-            "  Config list sub-view:",
-            Style::default().fg(t.accent).bold(),
-        )),
-        Line::from(vec![
-            Span::styled("  a         ", t.key_hint()),
-            Span::raw("Add item"),
-        ]),
-        Line::from(vec![
-            Span::styled("  d         ", t.key_hint()),
-            Span::raw("Delete item"),
-        ]),
-        Line::from(vec![
-            Span::styled("  t         ", t.key_hint()),
-            Span::raw("Toggle create (dotfiles)"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Packages tab:",
-            Style::default().fg(t.accent).bold(),
-        )),
-        Line::from(vec![
-            Span::styled("  Enter     ", t.key_hint()),
-            Span::raw("Expand/uninstall, toggle history diff"),
-        ]),
-        Line::from(vec![
-            Span::styled("  h         ", t.key_hint()),
-            Span::raw("Toggle manifest history"),
-        ]),
-        Line::from(vec![
-            Span::styled("  R         ", t.key_hint()),
-            Span::raw("Roll back to history entry"),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  ?         ", t.key_hint()),
-            Span::raw("Toggle help"),
-        ]),
-        Line::from(vec![
-            Span::styled("  Ctrl+c    ", t.key_hint()),
-            Span::raw("Force quit"),
-        ]),
-        Line::from(""),
+        section("Config list"),
+        key("a / d", "Add / delete item"),
+        key("t", "Toggle create"),
     ];
 
-    let paragraph = Paragraph::new(help_text).block(
-        Block::default()
-            .title(" Keyboard Shortcuts ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(t.accent)),
-    );
-    f.render_widget(paragraph, popup_area);
+    let two_col = area.width >= 78 && area.height >= 21;
+    let height = if two_col { 19 } else { 34 }.min(area.height.saturating_sub(2));
+    let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
+    let rect = centered(area, width, height);
+    let block = popup(f, rect, "Keyboard shortcuts", t.accent, t);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let inner = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    if two_col {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        f.render_widget(Paragraph::new(left), cols[0]);
+        f.render_widget(Paragraph::new(right), cols[1]);
+    } else {
+        let mut all = left;
+        all.push(Line::from(""));
+        all.extend(right);
+        f.render_widget(Paragraph::new(all), inner);
+    }
 }
