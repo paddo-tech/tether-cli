@@ -119,6 +119,16 @@ impl InboxItem {
     fn is(&self, manager: &str, name: &str) -> bool {
         self.manager == manager && self.name == name
     }
+
+    /// Whether approving `self` grants what approving `other` would: the same key for a
+    /// machine, the same version and tap for a package, held for the same reasons.
+    fn same_request(&self, other: &InboxItem) -> bool {
+        self.id() == other.id()
+            && self.kind == other.kind
+            && self.version == other.version
+            && self.tap == other.tap
+            && self.reasons == other.reasons
+    }
 }
 
 /// An approval or rejection. An approval covers only this version, and for a Homebrew
@@ -269,10 +279,18 @@ impl Inbox {
         Ok(self.items.remove(pos))
     }
 
-    /// Approve a pending item. Approving a Homebrew formula or cask does not trust its tap.
+    /// Approve the pending item the user reviewed. A sync can replace an item under the same
+    /// id, for example with another key or version, so an item that no longer matches
+    /// `reviewed` is refused. Approving a Homebrew formula or cask does not trust its tap.
     /// A machine item is only removed: the trust store, not this list, records trusted keys.
-    pub fn approve(&mut self, query: &str) -> Result<InboxItem> {
-        let item = self.find(query)?;
+    pub fn approve(&mut self, reviewed: &InboxItem) -> Result<InboxItem> {
+        let id = reviewed.id();
+        let Some(item) = self.items.iter().find(|i| i.id() == id) else {
+            bail!("No inbox item {}", id);
+        };
+        if !item.same_request(reviewed) {
+            bail!("{} changed since you reviewed it. Review it again", id);
+        }
         if item.reasons.contains(&Reason::Malicious) {
             bail!(
                 "OSV lists {} as malicious ({}). Tether will not install it",
@@ -280,7 +298,7 @@ impl Inbox {
                 item.advisories.join(", ")
             );
         }
-        let item = self.take(query)?;
+        let item = self.take(&id)?;
         if item.kind != Kind::Package {
             return Ok(item);
         }
@@ -423,11 +441,12 @@ pub fn add(items: Vec<InboxItem>) -> Result<Vec<InboxItem>> {
     })
 }
 
-/// Record approval. A machine item trusts its key now. For a package, the caller installs
-/// it with [`install`] or leaves it to the next sync.
-pub fn approve(query: &str) -> Result<InboxItem> {
+/// Record approval of the item the user reviewed, as shown to them. A machine item trusts
+/// its key now. For a package, the caller installs it with [`install`] or leaves it to the
+/// next sync.
+pub fn approve(reviewed: &InboxItem) -> Result<InboxItem> {
     Inbox::update(|inbox| {
-        let item = inbox.approve(query)?;
+        let item = inbox.approve(reviewed)?;
         if let Kind::TrustMachine { public_key, .. } = &item.kind {
             let mut store = TrustStore::load()?;
             store.trust(&item.name, &PublicKey::from_openssh(public_key)?)?;
@@ -661,7 +680,7 @@ mod tests {
         formula.version = None;
         formula.tap = Some("gastownhall/beads".to_string());
         inbox.add(formula);
-        let approved = inbox.approve("bd").unwrap();
+        let approved = inbox.approve(&inbox.find("bd").unwrap().clone()).unwrap();
         assert_eq!(approved.name, "bd");
         assert!(inbox.items.is_empty());
         assert!(inbox.is_approved("brew_formulae", "bd", None, Some("gastownhall/beads")));
@@ -674,7 +693,8 @@ mod tests {
         );
 
         inbox.add(item("brew_taps", "gastownhall/beads"));
-        inbox.approve("brew_taps:gastownhall/beads").unwrap();
+        let tap = inbox.find("brew_taps:gastownhall/beads").unwrap().clone();
+        inbox.approve(&tap).unwrap();
         assert_eq!(
             inbox.approved_taps().collect::<Vec<_>>(),
             vec!["gastownhall/beads"]
@@ -685,7 +705,7 @@ mod tests {
     fn approval_covers_only_the_approved_version() {
         let mut inbox = Inbox::default();
         inbox.add(item("npm", "left-pad"));
-        inbox.approve("left-pad").unwrap();
+        inbox.approve(&item("npm", "left-pad")).unwrap();
         assert!(inbox.is_approved("npm", "left-pad", Some("1.0.0"), None));
         assert!(!inbox.is_approved("npm", "left-pad", Some("6.6.6"), None));
         assert!(!inbox.is_approved("npm", "left-pad", None, None));
@@ -698,8 +718,40 @@ mod tests {
         bad.reasons = vec![Reason::Malicious];
         bad.advisories = vec!["MAL-2025-41443".to_string()];
         inbox.add(bad);
-        assert!(inbox.approve("nx").is_err());
+        let shown = inbox.find("nx").unwrap().clone();
+        assert!(inbox.approve(&shown).is_err());
         assert!(inbox.is_pending("npm", "nx"));
+    }
+
+    #[test]
+    fn approval_refuses_an_item_that_changed_after_review() {
+        let (b, b2) = (key(), key());
+        let mut inbox = Inbox::default();
+        let shown = InboxItem::machine("b", &b, Reason::NewMachine).unwrap();
+        inbox.add(shown.clone());
+        // A sync replaces the item under the same id with another key
+        inbox.add(InboxItem::machine("b", &b2, Reason::NewMachine).unwrap());
+        let err = inbox.approve(&shown).unwrap_err().to_string();
+        assert!(err.contains("changed since you reviewed it"), "{err}");
+        assert!(inbox.is_pending(MACHINE, "b"));
+
+        let shown = item("npm", "left-pad");
+        inbox.add(shown.clone());
+        inbox.add(InboxItem {
+            version: Some("6.6.6".to_string()),
+            ..item("npm", "left-pad")
+        });
+        assert!(inbox.approve(&shown).is_err());
+        let mut formula = item("brew_formulae", "bd");
+        formula.tap = Some("good/tap".to_string());
+        inbox.add(formula.clone());
+        inbox.add(InboxItem {
+            tap: Some("evil/tap".to_string()),
+            ..formula.clone()
+        });
+        assert!(inbox.approve(&formula).is_err());
+        assert!(inbox.approved.is_empty());
+        assert!(inbox.approve(&item("npm", "gone")).is_err());
     }
 
     #[test]
@@ -801,7 +853,7 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let approved = inbox.approve("machine:c").unwrap();
+        let approved = inbox.approve(&queued[0]).unwrap();
         assert!(inbox.items.is_empty());
         assert!(inbox.approved.is_empty());
         let Kind::TrustMachine { fingerprint, .. } = approved.kind else {
@@ -848,7 +900,7 @@ mod tests {
     fn inbox_roundtrips_through_json() {
         let mut inbox = Inbox::default();
         inbox.add(item("uv", "ruff"));
-        inbox.approve("ruff").unwrap();
+        inbox.approve(&item("uv", "ruff")).unwrap();
         inbox.add(item("gem", "rails"));
         let json = serde_json::to_string(&inbox).unwrap();
         assert_eq!(serde_json::from_str::<Inbox>(&json).unwrap(), inbox);

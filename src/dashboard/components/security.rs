@@ -81,18 +81,14 @@ fn reload(app: &mut App) {
     clamp_cursor(&mut app.security.cursor, app.state.inbox.items.len());
 }
 
-/// Record approval, then install a package in the background. A machine item trusts its key.
+/// Record approval of the item as displayed, then install a package in the background.
+/// A machine item trusts its key.
 pub fn approve(app: &mut App, id: &str) -> Option<Cmd> {
-    let package = app
-        .state
-        .inbox
-        .items
-        .iter()
-        .any(|i| i.id() == id && i.kind == Kind::Package);
-    if package && app.install_busy() {
+    let shown = app.state.inbox.items.iter().find(|i| i.id() == id)?.clone();
+    if shown.kind == Kind::Package && app.install_busy() {
         return None;
     }
-    let result = inbox::approve(id);
+    let result = inbox::approve(&shown);
     reload(app);
     match result {
         Ok(item) => match &item.kind {
@@ -145,17 +141,17 @@ pub fn approve_all(app: &mut App) -> Option<Cmd> {
     if app.install_busy() {
         return None;
     }
-    let ids: Vec<String> = app
+    let shown: Vec<InboxItem> = app
         .state
         .inbox
         .items
         .iter()
         .filter(|i| i.kind == Kind::Package && !is_malicious(i))
-        .map(InboxItem::id)
+        .cloned()
         .collect();
     let mut approved = Vec::new();
-    for id in ids {
-        match inbox::approve(&id) {
+    for item in &shown {
+        match inbox::approve(item) {
             Ok(item) => approved.push(item),
             Err(e) => app.flash_error(e.to_string()),
         }

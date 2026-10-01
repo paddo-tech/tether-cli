@@ -1216,8 +1216,8 @@ mod tests {
             None,
             vec![Reason::Unsigned],
         );
-        trust.inbox.add(item);
-        trust.inbox.approve("npm:example").unwrap();
+        trust.inbox.add(item.clone());
+        trust.inbox.approve(&item).unwrap();
         assert!(held(&trust, "example", Some("1.0.0")).is_empty());
         assert_eq!(
             held(&trust, "example", Some("6.6.6")),
