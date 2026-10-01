@@ -301,7 +301,9 @@ mod tests {
     fn gem_names() {
         assert!(ok(Ecosystem::Gem, "rails"));
         assert!(ok(Ecosystem::Gem, "net-http_persistent.x"));
-        for name in ["--source", "../x", "x/y", "http://x", "a b", "x.gem", "x.GEM"] {
+        for name in [
+            "--source", "../x", "x/y", "http://x", "a b", "x.gem", "x.GEM",
+        ] {
             assert!(!ok(Ecosystem::Gem, name), "{name:?}");
         }
     }

@@ -2,7 +2,6 @@ use crate::config::{Config, PackagesConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::Mutex;
-use tokio::process::Command;
 
 /// Supply-chain settings every manager applies to installs and upgrades.
 #[derive(Debug, Clone)]
@@ -88,7 +87,12 @@ pub fn parse_version(output: &str) -> Option<((u64, u64, u64), bool)> {
 }
 
 pub async fn tool_version(program: &str) -> Option<((u64, u64, u64), bool)> {
-    let output = Command::new(program).arg("--version").output().await.ok()?;
+    let output = super::command(program)
+        .ok()?
+        .arg("--version")
+        .output()
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }

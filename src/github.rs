@@ -12,7 +12,7 @@ impl GitHubCli {
 
     /// Install gh CLI via Homebrew
     pub async fn install() -> Result<()> {
-        let output = Command::new("brew")
+        let output = crate::packages::command("brew")?
             .args(["install", "gh"])
             .output()
             .await

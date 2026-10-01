@@ -1,9 +1,9 @@
+use super::command;
 use super::policy::first_warning;
 use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
-use tokio::process::Command;
 
 /// Structured representation of Brewfile contents
 #[derive(Debug, Clone, Default)]
@@ -181,7 +181,7 @@ impl BrewManager {
                 let requested_version = &formula[at_pos + 1..];
 
                 // Check what versions of this formula are installed
-                let output = Command::new("brew")
+                let output = command("brew")?
                     .args(["list", "--versions"])
                     .output()
                     .await?;
@@ -201,7 +201,7 @@ impl BrewManager {
                                 if installed_base == base_name
                                     && installed_version != requested_version
                                 {
-                                    let _ = Command::new("brew")
+                                    let _ = command("brew")?
                                         .args(["unlink", installed_name])
                                         .output()
                                         .await;
@@ -217,7 +217,7 @@ impl BrewManager {
     }
 
     async fn run_brew(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("brew").args(args).output().await?;
+        let output = command("brew")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -269,7 +269,7 @@ impl BrewManager {
         use std::process::Stdio;
 
         self.check_package(cask)?;
-        let mut cmd = Command::new("brew");
+        let mut cmd = command("brew")?;
         cmd.args(["install", "--cask", cask])
             .env("NONINTERACTIVE", "1")
             .env("HOMEBREW_NO_AUTO_UPDATE", "1");
@@ -378,7 +378,7 @@ impl PackageManager for BrewManager {
         }
 
         // Generate Brewfile
-        let output = Command::new("brew")
+        let output = command("brew")?
             .args([
                 "bundle",
                 "dump",
@@ -428,7 +428,7 @@ impl PackageManager for BrewManager {
         // Use `brew bundle install` to install packages from Brewfile
         // --no-upgrade: don't upgrade existing packages (faster, less disruptive)
         // Stream output to terminal so user can see progress and any errors
-        let status = Command::new("brew")
+        let status = command("brew")?
             .args([
                 "bundle",
                 "install",
@@ -486,7 +486,7 @@ impl PackageManager for BrewManager {
                     eprintln!("Warning: Skipping brew entry: {}", e);
                     continue;
                 }
-                let output = Command::new("brew")
+                let output = command("brew")?
                     .args(["uninstall", &pkg.name])
                     .output()
                     .await?;
@@ -509,9 +509,9 @@ impl PackageManager for BrewManager {
         }
 
         // Update Homebrew itself and upgrade all packages
-        Command::new("brew").args(["update"]).output().await?;
+        command("brew")?.args(["update"]).output().await?;
 
-        let output = Command::new("brew").args(["upgrade"]).output().await?;
+        let output = command("brew")?.args(["upgrade"]).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -523,7 +523,7 @@ impl PackageManager for BrewManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Brew, package)?;
-        let output = Command::new("brew")
+        let output = command("brew")?
             .args(["uninstall", package])
             .output()
             .await?;
@@ -537,7 +537,7 @@ impl PackageManager for BrewManager {
     }
 
     async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
-        let output = Command::new("brew")
+        let output = command("brew")?
             .args(["uses", "--installed", package])
             .output()
             .await?;

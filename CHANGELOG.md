@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - npm, pnpm and bun now install and upgrade with install scripts turned off. List packages that need their scripts in `packages.allow_scripts`
 - Homebrew taps outside `homebrew/*` must be listed in `packages.brew.trusted_taps`. Tether skips other taps, and formulae and casks from them, and shows a warning
 - Tether now rejects package names and versions that a package manager reads as a local file. The check ignores case. It covers `.tgz`, `.tar` and `.tar.gz` for npm, pnpm and bun, `.gem` for gem, `.rb`, `.json` and bottle tarballs for Homebrew, and `.tar.gz`, `.whl` and `.zip` for uv
+- Tether now runs every package manager in the empty directory `~/.tether/run`. Before, a package manager ran in your current directory and could install a local file or read project config from it. `gem install` and `gem update` also use `--remote`, so gem never installs a `*.gem` file
 
 ## [1.13.1] - 2026-10-02
 

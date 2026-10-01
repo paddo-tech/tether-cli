@@ -1,8 +1,8 @@
+use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::process::Command;
 
 pub struct UvManager;
 
@@ -16,7 +16,7 @@ impl UvManager {
     }
 
     async fn run_uv(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("uv").args(args).output().await?;
+        let output = command("uv")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -101,7 +101,7 @@ impl PackageManager for UvManager {
             return Ok(());
         }
 
-        let output = Command::new("uv")
+        let output = command("uv")?
             .args(["tool", "upgrade", "--all"])
             .args(self.cooldown().await.args())
             .output()
@@ -117,7 +117,7 @@ impl PackageManager for UvManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Python, package)?;
-        let output = Command::new("uv")
+        let output = command("uv")?
             .args(["tool", "uninstall", package])
             .output()
             .await?;

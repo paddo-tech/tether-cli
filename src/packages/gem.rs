@@ -1,8 +1,8 @@
+use super::command;
 use super::policy::PackagePolicy;
 use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::process::Command;
 
 pub struct GemManager;
 
@@ -16,7 +16,7 @@ impl GemManager {
     }
 
     async fn run_gem(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gem").args(args).output().await?;
+        let output = command("gem")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -50,7 +50,7 @@ impl Default for GemManager {
 #[async_trait]
 impl PackageManager for GemManager {
     async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
-        let output = Command::new("ruby")
+        let output = command("ruby")?
             .args(["-e", TOP_LEVEL_GEMS])
             .output()
             .await?;
@@ -89,7 +89,8 @@ impl PackageManager for GemManager {
 
         // Without GEM_HOME, --user-install avoids needing sudo for a system Ruby
         // --conservative skips gems present only as dependencies, which the listing omits
-        let mut args = vec!["install", pkg_spec.as_str(), "--conservative"];
+        // --remote stops gem from installing a matching *.gem file instead of the registry gem
+        let mut args = vec!["install", pkg_spec.as_str(), "--conservative", "--remote"];
         args.extend(Self::user_install_flag());
         self.run_gem(&args).await?;
         Ok(())
@@ -122,8 +123,8 @@ impl PackageManager for GemManager {
             return Ok(());
         }
 
-        let output = Command::new("gem")
-            .arg("update")
+        let output = command("gem")?
+            .args(["update", "--remote"])
             .args(Self::user_install_flag())
             .output()
             .await?;
@@ -138,7 +139,7 @@ impl PackageManager for GemManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Gem, package)?;
-        let output = Command::new("gem")
+        let output = command("gem")?
             .args(["uninstall", package, "-x", "-a"])
             .output()
             .await?;
@@ -153,7 +154,7 @@ impl PackageManager for GemManager {
 
     async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
         // gem dependency -R shows reverse dependencies
-        let output = Command::new("gem")
+        let output = command("gem")?
             .args(["dependency", "-R", package])
             .output()
             .await?;

@@ -1,10 +1,10 @@
+use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
-use tokio::process::Command;
 
 #[derive(Debug, Deserialize)]
 struct NpmListOutput {
@@ -41,7 +41,7 @@ impl NpmManager {
     }
 
     async fn run_npm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("npm").args(args).output().await?;
+        let output = command("npm")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -156,7 +156,7 @@ impl PackageManager for NpmManager {
                 .flat_map(|name| policy::npm_script_args(&package_policy, name, major))
                 .collect();
             script_args.dedup();
-            let output = Command::new("npm")
+            let output = command("npm")?
                 .args(["update", "-g"])
                 .args(&cooldown)
                 .args(&script_args)
@@ -175,7 +175,7 @@ impl PackageManager for NpmManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Npm, package)?;
-        let output = Command::new("npm")
+        let output = command("npm")?
             .args(["uninstall", "-g", package])
             .output()
             .await?;

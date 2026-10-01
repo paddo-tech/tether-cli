@@ -1,3 +1,4 @@
+use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{
     command_error_message, validate_name, validate_version, Cooldown, Ecosystem, PackageInfo,
@@ -6,7 +7,6 @@ use super::{
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::process::Command;
 
 pub struct PnpmManager;
 
@@ -29,7 +29,7 @@ impl PnpmManager {
     }
 
     async fn run_pnpm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("pnpm").args(args).output().await?;
+        let output = command("pnpm")?.args(args).output().await?;
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
@@ -149,7 +149,7 @@ impl PackageManager for PnpmManager {
             let Some(first) = batch.first() else {
                 continue;
             };
-            let output = Command::new("pnpm")
+            let output = command("pnpm")?
                 .args(["update", "-g"])
                 .args(&cooldown)
                 .args(policy::pnpm_script_args(&package_policy, first))
@@ -170,7 +170,7 @@ impl PackageManager for PnpmManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Npm, package)?;
-        let output = Command::new("pnpm")
+        let output = command("pnpm")?
             .args(["remove", "-g", package])
             .output()
             .await?;

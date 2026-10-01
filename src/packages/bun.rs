@@ -1,8 +1,8 @@
+use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::process::Command;
 
 /// Parse a package@version string, handling scoped packages like @scope/pkg@version
 fn parse_package_version(s: &str) -> (String, Option<String>) {
@@ -36,7 +36,7 @@ impl BunManager {
     }
 
     async fn run_bun(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("bun").args(args).output().await?;
+        let output = command("bun")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -165,7 +165,7 @@ impl PackageManager for BunManager {
                 eprintln!("Warning: Skipping bun entry: {}", e);
                 continue;
             }
-            let output = Command::new("bun")
+            let output = command("bun")?
                 .args(["add", "-g"])
                 .args(&cooldown)
                 .args(policy::bun_script_args(&package_policy, &pkg.name))
@@ -184,7 +184,7 @@ impl PackageManager for BunManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Npm, package)?;
-        let output = Command::new("bun")
+        let output = command("bun")?
             .args(["remove", "-g", package])
             .output()
             .await?;

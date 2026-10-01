@@ -18,6 +18,20 @@ pub use policy::{Cooldown, PackagePolicy};
 pub use uv::UvManager;
 pub use validate::{validate_name, validate_version, Ecosystem};
 
+/// Package managers read local package files and project config (`*.gem`, `.npmrc`,
+/// `pnpm-workspace.yaml`) from the working directory, so every one runs in an empty
+/// directory Tether owns instead of the caller's.
+pub fn command(program: &str) -> anyhow::Result<tokio::process::Command> {
+    let dir = crate::home_dir()?.join(".tether").join("run");
+    if std::fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_some()) {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.current_dir(dir);
+    Ok(cmd)
+}
+
 /// Some tools (pnpm) report failures on stdout, so surface both streams.
 pub fn command_error_message(output: &std::process::Output) -> String {
     [&output.stderr, &output.stdout]
