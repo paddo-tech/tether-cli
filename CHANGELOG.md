@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Package manifests now record the version each machine has installed: `name@1.2.3` in `npm.txt`, `pnpm.txt` and `bun.txt`, `name==1.2.3` in `uv.txt`, and `name:1.2.3` in `gems.txt`. When machines differ, the manifest keeps the newest version. A new machine installs that exact version. Lines without a version still work and install the newest release that passes the release-age limit. The Brewfile stays unpinned, because Homebrew installs only the current release
+- New approval inbox in `~/.tether/inbox.json`. It stays on this machine and is never synced. Use `tether packages inbox` to list held packages, and `tether packages approve <id>` or `tether packages reject <id>` to decide. An approved package installs at once. A rejected package is not offered again. An approved Homebrew package from an untrusted tap also trusts that tap
+- `tether sync` in a terminal now asks about held packages. The daemon holds them and sends one notification for each new batch
+- New setting `packages.auto_install_from_trusted` (default false)
+
+### Changed
+
+- A package that another machine added to a manifest no longer installs on its own. It waits in the approval inbox. Set `packages.auto_install_from_trusted = true` to install such packages without approval when they pass every other check
+- Synced packages that the installed manager cannot hold to `packages.min_release_age_days` now wait in the approval inbox. Before, they installed after a warning. This covers gem and old npm, pnpm and bun
+- Homebrew taps that are not trusted, and formulae and casks from them, now wait in the approval inbox. Before, Tether skipped them with a warning
 
 ### Security
 

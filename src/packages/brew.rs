@@ -1,4 +1,5 @@
 use super::command;
+use super::inbox::{self, InboxItem, Reason};
 use super::policy::first_warning;
 use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy};
 use anyhow::Result;
@@ -148,30 +149,47 @@ fn tap_of(name: &str) -> Option<&str> {
     name.rsplit_once('/').map(|(tap, _)| tap)
 }
 
-/// Untrusted taps and their packages are held back from install. The approval inbox
-/// takes them over here once it exists.
-/// The daemon re-reads the Brewfile every cycle, so each warning prints once per process.
+/// Untrusted taps and their packages go to the approval inbox instead of brew.
+/// The daemon re-reads the Brewfile every cycle, so only newly held items are reported.
 pub fn hold_untrusted(untrusted: &BrewfilePackages) {
-    let messages = untrusted
+    let item = |manager: &str, name: &String, tap: Option<&str>| InboxItem {
+        manager: manager.to_string(),
+        name: name.clone(),
+        version: None,
+        tap: tap.map(str::to_string),
+        source_machine: None,
+        commit: None,
+        reasons: vec![Reason::UntrustedTap],
+        advisories: Vec::new(),
+        first_seen: chrono::Utc::now(),
+    };
+    let items = untrusted
         .taps
         .iter()
-        .map(|tap| {
-            format!(
-                "Warning: Skipping untrusted tap {}. Add it to packages.brew.trusted_taps to allow it",
-                tap
-            )
-        })
+        .map(|t| item("brew_taps", t, None))
         .chain(
             untrusted
                 .formulae
                 .iter()
-                .chain(&untrusted.casks)
-                .map(|name| format!("Warning: Skipping {} from an untrusted tap", name)),
-        );
-    for message in messages {
-        if first_warning(&message) {
-            eprintln!("{}", message);
+                .map(|f| item("brew_formulae", f, tap_of(f))),
+        )
+        .chain(
+            untrusted
+                .casks
+                .iter()
+                .map(|c| item("brew_casks", c, tap_of(c))),
+        )
+        .collect();
+    match inbox::add(items) {
+        Ok(held) => {
+            for item in held {
+                eprintln!(
+                    "Warning: Holding {} from an untrusted tap for approval. Run 'tether packages inbox'",
+                    item.name
+                );
+            }
         }
+        Err(e) => eprintln!("Warning: Skipping untrusted Homebrew entries: {}", e),
     }
 }
 
@@ -218,36 +236,6 @@ impl BrewManager {
             .chain(info.casks)
             .next()
             .and_then(|entry| entry.tap)
-    }
-
-    /// Move short-named formulae and casks that resolve to an untrusted tap, or to no tap,
-    /// out of `packages`.
-    pub async fn take_untrusted_short_names(
-        &self,
-        packages: &mut BrewfilePackages,
-    ) -> BrewfilePackages {
-        let policy = self.policy();
-        let mut untrusted = BrewfilePackages::default();
-        for (list, held, cask) in [
-            (&mut packages.formulae, &mut untrusted.formulae, false),
-            (&mut packages.casks, &mut untrusted.casks, true),
-        ] {
-            let mut kept = Vec::new();
-            for name in list.drain(..) {
-                let trusted = tap_of(&name).is_some()
-                    || self
-                        .tap_for(&name, cask)
-                        .await
-                        .is_some_and(|tap| policy.tap_trusted(&tap));
-                if trusted {
-                    kept.push(name);
-                } else {
-                    held.push(name);
-                }
-            }
-            *list = kept;
-        }
-        untrusted
     }
 
     /// Validate and trust-filter a Brewfile before brew sees it.

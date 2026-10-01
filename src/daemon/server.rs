@@ -4,7 +4,8 @@ use crate::packages::{
     UvManager,
 };
 use crate::sync::{
-    import_packages, notify_deferred_casks, GitBackend, MachineState, SyncEngine, SyncState,
+    import_packages, notify_deferred_casks, notify_inbox, GitBackend, MachineState, SyncEngine,
+    SyncState,
 };
 use anyhow::Result;
 use chrono::Local;
@@ -387,7 +388,7 @@ impl DaemonServer {
         // Import packages (daemon mode: defer casks that need password)
         if config.features.personal_packages {
             let previously_deferred = state.deferred_casks.clone();
-            let deferred_casks = import_packages(
+            let outcome = import_packages(
                 &config,
                 &sync_path,
                 &mut state,
@@ -396,6 +397,14 @@ impl DaemonServer {
                 &previously_deferred,
             )
             .await?;
+            let deferred_casks = outcome.deferred_casks;
+
+            // One notification per batch of newly held packages
+            if !outcome.queued.is_empty() {
+                let names: Vec<&str> = outcome.queued.iter().map(|i| i.name.as_str()).collect();
+                log::info!("Held for approval: {}", names.join(", "));
+                notify_inbox(&names).ok();
+            }
 
             // Handle newly deferred casks
             if !deferred_casks.is_empty() {

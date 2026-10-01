@@ -1,6 +1,7 @@
 pub mod brew;
 pub mod bun;
 pub mod gem;
+pub mod inbox;
 pub mod manager;
 pub mod npm;
 pub mod pin;

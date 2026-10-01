@@ -310,6 +310,10 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         )
         .await?;
 
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            super::packages::review_inbox().await?;
+        }
+
         // Clear deferred casks after interactive sync (user had their chance)
         if !state.deferred_casks.is_empty() {
             state.deferred_casks.clear();

@@ -28,10 +28,17 @@ impl PackagePolicy {
 
     /// Managers are built at many call sites without a config, so they read it here.
     /// An unreadable config falls back to the secure defaults.
+    /// Taps approved in the inbox are trusted like configured ones.
     pub fn load() -> Self {
-        Config::load()
+        let mut policy = Config::load()
             .map(|c| Self::from_config(&c.packages))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Ok(inbox) = super::inbox::Inbox::load() {
+            policy
+                .trusted_taps
+                .extend(inbox.approved_taps().map(str::to_string));
+        }
+        policy
     }
 
     pub fn scripts_allowed(&self, name: &str) -> bool {
