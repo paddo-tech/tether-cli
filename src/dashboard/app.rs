@@ -73,6 +73,14 @@ impl Job {
     }
 }
 
+/// A package install in flight. `id` tells its result apart from an earlier install of the same package.
+#[derive(Clone, PartialEq, Debug)]
+pub struct InstallOp {
+    pub id: u64,
+    pub manager_key: String,
+    pub name: String,
+}
+
 /// Layers drawn over the active tab, bottom to top.
 pub enum Overlay {
     /// Not modal: keys still reach the tab underneath.
@@ -106,7 +114,8 @@ pub struct App {
     pub machines: MachinesTabState,
     pub config: ConfigTabState,
     pub uninstalling: Option<(String, String)>,
-    pub installing: Option<(String, String)>,
+    pub installing: Option<InstallOp>,
+    next_op_id: u64,
     /// A sync was asked for while a job ran; it starts when that job exits.
     pub sync_pending: bool,
 }
@@ -131,6 +140,7 @@ impl App {
             config: ConfigTabState::default(),
             uninstalling: None,
             installing: None,
+            next_op_id: 0,
             sync_pending: false,
         }
     }
@@ -173,6 +183,21 @@ impl App {
             None
         } else {
             Some(Cmd::Run(Job::Sync))
+        }
+    }
+
+    /// Track a new install, replacing any earlier one, and return the command that runs it.
+    pub fn start_install(&mut self, manager_key: String, name: String) -> Cmd {
+        self.next_op_id += 1;
+        let op = InstallOp {
+            id: self.next_op_id,
+            manager_key,
+            name,
+        };
+        self.installing = Some(op.clone());
+        Cmd::Install {
+            op,
+            machine_id: self.machine_id().to_string(),
         }
     }
 

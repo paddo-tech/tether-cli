@@ -1,4 +1,4 @@
-use super::app::{DaemonOp, Job};
+use super::app::{DaemonOp, InstallOp, Job};
 use crossterm::event::KeyEvent;
 use std::collections::HashMap;
 
@@ -18,8 +18,7 @@ pub enum Msg {
     DaemonOpExited,
     UninstallDone(Result<(), String>),
     InstallDone {
-        manager_key: String,
-        name: String,
+        op: InstallOp,
         result: Result<(), String>,
     },
     LocalPackages(HashMap<String, Vec<String>>),
@@ -39,8 +38,7 @@ pub enum Cmd {
         name: String,
     },
     Install {
-        manager_key: String,
-        name: String,
+        op: InstallOp,
         machine_id: String,
     },
     CollectPackages {

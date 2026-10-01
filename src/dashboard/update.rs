@@ -1,4 +1,4 @@
-use super::app::{App, DaemonOp, Job, Overlay, Tab};
+use super::app::{App, DaemonOp, InstallOp, Job, Overlay, Tab};
 use super::components::{
     config, confirm, file_import, files, machines, overview, packages, pkg_import, profile_picker,
 };
@@ -65,11 +65,7 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
                 }
             }
         }
-        Msg::InstallDone {
-            manager_key,
-            name,
-            result,
-        } => on_install_done(app, manager_key, name, result),
+        Msg::InstallDone { op, result } => on_install_done(app, op, result),
         Msg::LocalPackages(packages) => {
             on_local_packages(app, packages);
             None
@@ -190,16 +186,14 @@ fn request_quit(app: &mut App) {
     }
 }
 
-fn on_install_done(
-    app: &mut App,
-    manager_key: String,
-    name: String,
-    result: Result<(), String>,
-) -> Option<Cmd> {
+fn on_install_done(app: &mut App, op: InstallOp, result: Result<(), String>) -> Option<Cmd> {
     // A second install replaces the first; its result is no longer awaited.
-    if app.installing.as_ref() != Some(&(manager_key.clone(), name.clone())) {
+    if app.installing.as_ref().map(|i| i.id) != Some(op.id) {
         return None;
     }
+    let InstallOp {
+        manager_key, name, ..
+    } = op;
     app.installing = None;
     if let Err(e) = result {
         app.flash_error(format!("install failed: {}", e));
@@ -379,6 +373,33 @@ mod tests {
         );
         assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
         assert!(!app.sync_pending);
+    }
+
+    #[test]
+    fn stale_install_result_is_ignored() {
+        let mut app = app();
+        let first = app.start_install("npm".into(), "left-pad".into());
+        let second = app.start_install("npm".into(), "left-pad".into());
+        let (Cmd::Install { op: first, .. }, Cmd::Install { op: second, .. }) = (first, second)
+        else {
+            panic!("expected install commands");
+        };
+        update(
+            &mut app,
+            Msg::InstallDone {
+                op: first,
+                result: Ok(()),
+            },
+        );
+        assert_eq!(app.installing.as_ref(), Some(&second));
+        update(
+            &mut app,
+            Msg::InstallDone {
+                op: second,
+                result: Ok(()),
+            },
+        );
+        assert!(app.installing.is_none());
     }
 
     #[test]

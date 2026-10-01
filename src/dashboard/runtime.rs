@@ -34,22 +34,14 @@ impl Runtime {
                     async move { Msg::UninstallDone(run_uninstall(&manager_key, &name).await) },
                 );
             }
-            Cmd::Install {
-                manager_key,
-                name,
-                machine_id,
-            } => {
+            Cmd::Install { op, machine_id } => {
                 self.spawn(async move {
-                    let result = run_install(&manager_key, &name).await;
+                    let result = run_install(&op.manager_key, &op.name).await;
                     if result.is_ok() {
                         // Sync would uninstall it again while it is still tombstoned.
-                        remove_from_removed_packages(&machine_id, &manager_key, &name);
+                        remove_from_removed_packages(&machine_id, &op.manager_key, &op.name);
                     }
-                    Msg::InstallDone {
-                        manager_key,
-                        name,
-                        result,
-                    }
+                    Msg::InstallDone { op, result }
                 });
             }
             Cmd::CollectPackages { config, machine_id } => {

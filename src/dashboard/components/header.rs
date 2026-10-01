@@ -87,10 +87,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    if let Some((_, pkg_name)) = &app.installing {
+    if let Some(op) = &app.installing {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            format!("installing {}...", pkg_name),
+            format!("installing {}...", op.name),
             Style::default().fg(t.warn),
         ));
     }
