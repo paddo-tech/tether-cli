@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New trust store in `~/.tether/trusted_keys`. It stays on this machine and is never synced. It starts with this machine's own key. A key from a new machine waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
 - `tether machines list` now shows each machine's key fingerprint and whether this machine trusts it
 - Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
-- The dashboard has a new Security tab for the approval inbox. It shows each held package with its reasons, source machine, commit and OSV advisories. Press `a` to approve and install, `x` to reject, or `A` to approve all items that are not malicious. The header shows the number of held packages
+- The dashboard has a new Security tab for the approval inbox. It shows each held package with its reasons, source machine, commit and OSV advisories, and each machine key that waits for trust with its fingerprint. A changed key shows a loud warning. Press `a` to approve and install or to trust a key, `x` to reject, or `A` to approve all packages that are not malicious. The tab also lists the trusted machines. The header shows the number of held items
 
 ### Changed
 
