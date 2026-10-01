@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New approval inbox in `~/.tether/inbox.json`. It stays on this machine and is never synced. Use `tether packages inbox` to list held packages, and `tether packages approve <id>` or `tether packages reject <id>` to decide. An approved package installs at once. A rejected package is not offered again. An approved Homebrew package from an untrusted tap also trusts that tap
 - `tether sync` in a terminal now asks about held packages. The daemon holds them and sends one notification for each new batch
 - New setting `packages.auto_install_from_trusted` (default false)
+- Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
 
 ### Changed
 

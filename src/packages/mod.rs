@@ -4,6 +4,7 @@ pub mod gem;
 pub mod inbox;
 pub mod manager;
 pub mod npm;
+pub mod osv;
 pub mod pin;
 pub mod pnpm;
 pub mod policy;

@@ -1,4 +1,4 @@
-use super::{manager_for_key, BrewManager, PackageInfo, PackageManager};
+use super::{manager_for_key, osv, BrewManager, PackageInfo, PackageManager};
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -291,11 +291,28 @@ pub fn reject(query: &str) -> Result<InboxItem> {
 }
 
 /// Install an approved item now. `interactive` lets a cask prompt for a password.
+/// OSV is asked again, because an advisory can appear after the item was queued.
 pub async fn install(item: &InboxItem, interactive: bool) -> Result<()> {
     let package = PackageInfo {
         name: item.name.clone(),
         version: item.version.clone(),
     };
+    if let Some(manager) = manager_for_key(&item.manager) {
+        let pin = [(item.name.clone(), item.version.clone())];
+        let found = osv::advisories(manager.ecosystem(), &pin).await;
+        let malicious: Vec<&String> = found[0].iter().filter(|id| osv::is_malicious(id)).collect();
+        if !malicious.is_empty() {
+            bail!(
+                "OSV lists {} as malicious ({}). Tether will not install it",
+                item.name,
+                malicious
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
     match item.manager.as_str() {
         "brew_taps" => BrewManager::new().tap(&item.name).await,
         "brew_formulae" => BrewManager::new().install(&package).await,

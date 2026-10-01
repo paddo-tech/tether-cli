@@ -1,6 +1,7 @@
 use crate::cli::Output;
 use crate::config::Config;
 use crate::packages::inbox::{self, Checks, Inbox, InboxItem, Reason};
+use crate::packages::osv;
 use crate::packages::pin::{format_pin, parse_pin};
 use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageManager,
@@ -573,17 +574,32 @@ async fn import_simple_manager(
     }
 
     let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
+    let pins: Vec<(String, Option<String>)> = missing
+        .iter()
+        .map(|(name, version, _)| (name.clone(), version.clone()))
+        .collect();
+    let advisories = osv::advisories(def.ecosystem, &pins).await;
     let mut allowed = Vec::new();
-    for (name, version, line) in missing {
+    for ((name, version, line), advisories) in missing.into_iter().zip(advisories) {
         let checks = Checks {
             cooldown_unsupported,
+            malicious: advisories.iter().any(|id| osv::is_malicious(id)),
             ..trust.checks(def.state_key, &name)
         };
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
+            if !advisories.is_empty() {
+                Output::warning(&format!(
+                    "{} has known vulnerabilities: {}",
+                    line,
+                    advisories.join(", ")
+                ));
+            }
             allowed.push(line);
         } else {
-            queued.push(trust.item(def.state_key, &name, version, None, reasons));
+            let mut item = trust.item(def.state_key, &name, version, None, reasons);
+            item.advisories = advisories;
+            queued.push(item);
         }
     }
 
