@@ -501,23 +501,14 @@ async fn import_brew(
     brew_packages.taps.retain(|p| !removed_taps.contains(p));
     brew_packages.retain_valid();
 
-    // Untrusted taps that are not tapped yet wait for approval
     let policy = PackagePolicy::load();
     let local_taps: HashSet<String> = brew
         .list_taps()
         .await
         .map(|t| t.into_iter().collect())
         .unwrap_or_default();
-    let (trusted_taps, untrusted_taps): (Vec<String>, Vec<String>) = brew_packages
-        .taps
-        .drain(..)
-        .partition(|t| policy.tap_trusted(t));
-    for tap in untrusted_taps {
-        if !local_taps.contains(&tap) && !trust.settled("brew_taps", &tap) {
-            queued.push(trust.item("brew_taps", &tap, None, None, vec![Reason::UntrustedTap]));
-        }
-    }
-    brew_packages.taps = trusted_taps;
+    let taps = std::mem::take(&mut brew_packages.taps);
+    brew_packages.taps = gate_taps(&policy, trust, &local_taps, taps, queued);
 
     // Calculate missing packages (normalize formula names for comparison)
     let local_formulae: HashSet<_> = machine_state
@@ -642,6 +633,38 @@ async fn import_brew(
     }
 
     (flagged_casks, installed_any)
+}
+
+/// Keep the taps that are tapped already or may be tapped, and queue the rest. A tap is
+/// added only when a trusted record lists it, like a formula, and its tap policy allows it.
+fn gate_taps(
+    policy: &PackagePolicy,
+    trust: &Trust,
+    local_taps: &HashSet<String>,
+    taps: Vec<String>,
+    queued: &mut Vec<InboxItem>,
+) -> Vec<String> {
+    let mut allowed = Vec::new();
+    for tap in taps {
+        if local_taps.contains(&tap) {
+            allowed.push(tap);
+            continue;
+        }
+        if trust.settled("brew_taps", &tap) {
+            continue;
+        }
+        let checks = Checks {
+            untrusted_tap: !policy.tap_trusted(&tap),
+            ..trust.checks("brew_taps", &tap, None, None)
+        };
+        let reasons = inbox::reasons(checks);
+        if reasons.is_empty() {
+            allowed.push(tap);
+        } else {
+            queued.push(trust.item("brew_taps", &tap, None, None, reasons));
+        }
+    }
+    allowed
 }
 
 /// Keep the formulae or casks that may install and queue the rest. A short name is
@@ -1238,6 +1261,38 @@ mod tests {
             held(&trust, "other", other.1.as_deref()),
             vec![Reason::Unsigned]
         );
+    }
+
+    #[test]
+    fn test_taps_need_a_trusted_record_too() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        let mut machine = MachineState::new("t");
+        machine.packages.insert(
+            "brew_taps".to_string(),
+            vec!["listed/tap".to_string(), "other/tap".to_string()],
+        );
+        machine.save_to_repo(path).unwrap();
+        signing::sign_record(path, "t", &t).unwrap();
+        let trust = trust_as(path, "me", &me, &store);
+        let policy = crate::packages::PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["listed/tap".to_string(), "added/tap".to_string()],
+            approved_from_taps: Vec::new(),
+        };
+        let local = HashSet::from(["local/tap".to_string()]);
+        let mut queued = Vec::new();
+        let taps = ["listed/tap", "added/tap", "other/tap", "local/tap"]
+            .map(String::from)
+            .to_vec();
+        let allowed = gate_taps(&policy, &trust, &local, taps, &mut queued);
+        assert_eq!(allowed, vec!["listed/tap", "local/tap"]);
+        // Allowed by policy, but no trusted record lists it: a repo writer added it
+        assert_eq!(queued[0].name, "added/tap");
+        assert_eq!(queued[0].reasons, vec![Reason::Unsigned]);
+        assert_eq!(queued[1].name, "other/tap");
+        assert_eq!(queued[1].reasons, vec![Reason::UntrustedTap]);
     }
 
     #[test]
