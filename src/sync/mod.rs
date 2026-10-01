@@ -235,7 +235,8 @@ pub fn check_sync_format_version(sync_path: &Path) -> Result<()> {
 }
 
 /// Acquire an exclusive lock on ~/.tether/sync.lock.
-/// If `wait` is true (CLI), retries up to 20 times at 100ms intervals.
+/// If `wait` is true (CLI), retries for 2s, then blocks until the lock is free when
+/// stdin is a terminal, or fails otherwise.
 /// If `wait` is false (daemon), fails immediately.
 pub fn acquire_sync_lock(wait: bool) -> Result<File> {
     use fs2::FileExt;
@@ -255,7 +256,15 @@ pub fn acquire_sync_lock(wait: bool) -> Result<File> {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        anyhow::bail!("Could not acquire sync lock after 2 seconds. Another sync may be running.");
+        // A daemon sync that installs packages can hold the lock for minutes. Only a
+        // terminal user can see this wait and cancel it; the dashboard's child sync cannot.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            anyhow::bail!(
+                "Could not acquire sync lock after 2 seconds. Another sync may be running."
+            );
+        }
+        crate::cli::Output::info("Waiting for another sync to finish (Ctrl-C to cancel)...");
+        file.lock_exclusive()?;
     } else {
         file.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("Sync already in progress, skipping"))?;

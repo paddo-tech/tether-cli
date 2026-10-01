@@ -37,12 +37,23 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         Output::info("Dry-run mode");
     }
 
-    // Acquire sync lock (wait up to 2s for other syncs to finish)
+    // Acquire sync lock, waiting for any running sync to finish
     let _sync_lock = if !dry_run {
         Some(crate::sync::acquire_sync_lock(true)?)
     } else {
         None
     };
+
+    // Only an interactive shell has the user's PATH; cron or ssh -c would bake in a bare PATH for good.
+    #[cfg(target_os = "macos")]
+    if !dry_run
+        && !crate::daemon::is_daemon_mode()
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
+        if let Err(e) = super::daemon::refresh_stale_launchd_service().await {
+            Output::warning(&format!("Could not update the daemon service: {}", e));
+        }
+    }
 
     let config = Config::load()?;
 

@@ -216,8 +216,7 @@ fn launchd_plist_path() -> Result<PathBuf> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
-fn generate_plist() -> Result<String> {
-    let exe = std::env::current_exe()?;
+fn generate_plist(exe: &std::path::Path) -> Result<String> {
     let paths = DaemonPaths::new()?;
 
     // launchd starts agents with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which hides Homebrew
@@ -302,7 +301,7 @@ pub async fn install() -> Result<()> {
         }
 
         // Write plist
-        let plist = generate_plist()?;
+        let plist = generate_plist(&std::env::current_exe()?)?;
         fs::write(&plist_path, plist)?;
 
         // Load the service
@@ -323,6 +322,65 @@ pub async fn install() -> Result<()> {
         Output::info("Daemon will now start automatically on login and restart if it exits");
         Ok(())
     }
+}
+
+/// Plists written before 1.12.1 have no EnvironmentVariables, so launchd runs the
+/// daemon with its default PATH and package commands resolve to system tools
+/// (e.g. macOS Ruby 2.6 `gem`). Rewrite such a plist from the caller's shell, keeping
+/// the installed binary and whether the user has the service loaded.
+#[cfg(target_os = "macos")]
+pub async fn refresh_stale_launchd_service() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    match fs::read_to_string(&plist_path) {
+        Ok(plist) if !plist.contains("<key>EnvironmentVariables</key>") => {}
+        _ => return Ok(()),
+    }
+
+    let output = Command::new("plutil")
+        .args(["-extract", "ProgramArguments.0", "raw"])
+        .arg(&plist_path)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "cannot read the daemon path from the plist"
+        ));
+    }
+    let exe = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    let loaded = Command::new("launchctl")
+        .args(["list", LAUNCHD_LABEL])
+        .output()?
+        .status
+        .success();
+
+    Output::info("Updating the daemon service with your shell PATH...");
+    // Write only once the old job is gone: a still-loaded job keeps its cached
+    // environment, and the new key would stop later syncs from retrying.
+    if loaded {
+        let output = Command::new("launchctl")
+            .arg("unload")
+            .arg(&plist_path)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to unload launchd service: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    fs::write(&plist_path, generate_plist(&exe)?)?;
+    if loaded {
+        let output = Command::new("launchctl")
+            .arg("load")
+            .arg(&plist_path)
+            .output()?;
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "Failed to reload launchd service: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub async fn uninstall() -> Result<()> {
