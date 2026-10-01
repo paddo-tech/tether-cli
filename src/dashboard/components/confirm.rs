@@ -1,5 +1,5 @@
-use super::{centered, clamp_cursor, files, manager_label, popup};
-use crate::dashboard::app::{App, Hit, Job, Overlay};
+use super::{centered, clamp_cursor, files, manager_label, popup, security};
+use crate::dashboard::app::{App, Hit, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
@@ -21,6 +21,11 @@ pub enum Confirm {
     Rollback(RollbackPlan),
     RemoveFile {
         path: String,
+    },
+    /// Approve and install every pending inbox item OSV does not list as malicious.
+    ApproveAll {
+        count: usize,
+        malicious: usize,
     },
 }
 
@@ -58,11 +63,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
                 app.flash_error("Another tether command is still running");
                 return None;
             }
-            Some(Cmd::Run(Job::Rollback {
-                manager: plan.manager,
-                commit: plan.commit,
-                short_hash: plan.short_hash,
-            }))
+            Some(Cmd::CheckRollback(plan))
         }
         Confirm::RemoveFile { path } => {
             let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
@@ -78,6 +79,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             clamp_cursor(&mut app.files.cursor, len);
             app.follow_up_sync()
         }
+        Confirm::ApproveAll { .. } => security::approve_all(app),
     }
 }
 
@@ -110,7 +112,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 "Roll back {} to {} (+{} install, -{} uninstall)?",
                 manager_label(&plan.manager),
                 plan.short_hash,
-                plan.install,
+                plan.to_install.len(),
                 plan.uninstall
             ),
             t.warn,
@@ -122,6 +124,17 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             &format!("Remove {} from profile?", path),
             t.error,
         ),
+        Confirm::ApproveAll { count, malicious } => {
+            let mut msg = format!(
+                "Approve and install {} package{}?",
+                count,
+                if *count == 1 { "" } else { "s" }
+            );
+            if *malicious > 0 {
+                msg.push_str(&format!(" {} malicious stay held.", malicious));
+            }
+            render_popup(f, app, "Approve all", &msg, t.ok)
+        }
     }
 }
 

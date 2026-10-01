@@ -1,4 +1,6 @@
 use super::app::{DaemonOp, InstallOp, Job};
+use super::repo::RollbackPlan;
+use crate::packages::inbox::InboxItem;
 use crossterm::event::{KeyEvent, MouseEvent};
 use std::collections::HashMap;
 
@@ -31,6 +33,11 @@ pub enum Msg {
         short_hash: String,
         result: Result<(), String>,
     },
+    /// OSV verdict on the packages a rollback would install.
+    RollbackChecked {
+        plan: RollbackPlan,
+        result: Result<(), String>,
+    },
 }
 
 /// Side effects `update` asks for. The runtime executes them and reports back with a `Msg`.
@@ -45,6 +52,13 @@ pub enum Cmd {
         op: InstallOp,
         machine_id: String,
     },
+    /// Install approved inbox items one after another. Reports one `InstallDone`.
+    InstallApproved {
+        op: InstallOp,
+        items: Vec<InboxItem>,
+    },
+    /// Ask OSV about the packages a rollback would install before it runs.
+    CheckRollback(RollbackPlan),
     /// Count sync commits per day; `git log` over the sync repo is too slow for the UI thread.
     LoadActivity,
     CollectPackages {

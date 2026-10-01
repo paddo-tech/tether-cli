@@ -57,6 +57,36 @@ impl Runtime {
                     },
                 );
             }
+            Cmd::InstallApproved { op, items } => {
+                let failed_op = op.clone();
+                self.spawn(
+                    async move {
+                        let result = install_approved(&items).await;
+                        Msg::InstallDone { op, result }
+                    },
+                    move |e| {
+                        Some(Msg::InstallDone {
+                            op: failed_op,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::CheckRollback(plan) => {
+                let failed_plan = plan.clone();
+                self.spawn(
+                    async move {
+                        let result = osv_guard(&plan.manager, &plan.to_install).await;
+                        Msg::RollbackChecked { plan, result }
+                    },
+                    move |e| {
+                        Some(Msg::RollbackChecked {
+                            plan: failed_plan,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
             Cmd::LoadActivity => {
                 self.spawn(
                     async { Msg::Activity(super::repo::commit_activity(ACTIVITY_DAYS)) },
@@ -199,8 +229,56 @@ async fn run_uninstall(manager_key: &str, package: &str) -> Result<(), String> {
     manager.uninstall(package).await.map_err(|e| e.to_string())
 }
 
+/// Refuse packages OSV lists as malicious, like `inbox::install` does. Homebrew has no
+/// OSV ecosystem, and an OSV outage does not block, as for synced installs.
+async fn osv_guard(manager_key: &str, packages: &[(String, Option<String>)]) -> Result<(), String> {
+    use crate::packages::osv;
+
+    let Some(manager) = crate::packages::manager_for_key(manager_key) else {
+        return Ok(());
+    };
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let found = osv::advisories(manager.ecosystem(), packages).await;
+    let hits: Vec<String> = packages
+        .iter()
+        .zip(found)
+        .flat_map(|((name, _), ids)| {
+            ids.into_iter()
+                .filter(|id| osv::is_malicious(id))
+                .map(move |id| format!("{} ({})", name, id))
+        })
+        .collect();
+    if hits.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "OSV lists {} as malicious. Tether will not install it",
+            hits.join(", ")
+        ))
+    }
+}
+
+/// Install each item and report every failure together.
+async fn install_approved(items: &[crate::packages::inbox::InboxItem]) -> Result<(), String> {
+    let mut failed = Vec::new();
+    for item in items {
+        if let Err(e) = crate::packages::inbox::install(item, false).await {
+            failed.push(format!("{}: {}", item.name, e));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
 async fn run_install(manager_key: &str, package: &str) -> Result<(), String> {
     use crate::packages::*;
+
+    osv_guard(manager_key, &[(package.to_string(), None)]).await?;
 
     if manager_key == "brew_casks" {
         return BrewManager

@@ -2,6 +2,7 @@
 
 use super::{cursor_down, files, manager_label, scroll_for, select_row, truncate};
 use crate::dashboard::app::{Action, App, Hit, Overlay, Tab};
+use crate::packages::inbox::Reason;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -12,8 +13,18 @@ use ratatui::{
 pub enum Target {
     Action(Action),
     Tab(Tab),
-    File { section: String, path: String },
-    Package { manager_key: String, name: String },
+    File {
+        section: String,
+        path: String,
+    },
+    Package {
+        manager_key: String,
+        name: String,
+    },
+    /// Approve and install an inbox item by id.
+    Approve(String),
+    /// Reject an inbox item by id.
+    Reject(String),
 }
 
 pub struct Entry {
@@ -151,6 +162,32 @@ pub fn entries(app: &App) -> Vec<Entry> {
             label: label.to_string(),
             kind: "action".into(),
             target: Target::Action(action),
+        });
+    }
+    let pending = &app.state.inbox.items;
+    if pending
+        .iter()
+        .any(|i| !i.reasons.contains(&Reason::Malicious))
+    {
+        out.push(Entry {
+            label: "Approve all pending packages".into(),
+            kind: "action".into(),
+            target: Target::Action(Action::ApproveAll),
+        });
+    }
+    for item in pending {
+        let name = format!("{} ({})", item.name, manager_label(&item.manager));
+        if !item.reasons.contains(&Reason::Malicious) {
+            out.push(Entry {
+                label: format!("Approve {}", name),
+                kind: "inbox".into(),
+                target: Target::Approve(item.id()),
+            });
+        }
+        out.push(Entry {
+            label: format!("Reject {}", name),
+            kind: "inbox".into(),
+            target: Target::Reject(item.id()),
         });
     }
     for tab in Tab::all() {
@@ -318,6 +355,8 @@ pub fn render(f: &mut Frame, app: &App, p: &Palette) {
             Target::Tab(_) => ("#", t.info),
             Target::File { .. } => ("◇", t.ok),
             Target::Package { .. } => ("▪", t.key),
+            Target::Approve(_) => ("✓", t.ok),
+            Target::Reject(_) => ("✗", t.error),
         };
         let max_label = (list.width as usize).saturating_sub(entry.kind.len() + 6);
         let label = truncate(&entry.label, max_label);

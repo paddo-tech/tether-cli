@@ -12,6 +12,7 @@ pub mod packages;
 pub mod palette;
 pub mod pkg_import;
 pub mod profile_picker;
+pub mod security;
 pub mod sparkline;
 pub mod tabs;
 pub mod toast;

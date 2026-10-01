@@ -28,6 +28,12 @@ const MACHINES: &[Hint] = &[
     ("p", "profile", k(KeyCode::Char('p'))),
 ];
 const CONFIG: &[Hint] = &[("⏎", "edit", k(KeyCode::Enter))];
+const SECURITY: &[Hint] = &[
+    ("a", "approve", k(KeyCode::Char('a'))),
+    ("x", "reject", k(KeyCode::Char('x'))),
+    ("A", "approve all", k(KeyCode::Char('A'))),
+    ("⏎", "details", k(KeyCode::Enter)),
+];
 
 fn tab_hints(tab: Tab) -> &'static [Hint] {
     match tab {
@@ -36,6 +42,7 @@ fn tab_hints(tab: Tab) -> &'static [Hint] {
         Tab::Packages => PACKAGES,
         Tab::Machines => MACHINES,
         Tab::Config => CONFIG,
+        Tab::Security => SECURITY,
     }
 }
 
@@ -78,7 +85,12 @@ pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
         .map(|(k, d, _)| (k.chars().count() + d.len() + 3) as u16)
         .sum();
     let right_start = area.right().saturating_sub(global_w + 1).max(area.x);
-    draw(f, tab_hints(app.active_tab), area.x, right_start);
+    let hints = if app.active_tab == Tab::Security && app.state.inbox.items.is_empty() {
+        &[]
+    } else {
+        tab_hints(app.active_tab)
+    };
+    draw(f, hints, area.x, right_start);
     draw(f, GLOBAL, right_start, area.right());
 }
 
@@ -93,7 +105,7 @@ pub fn render_overlay(f: &mut Frame, t: &Theme) {
         return;
     }
 
-    let tabs = format!("1-{}", Tab::all().len());
+    let tabs = format!("Tab / 1-{}", Tab::all().len());
     let section =
         |s: &'static str| Line::from(Span::styled(s, Style::default().fg(t.accent).bold()));
     let key = |k: &str, d: &'static str| {
@@ -108,17 +120,19 @@ pub fn render_overlay(f: &mut Frame, t: &Theme) {
         key("s", "Sync now"),
         key("d", "Start/stop daemon"),
         key("r", "Refresh"),
-        key("Tab", "Next tab"),
-        key(&tabs, "Switch tab"),
+        key(&tabs, "Next tab / switch tab"),
         key("j/k ↑↓", "Move"),
         key("Enter", "Expand / edit"),
         key("?", "Toggle help"),
         key("q / Esc", "Quit"),
         key("Ctrl+C", "Force quit"),
+        key("click", "Select; again to open"),
         Line::from(""),
-        section("Mouse"),
-        key("click", "Tab, row; again to open"),
-        key("wheel", "Scroll"),
+        section("Security"),
+        key("a", "Approve and install"),
+        key("x", "Reject"),
+        key("A", "Approve all safe items"),
+        key("Enter", "Details"),
     ];
     let right = vec![
         section("Files"),
@@ -139,8 +153,8 @@ pub fn render_overlay(f: &mut Frame, t: &Theme) {
         key("t", "Toggle create"),
     ];
 
-    let two_col = area.width >= 78 && area.height >= 21;
-    let height = if two_col { 19 } else { 34 }.min(area.height.saturating_sub(2));
+    let two_col = area.width >= 78 && area.height >= 23;
+    let height = if two_col { 21 } else { 38 }.min(area.height.saturating_sub(2));
     let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
     let rect = centered(area, width, height);
     let block = popup(f, rect, "Keyboard shortcuts", t.accent, t);

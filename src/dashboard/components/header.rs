@@ -1,6 +1,6 @@
 use super::{pulse, spinner};
 use crate::cli::output::relative_time;
-use crate::dashboard::app::{App, DaemonOp, Job};
+use crate::dashboard::app::{App, DaemonOp, Hit, Job, Tab};
 use crate::dashboard::theme::mix;
 use ratatui::prelude::*;
 
@@ -52,6 +52,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     let sep = || Span::styled("  │  ", Style::default().fg(t.border));
     let mut right: Vec<Span> = Vec::new();
+
+    // Leftmost on the right side, so its click region starts where the line does.
+    let (pending, malicious) = super::security::pending(app);
+    let badge = format!(" ⚑ {} pending ", pending);
+    let badge_w = badge.chars().count() as u16;
+    if pending > 0 {
+        let bg = if malicious { t.error } else { t.warn };
+        right.push(Span::styled(
+            badge,
+            Style::default().fg(t.brand_fg).bg(bg).bold(),
+        ));
+        right.push(Span::raw("  "));
+    }
 
     if let Some(op) = &app.installing {
         right.push(Span::styled(
@@ -137,5 +150,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
     right.push(Span::raw(" "));
 
-    super::row(f, area, Line::from(left), Line::from(right));
+    let right = Line::from(right);
+    let right_w = right.width() as u16;
+    if pending > 0 && right_w <= area.width {
+        app.add_hit(
+            Rect::new(area.right() - right_w, area.y, badge_w, 1),
+            Hit::Tab(Tab::Security),
+        );
+    }
+    super::row(f, area, Line::from(left), right);
 }

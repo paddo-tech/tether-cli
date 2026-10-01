@@ -1,7 +1,7 @@
 use super::app::{App, Overlay, Tab};
 use super::components::{
     backdrop, config, confirm, file_import, files, header, help, machines, overview, packages,
-    palette, pkg_import, profile_picker, tabs, toast,
+    palette, pkg_import, profile_picker, security, tabs, toast,
 };
 use ratatui::{prelude::*, widgets::Block};
 
@@ -33,6 +33,7 @@ pub fn view(f: &mut Frame, app: &App) {
         Tab::Packages => packages::render(f, body, app),
         Tab::Machines => machines::render(f, body, app),
         Tab::Config => config::render(f, body, app),
+        Tab::Security => security::render(f, body, app),
     }
 
     help::render_bar(f, footer, app);
