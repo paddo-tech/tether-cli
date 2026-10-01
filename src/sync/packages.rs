@@ -208,6 +208,21 @@ async fn import_brew(
         }
     }
 
+    let mut missing = BrewfilePackages {
+        taps: Vec::new(),
+        formulae: missing_formulae,
+        casks: casks_to_try,
+    };
+    let untrusted = brew.take_untrusted_short_names(&mut missing).await;
+    if !untrusted.is_empty() {
+        crate::packages::brew::hold_untrusted(&untrusted);
+    }
+    let BrewfilePackages {
+        formulae: missing_formulae,
+        casks: casks_to_try,
+        ..
+    } = missing;
+
     let mut installed_any = false;
 
     // Install formulae via bundle (no password needed)

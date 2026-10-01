@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tether skips `pnpm update` for packages with scripts off on pnpm 12.0.0 to 12.3.1, because those versions reject `update --ignore-scripts`. It shows a warning once
 - `packages.allow_scripts` now runs scripts only for the listed package. pnpm 10.4 and later install it with `--allow-build=<name>`, and npm 12 and later with `--allow-scripts=<name>`. On older npm or pnpm the listed package also installs with scripts off, because those versions would run the scripts of all its dependencies too. Tether shows a warning once
 - uv now gets the release-age limit as a duration (`--exclude-newer "7 days"`) on uv 0.9.17 and later. uv saves the limit in each tool receipt. A saved timestamp kept later upgrades at that date, but a saved duration stays relative. With `packages.min_release_age_days = 0`, uv 0.11.24 and later get `--exclude-newer false`, which clears a saved limit. On older uv, run `uv tool install --force <name>` to clear it
+- Tether now looks up the tap of a short Homebrew name, such as `bun`, before it installs it. brew can resolve a short name to any tapped repository, so a name from an untrusted tap is skipped like a qualified one
+- Homebrew upgrades now upgrade only outdated formulae and casks from trusted taps. Before, Tether ran a plain `brew upgrade`, which also upgraded packages from untrusted taps
 
 ## [1.13.1] - 2026-10-02
 
