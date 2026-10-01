@@ -129,6 +129,7 @@ impl PackageManager for PnpmManager {
 
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
+        let version = policy::tool_version("pnpm").await;
         let names: Vec<String> = packages
             .into_iter()
             .map(|p| p.name)
@@ -149,10 +150,21 @@ impl PackageManager for PnpmManager {
             let Some(first) = batch.first() else {
                 continue;
             };
+            let script_args = policy::pnpm_script_args(&package_policy, first);
+            if script_args.iter().any(|a| a == "--ignore-scripts")
+                && !policy::pnpm_update_accepts_ignore_scripts(version)
+            {
+                if policy::first_warning("pnpm update --ignore-scripts") {
+                    eprintln!(
+                        "Warning: Skipping pnpm update: pnpm 12.0.0 to 12.3.1 cannot update with install scripts off. Upgrade pnpm to 12.3.2 or later"
+                    );
+                }
+                continue;
+            }
             let output = command("pnpm")?
                 .args(["update", "-g"])
                 .args(&cooldown)
-                .args(policy::pnpm_script_args(&package_policy, first))
+                .args(script_args)
                 .args(&batch)
                 .output()
                 .await?;

@@ -114,19 +114,32 @@ pub fn npm_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cool
 
 /// pnpm added `minimumReleaseAge` (minutes) in 10.16.0. The 12.0.0 prereleases before
 /// rc.9 silently ignored it on the command line, so every 12.0.0 prerelease is refused.
+/// pnpm 11.0.0 made the cutoff non-strict: it installs a too-new version when no mature
+/// one matches and writes it to `minimumReleaseAgeExclude`. 12.0.0 to 12.2.x also ignore
+/// that an explicit cutoff implies strict (pnpm/pnpm#14409), so strict is always passed.
+/// Before 11.0.0 the cutoff is always strict and the strict key does not exist.
 pub fn pnpm_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cooldown {
     if days == 0 {
         return Cooldown::Off;
     }
     match version {
         Some((v, pre)) if v >= (10, 16, 0) && !(v == (12, 0, 0) && pre) => {
-            Cooldown::Args(vec![format!(
+            let mut args = vec![format!(
                 "--config.minimum-release-age={}",
                 u64::from(days) * 24 * 60
-            )])
+            )];
+            if v >= (11, 0, 0) {
+                args.push("--config.minimum-release-age-strict=true".to_string());
+            }
+            Cooldown::Args(args)
         }
         _ => Cooldown::Unsupported,
     }
+}
+
+/// pnpm 12.0.0 to 12.3.1 reject `update --ignore-scripts` (pnpm/pnpm#14512).
+pub fn pnpm_update_accepts_ignore_scripts(version: Option<((u64, u64, u64), bool)>) -> bool {
+    !matches!(version, Some((v, _)) if ((12, 0, 0)..(12, 3, 2)).contains(&v))
 }
 
 /// bun added `minimumReleaseAge` (seconds) in 1.3.0.
@@ -254,8 +267,27 @@ mod tests {
         );
         assert_eq!(pnpm_cooldown(7, v("10.15.1")), Cooldown::Unsupported);
         assert_eq!(pnpm_cooldown(7, v("12.0.0-rc.6")), Cooldown::Unsupported);
-        assert!(matches!(pnpm_cooldown(7, v("12.8.1")), Cooldown::Args(_)));
         assert_eq!(pnpm_cooldown(0, None), Cooldown::Off);
+    }
+
+    #[test]
+    fn pnpm_cooldown_strict_from_11() {
+        let strict = Cooldown::Args(vec![
+            "--config.minimum-release-age=10080".to_string(),
+            "--config.minimum-release-age-strict=true".to_string(),
+        ]);
+        assert_eq!(pnpm_cooldown(7, v("11.0.0")), strict);
+        assert_eq!(pnpm_cooldown(7, v("12.2.1")), strict);
+        assert_eq!(pnpm_cooldown(7, v("12.8.1")), strict);
+    }
+
+    #[test]
+    fn pnpm_update_ignore_scripts_gap() {
+        assert!(pnpm_update_accepts_ignore_scripts(v("11.6.0")));
+        assert!(!pnpm_update_accepts_ignore_scripts(v("12.0.0")));
+        assert!(!pnpm_update_accepts_ignore_scripts(v("12.3.1")));
+        assert!(pnpm_update_accepts_ignore_scripts(v("12.3.2")));
+        assert!(pnpm_update_accepts_ignore_scripts(v("12.8.1")));
     }
 
     #[test]
