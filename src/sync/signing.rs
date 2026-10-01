@@ -99,6 +99,7 @@ pub fn save_record(sync_path: &Path, record: &MachineState) -> Result<()> {
     // Other machines distrust a record that validation would change
     let mut record = record.clone();
     record.validate()?;
+    record.generation = record.generation.saturating_add(1);
     record.save_to_repo(sync_path)?;
     let key = load_or_create(&record.machine_id)?;
     sign_record(sync_path, &record.machine_id, &key)?;
@@ -106,6 +107,46 @@ pub fn save_record(sync_path: &Path, record: &MachineState) -> Result<()> {
         &local_record_path()?,
         &std::fs::read(record_path(sync_path, &record.machine_id))?,
     )
+}
+
+/// The newest record generation this machine has accepted from each machine key, in
+/// `~/.tether/record_generations.json`. It is never synced. A record signed by the same
+/// key with a lower generation is a replay from history and does not count.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Generations {
+    seen: BTreeMap<String, u64>,
+}
+
+impl Generations {
+    fn path() -> Result<PathBuf> {
+        Ok(crate::home_dir()?
+            .join(".tether")
+            .join("record_generations.json"))
+    }
+
+    pub fn load() -> Result<Self> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        serde_json::from_slice(&std::fs::read(&path)?)
+            .with_context(|| format!("Invalid record generations {}", path.display()))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        crate::sync::atomic_write(&Self::path()?, &serde_json::to_vec_pretty(self)?)
+    }
+
+    /// Whether a record `key` signed at `generation` is not older than one seen before.
+    /// A new key starts from its first record, so a reinstalled machine is not refused.
+    pub fn accept(&mut self, key: &PublicKey, generation: u64) -> bool {
+        let seen = self.seen.entry(fingerprint(key)).or_insert(generation);
+        if generation < *seen {
+            return false;
+        }
+        *seen = generation;
+        true
+    }
 }
 
 /// This machine's copy of its last record. Anyone who can push writes the repo copy, so
@@ -448,6 +489,17 @@ mod tests {
             .insert("npm".to_string(), vec!["evil".to_string()]);
         write_record(tmp.path(), "m1", &record);
         assert!(signer_of(tmp.path(), "m1").is_none());
+    }
+
+    #[test]
+    fn older_generation_from_the_same_key_is_refused() {
+        let (a, b) = (key(), key());
+        let mut seen = Generations::default();
+        assert!(seen.accept(a.public_key(), 5));
+        assert!(seen.accept(a.public_key(), 5));
+        assert!(seen.accept(a.public_key(), 7));
+        assert!(!seen.accept(a.public_key(), 6));
+        assert!(seen.accept(b.public_key(), 1));
     }
 
     #[test]

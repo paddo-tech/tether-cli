@@ -7,7 +7,7 @@ use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageManager,
     PackagePolicy,
 };
-use crate::sync::signing::{self, SignedRecord, TrustStore};
+use crate::sync::signing::{self, Generations, SignedRecord, TrustStore};
 use crate::sync::state::PackageState;
 use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::Result;
@@ -198,16 +198,21 @@ struct Trust {
 }
 
 impl Trust {
+    /// The caller holds the sync lock, which also guards the record generations.
     fn load(config: &Config, sync_path: &Path, machine_id: &str) -> Result<Self> {
         let own_key = signing::load_or_create(machine_id)?;
+        let mut generations = Generations::load()?;
+        let provenance = Provenance::load(
+            sync_path,
+            machine_id,
+            own_key.public_key(),
+            &TrustStore::load()?,
+            &mut generations,
+        );
+        generations.save()?;
         Ok(Self {
             inbox: Inbox::load()?,
-            provenance: Provenance::load(
-                sync_path,
-                machine_id,
-                own_key.public_key(),
-                &TrustStore::load()?,
-            ),
+            provenance,
             auto_install_from_trusted: config.packages.auto_install_from_trusted,
         })
     }
@@ -310,7 +315,13 @@ struct Provenance {
 }
 
 impl Provenance {
-    fn load(sync_path: &Path, this_machine: &str, own_key: &PublicKey, store: &TrustStore) -> Self {
+    fn load(
+        sync_path: &Path,
+        this_machine: &str,
+        own_key: &PublicKey,
+        store: &TrustStore,
+        generations: &mut Generations,
+    ) -> Self {
         let records = signing::records(sync_path);
         let (mut own, mut trusted, mut untrusted) =
             (HashSet::new(), HashSet::new(), HashSet::new());
@@ -319,13 +330,20 @@ impl Provenance {
                 continue;
             };
             let id = &r.record.machine_id;
-            let set = if id == this_machine {
-                if signer.key_data() == own_key.key_data() {
-                    &mut own
-                } else {
-                    &mut untrusted
-                }
-            } else if store.trusts(id, signer) {
+            let own_record = id == this_machine && signer.key_data() == own_key.key_data();
+            let trusted_record = id != this_machine && store.trusts(id, signer);
+            // A record that grants trust must be the newest its key has signed
+            if (own_record || trusted_record) && !generations.accept(signer, r.record.generation) {
+                Output::warning(&format!(
+                    "Ignoring machines/{}.json: its key signed a newer record before \
+                     (generation {}). Someone may be replaying an old record",
+                    id, r.record.generation
+                ));
+                continue;
+            }
+            let set = if own_record {
+                &mut own
+            } else if trusted_record {
                 &mut trusted
             } else {
                 &mut untrusted
@@ -1076,7 +1094,13 @@ mod tests {
     fn trust_as(dir: &Path, me: &str, key: &ssh_key::PrivateKey, store: &TrustStore) -> Trust {
         Trust {
             inbox: Inbox::default(),
-            provenance: Provenance::load(dir, me, key.public_key(), store),
+            provenance: Provenance::load(
+                dir,
+                me,
+                key.public_key(),
+                store,
+                &mut Generations::default(),
+            ),
             auto_install_from_trusted: true,
         }
     }
@@ -1176,6 +1200,40 @@ mod tests {
             held(&trust, "evilpkg", Some("1.0.0")),
             vec![Reason::Unsigned]
         );
+    }
+
+    #[test]
+    fn test_replayed_older_record_is_not_trusted() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        let write = |generation: u64, version: &str| {
+            let mut machine = MachineState::new("t");
+            machine
+                .packages
+                .insert("npm".to_string(), vec!["example".to_string()]);
+            machine.package_versions.insert(
+                "npm".to_string(),
+                HashMap::from([("example".to_string(), version.to_string())]),
+            );
+            machine.generation = generation;
+            machine.save_to_repo(path).unwrap();
+            signing::sign_record(path, "t", &t).unwrap();
+        };
+        let entry = |version: &str| {
+            (
+                "npm".to_string(),
+                "example".to_string(),
+                Some(version.to_string()),
+            )
+        };
+        let mut seen = Generations::default();
+        write(5, "2.0.0");
+        let provenance = Provenance::load(path, "me", me.public_key(), &store, &mut seen);
+        assert_eq!(provenance.signer(&entry("2.0.0")), Signer::Trusted);
+        // An older record and signature by the same key, restored from git history
+        write(3, "1.0.0");
+        let provenance = Provenance::load(path, "me", me.public_key(), &store, &mut seen);
+        assert_eq!(provenance.signer(&entry("1.0.0")), Signer::None);
     }
 
     #[test]

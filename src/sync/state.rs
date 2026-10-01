@@ -97,6 +97,10 @@ pub struct MachineState {
     /// Profile assigned to this machine (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// Counts this machine's saves of its record. The signature covers it, so another
+    /// machine can refuse an older signed record that someone replays from git history.
+    #[serde(default)]
+    pub generation: u64,
 }
 
 impl Default for MachineState {
@@ -161,6 +165,7 @@ impl MachineState {
             ignored_project_configs: HashMap::new(),
             checkouts: HashMap::new(),
             profile: None,
+            generation: 0,
         }
     }
 
