@@ -246,8 +246,10 @@ impl Inbox {
             .filter_map(|d| Some((d.manager.as_str(), d.name.as_str(), d.tap.as_deref()?)))
     }
 
-    /// Queue an item. Returns false when it is already pending or was rejected.
-    /// A pending item takes the newer check results, so a cleared OSV report can be approved.
+    /// Queue an item. Returns true when it is new, or replaces a pending item that asks for
+    /// something else, such as another version or key: that is a new decision, so it is
+    /// reported again. A pending item takes the newer check results, so a cleared OSV report
+    /// can be approved.
     pub fn add(&mut self, item: InboxItem) -> bool {
         if self.is_rejected(&item.manager, &item.name) {
             return false;
@@ -257,11 +259,16 @@ impl Inbox {
             .iter_mut()
             .find(|i| i.is(&item.manager, &item.name))
         {
+            let changed = !pending.same_request(&item);
             *pending = InboxItem {
-                first_seen: pending.first_seen,
+                first_seen: if changed {
+                    item.first_seen
+                } else {
+                    pending.first_seen
+                },
                 ..item
             };
-            return false;
+            return changed;
         }
         self.items.push(item);
         true
@@ -690,9 +697,16 @@ mod tests {
         let mut inbox = Inbox::default();
         assert!(inbox.add(item("npm", "left-pad")));
         let mut cleared = item("npm", "left-pad");
-        cleared.reasons = vec![Reason::CooldownUnsupported];
+        cleared.advisories = vec!["GHSA-x".to_string()];
         assert!(!inbox.add(cleared));
-        assert_eq!(inbox.items[0].reasons, vec![Reason::CooldownUnsupported]);
+        assert_eq!(inbox.items[0].advisories, vec!["GHSA-x"]);
+        // Another version under the same id is a new decision, so it is reported again
+        let swapped = InboxItem {
+            version: Some("6.6.6".to_string()),
+            ..item("npm", "left-pad")
+        };
+        assert!(inbox.add(swapped));
+        assert_eq!(inbox.items[0].version.as_deref(), Some("6.6.6"));
         assert!(inbox.add(item("pnpm", "left-pad")));
         inbox.reject("npm:left-pad").unwrap();
         assert!(inbox.is_rejected("npm", "left-pad"));
