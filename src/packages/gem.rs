@@ -1,4 +1,5 @@
-use super::{PackageInfo, PackageManager};
+use super::policy::PackagePolicy;
+use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -8,6 +9,10 @@ pub struct GemManager;
 impl GemManager {
     pub fn new() -> Self {
         Self
+    }
+
+    fn policy(&self) -> PackagePolicy {
+        PackagePolicy::load()
     }
 
     async fn run_gem(&self, args: &[&str]) -> Result<String> {
@@ -74,7 +79,9 @@ impl PackageManager for GemManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
+        validate_name(Ecosystem::Gem, &package.name)?;
         let pkg_spec = if let Some(version) = &package.version {
+            validate_version(version)?;
             format!("{}:{}", package.name, version)
         } else {
             package.name.clone()
@@ -94,6 +101,19 @@ impl PackageManager for GemManager {
 
     fn name(&self) -> &str {
         "gem"
+    }
+
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Gem
+    }
+
+    // RubyGems has no release-age filter
+    async fn cooldown(&self) -> Cooldown {
+        if self.policy().min_release_age_days == 0 {
+            Cooldown::Off
+        } else {
+            Cooldown::Unsupported
+        }
     }
 
     async fn update_all(&self) -> Result<()> {
@@ -117,6 +137,7 @@ impl PackageManager for GemManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
+        validate_name(Ecosystem::Gem, package)?;
         let output = Command::new("gem")
             .args(["uninstall", package, "-x", "-a"])
             .output()

@@ -169,6 +169,7 @@ async fn import_brew(
         .retain(|p| !removed_formulae.contains(p));
     brew_packages.casks.retain(|p| !removed_casks.contains(p));
     brew_packages.taps.retain(|p| !removed_taps.contains(p));
+    brew.filter_brewfile(&mut brew_packages);
 
     // Calculate missing packages (normalize formula names for comparison)
     let local_formulae: HashSet<_> = machine_state

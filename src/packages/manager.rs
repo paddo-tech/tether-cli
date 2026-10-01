@@ -1,3 +1,4 @@
+use super::{validate_name, Cooldown, Ecosystem};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,12 @@ pub trait PackageManager: Send + Sync {
     /// Get the name of this package manager
     fn name(&self) -> &str;
 
+    /// Registry naming rules this manager's packages follow
+    fn ecosystem(&self) -> Ecosystem;
+
+    /// Flags that enforce `packages.min_release_age_days` with the installed tool version
+    async fn cooldown(&self) -> Cooldown;
+
     /// Export installed packages to a manifest file using native tooling
     /// Returns the content of the manifest as a String
     async fn export_manifest(&self) -> Result<String> {
@@ -42,6 +49,13 @@ pub trait PackageManager: Send + Sync {
             .lines()
             .map(|line| line.trim())
             .filter(|line| !line.is_empty())
+            .filter(|line| match validate_name(self.ecosystem(), line) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("Warning: Skipping {} entry: {}", self.name(), e);
+                    false
+                }
+            })
             .collect();
 
         if package_names.is_empty() {

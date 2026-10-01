@@ -1,4 +1,5 @@
-use super::{PackageInfo, PackageManager};
+use super::policy::{self, PackagePolicy};
+use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -8,6 +9,10 @@ pub struct UvManager;
 impl UvManager {
     pub fn new() -> Self {
         Self
+    }
+
+    fn policy(&self) -> PackagePolicy {
+        PackagePolicy::load()
     }
 
     async fn run_uv(&self, args: &[&str]) -> Result<String> {
@@ -65,7 +70,12 @@ impl PackageManager for UvManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
-        self.run_uv(&["tool", "install", &package.name]).await?;
+        validate_name(Ecosystem::Python, &package.name)?;
+        let cooldown = self.cooldown().await;
+        let mut args = vec!["tool", "install"];
+        args.extend(cooldown.args().iter().map(String::as_str));
+        args.push(&package.name);
+        self.run_uv(&args).await?;
         Ok(())
     }
 
@@ -77,6 +87,14 @@ impl PackageManager for UvManager {
         "uv"
     }
 
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Python
+    }
+
+    async fn cooldown(&self) -> Cooldown {
+        policy::uv_cooldown(self.policy().min_release_age_days, chrono::Utc::now())
+    }
+
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
@@ -85,6 +103,7 @@ impl PackageManager for UvManager {
 
         let output = Command::new("uv")
             .args(["tool", "upgrade", "--all"])
+            .args(self.cooldown().await.args())
             .output()
             .await?;
 
@@ -97,6 +116,7 @@ impl PackageManager for UvManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
+        validate_name(Ecosystem::Python, package)?;
         let output = Command::new("uv")
             .args(["tool", "uninstall", package])
             .output()

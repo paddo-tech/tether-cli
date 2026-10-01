@@ -4,7 +4,9 @@ pub mod gem;
 pub mod manager;
 pub mod npm;
 pub mod pnpm;
+pub mod policy;
 pub mod uv;
+pub mod validate;
 
 pub use brew::{normalize_formula_name, BrewManager, BrewfilePackages};
 pub use bun::BunManager;
@@ -12,7 +14,9 @@ pub use gem::GemManager;
 pub use manager::{PackageInfo, PackageManager};
 pub use npm::NpmManager;
 pub use pnpm::PnpmManager;
+pub use policy::{Cooldown, PackagePolicy};
 pub use uv::UvManager;
+pub use validate::{validate_name, validate_version, Ecosystem};
 
 /// Some tools (pnpm) report failures on stdout, so surface both streams.
 pub fn command_error_message(output: &std::process::Output) -> String {

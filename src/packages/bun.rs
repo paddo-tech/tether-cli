@@ -1,4 +1,5 @@
-use super::{PackageInfo, PackageManager};
+use super::policy::{self, PackagePolicy};
+use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -19,6 +20,19 @@ pub struct BunManager;
 impl BunManager {
     pub fn new() -> Self {
         Self
+    }
+
+    fn policy(&self) -> PackagePolicy {
+        PackagePolicy::load()
+    }
+
+    /// An old bun runs without cooldown args after one warning.
+    async fn cooldown_args(&self) -> Vec<String> {
+        let cooldown = self.cooldown().await;
+        if cooldown == Cooldown::Unsupported {
+            policy::warn_unsupported_once("bun", self.policy().min_release_age_days);
+        }
+        cooldown.args().to_vec()
     }
 
     async fn run_bun(&self, args: &[&str]) -> Result<String> {
@@ -99,13 +113,20 @@ impl PackageManager for BunManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
+        validate_name(Ecosystem::Npm, &package.name)?;
         let pkg_spec = if let Some(version) = &package.version {
+            validate_version(version)?;
             format!("{}@{}", package.name, version)
         } else {
             package.name.clone()
         };
 
-        self.run_bun(&["add", "-g", &pkg_spec]).await?;
+        let mut args = vec!["add".to_string(), "-g".to_string()];
+        args.extend(self.cooldown_args().await);
+        args.extend(policy::bun_script_args(&self.policy(), &package.name));
+        args.push(pkg_spec);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run_bun(&args).await?;
         Ok(())
     }
 
@@ -117,17 +138,38 @@ impl PackageManager for BunManager {
         "bun"
     }
 
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Npm
+    }
+
+    async fn cooldown(&self) -> Cooldown {
+        policy::bun_cooldown(
+            self.policy().min_release_age_days,
+            policy::tool_version("bun").await,
+        )
+    }
+
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
             return Ok(());
         }
 
+        let cooldown = self.cooldown_args().await;
+        let package_policy = self.policy();
+
         // bun update -g is broken (only updates first package)
         // Workaround: reinstall each package to get latest version
         for pkg in packages {
+            if let Err(e) = validate_name(Ecosystem::Npm, &pkg.name) {
+                eprintln!("Warning: Skipping bun entry: {}", e);
+                continue;
+            }
             let output = Command::new("bun")
-                .args(["add", "-g", &pkg.name])
+                .args(["add", "-g"])
+                .args(&cooldown)
+                .args(policy::bun_script_args(&package_policy, &pkg.name))
+                .arg(&pkg.name)
                 .output()
                 .await?;
 
@@ -141,6 +183,7 @@ impl PackageManager for BunManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
+        validate_name(Ecosystem::Npm, package)?;
         let output = Command::new("bun")
             .args(["remove", "-g", package])
             .output()

@@ -126,6 +126,12 @@ pub enum BackendType {
 pub struct PackagesConfig {
     #[serde(default)]
     pub remove_unlisted: bool,
+    /// Skip package releases younger than this many days (0 disables)
+    #[serde(default = "default_min_release_age_days")]
+    pub min_release_age_days: u32,
+    /// Packages whose install scripts may run; scripts are off for all others
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_scripts: Vec<String>,
     #[serde(default = "default_brew_config")]
     pub brew: BrewConfig,
     #[serde(default = "default_npm_config")]
@@ -145,6 +151,9 @@ pub struct BrewConfig {
     pub enabled: bool,
     pub sync_casks: bool,
     pub sync_taps: bool,
+    /// Third-party taps allowed to install; `homebrew/*` is always allowed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_taps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,11 +195,16 @@ impl Default for UvConfig {
     }
 }
 
+fn default_min_release_age_days() -> u32 {
+    7
+}
+
 fn default_brew_config() -> BrewConfig {
     BrewConfig {
         enabled: true,
         sync_casks: true,
         sync_taps: true,
+        trusted_taps: Vec::new(),
     }
 }
 
@@ -996,11 +1010,9 @@ impl Default for Config {
             },
             packages: PackagesConfig {
                 remove_unlisted: false,
-                brew: BrewConfig {
-                    enabled: true,
-                    sync_casks: true,
-                    sync_taps: true,
-                },
+                min_release_age_days: default_min_release_age_days(),
+                allow_scripts: Vec::new(),
+                brew: default_brew_config(),
                 npm: NpmConfig {
                     enabled: true,
                     sync_versions: false,
@@ -1356,6 +1368,40 @@ files = [".zshrc"]
 "#;
         let parsed: Config = toml::from_str(old_config).unwrap();
         assert_eq!(parsed.config_version, 1);
+        // Configs from before the supply-chain settings get the secure defaults
+        assert_eq!(parsed.packages.min_release_age_days, 7);
+        assert!(parsed.packages.allow_scripts.is_empty());
+        assert!(parsed.packages.brew.trusted_taps.is_empty());
+    }
+
+    #[test]
+    fn test_supply_chain_settings_parse() {
+        let config = r#"
+[sync]
+interval = "5m"
+strategy = "last-write-wins"
+
+[backend]
+type = "git"
+url = ""
+
+[packages]
+min_release_age_days = 0
+allow_scripts = ["esbuild"]
+
+[packages.brew]
+enabled = true
+sync_casks = true
+sync_taps = true
+trusted_taps = ["oven-sh/bun"]
+
+[dotfiles]
+files = []
+"#;
+        let parsed: Config = toml::from_str(config).unwrap();
+        assert_eq!(parsed.packages.min_release_age_days, 0);
+        assert_eq!(parsed.packages.allow_scripts, vec!["esbuild"]);
+        assert_eq!(parsed.packages.brew.trusted_taps, vec!["oven-sh/bun"]);
     }
 
     #[test]

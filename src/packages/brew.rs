@@ -1,4 +1,4 @@
-use super::{PackageInfo, PackageManager};
+use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::PathBuf;
@@ -50,6 +50,41 @@ impl BrewfilePackages {
         packages
     }
 
+    /// Drop entries that fail name validation, with a warning, so they never reach brew.
+    pub fn retain_valid(&mut self) {
+        let keep = |ecosystem: Ecosystem, name: &String| match validate_name(ecosystem, name) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("Warning: Skipping Brewfile entry: {}", e);
+                false
+            }
+        };
+        self.taps.retain(|t| keep(Ecosystem::BrewTap, t));
+        self.formulae.retain(|f| keep(Ecosystem::Brew, f));
+        self.casks.retain(|c| keep(Ecosystem::Brew, c));
+    }
+
+    /// Move untrusted taps, and formulae and casks qualified with one, out of `self`.
+    /// Short names stay: without their tap tapped they only resolve to trusted taps.
+    pub fn take_untrusted(&mut self, policy: &PackagePolicy) -> BrewfilePackages {
+        let trusted = |name: &String| tap_of(name).is_none_or(|tap| policy.tap_trusted(tap));
+        let (taps, untrusted_taps) = self.taps.drain(..).partition(|t| policy.tap_trusted(t));
+        let (formulae, untrusted_formulae) = self.formulae.drain(..).partition(trusted);
+        let (casks, untrusted_casks) = self.casks.drain(..).partition(trusted);
+        self.taps = taps;
+        self.formulae = formulae;
+        self.casks = casks;
+        BrewfilePackages {
+            taps: untrusted_taps,
+            formulae: untrusted_formulae,
+            casks: untrusted_casks,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.taps.is_empty() && self.formulae.is_empty() && self.casks.is_empty()
+    }
+
     /// Generate a Brewfile string from structured package lists
     pub fn generate(&self) -> String {
         let mut lines = Vec::new();
@@ -68,11 +103,54 @@ impl BrewfilePackages {
     }
 }
 
+/// The `user/repo` tap of a qualified `user/repo/name` formula or cask.
+fn tap_of(name: &str) -> Option<&str> {
+    name.rsplit_once('/').map(|(tap, _)| tap)
+}
+
+/// Untrusted taps and their packages are held back from install. The approval inbox
+/// takes them over here once it exists.
+pub fn hold_untrusted(untrusted: &BrewfilePackages) {
+    for tap in &untrusted.taps {
+        eprintln!(
+            "Warning: Skipping untrusted tap {}. Add it to packages.brew.trusted_taps to allow it",
+            tap
+        );
+    }
+    for name in untrusted.formulae.iter().chain(&untrusted.casks) {
+        eprintln!("Warning: Skipping {} from an untrusted tap", name);
+    }
+}
+
 pub struct BrewManager;
 
 impl BrewManager {
     pub fn new() -> Self {
         Self
+    }
+
+    fn policy(&self) -> PackagePolicy {
+        PackagePolicy::load()
+    }
+
+    /// Validate a formula or cask and refuse ones qualified with an untrusted tap.
+    fn check_package(&self, name: &str) -> Result<()> {
+        validate_name(Ecosystem::Brew, name)?;
+        if let Some(tap) = tap_of(name) {
+            if !self.policy().tap_trusted(tap) {
+                anyhow::bail!("{} is from untrusted tap {}", name, tap);
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and trust-filter a Brewfile before brew sees it.
+    pub fn filter_brewfile(&self, packages: &mut BrewfilePackages) {
+        packages.retain_valid();
+        let untrusted = packages.take_untrusted(&self.policy());
+        if !untrusted.is_empty() {
+            hold_untrusted(&untrusted);
+        }
     }
 
     /// Unlink conflicting versioned formulae before installing new versions.
@@ -160,6 +238,10 @@ impl BrewManager {
 
     /// Add a tap
     pub async fn tap(&self, tap_name: &str) -> Result<()> {
+        validate_name(Ecosystem::BrewTap, tap_name)?;
+        if !self.policy().tap_trusted(tap_name) {
+            anyhow::bail!("{} is not a trusted tap", tap_name);
+        }
         self.run_brew(&["tap", tap_name]).await?;
         Ok(())
     }
@@ -169,6 +251,7 @@ impl BrewManager {
     pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {
         use std::process::Stdio;
 
+        self.check_package(cask)?;
         let mut cmd = Command::new("brew");
         cmd.args(["install", "--cask", cask])
             .env("NONINTERACTIVE", "1")
@@ -241,6 +324,7 @@ impl PackageManager for BrewManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
+        self.check_package(&package.name)?;
         self.run_brew(&["install", &package.name]).await?;
         Ok(())
     }
@@ -251,6 +335,15 @@ impl PackageManager for BrewManager {
 
     fn name(&self) -> &str {
         "brew"
+    }
+
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Brew
+    }
+
+    // Homebrew has no release-age filter; the tap allowlist guards it instead
+    async fn cooldown(&self) -> Cooldown {
+        Cooldown::Off
     }
 
     async fn export_manifest(&self) -> Result<String> {
@@ -296,6 +389,11 @@ impl PackageManager for BrewManager {
     }
 
     async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
+        let mut packages = BrewfilePackages::parse(manifest_content);
+        self.filter_brewfile(&mut packages);
+        let manifest = packages.generate();
+        let manifest_content = manifest.as_str();
+
         // Unlink any conflicting versioned formulae before installing
         self.unlink_conflicting_versioned_formulae(manifest_content)
             .await?;
@@ -367,6 +465,10 @@ impl PackageManager for BrewManager {
         // Remove packages not in manifest
         for pkg in installed {
             if !desired.contains(pkg.name.as_str()) {
+                if let Err(e) = validate_name(Ecosystem::Brew, &pkg.name) {
+                    eprintln!("Warning: Skipping brew entry: {}", e);
+                    continue;
+                }
                 let output = Command::new("brew")
                     .args(["uninstall", &pkg.name])
                     .output()
@@ -403,6 +505,7 @@ impl PackageManager for BrewManager {
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
+        validate_name(Ecosystem::Brew, package)?;
         let output = Command::new("brew")
             .args(["uninstall", package])
             .output()
@@ -518,6 +621,46 @@ brew "git"
         assert_eq!(original.taps, parsed.taps);
         assert_eq!(original.formulae, parsed.formulae);
         assert_eq!(original.casks, parsed.casks);
+    }
+
+    #[test]
+    fn test_take_untrusted_splits_by_tap() {
+        let policy = PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["oven-sh/bun".to_string()],
+        };
+        let mut packages = BrewfilePackages {
+            taps: vec![
+                "homebrew/cask".to_string(),
+                "oven-sh/bun".to_string(),
+                "evil/tap".to_string(),
+            ],
+            formulae: vec![
+                "git".to_string(),
+                "oven-sh/bun/bun".to_string(),
+                "evil/tap/payload".to_string(),
+            ],
+            casks: vec!["iterm2".to_string(), "evil/tap/app".to_string()],
+        };
+        let untrusted = packages.take_untrusted(&policy);
+        assert_eq!(packages.taps, vec!["homebrew/cask", "oven-sh/bun"]);
+        assert_eq!(packages.formulae, vec!["git", "oven-sh/bun/bun"]);
+        assert_eq!(packages.casks, vec!["iterm2"]);
+        assert_eq!(untrusted.taps, vec!["evil/tap"]);
+        assert_eq!(untrusted.formulae, vec!["evil/tap/payload"]);
+        assert_eq!(untrusted.casks, vec!["evil/tap/app"]);
+    }
+
+    #[test]
+    fn test_retain_valid_drops_bad_entries() {
+        let mut packages = BrewfilePackages::parse(
+            "tap \"--force\"\ntap \"oven-sh/bun\"\nbrew \"--HEAD\"\nbrew \"git\"\ncask \"../x\"\ncask \"iterm2\"\n",
+        );
+        packages.retain_valid();
+        assert_eq!(packages.taps, vec!["oven-sh/bun"]);
+        assert_eq!(packages.formulae, vec!["git"]);
+        assert_eq!(packages.casks, vec!["iterm2"]);
     }
 
     // normalize_formula_name tests

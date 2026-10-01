@@ -1,4 +1,8 @@
-use super::{command_error_message, PackageInfo, PackageManager};
+use super::policy::{self, PackagePolicy};
+use super::{
+    command_error_message, validate_name, validate_version, Cooldown, Ecosystem, PackageInfo,
+    PackageManager,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -9,6 +13,19 @@ pub struct PnpmManager;
 impl PnpmManager {
     pub fn new() -> Self {
         Self
+    }
+
+    fn policy(&self) -> PackagePolicy {
+        PackagePolicy::load()
+    }
+
+    /// An old pnpm runs without cooldown args after one warning.
+    async fn cooldown_args(&self) -> Vec<String> {
+        let cooldown = self.cooldown().await;
+        if cooldown == Cooldown::Unsupported {
+            policy::warn_unsupported_once("pnpm", self.policy().min_release_age_days);
+        }
+        cooldown.args().to_vec()
     }
 
     async fn run_pnpm(&self, args: &[&str]) -> Result<String> {
@@ -68,13 +85,20 @@ impl PackageManager for PnpmManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
+        validate_name(Ecosystem::Npm, &package.name)?;
         let pkg_spec = if let Some(version) = &package.version {
+            validate_version(version)?;
             format!("{}@{}", package.name, version)
         } else {
             package.name.clone()
         };
 
-        self.run_pnpm(&["add", "-g", &pkg_spec]).await?;
+        let mut args = vec!["add".to_string(), "-g".to_string()];
+        args.extend(self.cooldown_args().await);
+        args.extend(policy::pnpm_script_args(&self.policy(), &package.name));
+        args.push(pkg_spec);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.run_pnpm(&args).await?;
         Ok(())
     }
 
@@ -86,25 +110,66 @@ impl PackageManager for PnpmManager {
         "pnpm"
     }
 
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Npm
+    }
+
+    async fn cooldown(&self) -> Cooldown {
+        policy::pnpm_cooldown(
+            self.policy().min_release_age_days,
+            policy::tool_version("pnpm").await,
+        )
+    }
+
     async fn update_all(&self) -> Result<()> {
         let packages = self.list_installed().await?;
         if packages.is_empty() {
             return Ok(());
         }
 
-        let output = Command::new("pnpm").args(["update", "-g"]).output().await?;
+        let cooldown = self.cooldown_args().await;
+        let package_policy = self.policy();
+        let names: Vec<String> = packages
+            .into_iter()
+            .map(|p| p.name)
+            .filter(|name| match validate_name(Ecosystem::Npm, name) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("Warning: Skipping pnpm entry: {}", e);
+                    false
+                }
+            })
+            .collect();
+        let (scripted, plain): (Vec<String>, Vec<String>) = names
+            .into_iter()
+            .partition(|name| package_policy.scripts_allowed(name));
 
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "pnpm update failed: {}",
-                command_error_message(&output)
-            ));
+        // Allowlisted packages update in a second run so only they get scripts
+        for batch in [plain, scripted] {
+            let Some(first) = batch.first() else {
+                continue;
+            };
+            let output = Command::new("pnpm")
+                .args(["update", "-g"])
+                .args(&cooldown)
+                .args(policy::pnpm_script_args(&package_policy, first))
+                .args(&batch)
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "pnpm update failed: {}",
+                    command_error_message(&output)
+                ));
+            }
         }
 
         Ok(())
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
+        validate_name(Ecosystem::Npm, package)?;
         let output = Command::new("pnpm")
             .args(["remove", "-g", package])
             .output()
