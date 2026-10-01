@@ -322,6 +322,8 @@ async fn install_check(op: &InstallOp, osv_required: bool) -> Result<(), Blocked
 /// Approve each item as displayed and install it, and report every failure together.
 /// An item that changed since it was displayed is not approved.
 async fn approve_and_install(items: &[InboxItem]) -> Result<(), String> {
+    // The daemon must not install the same packages meanwhile; the dashboard cannot wait on it
+    let _sync_lock = crate::sync::acquire_sync_lock(false).map_err(|e| e.to_string())?;
     let mut failed = Vec::new();
     for item in items {
         let result = match crate::packages::inbox::approve(item) {
