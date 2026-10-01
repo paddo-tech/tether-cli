@@ -76,9 +76,11 @@ impl Job {
     pub fn args(&self) -> Vec<&str> {
         match self {
             Job::Sync => vec!["sync"],
+            // The confirm popup is the user's yes. Without a terminal, rollback installs only
+            // the newest trusted versions, never an older one
             Job::Rollback {
                 manager, commit, ..
-            } => vec!["rollback", "packages", manager, commit],
+            } => vec!["rollback", "packages", manager, commit, "--yes"],
         }
     }
 }

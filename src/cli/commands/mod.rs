@@ -741,7 +741,7 @@ impl Cli {
             Commands::History { file, limit } => history::run(file, *limit).await,
             Commands::Rollback { action } => match action {
                 RollbackAction::Packages { manager, commit } => {
-                    rollback::packages(manager, commit).await
+                    rollback::packages(manager, commit, self.yes).await
                 }
             },
             Commands::Collab { action } => match action {

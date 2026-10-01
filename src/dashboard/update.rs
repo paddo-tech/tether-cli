@@ -1208,7 +1208,10 @@ mod tests {
         let Some(Cmd::Run(job)) = cmd else {
             panic!("expected the rollback job");
         };
-        assert_eq!(job.args(), vec!["rollback", "packages", "npm", "abc123"]);
+        assert_eq!(
+            job.args(),
+            vec!["rollback", "packages", "npm", "abc123", "--yes"]
+        );
     }
 
     #[test]

@@ -775,7 +775,15 @@ async fn import_simple_manager(
         return false;
     }
 
-    let allowed = gate_simple(def, manager.as_ref(), trust, missing, queued).await;
+    let allowed = gate_simple(
+        def,
+        manager.as_ref(),
+        trust,
+        missing,
+        &HashSet::new(),
+        queued,
+    )
+    .await;
 
     if allowed.is_empty() {
         return false;
@@ -803,35 +811,114 @@ async fn import_simple_manager(
     }
 }
 
-/// Gate the manifest lines a rollback would install exactly like a synced import.
-/// Returns the lines that may install; the rest go to the approval inbox.
-pub async fn gate_rollback(
-    config: &Config,
-    sync_path: &Path,
-    machine_id: &str,
-    state_key: &str,
-    lines: Vec<String>,
-) -> Result<Vec<String>> {
-    let (Some(def), Some(manager)) = (
-        SIMPLE_MANAGERS.iter().find(|d| d.state_key == state_key),
-        crate::packages::manager_for_key(state_key),
-    ) else {
-        anyhow::bail!("Rollback is not supported for {}", state_key);
-    };
-    let trust = Trust::load(config, sync_path, machine_id)?;
-    let candidates = manifest_entries(def.ecosystem, &lines.join("\n"))
-        .into_iter()
-        .filter(|(name, version, _)| {
-            !trust.held(state_key, name)
-                && !trust
-                    .inbox
-                    .is_rejected(state_key, name, version.as_deref(), None)
+/// A package a rollback would install, at the version its snapshot pins.
+pub struct RollbackLine {
+    pub name: String,
+    pub version: Option<String>,
+    /// The newest version a trusted machine record lists now
+    pub trusted: Option<String>,
+    line: String,
+}
+
+impl RollbackLine {
+    /// Rollback is the user's choice to go back, so it may install a version other than the
+    /// newest trusted one, but only when the user confirms that version in a terminal.
+    pub fn needs_confirmation(&self) -> bool {
+        self.version.is_some() && self.version != self.trusted
+    }
+}
+
+/// The trust checks for the packages a rollback would install, loaded once.
+pub struct RollbackGate {
+    def: &'static PackageManagerDef,
+    trust: Trust,
+}
+
+impl RollbackGate {
+    /// The caller holds the sync lock.
+    pub fn load(
+        config: &Config,
+        sync_path: &Path,
+        machine_id: &str,
+        state_key: &str,
+    ) -> Result<Self> {
+        let Some(def) = SIMPLE_MANAGERS.iter().find(|d| d.state_key == state_key) else {
+            anyhow::bail!("Rollback is not supported for {}", state_key);
+        };
+        Ok(Self {
+            def,
+            trust: Trust::load(config, sync_path, machine_id)?,
         })
-        .collect();
-    let mut queued = Vec::new();
-    let allowed = gate_simple(def, manager.as_ref(), &trust, candidates, &mut queued).await;
-    report_held(&inbox::add(queued)?);
-    Ok(allowed)
+    }
+
+    pub fn plan(&self, lines: &[String]) -> Vec<RollbackLine> {
+        manifest_entries(self.def.ecosystem, &lines.join("\n"))
+            .into_iter()
+            .map(|(name, version, line)| RollbackLine {
+                trusted: self.trust.provenance.newest_trusted_version(
+                    self.def.ecosystem,
+                    self.def.state_key,
+                    &name,
+                ),
+                name,
+                version,
+                line,
+            })
+            .collect()
+    }
+
+    /// The version to install: the snapshot's when the user confirmed it, else the newest
+    /// trusted one, as a sync picks.
+    fn pin(&self, line: RollbackLine, confirmed: bool) -> (String, Option<String>, String) {
+        let entry = (line.name, line.version, line.line);
+        if confirmed {
+            entry
+        } else {
+            self.trust.trusted_pin(self.def, entry)
+        }
+    }
+
+    /// Check each line like a synced import. A version the user confirmed counts as
+    /// approved, but a malicious one is still refused. Returns the manifest lines to
+    /// install; the rest go to the approval inbox.
+    pub async fn gate(
+        &self,
+        lines: Vec<RollbackLine>,
+        confirmed: &HashSet<String>,
+    ) -> Result<Vec<String>> {
+        let Some(manager) = crate::packages::manager_for_key(self.def.state_key) else {
+            anyhow::bail!("Rollback is not supported for {}", self.def.state_key);
+        };
+        let key = self.def.state_key;
+        let candidates = lines
+            .into_iter()
+            .map(|line| {
+                let confirmed = confirmed.contains(&line.name);
+                (confirmed, self.pin(line, confirmed))
+            })
+            .filter(|(confirmed, (name, version, _))| {
+                *confirmed
+                    || !(self.trust.held(key, name)
+                        || self
+                            .trust
+                            .inbox
+                            .is_rejected(key, name, version.as_deref(), None))
+            })
+            .map(|(_, entry)| entry)
+            .collect();
+        let mut queued = Vec::new();
+        let allowed = gate_simple(
+            self.def,
+            manager.as_ref(),
+            &self.trust,
+            candidates,
+            confirmed,
+            &mut queued,
+        )
+        .await;
+        report_held(&inbox::add(queued)?);
+        Ok(allowed)
+    }
 }
 
 /// Name, pinned version and text of each manifest line that names a registry release.
@@ -863,11 +950,13 @@ fn manifest_entries(ecosystem: Ecosystem, manifest: &str) -> Vec<(String, Option
 }
 
 /// Keep the lines that may install and queue the rest with their OSV advisories.
+/// `confirmed` names packages whose version the user confirmed just now.
 async fn gate_simple(
     def: &PackageManagerDef,
     manager: &dyn PackageManager,
     trust: &Trust,
     missing: Vec<(String, Option<String>, String)>,
+    confirmed: &HashSet<String>,
     queued: &mut Vec<InboxItem>,
 ) -> Vec<String> {
     let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
@@ -878,11 +967,12 @@ async fn gate_simple(
     let advisories = osv::advisories(def.ecosystem, &pins).await;
     let mut allowed = Vec::new();
     for ((name, version, line), advisories) in missing.into_iter().zip(advisories) {
-        let checks = Checks {
+        let mut checks = Checks {
             cooldown_unsupported,
             malicious: advisories.iter().any(|id| osv::is_malicious(id)),
             ..trust.checks(def.state_key, &name, version.as_deref(), None)
         };
+        checks.approved |= confirmed.contains(&name);
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
             if !advisories.is_empty() {
@@ -1462,6 +1552,41 @@ mod tests {
             ..item
         });
         assert!(trust.held("npm", "good"));
+    }
+
+    #[test]
+    fn test_rollback_installs_an_older_version_only_when_confirmed() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        record(path, "t", &[("good", "2.0.0")], Some(&t));
+        let gate = RollbackGate {
+            def: &SIMPLE_MANAGERS[0],
+            trust: trust_as(path, "me", &me, &store),
+        };
+        let lines = vec![
+            "good@1.0.0".to_string(),
+            "good2@1.0.0".to_string(),
+            "loose".to_string(),
+        ];
+        let plan = gate.plan(&lines);
+        assert!(plan[0].needs_confirmation());
+        assert_eq!(plan[0].trusted.as_deref(), Some("2.0.0"));
+        assert!(plan[1].needs_confirmation());
+        assert!(!plan[2].needs_confirmation());
+
+        let mut plan = gate.plan(&lines).into_iter();
+        let unconfirmed = gate.pin(plan.next().unwrap(), false);
+        assert_eq!(unconfirmed.1.as_deref(), Some("2.0.0"));
+        assert_eq!(unconfirmed.2, "good@2.0.0");
+        let confirmed = gate.pin(gate.plan(&lines).remove(0), true);
+        assert_eq!(confirmed.2, "good@1.0.0");
+        // Without a trusted version the snapshot pin stays, and the trust checks hold it
+        let untrusted = gate.pin(plan.next().unwrap(), false);
+        assert_eq!(untrusted.2, "good2@1.0.0");
+        assert_eq!(
+            held(&gate.trust, "good2", Some("1.0.0")),
+            vec![Reason::Unsigned]
+        );
     }
 
     #[test]
