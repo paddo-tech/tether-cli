@@ -618,6 +618,14 @@ impl DaemonServer {
 
     /// Update all enabled package managers
     async fn run_package_updates(&self) -> Result<()> {
+        // Upgrades hold malicious targets in the inbox, which a sync or approval may be changing
+        let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+            Ok(lock) => lock,
+            Err(_) => {
+                log::info!("Sync in progress, skipping today's package update");
+                return Ok(());
+            }
+        };
         let config = Config::load()?;
         let mut any_actual_updates = false;
 
