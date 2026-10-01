@@ -1,6 +1,8 @@
 //! Read-side queries against the sync repo used by the dashboard.
 
 use super::state::DashboardState;
+use crate::packages::pin::{manifest_names, parse_pin};
+use crate::packages::Ecosystem;
 use crate::sync::{FileLogEntry, GitBackend, SyncEngine};
 use std::collections::{HashMap, HashSet};
 
@@ -47,12 +49,14 @@ pub fn pkg_diff(manager_key: &str, commit: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Install/uninstall counts for rolling a manager back to a commit.
+/// What rolling a manager back to a commit would change.
+#[derive(Clone)]
 pub struct RollbackPlan {
     pub manager: String,
     pub commit: String,
     pub short_hash: String,
-    pub install: usize,
+    /// Packages the snapshot has and this machine lacks, with their pinned versions.
+    pub to_install: Vec<(String, Option<String>)>,
     pub uninstall: usize,
 }
 
@@ -62,41 +66,52 @@ pub fn rollback_plan(
     commit: &str,
     short_hash: &str,
 ) -> Option<RollbackPlan> {
+    let ecosystem = crate::packages::manager_for_key(manager)?.ecosystem();
     let manifest = crate::sync::packages::manifest_filename(manager)?;
     let repo_path = format!("manifests/{}", manifest);
     let snapshot = open_repo()?.show_at_commit(commit, &repo_path).ok()?;
     let snapshot = String::from_utf8_lossy(&snapshot);
-    let ecosystem = crate::packages::manager_for_key(manager).map(|m| m.ecosystem());
-    let target: HashSet<String> = snapshot
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| match ecosystem {
-            Some(eco) => crate::packages::pin::parse_pin(eco, l).0,
-            None => l.to_string(),
-        })
-        .collect();
 
     let current_machine_id = state
         .sync_state
         .as_ref()
         .map(|s| s.machine_id.as_str())
         .unwrap_or("");
-    let installed: HashSet<String> = state
+    let installed: Vec<String> = state
         .machines
         .iter()
         .find(|m| m.machine_id == current_machine_id)
         .and_then(|m| m.packages.get(manager))
-        .map(|v| v.iter().cloned().collect())
+        .cloned()
         .unwrap_or_default();
+    let (to_install, uninstall) = rollback_delta(ecosystem, &snapshot, &installed);
 
     Some(RollbackPlan {
         manager: manager.to_string(),
         commit: commit.to_string(),
         short_hash: short_hash.to_string(),
-        install: target.difference(&installed).count(),
-        uninstall: installed.difference(&target).count(),
+        to_install,
+        uninstall,
     })
+}
+
+/// Packages to install (with pins) and the uninstall count that move `installed` to `snapshot`.
+fn rollback_delta(
+    ecosystem: Ecosystem,
+    snapshot: &str,
+    installed: &[String],
+) -> (Vec<(String, Option<String>)>, usize) {
+    let target: HashSet<String> = manifest_names(ecosystem, snapshot).into_iter().collect();
+    let installed: HashSet<&str> = installed.iter().map(String::as_str).collect();
+    let to_install = snapshot
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| parse_pin(ecosystem, l))
+        .filter(|(name, _)| !installed.contains(name.as_str()))
+        .collect();
+    let uninstall = installed.iter().filter(|n| !target.contains(**n)).count();
+    (to_install, uninstall)
 }
 
 /// Detect files in the sync repo that are no longer tracked locally.
@@ -239,17 +254,22 @@ fn repo_path_to_dotfile_with_profiles(
     }
 }
 
-/// Sync commits per local day, oldest first, ending today. Empty without a sync repo.
-pub fn commit_activity(days: usize) -> Vec<u64> {
+/// A chart is not worth waiting on a git that hangs, for example on a repo lock.
+const ACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Sync commits per local day, oldest first, ending today. Empty without a sync repo
+/// or when git does not finish in time.
+pub async fn commit_activity(days: usize) -> Vec<u64> {
     let Ok(sync_path) = SyncEngine::sync_path() else {
         return Vec::new();
     };
     let since = format!("--since={}.days", days);
-    let Ok(output) = std::process::Command::new("git")
+    let log = tokio::process::Command::new("git")
         .args(["log", &since, "--format=%at"])
         .current_dir(&sync_path)
-        .output()
-    else {
+        .kill_on_drop(true)
+        .output();
+    let Ok(Ok(output)) = tokio::time::timeout(ACTIVITY_TIMEOUT, log).await else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -282,6 +302,31 @@ pub fn daily_counts(stamps: &[i64], today: chrono::NaiveDate, days: usize) -> Ve
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn rollback_delta_reads_pinned_lines() {
+        let installed = vec!["left-pad".to_string(), "typescript".to_string()];
+        let snapshot = "left-pad@1.3.0\n@scope/tool@2.0.0\n\nzx\n";
+        let (to_install, uninstall) = rollback_delta(Ecosystem::Npm, snapshot, &installed);
+        assert_eq!(
+            to_install,
+            vec![
+                ("@scope/tool".to_string(), Some("2.0.0".to_string())),
+                ("zx".to_string(), None),
+            ]
+        );
+        assert_eq!(uninstall, 1);
+
+        let (to_install, uninstall) =
+            rollback_delta(Ecosystem::Python, "ruff==0.6.0\n", &["ruff".to_string()]);
+        assert!(to_install.is_empty());
+        assert_eq!(uninstall, 0);
+        let (to_install, _) = rollback_delta(Ecosystem::Gem, "rails:7.1.0\n", &[]);
+        assert_eq!(
+            to_install,
+            vec![("rails".to_string(), Some("7.1.0".to_string()))]
+        );
+    }
 
     #[test]
     fn daily_counts_bucket_by_local_day() {

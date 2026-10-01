@@ -1,5 +1,6 @@
 use super::truncate;
-use crate::dashboard::theme::{mix, Theme};
+use crate::dashboard::app::{App, Hit};
+use crate::dashboard::theme::mix;
 use ratatui::{
     prelude::*,
     widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap},
@@ -54,14 +55,16 @@ impl Toast {
 }
 
 /// Stack toasts under the header, newest on top.
-pub fn render(f: &mut Frame, toasts: &[Toast], t: &Theme) {
+/// Each toast is clickable, and a click dismisses it.
+pub fn render(f: &mut Frame, app: &App) {
+    let (toasts, t) = (&app.toasts, &app.theme);
     let area = f.area();
     if area.width < 24 || area.height < 8 {
         return;
     }
     let now = Instant::now();
     let mut y = area.y + 2;
-    for toast in toasts.iter().rev() {
+    for (i, toast) in toasts.iter().enumerate().rev() {
         let (icon, color) = match toast.kind {
             ToastKind::Info => ("●", t.info),
             ToastKind::Success => ("✓", t.ok),
@@ -83,6 +86,7 @@ pub fn render(f: &mut Frame, toasts: &[Toast], t: &Theme) {
         let visible_w = area.right().saturating_sub(x).min(width);
         if visible_w >= 4 {
             let rect = Rect::new(x, y, visible_w, height);
+            app.add_hit(rect, Hit::Toast(i));
             let fg = |c: Color| if t.rgb { mix(c, t.base_bg, fade) } else { c };
             let bg = if t.rgb {
                 mix(t.popup_bg, t.base_bg, fade)

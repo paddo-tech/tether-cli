@@ -2,6 +2,7 @@
 
 use super::{cursor_down, files, manager_label, scroll_for, select_row, truncate};
 use crate::dashboard::app::{Action, App, Hit, Overlay, Tab};
+use crate::packages::inbox::{Kind, Reason};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -12,8 +13,18 @@ use ratatui::{
 pub enum Target {
     Action(Action),
     Tab(Tab),
-    File { section: String, path: String },
-    Package { manager_key: String, name: String },
+    File {
+        section: String,
+        path: String,
+    },
+    Package {
+        manager_key: String,
+        name: String,
+    },
+    /// Approve and install an inbox item by id.
+    Approve(String),
+    /// Reject an inbox item by id.
+    Reject(String),
 }
 
 pub struct Entry {
@@ -78,21 +89,15 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
             || (c[i - 1].is_lowercase() && c[i].is_uppercase())
     };
 
-    // Try every start of the first char and keep the best greedy alignment.
-    let mut best: Option<(i32, Vec<usize>)> = None;
-    let first = q[0].to_ascii_lowercase();
-    for start in (0..lower.len()).filter(|&i| lower[i] == first) {
+    // Align from `start`. With `prefer_words`, jump ahead to a nearby word start;
+    // that can strand later query chars, so the plain earliest match is the fallback.
+    let align = |start: usize, prefer_words: bool| -> Option<Vec<usize>> {
         let mut pos = vec![start];
         let mut ci = start + 1;
         for &qc in &q[1..] {
             let qc = qc.to_ascii_lowercase();
-            // Prefer the next word start over a mid-word hit when one exists before a gap.
-            let next = (ci..lower.len()).find(|&i| lower[i] == qc);
-            let Some(mut found) = next else {
-                pos.clear();
-                break;
-            };
-            if found != ci {
+            let mut found = (ci..lower.len()).find(|&i| lower[i] == qc)?;
+            if prefer_words && found != ci {
                 if let Some(b) = (found..lower.len()).find(|&i| lower[i] == qc && boundary(i)) {
                     if b - found <= 8 {
                         found = b;
@@ -102,9 +107,16 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
             pos.push(found);
             ci = found + 1;
         }
-        if pos.is_empty() {
+        Some(pos)
+    };
+
+    // Try every start of the first char and keep the best alignment.
+    let mut best: Option<(i32, Vec<usize>)> = None;
+    let first = q[0].to_ascii_lowercase();
+    for start in (0..lower.len()).filter(|&i| lower[i] == first) {
+        let Some(pos) = align(start, true).or_else(|| align(start, false)) else {
             continue;
-        }
+        };
         let mut score = 0i32;
         for (k, &p) in pos.iter().enumerate() {
             score += 16;
@@ -151,6 +163,38 @@ pub fn entries(app: &App) -> Vec<Entry> {
             label: label.to_string(),
             kind: "action".into(),
             target: Target::Action(action),
+        });
+    }
+    let pending = &app.state.inbox.items;
+    if pending
+        .iter()
+        .any(|i| !i.reasons.contains(&Reason::Malicious))
+    {
+        out.push(Entry {
+            label: "Approve all pending packages".into(),
+            kind: "action".into(),
+            target: Target::Action(Action::ApproveAll),
+        });
+    }
+    for item in pending {
+        let (verb, name) = match item.kind {
+            Kind::Package => (
+                "Approve",
+                format!("{} ({})", item.name, manager_label(&item.manager)),
+            ),
+            Kind::TrustMachine { .. } => ("Trust", format!("machine key of {}", item.name)),
+        };
+        if !item.reasons.contains(&Reason::Malicious) {
+            out.push(Entry {
+                label: format!("{} {}", verb, name),
+                kind: "inbox".into(),
+                target: Target::Approve(item.id()),
+            });
+        }
+        out.push(Entry {
+            label: format!("Reject {}", name),
+            kind: "inbox".into(),
+            target: Target::Reject(item.id()),
         });
     }
     for tab in Tab::all() {
@@ -318,6 +362,8 @@ pub fn render(f: &mut Frame, app: &App, p: &Palette) {
             Target::Tab(_) => ("#", t.info),
             Target::File { .. } => ("◇", t.ok),
             Target::Package { .. } => ("▪", t.key),
+            Target::Approve(_) => ("✓", t.ok),
+            Target::Reject(_) => ("✗", t.error),
         };
         let max_label = (list.width as usize).saturating_sub(entry.kind.len() + 6);
         let label = truncate(&entry.label, max_label);
@@ -356,6 +402,14 @@ mod tests {
         assert!(fuzzy_match("zrc", ".zshrc").is_some());
         assert!(fuzzy_match("xyz", ".zshrc").is_none());
         assert_eq!(fuzzy_match("", "anything").map(|m| m.0), Some(0));
+    }
+
+    #[test]
+    fn fuzzy_falls_back_when_word_start_strands_the_query() {
+        assert_eq!(
+            fuzzy_match("abc", "axbc-b").map(|m| m.1),
+            Some(vec![0, 2, 3])
+        );
     }
 
     #[test]

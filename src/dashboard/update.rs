@@ -2,6 +2,7 @@ use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
 use super::components::palette::{self, Palette, Target};
 use super::components::{
     config, confirm, file_import, files, machines, overview, packages, pkg_import, profile_picker,
+    security,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -10,7 +11,18 @@ use std::time::{Duration, Instant};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Any message other than a tick may change what is on screen, so the regions from the
+/// last draw are dropped. A click before the next draw hits nothing instead of a stale row.
 pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
+    let tick = matches!(msg, Msg::Tick);
+    let cmd = apply(app, msg);
+    if !tick {
+        app.hits.borrow_mut().clear();
+    }
+    cmd
+}
+
+fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
     match msg {
         Msg::Key(key) => on_key(app, key),
         Msg::Mouse(m) => on_mouse(app, m),
@@ -77,6 +89,21 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
         }
         Msg::InstallDone { op, result } => on_install_done(app, op, result),
+        Msg::RollbackChecked { plan, result } => match result {
+            Err(e) => {
+                app.flash_error(e);
+                None
+            }
+            Ok(()) if app.running.is_some() => {
+                app.flash_error("Another tether command is still running");
+                None
+            }
+            Ok(()) => Some(Cmd::Run(Job::Rollback {
+                manager: plan.manager,
+                commit: plan.commit,
+                short_hash: plan.short_hash,
+            })),
+        },
         Msg::LocalPackages(packages) => {
             on_local_packages(app, packages);
             None
@@ -104,6 +131,7 @@ fn on_tick(app: &mut App) -> Option<Cmd> {
     app.toasts.retain(|t| t.alive(now));
     if app.last_refresh.elapsed() >= REFRESH_INTERVAL {
         app.reload_state();
+        app.hits.borrow_mut().clear();
         return Some(Cmd::LoadActivity);
     }
     None
@@ -143,6 +171,7 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
         Tab::Packages => packages::handle_key(app, key),
         Tab::Machines => machines::handle_key(app, key),
         Tab::Config => config::handle_key(app, key),
+        Tab::Security => security::handle_key(app, key),
     };
     if let KeyOutcome::Handled(cmd) = outcome {
         return cmd;
@@ -211,6 +240,10 @@ pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
             app.active_tab = Tab::Machines;
             machines::open_profile_picker(app);
         }
+        Action::ApproveAll => {
+            app.active_tab = Tab::Security;
+            security::confirm_approve_all(app);
+        }
     }
     None
 }
@@ -227,6 +260,16 @@ fn open_or_report(app: &mut App, open: fn(&mut App), empty: &str) {
 fn run_target(app: &mut App, target: Target) -> Option<Cmd> {
     match target {
         Target::Action(action) => return run_action(app, action),
+        Target::Approve(id) => {
+            app.active_tab = Tab::Security;
+            security::select(app, &id);
+            return security::approve(app, &id);
+        }
+        Target::Reject(id) => {
+            app.active_tab = Tab::Security;
+            security::select(app, &id);
+            security::reject(app, &id);
+        }
         Target::Tab(tab) => app.active_tab = tab,
         Target::File { section, path } => {
             app.active_tab = Tab::Files;
@@ -261,9 +304,14 @@ fn run_target(app: &mut App, target: Target) -> Option<Cmd> {
 /// Clicks hit what the last draw recorded; the wheel scrolls like arrow keys.
 fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
     match m.kind {
+        // Help covers the tab, so the wheel does not scroll it.
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp if app.help_open() => None,
         MouseEventKind::ScrollDown => on_key(app, KeyEvent::from(KeyCode::Down)),
         MouseEventKind::ScrollUp => on_key(app, KeyEvent::from(KeyCode::Up)),
         MouseEventKind::Down(MouseButton::Left) => match app.hit_at(m.column, m.row)? {
+            // Under a modal only its own buttons and items answer; a row click would become
+            // Enter on the modal and could accept a destructive confirm.
+            Hit::Tab(_) | Hit::Row(_) if app.overlays.last().is_some_and(Overlay::is_modal) => None,
             Hit::Tab(tab) => {
                 app.active_tab = tab;
                 None
@@ -271,6 +319,17 @@ fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
             Hit::Key(key) => on_key(app, key),
             Hit::Row(i) => click_row(app, i),
             Hit::Item(i) => click_item(app, i),
+            Hit::CloseHelp => {
+                app.overlays.retain(|o| !matches!(o, Overlay::Help));
+                None
+            }
+            Hit::Block => None,
+            Hit::Toast(i) => {
+                if i < app.toasts.len() {
+                    app.toasts.remove(i);
+                }
+                None
+            }
         },
         _ => None,
     }
@@ -283,6 +342,7 @@ fn click_row(app: &mut App, i: usize) -> Option<Cmd> {
         Tab::Files => &mut app.files.cursor,
         Tab::Packages => &mut app.packages.cursor,
         Tab::Machines => &mut app.machines.cursor,
+        Tab::Security => &mut app.security.cursor,
         Tab::Config => {
             // A click mid-edit would move the edit to another field.
             if app.config.editing || app.config.list_edit.as_ref().is_some_and(|l| l.adding) {
@@ -385,6 +445,7 @@ mod tests {
     use crate::dashboard::components::confirm::Confirm;
     use crate::dashboard::components::toast::{Toast, ToastKind, MAX_TOASTS};
     use crate::dashboard::state::DashboardState;
+    use crate::packages::inbox::{InboxItem, Kind, Reason};
     use crate::sync::{ConflictState, TeamManifest};
     use std::collections::HashMap;
     use std::time::Instant;
@@ -399,6 +460,8 @@ mod tests {
             daemon_pid: None,
             daemon_running: false,
             activity_lines: Vec::new(),
+            inbox: Default::default(),
+            trusted: Vec::new(),
         };
         App::new(state, HashMap::new())
     }
@@ -418,6 +481,8 @@ mod tests {
         assert_eq!(app.active_tab, Tab::Machines);
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.active_tab, Tab::Config);
+        key(&mut app, KeyCode::Char('6'));
+        assert_eq!(app.active_tab, Tab::Security);
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.active_tab, Tab::Overview);
         key(&mut app, KeyCode::Char('9'));
@@ -537,27 +602,36 @@ mod tests {
     }
 
     #[test]
-    fn stale_install_result_is_ignored() {
+    fn second_install_waits_for_the_first() {
         let mut app = app();
-        let first = app.start_install("npm".into(), "left-pad".into());
-        let second = app.start_install("npm".into(), "left-pad".into());
-        let (Cmd::Install { op: first, .. }, Cmd::Install { op: second, .. }) = (first, second)
+        let Some(Cmd::Install { op: first, .. }) =
+            app.start_install("npm".into(), "left-pad".into())
         else {
-            panic!("expected install commands");
+            panic!("expected an install command");
+        };
+        assert!(app.start_install("npm".into(), "zx".into()).is_none());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Error, "Install in progress"))
+        );
+        assert_eq!(app.installing.as_ref(), Some(&first));
+        let stale = InstallOp {
+            id: first.id + 1,
+            ..first.clone()
         };
         update(
             &mut app,
             Msg::InstallDone {
-                op: first,
+                op: stale,
                 result: Ok(()),
             },
         );
-        assert_eq!(app.installing.as_ref(), Some(&second));
+        assert!(app.installing.is_some());
         update(
             &mut app,
             Msg::InstallDone {
-                op: second,
-                result: Ok(()),
+                op: first,
+                result: Err("boom".into()),
             },
         );
         assert!(app.installing.is_none());
@@ -648,6 +722,77 @@ mod tests {
     }
 
     #[test]
+    fn second_click_before_redraw_hits_nothing() {
+        let mut app = app();
+        app.add_hit(
+            Rect::new(0, 0, 5, 1),
+            Hit::Key(KeyEvent::from(KeyCode::Char('?'))),
+        );
+        click(&mut app, 1, 0);
+        click(&mut app, 1, 0);
+        assert!(app.help_open());
+    }
+
+    #[test]
+    fn row_click_cannot_answer_a_confirm() {
+        let mut app = app();
+        app.active_tab = Tab::Files;
+        app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
+            manager_key: "npm".into(),
+            name: "left-pad".into(),
+        }));
+        app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(0));
+        assert!(click(&mut app, 2, 5).is_none());
+        assert_eq!(app.overlays.len(), 1);
+        assert!(app.uninstalling.is_none());
+    }
+
+    #[test]
+    fn help_and_toasts_take_clicks_before_the_tab() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        app.active_tab = Tab::Config;
+        run_action(&mut app, Action::Help);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert_eq!(app.hit_at(40, 12), Some(Hit::Block));
+        click(&mut app, 40, 12);
+        assert!(app.help_open());
+        assert_eq!(app.config.selected, 0);
+        update(
+            &mut app,
+            Msg::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 40,
+                row: 12,
+                modifiers: KeyModifiers::NONE,
+            }),
+        );
+        assert_eq!(app.config.selected, 0);
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        click(&mut app, 0, 23);
+        assert!(!app.help_open());
+
+        app.flash_info("hello");
+        // Past the slide-in, so the toast is fully on screen.
+        app.toasts[0].born = Instant::now() - Duration::from_secs(1);
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let (x, y) = (0..80u16)
+            .flat_map(|x| (0..24u16).map(move |y| (x, y)))
+            .find(|&(x, y)| app.hit_at(x, y) == Some(Hit::Toast(0)))
+            .expect("toast is clickable");
+        click(&mut app, x, y);
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
     fn clicked_key_hint_acts_like_the_key() {
         let mut app = app();
         app.add_hit(
@@ -705,6 +850,201 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(screen.contains("Install left-pad (npm)?"));
+    }
+
+    fn inbox_item(name: &str, reasons: Vec<Reason>) -> InboxItem {
+        InboxItem {
+            kind: Kind::Package,
+            signer: None,
+            manager: "npm".into(),
+            name: name.into(),
+            version: Some("1.0.0".into()),
+            tap: None,
+            source_machine: Some("other".into()),
+            commit: Some("abc1234def".into()),
+            reasons,
+            advisories: vec!["MAL-2025-1".into(), "GHSA-xxxx".into()],
+            first_seen: chrono::Utc::now(),
+        }
+    }
+
+    fn with_inbox() -> App {
+        let mut app = app();
+        app.state.inbox.items = vec![
+            inbox_item("evil", vec![Reason::Malicious, Reason::Unsigned]),
+            inbox_item(
+                "left-pad",
+                vec![Reason::Unsigned, Reason::CooldownUnsupported],
+            ),
+        ];
+        app
+    }
+
+    fn screen(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn security_tab_renders_inbox_at_every_size() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        for detail in [false, true] {
+            app.security.detail = detail;
+            for (w, h) in [(10, 4), (20, 6), (80, 24), (160, 48), (200, 60)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal
+                    .draw(|f| crate::dashboard::view::view(f, &app))
+                    .unwrap();
+            }
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("MALICIOUS"));
+        assert!(text.contains("2 pending"));
+        assert!(text.contains("approval is blocked"));
+
+        app.state.inbox.items.clear();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("This machine is clean"));
+    }
+
+    #[test]
+    fn pending_badge_opens_security_tab() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        let first_row: String = text.chars().take(160).collect();
+        let x = first_row
+            .find("2 pending")
+            .map(|b| first_row[..b].chars().count());
+        click(&mut app, x.unwrap() as u16, 0);
+        assert_eq!(app.active_tab, Tab::Security);
+    }
+
+    #[test]
+    fn security_keys_move_and_open_details() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.security.cursor, 1);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.security.detail);
+        app.installing = Some(InstallOp {
+            id: 9,
+            manager_key: "npm".into(),
+            name: "busy".into(),
+        });
+        // Approval waits for the running install, so the inbox stays as it was.
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        key(&mut app, KeyCode::Char('A'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(app.state.inbox.items.len(), 2);
+    }
+
+    #[test]
+    fn approve_all_confirm_counts_only_safe_items() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('A'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::ApproveAll {
+                count: 1,
+                malicious: 1
+            }))
+        ));
+    }
+
+    #[test]
+    fn machine_key_items_render_and_stay_out_of_approve_all() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        let mut machine = inbox_item("laptop", vec![Reason::KeyChanged]);
+        machine.manager = "machine".into();
+        machine.kind = Kind::TrustMachine {
+            public_key: "ssh-ed25519 AAAA".into(),
+            fingerprint: "SHA256:abc".into(),
+        };
+        app.state.inbox.items.insert(0, machine);
+        app.active_tab = Tab::Security;
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("KEY CHANGED"));
+        assert!(text.contains("SHA256:abc"));
+        assert!(text.contains("trust key"));
+        key(&mut app, KeyCode::Char('A'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::ApproveAll {
+                count: 1,
+                malicious: 1
+            }))
+        ));
+    }
+
+    #[test]
+    fn palette_offers_inbox_actions_but_never_approves_malicious() {
+        let app = with_inbox();
+        let targets: Vec<Target> = palette::entries(&app)
+            .into_iter()
+            .map(|e| e.target)
+            .collect();
+        assert!(targets.contains(&Target::Approve("npm:left-pad".into())));
+        assert!(targets.contains(&Target::Reject("npm:evil".into())));
+        assert!(!targets.contains(&Target::Approve("npm:evil".into())));
+        assert!(targets.contains(&Target::Action(Action::ApproveAll)));
+    }
+
+    #[test]
+    fn malicious_rollback_is_blocked() {
+        let mut app = app();
+        let plan = crate::dashboard::repo::RollbackPlan {
+            manager: "npm".into(),
+            commit: "abc123".into(),
+            short_hash: "abc".into(),
+            to_install: vec![("evil".into(), Some("1.0.0".into()))],
+            uninstall: 0,
+        };
+        let cmd = update(
+            &mut app,
+            Msg::RollbackChecked {
+                plan: plan.clone(),
+                result: Err("OSV lists evil (MAL-1) as malicious".into()),
+            },
+        );
+        assert!(cmd.is_none());
+        assert_eq!(last_toast(&app).map(|t| t.0), Some(ToastKind::Error));
+        let cmd = update(
+            &mut app,
+            Msg::RollbackChecked {
+                plan,
+                result: Ok(()),
+            },
+        );
+        assert!(matches!(cmd, Some(Cmd::Run(Job::Rollback { .. }))));
     }
 
     #[test]

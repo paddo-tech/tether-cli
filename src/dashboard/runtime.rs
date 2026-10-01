@@ -5,7 +5,9 @@ use super::msg::{Cmd, Msg};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
 
 /// Days of history in the Overview activity chart.
 const ACTIVITY_DAYS: usize = 90;
@@ -15,6 +17,8 @@ pub struct Runtime {
     pub rx: Receiver<Msg>,
     job: Option<(Job, Child)>,
     daemon: Option<Child>,
+    /// A refresh skips the activity count while the last one still runs.
+    activity_running: Arc<AtomicBool>,
 }
 
 impl Runtime {
@@ -25,6 +29,7 @@ impl Runtime {
             rx,
             job: None,
             daemon: None,
+            activity_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -57,10 +62,52 @@ impl Runtime {
                     },
                 );
             }
-            Cmd::LoadActivity => {
+            Cmd::InstallApproved { op, items } => {
+                let failed_op = op.clone();
                 self.spawn(
-                    async { Msg::Activity(super::repo::commit_activity(ACTIVITY_DAYS)) },
-                    |_| None,
+                    async move {
+                        let result = install_approved(&items).await;
+                        Msg::InstallDone { op, result }
+                    },
+                    move |e| {
+                        Some(Msg::InstallDone {
+                            op: failed_op,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::CheckRollback(plan) => {
+                let failed_plan = plan.clone();
+                self.spawn(
+                    async move {
+                        let result = osv_guard(&plan.manager, &plan.to_install).await;
+                        Msg::RollbackChecked { plan, result }
+                    },
+                    move |e| {
+                        Some(Msg::RollbackChecked {
+                            plan: failed_plan,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::LoadActivity => {
+                if self.activity_running.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let running = self.activity_running.clone();
+                let failed = self.activity_running.clone();
+                self.spawn(
+                    async move {
+                        let counts = super::repo::commit_activity(ACTIVITY_DAYS).await;
+                        running.store(false, Ordering::SeqCst);
+                        Msg::Activity(counts)
+                    },
+                    move |_| {
+                        failed.store(false, Ordering::SeqCst);
+                        None
+                    },
                 );
             }
             Cmd::CollectPackages { config, machine_id } => {
@@ -161,7 +208,8 @@ impl Runtime {
     }
 
     /// Run a future on its own thread and current-thread runtime, then send its `Msg`.
-    /// If the runtime cannot start, send `on_fail`'s message instead so no operation stays pending.
+    /// If the runtime cannot start or the future panics, send `on_fail`'s message instead,
+    /// so no operation stays pending.
     fn spawn<F, E>(&self, fut: F, on_fail: E)
     where
         F: Future<Output = Msg> + Send + 'static,
@@ -173,7 +221,12 @@ impl Runtime {
                 .enable_all()
                 .build()
             {
-                Ok(rt) => Some(rt.block_on(fut)),
+                Ok(rt) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rt.block_on(fut)
+                })) {
+                    Ok(msg) => Some(msg),
+                    Err(_) => on_fail("background task panicked".to_string()),
+                },
                 Err(e) => on_fail(format!("could not start async runtime: {}", e)),
             };
             if let Some(msg) = msg {
@@ -199,8 +252,56 @@ async fn run_uninstall(manager_key: &str, package: &str) -> Result<(), String> {
     manager.uninstall(package).await.map_err(|e| e.to_string())
 }
 
+/// Refuse packages OSV lists as malicious, like `inbox::install` does. Homebrew has no
+/// OSV ecosystem, and an OSV outage does not block, as for synced installs.
+async fn osv_guard(manager_key: &str, packages: &[(String, Option<String>)]) -> Result<(), String> {
+    use crate::packages::osv;
+
+    let Some(manager) = crate::packages::manager_for_key(manager_key) else {
+        return Ok(());
+    };
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let found = osv::advisories(manager.ecosystem(), packages).await;
+    let hits: Vec<String> = packages
+        .iter()
+        .zip(found)
+        .flat_map(|((name, _), ids)| {
+            ids.into_iter()
+                .filter(|id| osv::is_malicious(id))
+                .map(move |id| format!("{} ({})", name, id))
+        })
+        .collect();
+    if hits.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "OSV lists {} as malicious. Tether will not install it",
+            hits.join(", ")
+        ))
+    }
+}
+
+/// Install each item and report every failure together.
+async fn install_approved(items: &[crate::packages::inbox::InboxItem]) -> Result<(), String> {
+    let mut failed = Vec::new();
+    for item in items {
+        if let Err(e) = crate::packages::inbox::install(item, false).await {
+            failed.push(format!("{}: {}", item.name, e));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
 async fn run_install(manager_key: &str, package: &str) -> Result<(), String> {
     use crate::packages::*;
+
+    osv_guard(manager_key, &[(package.to_string(), None)]).await?;
 
     if manager_key == "brew_casks" {
         return BrewManager

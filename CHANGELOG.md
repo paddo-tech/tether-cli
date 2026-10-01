@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New trust store in `~/.tether/trusted_keys`. It stays on this machine and is never synced. It starts with this machine's own key. A key from a new machine waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
 - `tether machines list` now shows each machine's key fingerprint and whether this machine trusts it
 - Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
+- The dashboard has a new Security tab for the approval inbox. It shows each held package with its reasons, source machine, commit and OSV advisories, and each machine key that waits for trust with its fingerprint. A changed key shows a loud warning. Press `a` to approve and install or to trust a key, `x` to reject, or `A` to approve all packages that are not malicious. The tab also lists the trusted machines. The header shows the number of held items
 
 ### Changed
 
@@ -26,9 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Dashboard installs and package rollbacks now check OSV first, like synced installs. A `MAL-` advisory blocks them
 - When a trusted machine publishes a different signing key, Tether stops trusting that machine, shows a warning, and asks again through the inbox
 - A machine record in `machines/` must have its machine id as its file name. Tether ignores other records. Tether counts its own record only when this machine signed the last change to it
-
 - Tether now checks every package name from a manifest before it runs a package manager. It skips names that look like flags, URLs, paths, tarballs or `git+`/`github:`/`file:`/`link:` specs, and shows a warning
 - New setting `packages.min_release_age_days` (default 7, 0 turns it off). npm, pnpm, bun and uv installs and upgrades skip releases newer than this. The daemon does not auto-upgrade a manager that is too old to enforce it (npm before 11.10, pnpm before 10.16, bun before 1.3, and gem), and it logs a warning once
 - npm, pnpm and bun now install and upgrade with install scripts turned off. List packages that need their scripts in `packages.allow_scripts`

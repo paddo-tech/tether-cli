@@ -1,3 +1,4 @@
+use super::components::clamp_cursor;
 use super::components::config::ConfigTabState;
 use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
@@ -7,11 +8,13 @@ use super::components::packages::{self, PackagesTabState};
 use super::components::palette::Palette;
 use super::components::pkg_import::PkgImport;
 use super::components::profile_picker::ProfilePicker;
+use super::components::security::SecurityTabState;
 use super::components::toast::{Toast, ToastKind};
 use super::msg::Cmd;
 use super::repo;
 use super::state::DashboardState;
 use super::theme::Theme;
+use crate::packages::inbox::InboxItem;
 use crossterm::event::KeyEvent;
 use ratatui::layout::{Position, Rect};
 use std::cell::RefCell;
@@ -25,9 +28,7 @@ pub enum Tab {
     Packages,
     Machines,
     Config,
-    // Security goes here: add the variant, its title and its slot in `all()`, then
-    // route it in `view::view` and `update::on_key`. Tab bar, number keys,
-    // mouse and palette read `Tab::all()`.
+    Security,
 }
 
 impl Tab {
@@ -38,6 +39,7 @@ impl Tab {
             Tab::Packages => "Packages",
             Tab::Machines => "Machines",
             Tab::Config => "Config",
+            Tab::Security => "Security",
         }
     }
 
@@ -48,6 +50,7 @@ impl Tab {
             Tab::Packages,
             Tab::Machines,
             Tab::Config,
+            Tab::Security,
         ]
     }
 }
@@ -117,6 +120,7 @@ pub enum Action {
     ImportPackages,
     ImportDotfile,
     PickProfile,
+    ApproveAll,
 }
 
 /// A clickable region recorded by the last draw.
@@ -129,6 +133,12 @@ pub enum Hit {
     Item(usize),
     /// Acts like pressing this key.
     Key(KeyEvent),
+    /// Outside the help overlay: closes it.
+    CloseHelp,
+    /// Inside the help overlay: absorbs the click.
+    Block,
+    /// Toast `n` of `App::toasts`: dismisses it.
+    Toast(usize),
 }
 
 pub struct App {
@@ -146,6 +156,7 @@ pub struct App {
     pub packages: PackagesTabState,
     pub machines: MachinesTabState,
     pub config: ConfigTabState,
+    pub security: SecurityTabState,
     pub uninstalling: Option<(String, String)>,
     pub installing: Option<InstallOp>,
     next_op_id: u64,
@@ -178,6 +189,7 @@ impl App {
             packages: PackagesTabState::new(),
             machines: MachinesTabState::default(),
             config: ConfigTabState::default(),
+            security: SecurityTabState::default(),
             uninstalling: None,
             installing: None,
             next_op_id: 0,
@@ -272,8 +284,36 @@ impl App {
         }
     }
 
-    /// Track a new install, replacing any earlier one, and return the command that runs it.
-    pub fn start_install(&mut self, manager_key: String, name: String) -> Cmd {
+    /// One install runs at a time: a second would hide the first one's result, and both
+    /// would rewrite this machine's state file.
+    pub fn install_busy(&mut self) -> bool {
+        if self.installing.is_some() {
+            self.flash_error("Install in progress");
+        }
+        self.installing.is_some()
+    }
+
+    /// Track a new install and return the command that runs it, unless one already runs.
+    pub fn start_install(&mut self, manager_key: String, name: String) -> Option<Cmd> {
+        if self.install_busy() {
+            return None;
+        }
+        let op = self.track_install(manager_key, name);
+        Some(Cmd::Install {
+            op,
+            machine_id: self.machine_id().to_string(),
+        })
+    }
+
+    /// Track an install of approved inbox items. `label` names them in the header and toasts.
+    /// The caller checks `install_busy` before it records the approval.
+    pub fn start_inbox_install(&mut self, label: String, items: Vec<InboxItem>) -> Cmd {
+        let manager_key = items.first().map(|i| i.manager.clone()).unwrap_or_default();
+        let op = self.track_install(manager_key, label);
+        Cmd::InstallApproved { op, items }
+    }
+
+    fn track_install(&mut self, manager_key: String, name: String) -> InstallOp {
         self.next_op_id += 1;
         let op = InstallOp {
             id: self.next_op_id,
@@ -281,10 +321,7 @@ impl App {
             name,
         };
         self.installing = Some(op.clone());
-        Cmd::Install {
-            op,
-            machine_id: self.machine_id().to_string(),
-        }
+        op
     }
 
     /// Sync after a change, or once the running job exits.
@@ -299,6 +336,7 @@ impl App {
         self.files.deleted = repo::load_deleted_files(&self.state);
         files::refresh_expanded(self);
         packages::refresh_expanded(self);
+        clamp_cursor(&mut self.security.cursor, self.state.inbox.items.len());
         self.last_refresh = Instant::now();
     }
 }

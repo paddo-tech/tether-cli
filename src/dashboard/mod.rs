@@ -15,12 +15,12 @@ mod view;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind},
+    event::{self, DisableMouseCapture, Event, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use ratatui::prelude::*;
-use std::io::{stdout, IsTerminal};
+use std::io::{stdout, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use app::App;
@@ -34,6 +34,12 @@ const IDLE_POLL: Duration = Duration::from_millis(250);
 const FRAME: Duration = Duration::from_millis(50);
 /// Idle redraw, so relative times stay current.
 const IDLE_REDRAW: Duration = Duration::from_secs(1);
+/// Events handled per pass before the loop draws and polls background work again.
+const MAX_DRAIN: usize = 64;
+/// Button presses, wheel and drags (1000, 1002) in SGR coordinates (1006). Crossterm's
+/// EnableMouseCapture also turns on any-motion tracking (1003), which floods the loop
+/// with events while the pointer moves.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 
 struct TerminalGuard;
 
@@ -72,18 +78,25 @@ pub fn run() -> Result<()> {
         .config
         .as_ref()
         .and_then(|c| c.dashboard.theme.clone());
-    app.theme = theme::Theme::select(
-        setting.as_deref(),
-        theme::truecolor_env(),
-        theme::detect_dark_background,
-    );
+    let mut probe = theme::Probe::default();
+    app.theme = theme::Theme::select(setting.as_deref(), theme::truecolor_env(), || {
+        probe = theme::probe_background();
+        probe.dark
+    });
+    let mut late_reply = probe
+        .late_reply
+        .then(|| theme::LateReplyFilter::new(Instant::now()));
     stdout().execute(EnterAlternateScreen)?;
-    stdout().execute(EnableMouseCapture)?;
+    stdout().write_all(MOUSE_ON)?;
+    stdout().flush()?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
     let size = terminal.size()?;
     app.viewport = Rect::new(0, 0, size.width, size.height);
+    for key in probe.typed {
+        dispatch(&mut app, &mut rt, Msg::Key(key));
+    }
 
     // Draw only when something changed, at frame rate while animating.
     let mut dirty = true;
@@ -98,9 +111,13 @@ pub fn run() -> Result<()> {
 
         let wait = if animating { FRAME } else { IDLE_POLL };
         if event::poll(wait)? {
-            // Drain bursts such as wheel scrolls before the next draw.
-            loop {
-                if let Some(msg) = event_to_msg(event::read()?) {
+            // Drain bursts such as wheel scrolls before the next draw, up to a limit.
+            for _ in 0..MAX_DRAIN {
+                let msg = event_to_msg(event::read()?).filter(|msg| match (msg, &mut late_reply) {
+                    (Msg::Key(key), Some(filter)) => filter.allow(key, Instant::now()),
+                    _ => true,
+                });
+                if let Some(msg) = msg {
                     dispatch(&mut app, &mut rt, msg);
                     dirty = true;
                 }
