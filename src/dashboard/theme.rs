@@ -202,14 +202,17 @@ pub fn probe_background() -> Probe {
     }
 }
 
-/// Whether the last OSC reply in `raw` lacks its BEL or ST terminator.
+/// Whether the last OSC reply in `raw` lacks its BEL or ST terminator. A trailing lone ESC
+/// counts as the start of a reply cut before its `]`.
 fn osc_open(raw: &[u8]) -> bool {
-    raw.windows(2)
-        .rposition(|w| w == b"\x1b]")
-        .is_some_and(|start| {
-            let rest = &raw[start + 2..];
-            !rest.contains(&0x07) && !rest.windows(2).any(|w| w == b"\x1b\\")
-        })
+    raw.last() == Some(&0x1b)
+        || raw
+            .windows(2)
+            .rposition(|w| w == b"\x1b]")
+            .is_some_and(|start| {
+                let rest = &raw[start + 2..];
+                !rest.contains(&0x07) && !rest.windows(2).any(|w| w == b"\x1b\\")
+            })
 }
 
 /// Separate terminal replies (OSC `ESC ] ... BEL|ST` and DA1 `ESC [ ? ... c`) from typed bytes.
@@ -226,7 +229,7 @@ pub fn split_reply(raw: &[u8]) -> (Vec<u8>, Vec<u8>) {
                 (Some(a), Some(b)) => a.min(b),
                 (a, b) => a.or(b).unwrap_or(rest.len() - 1),
             })
-        } else if rest.starts_with(b"\x1b[?") {
+        } else if rest == b"\x1b" || rest.starts_with(b"\x1b[?") {
             Some(
                 rest.iter()
                     .position(|&b| b == b'c')
@@ -493,6 +496,25 @@ mod tests {
         assert!(!filter.allow(&key('d'), start));
         assert!(!filter.allow(&alt('\\'), start));
         assert!(filter.allow(&key('d'), start));
+    }
+
+    #[test]
+    fn reply_cut_after_its_prefix_never_becomes_keys() {
+        let start = Instant::now();
+        let key = |c| KeyEvent::from(KeyCode::Char(c));
+        let bel = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        // The query gave up after `ESC ] 11;rgb:`, and `6666/aaaa/0000 BEL` arrives as keys
+        for raw in [&b"\x1b]11;rgb:"[..], b"\x1b"] {
+            let (_, typed) = split_reply(raw);
+            assert!(typed.is_empty(), "{raw:?}");
+            assert!(!da1_done(raw));
+            let mut filter = LateReplyFilter::new(start, osc_open(raw));
+            for c in "6666/aaaa/0000".chars() {
+                assert!(!filter.allow(&key(c), start), "{c}");
+            }
+            assert!(!filter.allow(&bel, start));
+            assert!(filter.allow(&key('a'), start));
+        }
     }
 
     #[test]
