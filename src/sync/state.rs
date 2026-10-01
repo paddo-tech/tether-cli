@@ -303,10 +303,16 @@ impl MachineState {
         let mut union: HashMap<String, HashMap<String, String>> = HashMap::new();
         for machine in machines {
             for (manager, versions) in &machine.package_versions {
+                // Validation keeps versions only for managers with an ecosystem
+                let Some(ecosystem) =
+                    crate::packages::manager_for_key(manager).map(|m| m.ecosystem())
+                else {
+                    continue;
+                };
                 let pins = union.entry(manager.clone()).or_default();
                 for (name, version) in versions {
                     let newer = pins.get(name).is_none_or(|current| {
-                        crate::packages::pin::compare_versions(version, current).is_gt()
+                        crate::packages::pin::compare_versions(ecosystem, version, current).is_gt()
                     });
                     if newer {
                         pins.insert(name.clone(), version.clone());

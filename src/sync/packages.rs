@@ -265,7 +265,10 @@ impl Trust {
         def: &PackageManagerDef,
         (name, version, line): (String, Option<String>, String),
     ) -> (String, Option<String>, String) {
-        match self.provenance.newest_trusted_version(def.state_key, &name) {
+        match self
+            .provenance
+            .newest_trusted_version(def.ecosystem, def.state_key, &name)
+        {
             Some(newest) => {
                 let line = format_pin(def.ecosystem, &name, Some(&newest));
                 (name, Some(newest), line)
@@ -382,13 +385,18 @@ impl Provenance {
 
     /// The newest version of a package that this machine's or a trusted machine's record
     /// lists.
-    fn newest_trusted_version(&self, manager: &str, name: &str) -> Option<String> {
+    fn newest_trusted_version(
+        &self,
+        ecosystem: Ecosystem,
+        manager: &str,
+        name: &str,
+    ) -> Option<String> {
         self.own
             .iter()
             .chain(&self.trusted)
             .filter(|(m, n, _)| m == manager && n == name)
             .filter_map(|(_, _, version)| version.clone())
-            .max_by(|a, b| crate::packages::pin::compare_versions(a, b))
+            .max_by(|a, b| crate::packages::pin::compare_versions(ecosystem, a, b))
     }
 
     fn signer(&self, entry: &Entry) -> Signer {
