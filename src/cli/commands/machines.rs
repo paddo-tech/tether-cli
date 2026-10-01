@@ -294,13 +294,39 @@ fn remove_signature(sync_path: &std::path::Path, machine_id: &str) -> Result<()>
     Ok(())
 }
 
-pub async fn trust(name: &str) -> Result<()> {
+/// Trust only a key whose fingerprint the user gave or was shown and accepted.
+pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
         Output::warning("Machine management not available in team-only mode");
         return Ok(());
     }
-    let trusted = inbox::trust_machine(&SyncEngine::sync_path()?, name)?;
+    let sync_path = SyncEngine::sync_path()?;
+    let fingerprint = match fingerprint {
+        Some(fingerprint) => fingerprint.to_string(),
+        None => {
+            let Some(current) = inbox::signing_fingerprint(&sync_path, name) else {
+                anyhow::bail!("Machine {} has no signed machine record", name);
+            };
+            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                anyhow::bail!(
+                    "Check the key on {}, then run 'tether machines trust {} {}'",
+                    name,
+                    name,
+                    current
+                );
+            }
+            Output::info(&format!("Machine {} signs with key {}", name, current));
+            if !crate::cli::Prompt::confirm(
+                "Trust this key? Compare it with 'tether machines list' on that machine",
+                false,
+            )? {
+                return Ok(());
+            }
+            current
+        }
+    };
+    let trusted = inbox::trust_machine(&sync_path, name, &fingerprint)?;
     Output::success(&format!(
         "Trusted machine {} with key {}",
         trusted.machine_id, trusted.fingerprint

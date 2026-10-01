@@ -486,14 +486,45 @@ pub fn trusted_machines() -> Result<Vec<TrustedMachine>> {
         .collect())
 }
 
-/// Trust the key that signed `machine_id`'s record in the sync repo, and settle its inbox item.
-pub fn trust_machine(sync_path: &Path, machine_id: &str) -> Result<TrustedMachine> {
-    let Some((_, key)) = signing::record_signers(sync_path)
-        .into_iter()
-        .find(|(id, _)| id == machine_id)
-    else {
+/// The key that signs `machine_id`'s record, if its fingerprint is the one the user checked.
+/// The record can change between a warning and the command, so trust never goes to a key
+/// the user was not shown.
+fn shown_key(
+    signers: Vec<(String, PublicKey)>,
+    machine_id: &str,
+    shown: &str,
+) -> Result<PublicKey> {
+    let Some((_, key)) = signers.into_iter().find(|(id, _)| id == machine_id) else {
         bail!("Machine {} has no signed machine record", machine_id);
     };
+    let current = signing::fingerprint(&key);
+    if current != shown {
+        bail!(
+            "Machine {} now signs with key {}, not {}. Check the key on that machine",
+            machine_id,
+            current,
+            shown
+        );
+    }
+    Ok(key)
+}
+
+/// The fingerprint of the key that signs `machine_id`'s record now.
+pub fn signing_fingerprint(sync_path: &Path, machine_id: &str) -> Option<String> {
+    signing::record_signers(sync_path)
+        .into_iter()
+        .find(|(id, _)| id == machine_id)
+        .map(|(_, key)| signing::fingerprint(&key))
+}
+
+/// Trust the key that signs `machine_id`'s record in the sync repo, when its fingerprint is
+/// `fingerprint`, and settle its inbox item.
+pub fn trust_machine(
+    sync_path: &Path,
+    machine_id: &str,
+    fingerprint: &str,
+) -> Result<TrustedMachine> {
+    let key = shown_key(signing::record_signers(sync_path), machine_id, fingerprint)?;
     Inbox::update(|inbox| {
         let mut store = TrustStore::load()?;
         store.trust(machine_id, &key)?;
@@ -890,6 +921,16 @@ mod tests {
             .unwrap();
         assert_eq!(inbox.items.len(), 1);
         assert_eq!(inbox.items[0].reasons, vec![Reason::KeyChanged]);
+    }
+
+    #[test]
+    fn trust_command_takes_only_the_key_the_user_saw() {
+        let (b, b2) = (key(), key());
+        let signers = vec![("b".to_string(), b2.clone())];
+        assert!(shown_key(signers.clone(), "b", &signing::fingerprint(&b)).is_err());
+        assert!(shown_key(signers.clone(), "c", &signing::fingerprint(&b2)).is_err());
+        let key = shown_key(signers, "b", &signing::fingerprint(&b2)).unwrap();
+        assert_eq!(key.key_data(), b2.key_data());
     }
 
     #[test]

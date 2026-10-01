@@ -221,8 +221,13 @@ pub enum MachineAction {
     Rename { old: String, new: String },
     /// Remove a machine from sync
     Remove { name: String },
-    /// Trust the signing key a machine published, so its package changes install on their own
-    Trust { name: String },
+    /// Trust the signing key a machine published, so its package changes install on their own.
+    /// Without a fingerprint, Tether shows the current one and asks
+    Trust {
+        name: String,
+        /// Fingerprint you checked on that machine (`SHA256:...`)
+        fingerprint: Option<String>,
+    },
     /// Stop trusting a machine's signing key
     Untrust { name: String },
     /// Manage machine profile assignment
@@ -603,7 +608,9 @@ impl Cli {
                 MachineAction::List => machines::list().await,
                 MachineAction::Rename { old, new } => machines::rename(old, new).await,
                 MachineAction::Remove { name } => machines::remove(name).await,
-                MachineAction::Trust { name } => machines::trust(name).await,
+                MachineAction::Trust { name, fingerprint } => {
+                    machines::trust(name, fingerprint.as_deref()).await
+                }
                 MachineAction::Untrust { name } => machines::untrust(name).await,
                 MachineAction::Profile { action } => match action {
                     MachineProfileAction::Set { profile } => machines::profile_set(profile).await,

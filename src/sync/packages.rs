@@ -142,8 +142,8 @@ pub async fn import_packages(
         if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
             Output::warning(&format!(
                 "Machine {} signs with key {}, which this machine does not trust. Check it on that \
-                 machine, then run 'tether machines trust {}'",
-                item.name, fingerprint, item.name
+                 machine, then run 'tether machines trust {} {}'",
+                item.name, fingerprint, item.name, fingerprint
             ));
         }
     }
