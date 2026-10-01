@@ -422,11 +422,11 @@ fn on_install_done(app: &mut App, op: InstallOp, result: Result<(), String>) -> 
     app.follow_up_sync()
 }
 
-/// Live package lists show in place of this machine's record and stay shown across reloads.
+/// Live package lists show in place of this machine's record until a later sync writes it.
 /// Only a sync writes this machine's record. It reads names and versions from the managers
 /// together, so a signed record never pairs new names with old versions.
 fn on_local_packages(app: &mut App, packages: std::collections::HashMap<String, Vec<String>>) {
-    app.local_packages = Some(packages);
+    app.local_packages = Some((chrono::Utc::now(), packages));
     app.show_local_packages();
 }
 
@@ -611,9 +611,15 @@ mod tests {
         assert!(update(&mut app, Msg::LocalPackages(live.clone())).is_none());
         assert_eq!(app.state.machines[0].packages, live);
         // A reload reads the record again; the live list still shows
-        app.state.machines = vec![record];
+        app.state.machines = vec![record.clone()];
         app.show_local_packages();
         assert_eq!(app.state.machines[0].packages, live);
+        // A later sync wrote the record from the managers, so the record shows
+        record.last_sync = chrono::Utc::now() + chrono::Duration::seconds(1);
+        app.state.machines = vec![record.clone()];
+        app.show_local_packages();
+        assert_eq!(app.state.machines[0].packages, record.packages);
+        assert!(app.local_packages.is_none());
     }
 
     #[test]

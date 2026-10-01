@@ -142,6 +142,8 @@ pub enum Hit {
     Toast(usize),
 }
 
+pub type PackageLists = HashMap<String, Vec<String>>;
+
 pub struct App {
     pub state: DashboardState,
     pub theme: Theme,
@@ -169,8 +171,9 @@ pub struct App {
     pub viewport: Rect,
     /// Clickable regions from the last draw, topmost last. `view` refills it.
     pub hits: RefCell<Vec<(Rect, Hit)>>,
-    /// This machine's packages as its managers last reported them, shown over its record.
-    pub local_packages: Option<HashMap<String, Vec<String>>>,
+    /// This machine's packages as its managers reported them, and when, shown over its record
+    /// until a later sync writes that record.
+    pub local_packages: Option<(chrono::DateTime<chrono::Utc>, PackageLists)>,
     /// Animation clock origin.
     started: Instant,
 }
@@ -344,7 +347,7 @@ impl App {
 
     pub fn show_local_packages(&mut self) {
         let machine_id = self.machine_id().to_string();
-        let Some(packages) = self.local_packages.clone() else {
+        let Some((at, packages)) = self.local_packages.clone() else {
             return;
         };
         if machine_id.is_empty() {
@@ -356,6 +359,8 @@ impl App {
             .iter_mut()
             .find(|m| m.machine_id == machine_id)
         {
+            // A sync after the report read the managers again, so its record is newer
+            Some(machine) if machine.last_sync > at => self.local_packages = None,
             Some(machine) => machine.packages = packages,
             None => {
                 let mut ms = crate::sync::MachineState::new(&machine_id);
