@@ -89,21 +89,15 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
             || (c[i - 1].is_lowercase() && c[i].is_uppercase())
     };
 
-    // Try every start of the first char and keep the best greedy alignment.
-    let mut best: Option<(i32, Vec<usize>)> = None;
-    let first = q[0].to_ascii_lowercase();
-    for start in (0..lower.len()).filter(|&i| lower[i] == first) {
+    // Align from `start`. With `prefer_words`, jump ahead to a nearby word start;
+    // that can strand later query chars, so the plain earliest match is the fallback.
+    let align = |start: usize, prefer_words: bool| -> Option<Vec<usize>> {
         let mut pos = vec![start];
         let mut ci = start + 1;
         for &qc in &q[1..] {
             let qc = qc.to_ascii_lowercase();
-            // Prefer the next word start over a mid-word hit when one exists before a gap.
-            let next = (ci..lower.len()).find(|&i| lower[i] == qc);
-            let Some(mut found) = next else {
-                pos.clear();
-                break;
-            };
-            if found != ci {
+            let mut found = (ci..lower.len()).find(|&i| lower[i] == qc)?;
+            if prefer_words && found != ci {
                 if let Some(b) = (found..lower.len()).find(|&i| lower[i] == qc && boundary(i)) {
                     if b - found <= 8 {
                         found = b;
@@ -113,9 +107,16 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(i32, Vec<usize>)> {
             pos.push(found);
             ci = found + 1;
         }
-        if pos.is_empty() {
+        Some(pos)
+    };
+
+    // Try every start of the first char and keep the best alignment.
+    let mut best: Option<(i32, Vec<usize>)> = None;
+    let first = q[0].to_ascii_lowercase();
+    for start in (0..lower.len()).filter(|&i| lower[i] == first) {
+        let Some(pos) = align(start, true).or_else(|| align(start, false)) else {
             continue;
-        }
+        };
         let mut score = 0i32;
         for (k, &p) in pos.iter().enumerate() {
             score += 16;
@@ -395,6 +396,14 @@ mod tests {
         assert!(fuzzy_match("zrc", ".zshrc").is_some());
         assert!(fuzzy_match("xyz", ".zshrc").is_none());
         assert_eq!(fuzzy_match("", "anything").map(|m| m.0), Some(0));
+    }
+
+    #[test]
+    fn fuzzy_falls_back_when_word_start_strands_the_query() {
+        assert_eq!(
+            fuzzy_match("abc", "axbc-b").map(|m| m.1),
+            Some(vec![0, 2, 3])
+        );
     }
 
     #[test]
