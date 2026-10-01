@@ -255,7 +255,9 @@ pub fn acquire_sync_lock(wait: bool) -> Result<File> {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        anyhow::bail!("Could not acquire sync lock after 2 seconds. Another sync may be running.");
+        // A daemon sync that installs packages can hold the lock for minutes.
+        crate::cli::Output::info("Waiting for another sync to finish (Ctrl-C to cancel)...");
+        file.lock_exclusive()?;
     } else {
         file.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("Sync already in progress, skipping"))?;

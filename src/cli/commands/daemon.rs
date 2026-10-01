@@ -325,6 +325,20 @@ pub async fn install() -> Result<()> {
     }
 }
 
+/// Plists written before 1.12.1 have no EnvironmentVariables, so launchd runs the
+/// daemon with its default PATH and package commands resolve to system tools
+/// (e.g. macOS Ruby 2.6 `gem`). Rewrite such a plist from the caller's shell.
+#[cfg(target_os = "macos")]
+pub async fn refresh_stale_launchd_service() -> Result<()> {
+    match fs::read_to_string(launchd_plist_path()?) {
+        Ok(plist) if !plist.contains("<key>EnvironmentVariables</key>") => {
+            Output::info("Updating the daemon service with your shell PATH...");
+            install().await
+        }
+        _ => Ok(()),
+    }
+}
+
 pub async fn uninstall() -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
