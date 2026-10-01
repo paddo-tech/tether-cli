@@ -32,17 +32,21 @@ fn build_project_map(search_paths: &[PathBuf]) -> HashMap<String, Vec<PathBuf>> 
     project_map
 }
 
-pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
-    if dry_run {
-        Output::info("Dry-run mode");
-    }
-
+pub async fn run(dry_run: bool, force: bool, rediscover: bool) -> Result<()> {
     // Acquire sync lock, waiting for any running sync to finish
     let _sync_lock = if !dry_run {
         Some(crate::sync::acquire_sync_lock(true)?)
     } else {
         None
     };
+    run_locked(dry_run, force, rediscover).await
+}
+
+/// A sync for a caller that already holds the sync lock, or a dry run.
+pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
+    if dry_run {
+        Output::info("Dry-run mode");
+    }
 
     // Only an interactive shell has the user's PATH; cron or ssh -c would bake in a bare PATH for good.
     #[cfg(target_os = "macos")]

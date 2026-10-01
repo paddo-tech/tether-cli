@@ -106,21 +106,6 @@ impl Runtime {
                     |e| Some(Msg::InboxDone(Err(e))),
                 );
             }
-            Cmd::CheckRollback(plan) => {
-                let failed_plan = plan.clone();
-                self.spawn(
-                    async move {
-                        let result = osv_guard(&plan.manager, &plan.to_install).await;
-                        Msg::RollbackChecked { plan, result }
-                    },
-                    move |e| {
-                        Some(Msg::RollbackChecked {
-                            plan: failed_plan,
-                            result: Err(e),
-                        })
-                    },
-                );
-            }
             Cmd::LoadActivity => {
                 if self.activity_running.swap(true, Ordering::SeqCst) {
                     return;

@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tether upgrade` now asks before it upgrades a manager that cannot enforce `packages.min_release_age_days`, such as gem or an old npm. Without a terminal, it skips that manager
 - Homebrew upgrades now upgrade only outdated formulae and casks from trusted taps. Before, Tether ran a plain `brew upgrade`, which also upgraded packages from untrusted taps
 - npm, pnpm, bun, uv and gem upgrades, from the daemon or `tether upgrade`, now check each target version against OSV first. A package whose target has a `MAL-` advisory keeps its installed version and waits in the inbox. Tether reads the targets from `npm outdated -g --json`, `pnpm outdated -g --format json`, the `bun outdated -g` table, `uv tool list --outdated` and `gem outdated`. Homebrew has no OSV data, so brew upgrades are not checked
-- `tether rollback` now checks the packages it would install like a sync does. Packages that fail a check wait in the inbox
+- `tether rollback` now checks the packages it would install like a sync does. Packages that fail a check wait in the inbox, OSV included. It holds the sync lock for the whole rollback, so the daemon cannot sync between its steps. The dashboard relies on these checks: it runs `tether rollback` and no longer checks OSV itself
 - `tether packages approve` now takes the sync lock while it installs, so the daemon cannot install the same package at the same time
 
 ### Fixed

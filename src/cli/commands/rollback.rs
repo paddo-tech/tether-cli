@@ -6,7 +6,11 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
 /// Reverse-delta against the union manifest at `commit`; the follow-up sync records removals.
+/// The sync lock covers the whole rollback, so the daemon cannot install or record packages
+/// between its steps. Every package it installs passes the same checks as a sync, OSV
+/// included, so callers such as the dashboard need no checks of their own.
 pub async fn packages(manager: &str, commit: &str) -> Result<()> {
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let pkg_manager = crate::packages::manager_for_key(manager)
         .ok_or_else(|| anyhow::anyhow!("Rollback is not supported for {}", manager))?;
 
@@ -25,7 +29,7 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
 
     // Removal tombstones are diffed against the saved package list, so it must
     // match what is installed before anything is removed.
-    super::sync::run(false, false, false).await?;
+    super::sync::run_locked(false, false, false).await?;
 
     let sync_path = SyncEngine::sync_path()?;
     let git = GitBackend::open(&sync_path)?;
@@ -117,7 +121,7 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
     }
 
     Output::success("Rollback applied; syncing...");
-    super::sync::run(false, false, false).await?;
+    super::sync::run_locked(false, false, false).await?;
 
     if !failed.is_empty() {
         anyhow::bail!("{} package(s) failed: {}", failed.len(), failed.join(", "));

@@ -1,5 +1,5 @@
 use super::{centered, clamp_cursor, files, manager_label, popup, security};
-use crate::dashboard::app::{App, Hit, Overlay};
+use crate::dashboard::app::{App, Hit, Job, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
@@ -63,7 +63,11 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
                 app.flash_error("Another tether command is still running");
                 return None;
             }
-            Some(Cmd::CheckRollback(plan))
+            Some(Cmd::Run(Job::Rollback {
+                manager: plan.manager,
+                commit: plan.commit,
+                short_hash: plan.short_hash,
+            }))
         }
         Confirm::RemoveFile { path } => {
             let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {

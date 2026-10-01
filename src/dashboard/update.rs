@@ -97,21 +97,6 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
             None
         }
-        Msg::RollbackChecked { plan, result } => match result {
-            Err(e) => {
-                app.flash_error(e);
-                None
-            }
-            Ok(()) if app.running.is_some() => {
-                app.flash_error("Another tether command is still running");
-                None
-            }
-            Ok(()) => Some(Cmd::Run(Job::Rollback {
-                manager: plan.manager,
-                commit: plan.commit,
-                short_hash: plan.short_hash,
-            })),
-        },
         Msg::LocalPackages(packages) => {
             on_local_packages(app, packages);
             None
@@ -1110,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn malicious_rollback_is_blocked() {
+    fn rollback_confirm_runs_the_gated_cli_rollback() {
         let mut app = app();
         let plan = crate::dashboard::repo::RollbackPlan {
             manager: "npm".into(),
@@ -1119,23 +1104,12 @@ mod tests {
             to_install: vec![("evil".into(), Some("1.0.0".into()))],
             uninstall: 0,
         };
-        let cmd = update(
-            &mut app,
-            Msg::RollbackChecked {
-                plan: plan.clone(),
-                result: Err("OSV lists evil (MAL-1) as malicious".into()),
-            },
-        );
-        assert!(cmd.is_none());
-        assert_eq!(last_toast(&app).map(|t| t.0), Some(ToastKind::Error));
-        let cmd = update(
-            &mut app,
-            Msg::RollbackChecked {
-                plan,
-                result: Ok(()),
-            },
-        );
-        assert!(matches!(cmd, Some(Cmd::Run(Job::Rollback { .. }))));
+        app.overlays.push(Overlay::Confirm(Confirm::Rollback(plan)));
+        let cmd = key(&mut app, KeyCode::Char('y'));
+        let Some(Cmd::Run(job)) = cmd else {
+            panic!("expected the rollback job");
+        };
+        assert_eq!(job.args(), vec!["rollback", "packages", "npm", "abc123"]);
     }
 
     #[test]

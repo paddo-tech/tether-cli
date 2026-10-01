@@ -1,5 +1,4 @@
 use super::app::{DaemonOp, InstallOp, Job};
-use super::repo::RollbackPlan;
 use crate::packages::inbox::InboxItem;
 use crossterm::event::{KeyEvent, MouseEvent};
 use std::collections::HashMap;
@@ -35,11 +34,6 @@ pub enum Msg {
     },
     /// A machine key was trusted or an item rejected: the toast text, or the error.
     InboxDone(Result<String, String>),
-    /// OSV verdict on the packages a rollback would install.
-    RollbackChecked {
-        plan: RollbackPlan,
-        result: Result<(), String>,
-    },
 }
 
 /// Side effects `update` asks for. The runtime executes them and reports back with a `Msg`.
@@ -67,8 +61,6 @@ pub enum Cmd {
     },
     /// Reject an inbox item.
     Reject(Box<InboxItem>),
-    /// Ask OSV about the packages a rollback would install before it runs.
-    CheckRollback(RollbackPlan),
     /// Count sync commits per day; `git log` over the sync repo is too slow for the UI thread.
     LoadActivity,
     CollectPackages {
