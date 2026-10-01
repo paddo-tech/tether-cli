@@ -204,11 +204,14 @@ impl MachineState {
             packages.retain(|p| Self::is_safe_package_name(p));
         }
 
-        // Versions become part of install specs on other machines
-        for versions in self.package_versions.values_mut() {
+        // Versions become part of install specs on other machines, and a dist-tag would
+        // outrank every real version in the manifest union
+        for (manager, versions) in self.package_versions.iter_mut() {
+            let ecosystem = crate::packages::manager_for_key(manager).map(|m| m.ecosystem());
             versions.retain(|name, version| {
                 Self::is_safe_package_name(name)
-                    && crate::packages::validate_version(version).is_ok()
+                    && ecosystem
+                        .is_some_and(|eco| crate::packages::validate_version(eco, version).is_ok())
             });
         }
 

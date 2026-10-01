@@ -55,8 +55,11 @@ pub trait PackageManager: Send + Sync {
                 PackageInfo { name, version }
             })
             .filter(|p| {
-                let checked = validate_name(self.ecosystem(), &p.name)
-                    .and_then(|()| p.version.as_deref().map_or(Ok(()), validate_version));
+                let checked = validate_name(self.ecosystem(), &p.name).and_then(|()| {
+                    p.version
+                        .as_deref()
+                        .map_or(Ok(()), |v| validate_version(self.ecosystem(), v))
+                });
                 match checked {
                     Ok(()) => true,
                     Err(e) => {

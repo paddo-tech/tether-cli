@@ -35,16 +35,16 @@ pub fn validate_name(ecosystem: Ecosystem, name: &str) -> Result<()> {
 }
 
 /// Versions are appended to names (`name@1.0.0`), so they must not smuggle in a spec.
-pub fn validate_version(version: &str) -> Result<()> {
-    let ok = !version.is_empty()
-        && version.len() <= MAX_NAME_LEN
-        && version
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-        && version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+/// Only a concrete release passes: with a dist-tag such as `latest` or a range, the registry
+/// picks the release, and OSV cannot check it.
+pub fn validate_version(ecosystem: Ecosystem, version: &str) -> Result<()> {
+    let ok = version.len() <= MAX_NAME_LEN
+        && match ecosystem {
+            Ecosystem::Npm => is_semver(version),
+            Ecosystem::Python => is_pep440(version),
+            Ecosystem::Gem => is_gem_version(version),
+            Ecosystem::Brew | Ecosystem::BrewTap => false,
+        }
         // npm reads `name@x.tgz` as a local file, so versions get the same suffix check
         && !ALL_ECOSYSTEMS.iter().any(|&eco| {
             local_file_suffixes(eco)
@@ -55,6 +55,79 @@ pub fn validate_version(version: &str) -> Result<()> {
         bail!("invalid package version {:?}", version);
     }
     Ok(())
+}
+
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Dot-separated identifiers of letters, digits and `-`, as in a semver prerelease or build.
+fn is_idents(s: &str) -> bool {
+    s.split('.').all(|part| {
+        !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
+/// `MAJOR.MINOR.PATCH`, with an optional `-prerelease` and `+build`.
+fn is_semver(v: &str) -> bool {
+    let (v, build) = v.split_once('+').map_or((v, None), |(v, b)| (v, Some(b)));
+    let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| is_digits(p))
+        && pre.is_none_or(is_idents)
+        && build.is_none_or(is_idents)
+}
+
+/// A normalized PEP 440 version, as uv prints it:
+/// `[N!]N(.N)*[{a|b|rc}N][.postN][.devN][+local]`.
+fn is_pep440(v: &str) -> bool {
+    let (v, local) = v.split_once('+').map_or((v, None), |(v, l)| (v, Some(l)));
+    let local_ok = local.is_none_or(|l| {
+        l.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+    });
+    let v = match v.split_once('!') {
+        Some((epoch, rest)) if is_digits(epoch) => rest,
+        Some(_) => return false,
+        None => v,
+    };
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    if digits(v) == 0 {
+        return false;
+    }
+    let mut rest = &v[digits(v)..];
+    while let Some(after) = rest.strip_prefix('.') {
+        let n = digits(after);
+        if n == 0 {
+            break;
+        }
+        rest = &after[n..];
+    }
+    for markers in [&["a", "b", "rc"][..], &[".post"], &[".dev"]] {
+        if let Some(after) = markers.iter().find_map(|m| rest.strip_prefix(m)) {
+            let n = digits(after);
+            if n == 0 {
+                return false;
+            }
+            rest = &after[n..];
+        }
+    }
+    local_ok && rest.is_empty()
+}
+
+/// RubyGems' version pattern: `N(.X)*` with an optional `-prerelease`, where each X is
+/// letters or digits.
+fn is_gem_version(v: &str) -> bool {
+    let (core, pre) = v.split_once('-').map_or((v, None), |(c, p)| (c, Some(p)));
+    let mut parts = core.split('.');
+    parts.next().is_some_and(is_digits)
+        && parts.all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric()))
+        && pre.is_none_or(is_idents)
 }
 
 fn check_name(ecosystem: Ecosystem, name: &str) -> std::result::Result<(), &'static str> {
@@ -309,23 +382,61 @@ mod tests {
     }
 
     #[test]
-    fn versions() {
-        for v in ["1.2.3", "1.0.0-beta.1+build.5", "latest", "24.10.0"] {
-            assert!(validate_version(v).is_ok(), "{v}");
+    fn versions_must_be_concrete_releases() {
+        let ok = |eco, v| validate_version(eco, v).is_ok();
+        for v in ["1.2.3", "1.0.0-beta.1+build.5", "24.10.0", "0.0.1-rc-1"] {
+            assert!(ok(Ecosystem::Npm, v), "{v}");
+        }
+        for v in [
+            "0.6.0",
+            "1.0rc1",
+            "2.0.post1",
+            "1!2.0",
+            "1.0.dev3",
+            "1.0+local.7",
+            "24",
+        ] {
+            assert!(ok(Ecosystem::Python, v), "{v}");
+        }
+        for v in ["8.0.1", "2.0.0.pre1", "1.0.a", "1.0-beta.2", "3"] {
+            assert!(ok(Ecosystem::Gem, v), "{v}");
         }
         for v in [
             "",
+            "latest",
+            "next",
+            "x",
+            "1",
+            "1.2",
+            "1.2.x",
             "-1",
+            "v1.2.3",
             "file:../x",
-            "1.0 || 2.0",
-            "^1.0",
+            "1.0.0 || 2.0.0",
+            "^1.0.0",
+            "~1.0.0",
+            ">=1.0.0",
             "../x",
-            "evil.TGZ",
-            "1.0.tar",
-            "x.gem",
-            "x.whl",
+            "1.0.0-x.tgz",
+            "1.0.0-evil.TGZ",
+            "1.0.0-a.tar",
         ] {
-            assert!(validate_version(v).is_err(), "{v:?}");
+            assert!(!ok(Ecosystem::Npm, v), "{v:?}");
         }
+        for v in [
+            "latest",
+            "==1.0",
+            ">=1.0",
+            "1.0.whl",
+            "1.0rc",
+            "a1",
+            "1.0+Local",
+        ] {
+            assert!(!ok(Ecosystem::Python, v), "{v:?}");
+        }
+        for v in ["latest", "~> 1.0", ">= 1.0", "x.gem", "1..0", "1.0-x.gem"] {
+            assert!(!ok(Ecosystem::Gem, v), "{v:?}");
+        }
+        assert!(!ok(Ecosystem::Brew, "1.0.0"));
     }
 }

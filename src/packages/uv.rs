@@ -88,7 +88,7 @@ impl PackageManager for UvManager {
         validate_name(Ecosystem::Python, &package.name)?;
         let pkg_spec = match &package.version {
             Some(version) => {
-                validate_version(version)?;
+                validate_version(Ecosystem::Python, version)?;
                 format!("{}=={}", package.name, version)
             }
             None => package.name.clone(),

@@ -95,7 +95,7 @@ impl PackageManager for GemManager {
     async fn install(&self, package: &PackageInfo) -> Result<()> {
         validate_name(Ecosystem::Gem, &package.name)?;
         let pkg_spec = if let Some(version) = &package.version {
-            validate_version(version)?;
+            validate_version(Ecosystem::Gem, version)?;
             format!("{}:{}", package.name, version)
         } else {
             package.name.clone()

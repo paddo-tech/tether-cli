@@ -661,14 +661,8 @@ async fn import_simple_manager(
         .unwrap_or_default();
 
     // Filter to only missing packages that nobody has decided on yet
-    let missing: Vec<(String, Option<String>, String)> = manifest
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let (name, version) = parse_pin(def.ecosystem, line);
-            (name, version, line.to_string())
-        })
+    let missing: Vec<(String, Option<String>, String)> = manifest_entries(def.ecosystem, &manifest)
+        .into_iter()
         .filter(|(name, _, _)| {
             !removed_packages.contains(name)
                 && !local_packages.contains(name)
@@ -724,18 +718,42 @@ pub async fn gate_rollback(
         anyhow::bail!("Rollback is not supported for {}", state_key);
     };
     let trust = Trust::load(config, sync_path, machine_id)?;
-    let candidates = lines
+    let candidates = manifest_entries(def.ecosystem, &lines.join("\n"))
         .into_iter()
-        .map(|line| {
-            let (name, version) = parse_pin(def.ecosystem, &line);
-            (name, version, line)
-        })
         .filter(|(name, _, _)| !trust.settled(state_key, name))
         .collect();
     let mut queued = Vec::new();
     let allowed = gate_simple(def, manager.as_ref(), &trust, candidates, &mut queued).await;
     report_held(&inbox::add(queued)?);
     Ok(allowed)
+}
+
+/// Name, pinned version and text of each manifest line that names a registry release.
+/// Other lines never reach the trust checks, OSV or a package manager.
+fn manifest_entries(ecosystem: Ecosystem, manifest: &str) -> Vec<(String, Option<String>, String)> {
+    manifest
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let (name, version) = parse_pin(ecosystem, line);
+            let checked = crate::packages::validate_name(ecosystem, &name).and_then(|()| {
+                version
+                    .as_deref()
+                    .map_or(Ok(()), |v| crate::packages::validate_version(ecosystem, v))
+            });
+            match checked {
+                Ok(()) => Some((name, version, line.to_string())),
+                Err(e) => {
+                    let message = format!("Skipping manifest line: {}", e);
+                    if crate::packages::policy::first_warning(&message) {
+                        Output::warning(&message);
+                    }
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Keep the lines that may install and queue the rest with their OSV advisories.
@@ -972,6 +990,34 @@ mod tests {
             "@types/node@24.1.0\nleft-pad\n"
         );
         assert_eq!(manifest_lines(Ecosystem::Npm, None, None), "");
+    }
+
+    #[test]
+    fn test_dist_tags_never_reach_the_union_or_an_install() {
+        let mut machine = MachineState::new("x");
+        machine
+            .packages
+            .insert("npm".to_string(), vec!["example".to_string()]);
+        machine.package_versions.insert(
+            "npm".to_string(),
+            HashMap::from([("example".to_string(), "latest".to_string())]),
+        );
+        machine.validate().unwrap();
+        assert!(machine.package_versions["npm"].is_empty());
+        assert_eq!(
+            manifest_entries(
+                Ecosystem::Npm,
+                "example@latest\nrange@^1.0.0\nok@1.0.0\nlegacy\n"
+            ),
+            vec![
+                (
+                    "ok".to_string(),
+                    Some("1.0.0".to_string()),
+                    "ok@1.0.0".to_string()
+                ),
+                ("legacy".to_string(), None, "legacy".to_string()),
+            ]
+        );
     }
 
     fn new_key() -> ssh_key::PrivateKey {
