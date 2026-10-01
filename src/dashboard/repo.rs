@@ -66,10 +66,15 @@ pub fn rollback_plan(
     let repo_path = format!("manifests/{}", manifest);
     let snapshot = open_repo()?.show_at_commit(commit, &repo_path).ok()?;
     let snapshot = String::from_utf8_lossy(&snapshot);
-    let target: HashSet<&str> = snapshot
+    let ecosystem = crate::packages::manager_for_key(manager).map(|m| m.ecosystem());
+    let target: HashSet<String> = snapshot
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
+        .map(|l| match ecosystem {
+            Some(eco) => crate::packages::pin::parse_pin(eco, l).0,
+            None => l.to_string(),
+        })
         .collect();
 
     let current_machine_id = state
@@ -77,12 +82,12 @@ pub fn rollback_plan(
         .as_ref()
         .map(|s| s.machine_id.as_str())
         .unwrap_or("");
-    let installed: HashSet<&str> = state
+    let installed: HashSet<String> = state
         .machines
         .iter()
         .find(|m| m.machine_id == current_machine_id)
         .and_then(|m| m.packages.get(manager))
-        .map(|v| v.iter().map(String::as_str).collect())
+        .map(|v| v.iter().cloned().collect())
         .unwrap_or_default();
 
     Some(RollbackPlan {

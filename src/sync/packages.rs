@@ -187,8 +187,12 @@ struct Trust {
 
 impl Trust {
     /// True when the package was already decided on: pending, or rejected.
+    /// Items held as malicious are checked again, because approval cannot clear them and
+    /// an unpinned query can match a report that covers only some releases.
     fn settled(&self, manager: &str, name: &str) -> bool {
-        self.inbox.is_pending(manager, name) || self.inbox.is_rejected(manager, name)
+        self.inbox.items.iter().any(|i| {
+            i.manager == manager && i.name == name && !i.reasons.contains(&Reason::Malicious)
+        }) || self.inbox.is_rejected(manager, name)
     }
 
     fn checks(&self, manager: &str, name: &str) -> Checks {
