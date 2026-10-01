@@ -167,6 +167,8 @@ pub struct App {
     pub viewport: Rect,
     /// Clickable regions from the last draw, topmost last. `view` refills it.
     pub hits: RefCell<Vec<(Rect, Hit)>>,
+    /// This machine's packages as its managers last reported them, shown over its record.
+    pub local_packages: Option<HashMap<String, Vec<String>>>,
     /// Animation clock origin.
     started: Instant,
 }
@@ -196,6 +198,7 @@ impl App {
             sync_activity: Vec::new(),
             viewport: Rect::new(0, 0, 80, 24),
             hits: RefCell::new(Vec::new()),
+            local_packages: None,
             started: Instant::now(),
         }
     }
@@ -337,8 +340,32 @@ impl App {
         cmd
     }
 
+    pub fn show_local_packages(&mut self) {
+        let machine_id = self.machine_id().to_string();
+        let Some(packages) = self.local_packages.clone() else {
+            return;
+        };
+        if machine_id.is_empty() {
+            return;
+        }
+        match self
+            .state
+            .machines
+            .iter_mut()
+            .find(|m| m.machine_id == machine_id)
+        {
+            Some(machine) => machine.packages = packages,
+            None => {
+                let mut ms = crate::sync::MachineState::new(&machine_id);
+                ms.packages = packages;
+                self.state.machines.push(ms);
+            }
+        }
+    }
+
     pub fn reload_state(&mut self) {
         self.state = DashboardState::load();
+        self.show_local_packages();
         self.files.deleted = repo::load_deleted_files(&self.state);
         files::refresh_expanded(self);
         packages::refresh_expanded(self);

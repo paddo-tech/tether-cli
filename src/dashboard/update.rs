@@ -422,32 +422,12 @@ fn on_install_done(app: &mut App, op: InstallOp, result: Result<(), String>) -> 
     app.follow_up_sync()
 }
 
-/// Live package lists replace this machine's state and persist, so disk reloads keep them.
+/// Live package lists show in place of this machine's record and stay shown across reloads.
+/// Only a sync writes this machine's record. It reads names and versions from the managers
+/// together, so a signed record never pairs new names with old versions.
 fn on_local_packages(app: &mut App, packages: std::collections::HashMap<String, Vec<String>>) {
-    let machine_id = app.machine_id().to_string();
-    if machine_id.is_empty() {
-        return;
-    }
-    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
-        if let Ok(own) = crate::sync::signing::own_record(&sync_path, &machine_id) {
-            let mut record = own.unwrap_or_else(|| crate::sync::MachineState::new(&machine_id));
-            record.packages = packages.clone();
-            let _ = crate::sync::signing::save_record(&sync_path, &record);
-        }
-    }
-    match app
-        .state
-        .machines
-        .iter_mut()
-        .find(|m| m.machine_id == machine_id)
-    {
-        Some(machine) => machine.packages = packages,
-        None => {
-            let mut ms = crate::sync::MachineState::new(&machine_id);
-            ms.packages = packages;
-            app.state.machines.push(ms);
-        }
-    }
+    app.local_packages = Some(packages);
+    app.show_local_packages();
 }
 
 #[cfg(test)]
@@ -610,6 +590,30 @@ mod tests {
         );
         assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
         assert!(!app.sync_pending);
+    }
+
+    #[test]
+    fn local_packages_show_without_writing_the_record() {
+        let mut app = app();
+        app.state.sync_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "me",
+                "last_sync": "2026-01-01T00:00:00Z",
+                "files": {},
+                "packages": {},
+            }))
+            .unwrap(),
+        );
+        let mut record = crate::sync::MachineState::new("me");
+        record.packages.insert("npm".into(), vec!["old".into()]);
+        app.state.machines = vec![record.clone()];
+        let live = HashMap::from([("npm".to_string(), vec!["new".to_string()])]);
+        assert!(update(&mut app, Msg::LocalPackages(live.clone())).is_none());
+        assert_eq!(app.state.machines[0].packages, live);
+        // A reload reads the record again; the live list still shows
+        app.state.machines = vec![record];
+        app.show_local_packages();
+        assert_eq!(app.state.machines[0].packages, live);
     }
 
     #[test]
