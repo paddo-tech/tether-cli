@@ -181,14 +181,20 @@ impl Generations {
     /// Whether a record `key` signed at `generation`, with SHA-256 `digest`, is newer than
     /// the one accepted before, or is that same record. A new key starts from its first
     /// record, so a reinstalled machine is not refused.
-    pub fn accept(&mut self, key: &PublicKey, generation: u64, digest: &str) -> bool {
+    pub fn current(&self, key: &PublicKey, generation: u64, digest: &str) -> bool {
         let fp = fingerprint(key);
-        if let Some(&seen) = self.seen.get(&fp) {
-            let same_record = self.digests.get(&fp).is_none_or(|d| d == digest);
-            if generation < seen || (generation == seen && !same_record) {
-                return false;
-            }
+        self.seen.get(&fp).is_none_or(|&seen| {
+            generation > seen
+                || (generation == seen && self.digests.get(&fp).is_none_or(|d| d == digest))
+        })
+    }
+
+    /// Accept the record if it is [`Self::current`].
+    pub fn accept(&mut self, key: &PublicKey, generation: u64, digest: &str) -> bool {
+        if !self.current(key, generation, digest) {
+            return false;
         }
+        let fp = fingerprint(key);
         self.seen.insert(fp.clone(), generation);
         self.digests.insert(fp, digest.to_string());
         true
@@ -209,17 +215,21 @@ pub fn own_record(sync_path: &Path, machine_id: &str) -> Result<Option<MachineSt
         sync_path,
         machine_id,
         key.public_key(),
+        &Generations::load()?,
     )
 }
 
-/// The local copy when there is one. Before the first save that writes it, the repo copy
-/// counts when this machine's key signed it, or when it has no signature because an
-/// earlier build wrote it: that first upgrade trusts the repo as earlier builds did.
+/// The local copy when there is one. Without it, the repo copy counts when this machine's
+/// key signed it and it is not older than the last record this machine saved or accepted.
+/// Before this machine's first save, an unsigned repo copy counts too, because an earlier
+/// build wrote it: that first upgrade trusts the repo as earlier builds did. A generation
+/// accepted from this machine's key marks that the upgrade is done.
 fn own_record_from(
     local: &Path,
     sync_path: &Path,
     machine_id: &str,
     own_key: &PublicKey,
+    generations: &Generations,
 ) -> Result<Option<MachineState>> {
     if local.exists() {
         let mut record: MachineState = serde_json::from_slice(&std::fs::read(local)?)
@@ -238,7 +248,16 @@ fn own_record_from(
     let own = found
         .signer
         .is_some_and(|k| k.key_data() == own_key.key_data());
-    let legacy = !record_sig_path(sync_path, machine_id).exists();
+    if own && !generations.current(own_key, found.record.generation, &found.digest) {
+        Output::warning(&format!(
+            "machines/{}.json is older than this machine's last record. Tether rebuilds this \
+             machine's record from local state",
+            machine_id
+        ));
+        return Ok(None);
+    }
+    let legacy =
+        generations.last(own_key).is_none() && !record_sig_path(sync_path, machine_id).exists();
     if !own && !legacy {
         Output::warning(&format!(
             "machines/{}.json is not signed by this machine. Tether rebuilds this machine's \
@@ -598,6 +617,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let (dir, local) = (tmp.path(), tmp.path().join("machine.json"));
         let me = key();
+        let fresh = Generations::default();
         let mut mine = MachineState::new("me");
         mine.removed_packages
             .insert("npm".to_string(), vec!["old".to_string()]);
@@ -610,12 +630,12 @@ mod tests {
             .insert("npm".to_string(), vec!["needed".to_string()]);
         injected.ignored_dotfiles.push(".zshrc".to_string());
         write_record(dir, "me", &injected);
-        let own = own_record_from(&local, dir, "me", me.public_key())
+        let own = own_record_from(&local, dir, "me", me.public_key(), &fresh)
             .unwrap()
             .unwrap();
         assert_eq!(own.removed_packages["npm"], vec!["old"]);
         assert!(own.ignored_dotfiles.is_empty());
-        let renamed = own_record_from(&local, dir, "me2", me.public_key())
+        let renamed = own_record_from(&local, dir, "me2", me.public_key(), &fresh)
             .unwrap()
             .unwrap();
         assert_eq!(renamed.machine_id, "me2");
@@ -623,18 +643,48 @@ mod tests {
         // Without a local copy, a repo copy signed by another key is not used
         let none = tmp.path().join("none.json");
         sign_record(dir, "me", &key()).unwrap();
-        assert!(own_record_from(&none, dir, "me", me.public_key())
+        assert!(own_record_from(&none, dir, "me", me.public_key(), &fresh)
             .unwrap()
             .is_none());
         sign_record(dir, "me", &me).unwrap();
-        assert!(own_record_from(&none, dir, "me", me.public_key())
+        assert!(own_record_from(&none, dir, "me", me.public_key(), &fresh)
             .unwrap()
             .is_some());
         // An unsigned copy from an earlier build is used once, on the upgrade
         std::fs::remove_file(record_sig_path(dir, "me")).unwrap();
-        assert!(own_record_from(&none, dir, "me", me.public_key())
+        assert!(own_record_from(&none, dir, "me", me.public_key(), &fresh)
             .unwrap()
             .is_some());
+    }
+
+    #[test]
+    fn repo_own_record_after_the_upgrade_must_be_signed_and_current() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("machines")).unwrap();
+        let (local, none) = (dir.join("machine.json"), dir.join("none.json"));
+        let me = key();
+        let mut seen = Generations::default();
+        let record = MachineState::new("me");
+        save_record_at(dir, &record, &local, &me, &mut seen).unwrap();
+        let old = std::fs::read(record_path(dir, "me")).unwrap();
+        let old_sig = std::fs::read(record_sig_path(dir, "me")).unwrap();
+        save_record_at(dir, &record, &local, &me, &mut seen).unwrap();
+        let recover = |seen: &Generations| {
+            own_record_from(&none, dir, "me", me.public_key(), seen)
+                .unwrap()
+                .map(|r| r.generation)
+        };
+        assert_eq!(recover(&seen), Some(2));
+
+        // An older copy that this machine's key signed, restored from git history
+        std::fs::write(record_path(dir, "me"), &old).unwrap();
+        std::fs::write(record_sig_path(dir, "me"), &old_sig).unwrap();
+        assert_eq!(recover(&seen), None);
+        // The same copy without its signature no longer passes as an earlier build's
+        std::fs::remove_file(record_sig_path(dir, "me")).unwrap();
+        assert_eq!(recover(&seen), None);
+        assert_eq!(recover(&Generations::default()), Some(1));
     }
 
     #[test]
