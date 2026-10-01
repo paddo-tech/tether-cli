@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-10-02
+
+### Fixed
+
+- A daemon installed before 1.12.1 used macOS's default `PATH`, so package installs used system tools such as Ruby 2.6 `gem` and failed slowly while holding the sync lock. Running `tether sync` in a terminal now updates the daemon service with your shell's `PATH`. It keeps the installed binary, and it does not start a service that you unloaded
+- `tether sync` and `tether resolve` in a terminal now wait for a running sync to finish and show a message. Before, they failed after 2 seconds
+
 ## [1.13.0] - 2026-10-01
 
 ### Added
