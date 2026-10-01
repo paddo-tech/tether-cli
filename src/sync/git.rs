@@ -178,7 +178,10 @@ impl GitBackend {
         let mut parent: Option<git2::Commit> = None;
         for oid in local {
             let commit = repo.find_commit(oid)?;
-            if parent.is_none() && repo.extract_signature(&oid, None).is_ok() {
+            // A rebase under the user's own commit.gpgsign leaves a signature other machines do not trust
+            let signed_here = crate::sync::signing::commit_signer(&repo, oid)
+                .is_some_and(|k| k.key_data() == key.public_key().key_data());
+            if parent.is_none() && signed_here {
                 continue;
             }
             let parents: Vec<git2::Commit> = match parent.take() {
