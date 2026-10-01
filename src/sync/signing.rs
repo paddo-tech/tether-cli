@@ -95,26 +95,62 @@ pub fn sign_record(sync_path: &Path, machine_id: &str, key: &PrivateKey) -> Resu
 /// Write this machine's record, sign it, and keep a local copy. The signature vouches for
 /// the record's packages, so build the record with [`own_record`] and packages just read
 /// from this machine's managers.
+/// The caller holds the sync lock from its [`own_record`] read through this save, so no
+/// other writer saves in between and each generation is signed once.
 pub fn save_record(sync_path: &Path, record: &MachineState) -> Result<()> {
+    let key = load_or_create(&record.machine_id)?;
+    let mut generations = Generations::load()?;
+    save_record_at(
+        sync_path,
+        record,
+        &local_record_path()?,
+        &key,
+        &mut generations,
+    )?;
+    generations.save()
+}
+
+fn save_record_at(
+    sync_path: &Path,
+    record: &MachineState,
+    local: &Path,
+    key: &PrivateKey,
+    generations: &mut Generations,
+) -> Result<()> {
     // Other machines distrust a record that validation would change
     let mut record = record.clone();
     record.validate()?;
-    record.generation = record.generation.saturating_add(1);
+    // Count from the newest saved generation, not the caller's copy, which can be older
+    let saved = std::fs::read(local)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<MachineState>(&bytes).ok())
+        .map_or(0, |r| r.generation);
+    record.generation = record
+        .generation
+        .max(saved)
+        .max(generations.last(key.public_key()).unwrap_or(0))
+        .saturating_add(1);
     record.save_to_repo(sync_path)?;
-    let key = load_or_create(&record.machine_id)?;
-    sign_record(sync_path, &record.machine_id, &key)?;
-    crate::sync::atomic_write(
-        &local_record_path()?,
-        &std::fs::read(record_path(sync_path, &record.machine_id))?,
-    )
+    sign_record(sync_path, &record.machine_id, key)?;
+    let bytes = std::fs::read(record_path(sync_path, &record.machine_id))?;
+    generations.accept(
+        key.public_key(),
+        record.generation,
+        &crate::sha256_hex(&bytes),
+    );
+    crate::sync::atomic_write(local, &bytes)
 }
 
 /// The newest record generation this machine has accepted from each machine key, in
-/// `~/.tether/record_generations.json`. It is never synced. A record signed by the same
-/// key with a lower generation is a replay from history and does not count.
+/// `~/.tether/record_generations.json`, with the SHA-256 of the record it accepted at that
+/// generation. It is never synced. A record signed by the same key with a lower generation,
+/// or a different record with the same generation, is a replay and does not count.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Generations {
     seen: BTreeMap<String, u64>,
+    /// Earlier builds stored no digests; the next accepted record adds one
+    #[serde(default)]
+    digests: BTreeMap<String, String>,
 }
 
 impl Generations {
@@ -137,14 +173,24 @@ impl Generations {
         crate::sync::atomic_write(&Self::path()?, &serde_json::to_vec_pretty(self)?)
     }
 
-    /// Whether a record `key` signed at `generation` is not older than one seen before.
-    /// A new key starts from its first record, so a reinstalled machine is not refused.
-    pub fn accept(&mut self, key: &PublicKey, generation: u64) -> bool {
-        let seen = self.seen.entry(fingerprint(key)).or_insert(generation);
-        if generation < *seen {
-            return false;
+    /// The newest generation accepted from `key`.
+    pub fn last(&self, key: &PublicKey) -> Option<u64> {
+        self.seen.get(&fingerprint(key)).copied()
+    }
+
+    /// Whether a record `key` signed at `generation`, with SHA-256 `digest`, is newer than
+    /// the one accepted before, or is that same record. A new key starts from its first
+    /// record, so a reinstalled machine is not refused.
+    pub fn accept(&mut self, key: &PublicKey, generation: u64, digest: &str) -> bool {
+        let fp = fingerprint(key);
+        if let Some(&seen) = self.seen.get(&fp) {
+            let same_record = self.digests.get(&fp).is_none_or(|d| d == digest);
+            if generation < seen || (generation == seen && !same_record) {
+                return false;
+            }
         }
-        *seen = generation;
+        self.seen.insert(fp.clone(), generation);
+        self.digests.insert(fp, digest.to_string());
         true
     }
 }
@@ -221,6 +267,8 @@ fn record_signer(machine_id: &str, record: &[u8], signature: &str) -> Option<Pub
 pub struct SignedRecord {
     pub record: MachineState,
     pub signer: Option<PublicKey>,
+    /// SHA-256 of the record file
+    pub digest: String,
 }
 
 /// Every machine record whose file name is a valid machine id and equals the id inside it.
@@ -259,7 +307,11 @@ pub fn records(sync_path: &Path) -> Vec<SignedRecord> {
                 ));
                 None
             };
-            Some(SignedRecord { record, signer })
+            Some(SignedRecord {
+                record,
+                signer,
+                digest: crate::sha256_hex(&bytes),
+            })
         })
         .collect();
     records.sort_by(|a, b| a.record.machine_id.cmp(&b.record.machine_id));
@@ -495,11 +547,50 @@ mod tests {
     fn older_generation_from_the_same_key_is_refused() {
         let (a, b) = (key(), key());
         let mut seen = Generations::default();
-        assert!(seen.accept(a.public_key(), 5));
-        assert!(seen.accept(a.public_key(), 5));
-        assert!(seen.accept(a.public_key(), 7));
-        assert!(!seen.accept(a.public_key(), 6));
-        assert!(seen.accept(b.public_key(), 1));
+        assert!(seen.accept(a.public_key(), 5, "r5"));
+        assert!(seen.accept(a.public_key(), 5, "r5"));
+        assert!(seen.accept(a.public_key(), 7, "r7"));
+        assert!(!seen.accept(a.public_key(), 6, "r6"));
+        assert!(seen.accept(b.public_key(), 1, "b1"));
+    }
+
+    #[test]
+    fn different_record_at_the_accepted_generation_is_refused() {
+        let a = key();
+        let mut seen = Generations::default();
+        assert!(seen.accept(a.public_key(), 5, "first"));
+        assert!(!seen.accept(a.public_key(), 5, "second"));
+        assert!(seen.accept(a.public_key(), 5, "first"));
+
+        // A generation from an earlier build has no digest; the next record sets one
+        let mut legacy: Generations = serde_json::from_value(
+            serde_json::json!({ "seen": { fingerprint(a.public_key()): 5 } }),
+        )
+        .unwrap();
+        assert!(legacy.accept(a.public_key(), 5, "first"));
+        assert!(!legacy.accept(a.public_key(), 5, "second"));
+    }
+
+    #[test]
+    fn writers_from_a_stale_copy_never_reuse_a_generation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (dir, local) = (tmp.path(), tmp.path().join("machine.json"));
+        std::fs::create_dir_all(dir.join("machines")).unwrap();
+        let me = key();
+        let mut seen = Generations::default();
+        let stale = MachineState::new("me");
+        let generation = |seen: &mut Generations, record: &MachineState| {
+            save_record_at(dir, record, &local, &me, seen).unwrap();
+            records(dir)[0].record.generation
+        };
+        assert_eq!(generation(&mut seen, &stale), 1);
+        // A second writer that read its copy before the first saved
+        let mut other = stale.clone();
+        other.ignored_dotfiles.push(".zshrc".to_string());
+        assert_eq!(generation(&mut seen, &other), 2);
+        // Without the local copy, the accepted generation still counts
+        std::fs::remove_file(&local).unwrap();
+        assert_eq!(generation(&mut seen, &stale), 3);
     }
 
     #[test]

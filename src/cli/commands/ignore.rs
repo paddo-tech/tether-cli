@@ -94,6 +94,8 @@ pub async fn remove(pattern: &str) -> Result<()> {
 pub async fn ignore_dotfile(file: &str) -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
+    // No other writer may save this machine's record between this read and the save
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
 
     let mut machine_state = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
@@ -125,6 +127,7 @@ pub async fn ignore_dotfile(file: &str) -> Result<()> {
 pub async fn ignore_project(project: &str, path: &str) -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
 
     let mut machine_state = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
@@ -200,6 +203,7 @@ pub async fn sync_list() -> Result<()> {
 pub async fn sync_remove(file: &str) -> Result<()> {
     let state = SyncState::load()?;
     let sync_path = SyncEngine::sync_path()?;
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
 
     let mut machine_state = match crate::sync::signing::own_record(&sync_path, &state.machine_id)? {
         Some(ms) => ms,

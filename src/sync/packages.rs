@@ -351,10 +351,12 @@ impl Provenance {
             let own_record = id == this_machine && signer.key_data() == own_key.key_data();
             let trusted_record = id != this_machine && store.trusts(id, signer);
             // A record that grants trust must be the newest its key has signed
-            if (own_record || trusted_record) && !generations.accept(signer, r.record.generation) {
+            if (own_record || trusted_record)
+                && !generations.accept(signer, r.record.generation, &r.digest)
+            {
                 Output::warning(&format!(
-                    "Ignoring machines/{}.json: its key signed a newer record before \
-                     (generation {}). Someone may be replaying an old record",
+                    "Ignoring machines/{}.json: its key signed a newer or different record \
+                     at generation {} before. Someone may be replaying an old record",
                     id, r.record.generation
                 ));
                 continue;
@@ -1356,6 +1358,10 @@ mod tests {
         write(3, "1.0.0");
         let provenance = Provenance::load(path, "me", me.public_key(), &store, &mut seen);
         assert_eq!(provenance.signer(&entry("1.0.0")), Signer::None);
+        // A different record that the same key signed at the accepted generation
+        write(5, "1.5.0");
+        let provenance = Provenance::load(path, "me", me.public_key(), &store, &mut seen);
+        assert_eq!(provenance.signer(&entry("1.5.0")), Signer::None);
     }
 
     #[test]

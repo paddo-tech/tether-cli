@@ -52,6 +52,17 @@ impl Runtime {
                 let failed_op = op.clone();
                 self.spawn(
                     async move {
+                        // No sync may run between the install and the tombstone removal, or
+                        // save this machine's record while this saves it
+                        let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+                            Ok(lock) => lock,
+                            Err(e) => {
+                                return Msg::InstallDone {
+                                    op,
+                                    result: Err(e.to_string()),
+                                }
+                            }
+                        };
                         let result = match install_check(&op, osv_required).await {
                             Err(Blocked::OsvUnreachable(error)) => {
                                 return Msg::OsvUnreachable { op, error };
