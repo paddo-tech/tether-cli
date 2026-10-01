@@ -32,22 +32,36 @@ impl Runtime {
             Cmd::Uninstall { manager_key, name } => {
                 self.spawn(
                     async move { Msg::UninstallDone(run_uninstall(&manager_key, &name).await) },
+                    |e| Some(Msg::UninstallDone(Err(e))),
                 );
             }
             Cmd::Install { op, machine_id } => {
-                self.spawn(async move {
-                    let result = run_install(&op.manager_key, &op.name).await;
-                    if result.is_ok() {
-                        // Sync would uninstall it again while it is still tombstoned.
-                        remove_from_removed_packages(&machine_id, &op.manager_key, &op.name);
-                    }
-                    Msg::InstallDone { op, result }
-                });
+                let failed_op = op.clone();
+                self.spawn(
+                    async move {
+                        let result = run_install(&op.manager_key, &op.name).await;
+                        if result.is_ok() {
+                            // Sync would uninstall it again while it is still tombstoned.
+                            remove_from_removed_packages(&machine_id, &op.manager_key, &op.name);
+                        }
+                        Msg::InstallDone { op, result }
+                    },
+                    move |e| {
+                        Some(Msg::InstallDone {
+                            op: failed_op,
+                            result: Err(e),
+                        })
+                    },
+                );
             }
             Cmd::CollectPackages { config, machine_id } => {
-                self.spawn(async move {
-                    Msg::LocalPackages(collect_local_packages(&config, &machine_id).await)
-                });
+                // An empty list would wipe this machine's packages, so a failure sends nothing.
+                self.spawn(
+                    async move {
+                        Msg::LocalPackages(collect_local_packages(&config, &machine_id).await)
+                    },
+                    |_| None,
+                );
             }
             Cmd::Restore {
                 repo_path,
@@ -138,17 +152,23 @@ impl Runtime {
     }
 
     /// Run a future on its own thread and current-thread runtime, then send its `Msg`.
-    fn spawn<F>(&self, fut: F)
+    /// If the runtime cannot start, send `on_fail`'s message instead so no operation stays pending.
+    fn spawn<F, E>(&self, fut: F, on_fail: E)
     where
         F: Future<Output = Msg> + Send + 'static,
+        E: FnOnce(String) -> Option<Msg> + Send + 'static,
     {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            let msg = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
-                let _ = tx.send(rt.block_on(fut));
+                Ok(rt) => Some(rt.block_on(fut)),
+                Err(e) => on_fail(format!("could not start async runtime: {}", e)),
+            };
+            if let Some(msg) = msg {
+                let _ = tx.send(msg);
             }
         });
     }
