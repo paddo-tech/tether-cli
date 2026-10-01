@@ -1,3 +1,4 @@
+use super::policy::first_warning;
 use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -55,7 +56,10 @@ impl BrewfilePackages {
         let keep = |ecosystem: Ecosystem, name: &String| match validate_name(ecosystem, name) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!("Warning: Skipping Brewfile entry: {}", e);
+                let message = format!("Warning: Skipping Brewfile entry: {}", e);
+                if first_warning(&message) {
+                    eprintln!("{}", message);
+                }
                 false
             }
         };
@@ -110,15 +114,28 @@ fn tap_of(name: &str) -> Option<&str> {
 
 /// Untrusted taps and their packages are held back from install. The approval inbox
 /// takes them over here once it exists.
+/// The daemon re-reads the Brewfile every cycle, so each warning prints once per process.
 pub fn hold_untrusted(untrusted: &BrewfilePackages) {
-    for tap in &untrusted.taps {
-        eprintln!(
-            "Warning: Skipping untrusted tap {}. Add it to packages.brew.trusted_taps to allow it",
-            tap
+    let messages = untrusted
+        .taps
+        .iter()
+        .map(|tap| {
+            format!(
+                "Warning: Skipping untrusted tap {}. Add it to packages.brew.trusted_taps to allow it",
+                tap
+            )
+        })
+        .chain(
+            untrusted
+                .formulae
+                .iter()
+                .chain(&untrusted.casks)
+                .map(|name| format!("Warning: Skipping {} from an untrusted tap", name)),
         );
-    }
-    for name in untrusted.formulae.iter().chain(&untrusted.casks) {
-        eprintln!("Warning: Skipping {} from an untrusted tap", name);
+    for message in messages {
+        if first_warning(&message) {
+            eprintln!("{}", message);
+        }
     }
 }
 
