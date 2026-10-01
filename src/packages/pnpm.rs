@@ -93,9 +93,19 @@ impl PackageManager for PnpmManager {
             package.name.clone()
         };
 
+        let package_policy = self.policy();
+        let version = policy::tool_version("pnpm").await;
+        if package_policy.scripts_allowed(&package.name) && !policy::pnpm_can_allow_build(version) {
+            policy::warn_scripts_unsupported_once("pnpm", "10.4");
+        }
         let mut args = vec!["add".to_string(), "-g".to_string()];
         args.extend(self.cooldown_args().await);
-        args.extend(policy::pnpm_script_args(&self.policy(), &package.name));
+        args.extend(policy::pnpm_script_args(
+            &package_policy,
+            &package.name,
+            version,
+            true,
+        ));
         args.push(pkg_spec);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.run_pnpm(&args).await?;
@@ -144,13 +154,16 @@ impl PackageManager for PnpmManager {
         let (scripted, plain): (Vec<String>, Vec<String>) = names
             .into_iter()
             .partition(|name| package_policy.scripts_allowed(name));
+        if !scripted.is_empty() && !policy::pnpm_can_allow_build(version) {
+            policy::warn_scripts_unsupported_once("pnpm", "10.4");
+        }
 
         // Allowlisted packages update in a second run so only they get scripts
         for batch in [plain, scripted] {
             let Some(first) = batch.first() else {
                 continue;
             };
-            let script_args = policy::pnpm_script_args(&package_policy, first);
+            let script_args = policy::pnpm_script_args(&package_policy, first, version, false);
             if script_args.iter().any(|a| a == "--ignore-scripts")
                 && !policy::pnpm_update_accepts_ignore_scripts(version)
             {

@@ -171,23 +171,47 @@ pub fn uv_cooldown(days: u32, now: DateTime<Utc>) -> Cooldown {
 
 /// npm and pnpm run dependency scripts unless told not to, so scripts stay off
 /// for every package outside `packages.allow_scripts`.
+/// npm 12 blocks unreviewed install scripts on its own, so `--allow-scripts` runs only the
+/// named package's. Older npm would also run every dependency's scripts, so an allowlisted
+/// package keeps scripts off there.
 pub fn npm_script_args(policy: &PackagePolicy, name: &str, npm_major: u64) -> Vec<String> {
-    if !policy.scripts_allowed(name) {
-        return vec!["--ignore-scripts".to_string()];
-    }
-    // npm 12 blocks unreviewed install scripts on its own, even without --ignore-scripts
-    if npm_major >= 12 {
+    if policy.scripts_allowed(name) && npm_major >= 12 {
         vec![format!("--allow-scripts={}", name)]
+    } else {
+        vec!["--ignore-scripts".to_string()]
+    }
+}
+
+/// pnpm 10.4 added `add --allow-build`, which approves the named package's builds and
+/// records them in pnpm's global `allowBuilds`, so later updates need no flag. Older pnpm
+/// cannot approve one package, so an allowlisted package keeps scripts off there.
+pub fn pnpm_script_args(
+    policy: &PackagePolicy,
+    name: &str,
+    version: Option<((u64, u64, u64), bool)>,
+    adding: bool,
+) -> Vec<String> {
+    if !policy.scripts_allowed(name) || !pnpm_can_allow_build(version) {
+        vec!["--ignore-scripts".to_string()]
+    } else if adding {
+        vec![format!("--allow-build={}", name)]
     } else {
         Vec::new()
     }
 }
 
-pub fn pnpm_script_args(policy: &PackagePolicy, name: &str) -> Vec<String> {
-    if policy.scripts_allowed(name) {
-        Vec::new()
-    } else {
-        vec!["--ignore-scripts".to_string()]
+pub fn pnpm_can_allow_build(version: Option<((u64, u64, u64), bool)>) -> bool {
+    version.is_some_and(|(v, _)| v >= (10, 4, 0))
+}
+
+/// Allowlisted packages whose manager version cannot limit scripts to them install with
+/// scripts off, and the user is told once.
+pub fn warn_scripts_unsupported_once(manager: &str, needs: &str) {
+    if first_warning(&format!("allow_scripts {}", manager)) {
+        eprintln!(
+            "Warning: packages.allow_scripts needs {} {} or later. Scripts stay off for allowlisted {} packages",
+            manager, needs, manager
+        );
     }
 }
 
@@ -326,9 +350,21 @@ mod tests {
             npm_script_args(&p, "esbuild", 12),
             vec!["--allow-scripts=esbuild"]
         );
-        assert!(npm_script_args(&p, "esbuild", 11).is_empty());
-        assert_eq!(pnpm_script_args(&p, "left-pad"), vec!["--ignore-scripts"]);
-        assert!(pnpm_script_args(&p, "esbuild").is_empty());
+        assert_eq!(npm_script_args(&p, "esbuild", 11), vec!["--ignore-scripts"]);
+        let pnpm12 = v("12.8.1");
+        assert_eq!(
+            pnpm_script_args(&p, "left-pad", pnpm12, true),
+            vec!["--ignore-scripts"]
+        );
+        assert_eq!(
+            pnpm_script_args(&p, "esbuild", pnpm12, true),
+            vec!["--allow-build=esbuild"]
+        );
+        assert!(pnpm_script_args(&p, "esbuild", pnpm12, false).is_empty());
+        assert_eq!(
+            pnpm_script_args(&p, "esbuild", v("10.3.0"), true),
+            vec!["--ignore-scripts"]
+        );
         assert_eq!(bun_script_args(&p, "left-pad"), vec!["--ignore-scripts"]);
         assert_eq!(bun_script_args(&p, "esbuild"), vec!["--trust"]);
     }

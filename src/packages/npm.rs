@@ -92,10 +92,14 @@ impl PackageManager for NpmManager {
         };
 
         let major = self.version().await.map_or(0, |((major, _, _), _)| major);
+        let package_policy = self.policy();
+        if package_policy.scripts_allowed(&package.name) && major < 12 {
+            policy::warn_scripts_unsupported_once("npm", "12");
+        }
         let mut args = vec!["install".to_string(), "-g".to_string()];
         args.extend(self.cooldown_args().await);
         args.extend(policy::npm_script_args(
-            &self.policy(),
+            &package_policy,
             &package.name,
             major,
         ));
@@ -145,6 +149,9 @@ impl PackageManager for NpmManager {
         let (scripted, plain): (Vec<String>, Vec<String>) = names
             .into_iter()
             .partition(|name| package_policy.scripts_allowed(name));
+        if !scripted.is_empty() && major < 12 {
+            policy::warn_scripts_unsupported_once("npm", "12");
+        }
 
         // Allowlisted packages update in a second run so only they get scripts
         for batch in [plain, scripted] {
