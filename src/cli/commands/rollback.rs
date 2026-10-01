@@ -56,12 +56,32 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
         return Ok(());
     }
 
+    // A snapshot can hold any machine's packages, so they pass the same checks as a sync
+    let allowed = crate::sync::packages::gate_rollback(
+        &config,
+        &sync_path,
+        &state.machine_id,
+        manager,
+        to_install.iter().map(|name| pins[*name].clone()).collect(),
+    )
+    .await?;
+    let allowed: HashSet<String> = allowed
+        .iter()
+        .map(|line| parse_pin(pkg_manager.ecosystem(), line).0)
+        .collect();
+    let (to_install, held): (Vec<&String>, Vec<&String>) = to_install
+        .into_iter()
+        .partition(|name| allowed.contains(*name));
+
     Output::header(&format!("Rolling back {}", manager));
     for pkg in &to_uninstall {
         Output::list_item(&format!("uninstall {}", pkg));
     }
     for pkg in &to_install {
         Output::list_item(&format!("install {}", pkg));
+    }
+    for pkg in &held {
+        Output::list_item(&format!("hold {} for approval", pkg));
     }
 
     let mut failed: Vec<&str> = Vec::new();

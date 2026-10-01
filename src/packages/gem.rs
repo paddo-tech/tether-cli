@@ -4,6 +4,18 @@ use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, P
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// Name and latest version from `gem outdated` lines like `rdoc (7.0.4 < 8.1.0)`.
+fn parse_outdated(stdout: &str) -> Vec<(String, String)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (name, versions) = line.trim().split_once(" (")?;
+            let (_, latest) = versions.strip_suffix(')')?.split_once(" < ")?;
+            Some((name.to_string(), latest.to_string()))
+        })
+        .collect()
+}
+
 pub struct GemManager;
 
 impl GemManager {
@@ -125,8 +137,24 @@ impl PackageManager for GemManager {
             return Ok(());
         }
 
+        // Without names gem updates every gem, so held gems need the rest named
+        let held = super::inbox::hold_malicious_upgrades(self).await;
+        let mut names = Vec::new();
+        if !held.is_empty() {
+            names = packages
+                .into_iter()
+                .map(|p| p.name)
+                .filter(|name| !held.contains(name))
+                .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
+                .collect();
+            if names.is_empty() {
+                return Ok(());
+            }
+        }
         let output = command("gem")?
-            .args(["update", "--remote"])
+            .arg("update")
+            .args(names)
+            .arg("--remote")
             .args(Self::user_install_flag())
             .output()
             .await?;
@@ -137,6 +165,12 @@ impl PackageManager for GemManager {
         }
 
         Ok(())
+    }
+
+    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+        Ok(parse_outdated(
+            &self.run_gem(&["outdated", "--remote"]).await?,
+        ))
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -190,5 +224,22 @@ impl PackageManager for GemManager {
         }
 
         Ok(dependents)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outdated_lines_yield_latest_versions() {
+        let stdout = "rdoc (7.0.4 < 8.1.0)\nnet-imap (0.5.1 < 0.5.6)\nnoise\n";
+        assert_eq!(
+            parse_outdated(stdout),
+            vec![
+                ("rdoc".to_string(), "8.1.0".to_string()),
+                ("net-imap".to_string(), "0.5.6".to_string())
+            ]
+        );
     }
 }

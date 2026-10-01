@@ -221,8 +221,15 @@ pub async fn inbox_list() -> Result<()> {
     Ok(())
 }
 
-/// Approve a held package and install it now, or trust a held machine key.
+/// Approve a held package and install it now, or trust a held machine key. The sync lock
+/// keeps the daemon from installing the same package while this install runs.
 pub async fn approve(id: &str) -> Result<()> {
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    approve_locked(id).await
+}
+
+/// The caller holds the sync lock.
+async fn approve_locked(id: &str) -> Result<()> {
     let item = inbox::approve(id)?;
     if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
         Output::success(&format!(
@@ -245,6 +252,7 @@ pub async fn reject(id: &str) -> Result<()> {
 }
 
 /// Ask about each held package. Only a terminal user can answer, so callers check for one.
+/// The caller holds the sync lock.
 pub async fn review_inbox() -> Result<()> {
     let items = inbox::list()?;
     if items.is_empty() {
@@ -265,7 +273,7 @@ pub async fn review_inbox() -> Result<()> {
                     if item.reasons.contains(&Reason::Malicious) || item.kind != Kind::Package {
                         continue;
                     }
-                    if let Err(e) = approve(&item.id()).await {
+                    if let Err(e) = approve_locked(&item.id()).await {
                         Output::warning(&format!("{}: {}", item.name, e));
                     }
                 }
@@ -284,7 +292,7 @@ pub async fn review_inbox() -> Result<()> {
         };
         let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
         let result = match choice {
-            "Install" | "Trust" => approve(&item.id()).await,
+            "Install" | "Trust" => approve_locked(&item.id()).await,
             "Reject" => reject(&item.id()).await,
             _ => Ok(()),
         };
