@@ -330,6 +330,16 @@ impl Inbox {
         true
     }
 
+    /// Apply one sync's checks: drop the pending items for packages that now pass, and queue
+    /// the held ones. Returns the held items that are new or changed.
+    pub fn settle(&mut self, held: Vec<InboxItem>, passed: &[(String, String)]) -> Vec<InboxItem> {
+        self.items
+            .retain(|i| !passed.iter().any(|(manager, name)| i.is(manager, name)));
+        held.into_iter()
+            .filter(|item| self.add(item.clone()))
+            .collect()
+    }
+
     /// Find a pending item by id (`manager:name`) or by a name only one item has.
     pub fn find(&self, query: &str) -> Result<&InboxItem> {
         if let Some(item) = self.items.iter().find(|i| i.id() == query) {
@@ -507,6 +517,14 @@ pub fn add(items: Vec<InboxItem>) -> Result<Vec<InboxItem>> {
             .filter(|item| inbox.add(item.clone()))
             .collect())
     })
+}
+
+/// See [`Inbox::settle`].
+pub fn settle(held: Vec<InboxItem>, passed: &[(String, String)]) -> Result<Vec<InboxItem>> {
+    if held.is_empty() && passed.is_empty() {
+        return Ok(Vec::new());
+    }
+    Inbox::update(|inbox| Ok(inbox.settle(held, passed)))
 }
 
 /// Record approval of the item the user reviewed, as shown to them. A machine item trusts
@@ -823,6 +841,29 @@ mod tests {
             Some(signing::fingerprint(&new).as_str())
         );
         assert_eq!(queued[0].reasons, vec![Reason::KeyChanged]);
+    }
+
+    #[test]
+    fn settle_drops_items_that_pass_and_reports_changed_ones() {
+        let mut inbox = Inbox::default();
+        let cooldown = InboxItem {
+            reasons: vec![Reason::CooldownUnsupported],
+            ..item("npm", "a")
+        };
+        let new = inbox.settle(vec![cooldown.clone(), item("npm", "b")], &[]);
+        assert_eq!(new.len(), 2);
+        // The same reasons again are not news
+        assert!(inbox.settle(vec![cooldown.clone()], &[]).is_empty());
+        // Other reasons replace the item and report it again
+        let changed = InboxItem {
+            reasons: vec![Reason::Unsigned, Reason::CooldownUnsupported],
+            ..cooldown
+        };
+        assert_eq!(inbox.settle(vec![changed.clone()], &[]), vec![changed]);
+        // Once npm enforces the limit, the package passes and its item goes
+        inbox.settle(Vec::new(), &[("npm".to_string(), "a".to_string())]);
+        let left: Vec<String> = inbox.items.iter().map(|i| i.id()).collect();
+        assert_eq!(left, vec!["npm:b"]);
     }
 
     #[test]

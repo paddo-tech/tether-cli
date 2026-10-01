@@ -102,6 +102,7 @@ pub async fn import_packages(
     prune_inbox(machine_state)?;
     let held_machines = inbox::queue_machine_keys(sync_path, mid)?;
     let trust = Trust::load(config, sync_path, mid)?;
+    let mut gated = Gated::default();
 
     // Homebrew - special handling for formulae/casks/taps
     if config.is_manager_enabled(mid, "brew") {
@@ -111,7 +112,7 @@ pub async fn import_packages(
             daemon_mode,
             previously_deferred,
             &trust,
-            &mut outcome.queued,
+            &mut gated,
         )
         .await;
         outcome.deferred_casks = casks;
@@ -124,14 +125,8 @@ pub async fn import_packages(
     // Simple package managers (npm, pnpm, bun, gem)
     for def in SIMPLE_MANAGERS {
         if config.is_manager_enabled(mid, def.state_key) {
-            let installed = import_simple_manager(
-                def,
-                &manifests_dir,
-                machine_state,
-                &trust,
-                &mut outcome.queued,
-            )
-            .await;
+            let installed =
+                import_simple_manager(def, &manifests_dir, machine_state, &trust, &mut gated).await;
             if installed {
                 update_last_upgrade(state, def.state_key);
             }
@@ -147,11 +142,22 @@ pub async fn import_packages(
             ));
         }
     }
-    outcome.queued = inbox::add(outcome.queued)?;
+    outcome.queued = inbox::settle(gated.held, &gated.passed)?;
     report_held(&outcome.queued);
     outcome.queued.splice(0..0, held_machines);
 
     Ok(outcome)
+}
+
+/// What the checks decided for the packages one import or rollback checked. Every sync
+/// checks each missing package again, held or not, because a check can change: a record
+/// becomes trusted, a manager learns the release-age limit, a tap becomes trusted.
+#[derive(Default)]
+struct Gated {
+    /// Held for approval
+    held: Vec<InboxItem>,
+    /// May install now, as manager key and name. A pending item for one is dropped.
+    passed: Vec<(String, String)>,
 }
 
 fn report_held(items: &[InboxItem]) {
@@ -214,22 +220,6 @@ impl Trust {
             inbox: Inbox::load()?,
             provenance,
             auto_install_from_trusted: config.packages.auto_install_from_trusted,
-        })
-    }
-
-    /// True when the package already waits for a decision.
-    /// Items held as malicious are checked again, because approval cannot clear them and
-    /// an unpinned query can match a report that covers only some releases. Items held only
-    /// for trust are checked again too, because a machine record can become trusted later.
-    fn held(&self, manager: &str, name: &str) -> bool {
-        self.inbox.items.iter().any(|i| {
-            i.manager == manager
-                && i.name == name
-                && !i.reasons.contains(&Reason::Malicious)
-                && !i
-                    .reasons
-                    .iter()
-                    .all(|r| matches!(r, Reason::Unsigned | Reason::UntrustedSigner))
         })
     }
 
@@ -467,7 +457,7 @@ async fn import_brew(
     daemon_mode: bool,
     previously_deferred: &[String],
     trust: &Trust,
-    queued: &mut Vec<InboxItem>,
+    gated: &mut Gated,
 ) -> (Vec<String>, bool) {
     let brewfile = manifests_dir.join("Brewfile");
     if !brewfile.exists() {
@@ -518,7 +508,7 @@ async fn import_brew(
         .map(|t| t.into_iter().collect())
         .unwrap_or_default();
     let taps = std::mem::take(&mut brew_packages.taps);
-    brew_packages.taps = gate_taps(&policy, trust, &local_taps, taps, queued);
+    brew_packages.taps = gate_taps(&policy, trust, &local_taps, taps, gated);
 
     // Calculate missing packages (normalize formula names for comparison)
     let local_formulae: HashSet<_> = machine_state
@@ -563,10 +553,10 @@ async fn import_brew(
         trust,
         "brew_formulae",
         missing_formulae,
-        queued,
+        gated,
     )
     .await;
-    let casks_to_try = gate_brew(&brew, &policy, trust, "brew_casks", casks_to_try, queued).await;
+    let casks_to_try = gate_brew(&brew, &policy, trust, "brew_casks", casks_to_try, gated).await;
 
     let mut installed_any = false;
 
@@ -652,7 +642,7 @@ fn gate_taps(
     trust: &Trust,
     local_taps: &HashSet<String>,
     taps: Vec<String>,
-    queued: &mut Vec<InboxItem>,
+    gated: &mut Gated,
 ) -> Vec<String> {
     let mut allowed = Vec::new();
     for tap in taps {
@@ -660,7 +650,7 @@ fn gate_taps(
             allowed.push(tap);
             continue;
         }
-        if trust.held("brew_taps", &tap) || trust.inbox.is_rejected("brew_taps", &tap, None, None) {
+        if trust.inbox.is_rejected("brew_taps", &tap, None, None) {
             continue;
         }
         let checks = Checks {
@@ -669,9 +659,12 @@ fn gate_taps(
         };
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
+            gated.passed.push(("brew_taps".to_string(), tap.clone()));
             allowed.push(tap);
         } else {
-            queued.push(trust.item("brew_taps", &tap, None, None, reasons));
+            gated
+                .held
+                .push(trust.item("brew_taps", &tap, None, None, reasons));
         }
     }
     allowed
@@ -685,13 +678,10 @@ async fn gate_brew(
     trust: &Trust,
     manager: &str,
     names: Vec<String>,
-    queued: &mut Vec<InboxItem>,
+    gated: &mut Gated,
 ) -> Vec<String> {
     let mut allowed = Vec::new();
     for name in names {
-        if trust.held(manager, &name) {
-            continue;
-        }
         let tap = brew.tap_for(&name, manager == "brew_casks").await;
         let untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
         // Items record only an untrusted tap, so the decision lookups must use the same tap
@@ -708,9 +698,12 @@ async fn gate_brew(
         };
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
+            gated.passed.push((manager.to_string(), name.clone()));
             allowed.push(name);
         } else {
-            queued.push(trust.item(manager, &name, None, tap, reasons));
+            gated
+                .held
+                .push(trust.item(manager, &name, None, tap, reasons));
         }
     }
     allowed
@@ -723,7 +716,7 @@ async fn import_simple_manager(
     manifests_dir: &Path,
     machine_state: &MachineState,
     trust: &Trust,
-    queued: &mut Vec<InboxItem>,
+    gated: &mut Gated,
 ) -> bool {
     let manifest_path = manifests_dir.join(def.manifest_file);
     if !manifest_path.exists() {
@@ -755,14 +748,10 @@ async fn import_simple_manager(
         .map(|v| v.iter().cloned().collect())
         .unwrap_or_default();
 
-    // Filter to only missing packages that nobody has decided on yet
+    // Filter to only missing packages whose version the user has not rejected
     let missing: Vec<(String, Option<String>, String)> = manifest_entries(def.ecosystem, &manifest)
         .into_iter()
-        .filter(|(name, _, _)| {
-            !removed_packages.contains(name)
-                && !local_packages.contains(name)
-                && !trust.held(def.state_key, name)
-        })
+        .filter(|(name, _, _)| !removed_packages.contains(name) && !local_packages.contains(name))
         .map(|entry| trust.trusted_pin(def, entry))
         .filter(|(name, version, _)| {
             !trust
@@ -781,7 +770,7 @@ async fn import_simple_manager(
         trust,
         missing,
         &HashSet::new(),
-        queued,
+        gated,
     )
     .await;
 
@@ -898,25 +887,24 @@ impl RollbackGate {
             })
             .filter(|(confirmed, (name, version, _))| {
                 *confirmed
-                    || !(self.trust.held(key, name)
-                        || self
-                            .trust
-                            .inbox
-                            .is_rejected(key, name, version.as_deref(), None))
+                    || !self
+                        .trust
+                        .inbox
+                        .is_rejected(key, name, version.as_deref(), None)
             })
             .map(|(_, entry)| entry)
             .collect();
-        let mut queued = Vec::new();
+        let mut gated = Gated::default();
         let allowed = gate_simple(
             self.def,
             manager.as_ref(),
             &self.trust,
             candidates,
             confirmed,
-            &mut queued,
+            &mut gated,
         )
         .await;
-        report_held(&inbox::add(queued)?);
+        report_held(&inbox::settle(gated.held, &gated.passed)?);
         Ok(allowed)
     }
 }
@@ -957,7 +945,7 @@ async fn gate_simple(
     trust: &Trust,
     missing: Vec<(String, Option<String>, String)>,
     confirmed: &HashSet<String>,
-    queued: &mut Vec<InboxItem>,
+    gated: &mut Gated,
 ) -> Vec<String> {
     let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
     let pins: Vec<(String, Option<String>)> = missing
@@ -982,11 +970,12 @@ async fn gate_simple(
                     advisories.join(", ")
                 ));
             }
+            gated.passed.push((def.state_key.to_string(), name));
             allowed.push(line);
         } else {
             let mut item = trust.item(def.state_key, &name, version, None, reasons);
             item.advisories = advisories;
-            queued.push(item);
+            gated.held.push(item);
         }
     }
     allowed
@@ -1402,17 +1391,31 @@ mod tests {
             approved_from_taps: Vec::new(),
         };
         let local = HashSet::from(["local/tap".to_string()]);
-        let mut queued = Vec::new();
+        let mut gated = Gated::default();
         let taps = ["listed/tap", "added/tap", "other/tap", "local/tap"]
             .map(String::from)
             .to_vec();
-        let allowed = gate_taps(&policy, &trust, &local, taps, &mut queued);
+        let allowed = gate_taps(&policy, &trust, &local, taps.clone(), &mut gated);
         assert_eq!(allowed, vec!["listed/tap", "local/tap"]);
         // Allowed by policy, but no trusted record lists it: a repo writer added it
-        assert_eq!(queued[0].name, "added/tap");
-        assert_eq!(queued[0].reasons, vec![Reason::Unsigned]);
-        assert_eq!(queued[1].name, "other/tap");
-        assert_eq!(queued[1].reasons, vec![Reason::UntrustedTap]);
+        assert_eq!(gated.held[0].name, "added/tap");
+        assert_eq!(gated.held[0].reasons, vec![Reason::Unsigned]);
+        assert_eq!(gated.held[1].name, "other/tap");
+        assert_eq!(gated.held[1].reasons, vec![Reason::UntrustedTap]);
+
+        // A held tap is checked again: once trusted, it taps and leaves the inbox
+        let mut trust = trust;
+        trust.inbox.settle(gated.held, &gated.passed);
+        let policy = crate::packages::PackagePolicy {
+            trusted_taps: vec!["listed/tap".to_string(), "other/tap".to_string()],
+            ..policy
+        };
+        let mut gated = Gated::default();
+        let allowed = gate_taps(&policy, &trust, &local, taps, &mut gated);
+        assert_eq!(allowed, vec!["listed/tap", "other/tap", "local/tap"]);
+        trust.inbox.settle(gated.held, &gated.passed);
+        let pending: Vec<String> = trust.inbox.items.iter().map(|i| i.id()).collect();
+        assert_eq!(pending, vec!["brew_taps:added/tap"]);
     }
 
     #[test]
@@ -1541,17 +1544,6 @@ mod tests {
             ..trust_as(path, "me", &me, &store)
         };
         assert_eq!(held(&off, "good", Some("1.0.0")), vec![Reason::Unsigned]);
-
-        // An item held only for trust is checked again on the next sync
-        let mut trust = trust_as(path, "me", &me, &store);
-        let item = trust.item("npm", "good", None, None, vec![Reason::Unsigned]);
-        trust.inbox.add(item.clone());
-        assert!(!trust.held("npm", "good"));
-        trust.inbox.add(InboxItem {
-            reasons: vec![Reason::Unsigned, Reason::CooldownUnsupported],
-            ..item
-        });
-        assert!(trust.held("npm", "good"));
     }
 
     #[test]
