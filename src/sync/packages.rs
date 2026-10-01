@@ -256,6 +256,24 @@ impl Trust {
         }
     }
 
+    /// The manifest only names a package: anyone who can push could pin it to an older
+    /// version that some trusted record once listed. So the newest version that a trusted
+    /// record lists now replaces the manifest's pin. Without one, the manifest's pin stays,
+    /// and the trust checks hold it.
+    fn trusted_pin(
+        &self,
+        def: &PackageManagerDef,
+        (name, version, line): (String, Option<String>, String),
+    ) -> (String, Option<String>, String) {
+        match self.provenance.newest_trusted_version(def.state_key, &name) {
+            Some(newest) => {
+                let line = format_pin(def.ecosystem, &name, Some(&newest));
+                (name, Some(newest), line)
+            }
+            None => (name, version, line),
+        }
+    }
+
     fn item(
         &self,
         manager: &str,
@@ -358,6 +376,17 @@ impl Provenance {
             this_machine: this_machine.to_string(),
             sync_path: sync_path.to_path_buf(),
         }
+    }
+
+    /// The newest version of a package that this machine's or a trusted machine's record
+    /// lists.
+    fn newest_trusted_version(&self, manager: &str, name: &str) -> Option<String> {
+        self.own
+            .iter()
+            .chain(&self.trusted)
+            .filter(|(m, n, _)| m == manager && n == name)
+            .filter_map(|(_, _, version)| version.clone())
+            .max_by(|a, b| crate::packages::pin::compare_versions(a, b))
     }
 
     fn signer(&self, entry: &Entry) -> Signer {
@@ -691,6 +720,7 @@ async fn import_simple_manager(
                 && !local_packages.contains(name)
                 && !trust.settled(def.state_key, name)
         })
+        .map(|entry| trust.trusted_pin(def, entry))
         .collect();
 
     if missing.is_empty() {
@@ -1175,6 +1205,39 @@ mod tests {
         assert_eq!(held(&trust, "example", None), vec![Reason::Unsigned]);
         assert!(held(&trust, "example", Some("1.0.0")).is_empty());
         assert!(held(&trust, "example", Some("1.5.0")).is_empty());
+    }
+
+    #[test]
+    fn test_manifest_cannot_pick_an_older_trusted_version() {
+        let (tmp, me, t, mut store) = two_machines();
+        let path = tmp.path();
+        let u = new_key();
+        store.trust("u", u.public_key()).unwrap();
+        record(path, "t", &[("example", "1.0.0")], Some(&t));
+        record(path, "u", &[("example", "1.5.0")], Some(&u));
+        let trust = trust_as(path, "me", &me, &store);
+        let def = &SIMPLE_MANAGERS[0];
+        // The manifest pins the older version that a trusted record also lists
+        let line = |l: &str| manifest_entries(Ecosystem::Npm, l).remove(0);
+        assert_eq!(
+            trust.trusted_pin(def, line("example@1.0.0")),
+            (
+                "example".to_string(),
+                Some("1.5.0".to_string()),
+                "example@1.5.0".to_string()
+            )
+        );
+        assert_eq!(
+            trust.trusted_pin(def, line("example")).1.as_deref(),
+            Some("1.5.0")
+        );
+        // A package no trusted record lists keeps the manifest's pin and is held
+        let other = trust.trusted_pin(def, line("other@6.6.6"));
+        assert_eq!(other.1.as_deref(), Some("6.6.6"));
+        assert_eq!(
+            held(&trust, "other", other.1.as_deref()),
+            vec![Reason::Unsigned]
+        );
     }
 
     #[test]
