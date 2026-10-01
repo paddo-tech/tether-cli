@@ -109,13 +109,34 @@ pub fn local_hostname() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+pub fn local_os_version() -> String {
+    if cfg!(target_os = "macos") {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|v| format!("macOS {}", v.trim()))
+            .unwrap_or_default()
+    } else {
+        std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("PRETTY_NAME="))
+                    .map(|v| v.trim_matches('"').to_string())
+            })
+            .unwrap_or_default()
+    }
+}
+
 impl MachineState {
     pub fn new(machine_id: &str) -> Self {
         Self {
             machine_id: machine_id.to_string(),
             hostname: local_hostname(),
             last_sync: Utc::now(),
-            os_version: String::new(),
+            os_version: local_os_version(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             files: HashMap::new(),
             packages: HashMap::new(),

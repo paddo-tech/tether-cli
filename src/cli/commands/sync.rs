@@ -1780,9 +1780,10 @@ pub async fn build_machine_state(
     let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Update last_sync time, CLI version, and profile
+    // Update last_sync time, CLI and OS version, and profile
     machine_state.last_sync = chrono::Utc::now();
     machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
+    machine_state.os_version = crate::sync::state::local_os_version();
     machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
 
     // Collect file hashes
