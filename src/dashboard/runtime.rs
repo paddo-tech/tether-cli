@@ -63,13 +63,12 @@ impl Runtime {
                 commit,
                 short_hash,
             } => {
-                self.spawn(async move {
-                    let result = run_restore(&repo_path, &dotfile, &commit);
-                    Msg::RestoreDone {
-                        dotfile,
-                        short_hash,
-                        result,
-                    }
+                // Runs inline: a detached thread dies mid-write when the dashboard quits.
+                let result = run_restore(&repo_path, &dotfile, &commit);
+                let _ = self.tx.send(Msg::RestoreDone {
+                    dotfile,
+                    short_hash,
+                    result,
                 });
             }
         }
