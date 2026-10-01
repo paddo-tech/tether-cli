@@ -9,7 +9,10 @@ use anyhow::Result;
 use chrono::Utc;
 use std::io::IsTerminal;
 
+/// Holds the sync lock, because upgrades queue malicious targets in the inbox that a sync
+/// reads and changes.
 pub async fn run() -> Result<()> {
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     Output::header("Upgrading packages");
 
     let managers: Vec<Box<dyn PackageManager>> = vec![

@@ -120,6 +120,14 @@ impl InboxItem {
         self.manager == manager && self.name == name
     }
 
+    /// Fingerprint of the key a machine item asks to trust.
+    fn fingerprint(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::TrustMachine { fingerprint, .. } => Some(fingerprint),
+            Kind::Package => None,
+        }
+    }
+
     /// Whether approving `self` grants what approving `other` would: the same key for a
     /// machine, the same version and tap for a package, held for the same reasons.
     fn same_request(&self, other: &InboxItem) -> bool {
@@ -131,8 +139,8 @@ impl InboxItem {
     }
 }
 
-/// An approval or rejection. An approval covers only this version, and for a Homebrew
-/// formula or cask only this tap: a different one is a new decision.
+/// An approval or rejection. It covers only this version, for a Homebrew formula or cask
+/// only this tap, and for a machine only this key: a different one is a new decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Decision {
     pub manager: String,
@@ -141,7 +149,38 @@ pub struct Decision {
     pub version: Option<String>,
     #[serde(default)]
     pub tap: Option<String>,
+    /// Key fingerprint of a rejected machine item
+    #[serde(default)]
+    pub fingerprint: Option<String>,
     pub at: DateTime<Utc>,
+}
+
+impl Decision {
+    fn of(item: &InboxItem) -> Self {
+        Self {
+            manager: item.manager.clone(),
+            name: item.name.clone(),
+            version: item.version.clone(),
+            tap: item.tap.clone(),
+            fingerprint: item.fingerprint().map(str::to_string),
+            at: Utc::now(),
+        }
+    }
+
+    fn covers(
+        &self,
+        manager: &str,
+        name: &str,
+        version: Option<&str>,
+        tap: Option<&str>,
+        fingerprint: Option<&str>,
+    ) -> bool {
+        self.manager == manager
+            && self.name == name
+            && self.version.as_deref() == version
+            && self.tap.as_deref() == tap
+            && self.fingerprint.as_deref() == fingerprint
+    }
 }
 
 /// Local approval state in `~/.tether/inbox.json`. It is never synced, because approval
@@ -204,18 +243,35 @@ impl Inbox {
         version: Option<&str>,
         tap: Option<&str>,
     ) -> bool {
-        self.approved.iter().any(|d| {
-            d.manager == manager
-                && d.name == name
-                && d.version.as_deref() == version
-                && d.tap.as_deref() == tap
-        })
+        self.approved
+            .iter()
+            .any(|d| d.covers(manager, name, version, tap, None))
     }
 
-    pub fn is_rejected(&self, manager: &str, name: &str) -> bool {
+    /// Whether the user rejected this version and tap of a package.
+    pub fn is_rejected(
+        &self,
+        manager: &str,
+        name: &str,
+        version: Option<&str>,
+        tap: Option<&str>,
+    ) -> bool {
         self.rejected
             .iter()
-            .any(|d| d.manager == manager && d.name == name)
+            .any(|d| d.covers(manager, name, version, tap, None))
+    }
+
+    /// Whether the user rejected exactly what `item` asks for: its version and tap, or its key.
+    fn rejects(&self, item: &InboxItem) -> bool {
+        self.rejected.iter().any(|d| {
+            d.covers(
+                &item.manager,
+                &item.name,
+                item.version.as_deref(),
+                item.tap.as_deref(),
+                item.fingerprint(),
+            )
+        })
     }
 
     pub fn is_pending(&self, manager: &str, name: &str) -> bool {
@@ -251,7 +307,7 @@ impl Inbox {
     /// reported again. A pending item takes the newer check results, so a cleared OSV report
     /// can be approved.
     pub fn add(&mut self, item: InboxItem) -> bool {
-        if self.is_rejected(&item.manager, &item.name) {
+        if self.rejects(&item) {
             return false;
         }
         if let Some(pending) = self
@@ -299,12 +355,7 @@ impl Inbox {
     /// A machine item is only removed: the trust store, not this list, records trusted keys.
     pub fn approve(&mut self, reviewed: &InboxItem) -> Result<InboxItem> {
         let id = reviewed.id();
-        let Some(item) = self.items.iter().find(|i| i.id() == id) else {
-            bail!("No inbox item {}", id);
-        };
-        if !item.same_request(reviewed) {
-            bail!("{} changed since you reviewed it. Review it again", id);
-        }
+        let item = self.reviewed(reviewed)?;
         if item.reasons.contains(&Reason::Malicious) {
             bail!(
                 "OSV lists {} as malicious ({}). Tether will not install it",
@@ -316,26 +367,29 @@ impl Inbox {
         if item.kind != Kind::Package {
             return Ok(item);
         }
-        self.approved.push(Decision {
-            manager: item.manager.clone(),
-            name: item.name.clone(),
-            version: item.version.clone(),
-            tap: item.tap.clone(),
-            at: Utc::now(),
-        });
+        self.approved.push(Decision::of(&item));
         Ok(item)
     }
 
-    /// Reject a pending item so later syncs do not queue it again.
-    pub fn reject(&mut self, query: &str) -> Result<InboxItem> {
-        let item = self.take(query)?;
-        self.rejected.push(Decision {
-            manager: item.manager.clone(),
-            name: item.name.clone(),
-            version: item.version.clone(),
-            tap: item.tap.clone(),
-            at: Utc::now(),
-        });
+    /// The pending item under `reviewed`'s id, if a sync has not replaced it since review.
+    fn reviewed(&self, reviewed: &InboxItem) -> Result<&InboxItem> {
+        let id = reviewed.id();
+        let Some(item) = self.items.iter().find(|i| i.id() == id) else {
+            bail!("No inbox item {}", id);
+        };
+        if !item.same_request(reviewed) {
+            bail!("{} changed since you reviewed it. Review it again", id);
+        }
+        Ok(item)
+    }
+
+    /// Reject the pending item the user reviewed, refused like [`Inbox::approve`] when a
+    /// sync replaced it. The rejection covers only that version and tap, or that key, so a
+    /// different one is queued again as a new item.
+    pub fn reject(&mut self, reviewed: &InboxItem) -> Result<InboxItem> {
+        let id = self.reviewed(reviewed)?.id();
+        let item = self.take(&id)?;
+        self.rejected.push(Decision::of(&item));
         Ok(item)
     }
 
@@ -470,8 +524,9 @@ pub fn approve(reviewed: &InboxItem) -> Result<InboxItem> {
     })
 }
 
-pub fn reject(query: &str) -> Result<InboxItem> {
-    Inbox::update(|inbox| inbox.reject(query))
+/// Record rejection of the item the user reviewed, as shown to them.
+pub fn reject(reviewed: &InboxItem) -> Result<InboxItem> {
+    Inbox::update(|inbox| inbox.reject(reviewed))
 }
 
 /// A machine key in this machine's trust store.
@@ -708,9 +763,66 @@ mod tests {
         assert!(inbox.add(swapped));
         assert_eq!(inbox.items[0].version.as_deref(), Some("6.6.6"));
         assert!(inbox.add(item("pnpm", "left-pad")));
-        inbox.reject("npm:left-pad").unwrap();
-        assert!(inbox.is_rejected("npm", "left-pad"));
-        assert!(!inbox.add(item("npm", "left-pad")));
+        let shown = inbox.find("npm:left-pad").unwrap().clone();
+        inbox.reject(&shown).unwrap();
+        assert!(inbox.is_rejected("npm", "left-pad", Some("6.6.6"), None));
+        assert!(!inbox.add(shown));
+    }
+
+    #[test]
+    fn rejection_covers_only_the_reviewed_version_tap_or_key() {
+        let mut inbox = Inbox::default();
+        let shown = item("npm", "left-pad");
+        inbox.add(shown.clone());
+        // A sync replaced the version after review, so the rejection is refused
+        inbox.add(InboxItem {
+            version: Some("6.6.6".to_string()),
+            ..item("npm", "left-pad")
+        });
+        let err = inbox.reject(&shown).unwrap_err().to_string();
+        assert!(err.contains("changed since you reviewed it"), "{err}");
+        assert!(inbox.rejected.is_empty());
+
+        let shown = inbox.find("npm:left-pad").unwrap().clone();
+        inbox.reject(&shown).unwrap();
+        assert!(inbox.is_rejected("npm", "left-pad", Some("6.6.6"), None));
+        assert!(!inbox.is_rejected("npm", "left-pad", Some("6.6.7"), None));
+        assert!(inbox.add(InboxItem {
+            version: Some("6.6.7".to_string()),
+            ..item("npm", "left-pad")
+        }));
+
+        let mut formula = item("brew_formulae", "bd");
+        formula.version = None;
+        formula.tap = Some("evil/tap".to_string());
+        inbox.add(formula.clone());
+        inbox.reject(&formula).unwrap();
+        assert!(inbox.add(InboxItem {
+            tap: Some("other/tap".to_string()),
+            ..formula
+        }));
+
+        // Rejecting the key shown leaves a later key pending, with its warning
+        let (old, new) = (key(), key());
+        let mut store = TrustStore::default();
+        store.trust("b", &key()).unwrap();
+        let queued = inbox
+            .hold_untrusted_keys(&store, vec![("b".to_string(), old.clone())], "me")
+            .unwrap();
+        inbox.reject(&queued[0]).unwrap();
+        assert!(inbox
+            .hold_untrusted_keys(&store, vec![("b".to_string(), old)], "me")
+            .unwrap()
+            .is_empty());
+        let queued = inbox
+            .hold_untrusted_keys(&store, vec![("b".to_string(), new.clone())], "me")
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued[0].fingerprint(),
+            Some(signing::fingerprint(&new).as_str())
+        );
+        assert_eq!(queued[0].reasons, vec![Reason::KeyChanged]);
     }
 
     #[test]

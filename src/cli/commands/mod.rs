@@ -178,10 +178,12 @@ pub enum PackagesAction {
         /// The version, Homebrew tap or key fingerprint you reviewed. Required without a terminal
         expected: Option<String>,
     },
-    /// Reject a held package so syncs stop offering it
+    /// Reject a held package or key so syncs stop offering that version, tap or key
     Reject {
         /// Item id (manager:name) or a package name
         id: String,
+        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a terminal
+        expected: Option<String>,
     },
 }
 
@@ -716,7 +718,9 @@ impl Cli {
                 Some(PackagesAction::Approve { id, expected }) => {
                     packages::approve(id, expected.as_deref()).await
                 }
-                Some(PackagesAction::Reject { id }) => packages::reject(id).await,
+                Some(PackagesAction::Reject { id, expected }) => {
+                    packages::reject(id, expected.as_deref()).await
+                }
             },
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,

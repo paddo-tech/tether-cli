@@ -218,7 +218,7 @@ pub async fn inbox_list() -> Result<()> {
         Output::list_item(&describe(item));
     }
     Output::dim(
-        "Run 'tether packages approve <id> <version, tap or key>' or 'tether packages reject <id>'",
+        "Run 'tether packages approve <id> <version, tap or key>' or 'tether packages reject <id> <version, tap or key>'",
     );
     Ok(())
 }
@@ -244,31 +244,45 @@ fn check_expected(item: &InboxItem, expected: &str) -> Result<()> {
     Ok(())
 }
 
-/// Approve a held package and install it now, or trust a held machine key. The user
-/// confirms the item as shown, or names its version, tap or key, so a replacement that a
-/// sync queued under the same id is not approved. The sync lock keeps the daemon from
-/// installing the same package while this install runs.
-pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
+/// The item `id` as the user reviewed it: shown and confirmed in a terminal, or checked
+/// against the version, tap or key they named. So a replacement that a sync queued under
+/// the same id is not decided on. None when the user declines.
+fn reviewed(
+    id: &str,
+    expected: Option<&str>,
+    action: &str,
+    question: &str,
+) -> Result<Option<InboxItem>> {
     let item = inbox::Inbox::load()?.find(id)?.clone();
     match expected {
         Some(expected) => check_expected(&item, expected)?,
         None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
             Output::info(&describe(&item));
-            if !Prompt::confirm("Approve this item?", false)? {
-                return Ok(());
+            if !Prompt::confirm(question, false)? {
+                return Ok(None);
             }
         }
         None => {
             if let Some(binding) = binding(&item) {
                 anyhow::bail!(
-                    "Check {}, then run 'tether packages approve {} {}'",
+                    "Check {}, then run 'tether packages {} {} {}'",
                     describe(&item),
+                    action,
                     item.id(),
                     binding
                 );
             }
         }
     }
+    Ok(Some(item))
+}
+
+/// Approve a held package and install it now, or trust a held machine key. The sync lock
+/// keeps the daemon from installing the same package while this install runs.
+pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
+    let Some(item) = reviewed(id, expected, "approve", "Approve this item?")? else {
+        return Ok(());
+    };
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     Output::info(&format!("Approving {}", describe(&item)));
     approve_locked(&item).await
@@ -290,10 +304,17 @@ async fn approve_locked(shown: &InboxItem) -> Result<()> {
     Ok(())
 }
 
-/// Reject a held package so later syncs do not offer it again.
-pub async fn reject(id: &str) -> Result<()> {
-    let item = inbox::reject(id)?;
-    Output::success(&format!("Rejected {}", item.id()));
+/// Reject a held item so later syncs do not offer that version, tap or key again.
+pub async fn reject(id: &str, expected: Option<&str>) -> Result<()> {
+    let Some(item) = reviewed(id, expected, "reject", "Reject this item?")? else {
+        return Ok(());
+    };
+    reject_shown(&item)
+}
+
+fn reject_shown(shown: &InboxItem) -> Result<()> {
+    let item = inbox::reject(shown)?;
+    Output::success(&format!("Rejected {}", describe(&item)));
     Ok(())
 }
 
@@ -339,7 +360,7 @@ pub async fn review_inbox() -> Result<()> {
         let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
         let result = match choice {
             "Install" | "Trust" => approve_locked(&item).await,
-            "Reject" => reject(&item.id()).await,
+            "Reject" => reject_shown(&item),
             _ => Ok(()),
         };
         if let Err(e) = result {

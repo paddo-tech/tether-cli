@@ -217,11 +217,11 @@ impl Trust {
         })
     }
 
-    /// True when the package was already decided on: pending, or rejected.
+    /// True when the package already waits for a decision.
     /// Items held as malicious are checked again, because approval cannot clear them and
     /// an unpinned query can match a report that covers only some releases. Items held only
     /// for trust are checked again too, because a machine record can become trusted later.
-    fn settled(&self, manager: &str, name: &str) -> bool {
+    fn held(&self, manager: &str, name: &str) -> bool {
         self.inbox.items.iter().any(|i| {
             i.manager == manager
                 && i.name == name
@@ -230,7 +230,7 @@ impl Trust {
                     .reasons
                     .iter()
                     .all(|r| matches!(r, Reason::Unsigned | Reason::UntrustedSigner))
-        }) || self.inbox.is_rejected(manager, name)
+        })
     }
 
     /// `tap` is the tap a Homebrew formula or cask resolves to, because an approval covers
@@ -660,7 +660,7 @@ fn gate_taps(
             allowed.push(tap);
             continue;
         }
-        if trust.settled("brew_taps", &tap) {
+        if trust.held("brew_taps", &tap) || trust.inbox.is_rejected("brew_taps", &tap, None, None) {
             continue;
         }
         let checks = Checks {
@@ -689,13 +689,19 @@ async fn gate_brew(
 ) -> Vec<String> {
     let mut allowed = Vec::new();
     for name in names {
-        if trust.settled(manager, &name) {
+        if trust.held(manager, &name) {
             continue;
         }
         let tap = brew.tap_for(&name, manager == "brew_casks").await;
         let untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
-        // Items record only an untrusted tap, so the approval lookup must use the same tap
+        // Items record only an untrusted tap, so the decision lookups must use the same tap
         let tap = tap.filter(|_| untrusted_tap);
+        if trust
+            .inbox
+            .is_rejected(manager, &name, None, tap.as_deref())
+        {
+            continue;
+        }
         let checks = Checks {
             untrusted_tap,
             ..trust.checks(manager, &name, None, tap.as_deref())
@@ -755,9 +761,14 @@ async fn import_simple_manager(
         .filter(|(name, _, _)| {
             !removed_packages.contains(name)
                 && !local_packages.contains(name)
-                && !trust.settled(def.state_key, name)
+                && !trust.held(def.state_key, name)
         })
         .map(|entry| trust.trusted_pin(def, entry))
+        .filter(|(name, version, _)| {
+            !trust
+                .inbox
+                .is_rejected(def.state_key, name, version.as_deref(), None)
+        })
         .collect();
 
     if missing.is_empty() {
@@ -810,7 +821,12 @@ pub async fn gate_rollback(
     let trust = Trust::load(config, sync_path, machine_id)?;
     let candidates = manifest_entries(def.ecosystem, &lines.join("\n"))
         .into_iter()
-        .filter(|(name, _, _)| !trust.settled(state_key, name))
+        .filter(|(name, version, _)| {
+            !trust.held(state_key, name)
+                && !trust
+                    .inbox
+                    .is_rejected(state_key, name, version.as_deref(), None)
+        })
         .collect();
     let mut queued = Vec::new();
     let allowed = gate_simple(def, manager.as_ref(), &trust, candidates, &mut queued).await;
@@ -1440,12 +1456,12 @@ mod tests {
         let mut trust = trust_as(path, "me", &me, &store);
         let item = trust.item("npm", "good", None, None, vec![Reason::Unsigned]);
         trust.inbox.add(item.clone());
-        assert!(!trust.settled("npm", "good"));
+        assert!(!trust.held("npm", "good"));
         trust.inbox.add(InboxItem {
             reasons: vec![Reason::Unsigned, Reason::CooldownUnsupported],
             ..item
         });
-        assert!(trust.settled("npm", "good"));
+        assert!(trust.held("npm", "good"));
     }
 
     #[test]

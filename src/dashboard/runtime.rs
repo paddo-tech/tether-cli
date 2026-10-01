@@ -119,7 +119,7 @@ impl Runtime {
                 self.spawn(
                     async move {
                         Msg::InboxDone(
-                            crate::packages::inbox::reject(&item.id())
+                            crate::packages::inbox::reject(&item)
                                 .map(|item| format!("Rejected {}", item.name))
                                 .map_err(|e| e.to_string()),
                         )
