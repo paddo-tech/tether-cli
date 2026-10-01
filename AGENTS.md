@@ -46,6 +46,7 @@ cargo fmt                # Format
 - **owo-colors** - Terminal colors
 - **aes-gcm** - Encryption
 - **age** - Passphrase-based key encryption
+- **ssh-key** - Commit signing keys and SSH signatures
 
 ## Feature Toggles
 
@@ -72,12 +73,17 @@ Managed via `tether config features`. Available toggles:
 - `daemon.log` - Daemon logs
 - `backups/` - File backups
 - `conflicts.json` - Conflict state
+- `inbox.json` - Approval inbox (never synced)
+- `inbox.lock` - Lock for inbox and trust store changes
+- `run/` - Empty working directory for package managers
+- `signing_key` - This machine's SSH commit signing key (0600)
+- `trusted_keys` - Trusted machine keys, git allowed signers format (never synced)
 
 **Sync repo structure:**
 - `dotfiles/` - Dotfiles
 - `configs/` - App configs
 - `manifests/` - Package manifests
-- `machines/` - Machine-specific state
+- `machines/` - Machine-specific state (`<id>.json`) and public signing keys (`<id>.pub`)
 - `projects/` - Project secrets
 
 ## Code Quality

@@ -1,5 +1,5 @@
 use super::command;
-use super::inbox::{self, InboxItem, Reason};
+use super::inbox::{self, InboxItem, Kind, Reason};
 use super::policy::first_warning;
 use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy};
 use anyhow::Result;
@@ -153,12 +153,14 @@ fn tap_of(name: &str) -> Option<&str> {
 /// The daemon re-reads the Brewfile every cycle, so only newly held items are reported.
 pub fn hold_untrusted(untrusted: &BrewfilePackages) {
     let item = |manager: &str, name: &String, tap: Option<&str>| InboxItem {
+        kind: Kind::Package,
         manager: manager.to_string(),
         name: name.clone(),
         version: None,
         tap: tap.map(str::to_string),
         source_machine: None,
         commit: None,
+        signer: None,
         reasons: vec![Reason::UntrustedTap],
         advisories: Vec::new(),
         first_seen: chrono::Utc::now(),

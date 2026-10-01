@@ -12,16 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Package manifests now record the version each machine has installed: `name@1.2.3` in `npm.txt`, `pnpm.txt` and `bun.txt`, `name==1.2.3` in `uv.txt`, and `name:1.2.3` in `gems.txt`. When machines differ, the manifest keeps the newest version. A new machine installs that exact version. Lines without a version still work and install the newest release that passes the release-age limit. The Brewfile stays unpinned, because Homebrew installs only the current release
 - New approval inbox in `~/.tether/inbox.json`. It stays on this machine and is never synced. Use `tether packages inbox` to list held packages, and `tether packages approve <id>` or `tether packages reject <id>` to decide. An approved package installs at once. A rejected package is not offered again. An approved Homebrew package from an untrusted tap also trusts that tap
 - `tether sync` in a terminal now asks about held packages. The daemon holds them and sends one notification for each new batch
-- New setting `packages.auto_install_from_trusted` (default false)
+- New setting `packages.auto_install_from_trusted` (default true)
+- Each machine now has an SSH signing key in `~/.tether/signing_key`. Tether makes it on `tether init`, or on the first sync after an upgrade. Tether signs every commit it makes in the personal sync repo with it, and `git log --show-signature` can verify them. The public key goes to `machines/<id>.pub` in the sync repo
+- New trust store in `~/.tether/trusted_keys`. It stays on this machine and is never synced. It starts with this machine's own key. A key from a new machine waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
+- `tether machines list` now shows each machine's key fingerprint and whether this machine trusts it
 - Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
 
 ### Changed
 
-- A package that another machine added to a manifest no longer installs on its own. It waits in the approval inbox. Set `packages.auto_install_from_trusted = true` to install such packages without approval when they pass every other check
+- A package that another machine added to a manifest no longer installs on its own unless a trusted machine signed the commit that added it. Other packages wait in the approval inbox. Only commits pulled since the last sync count, so older history does not fill the inbox. Set `packages.auto_install_from_trusted = false` to hold signed packages too
 - Synced packages that the installed manager cannot hold to `packages.min_release_age_days` now wait in the approval inbox. Before, they installed after a warning. This covers gem and old npm, pnpm and bun
 - Homebrew taps that are not trusted, and formulae and casks from them, now wait in the approval inbox. Before, Tether skipped them with a warning
 
 ### Security
+
+- When a trusted machine publishes a different signing key, Tether stops trusting that machine, shows a warning, and asks again through the inbox
+- A machine record in `machines/` must have its machine id as its file name. Tether ignores other records. Tether counts its own record only when this machine signed the last change to it
 
 - Tether now checks every package name from a manifest before it runs a package manager. It skips names that look like flags, URLs, paths, tarballs or `git+`/`github:`/`file:`/`link:` specs, and shows a warning
 - New setting `packages.min_release_age_days` (default 7, 0 turns it off). npm, pnpm, bun and uv installs and upgrades skip releases newer than this. The daemon does not auto-upgrade a manager that is too old to enforce it (npm before 11.10, pnpm before 10.16, bun before 1.3, and gem), and it logs a warning once

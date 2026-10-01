@@ -1,38 +1,72 @@
 use super::{manager_for_key, osv, BrewManager, PackageInfo, PackageManager};
+use crate::cli::Output;
+use crate::sync::signing::{self, TrustStore};
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use ssh_key::PublicKey;
+use std::path::{Path, PathBuf};
 
 /// Why a synced package waits for the user instead of installing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
-    /// It came from another machine, and nothing yet proves that machine made the change.
+    /// It came from another machine, and no trusted signature lets it install on its own:
+    /// the change was unsigned, came from before this sync, or
+    /// `packages.auto_install_from_trusted` is off.
     Unsigned,
+    /// The commit that added it carries a valid signature from a key this machine does not trust.
+    UntrustedSigner,
     /// It is a tap outside the trusted taps, or a formula or cask from one.
     UntrustedTap,
     /// The installed manager cannot enforce `packages.min_release_age_days`.
     CooldownUnsupported,
     /// OSV lists a `MAL-` advisory for it. Approval cannot override this.
     Malicious,
+    /// A machine published a signing key this machine has not trusted yet.
+    NewMachine,
+    /// A trusted machine published a different signing key, so its old key lost trust.
+    KeyChanged,
 }
 
 impl Reason {
     pub fn label(self) -> &'static str {
         match self {
             Reason::Unsigned => "from another machine",
+            Reason::UntrustedSigner => "signed by an untrusted key",
             Reason::UntrustedTap => "untrusted tap",
             Reason::CooldownUnsupported => "release age not checked",
             Reason::Malicious => "malicious (OSV)",
+            Reason::NewMachine => "new machine key",
+            Reason::KeyChanged => "machine key changed",
         }
     }
 }
 
-/// A package held for approval. `source_machine` and `commit` identify the manifest
-/// change it came from, so signature checks can verify that commit later.
+/// Manager value of a machine trust item, so its id is `machine:<machine id>`.
+pub const MACHINE: &str = "machine";
+
+/// What approving an item does.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum Kind {
+    /// Install the package.
+    #[default]
+    Package,
+    /// Trust this signing key for the machine named by the item's `name`.
+    TrustMachine {
+        /// OpenSSH public key line
+        public_key: String,
+        fingerprint: String,
+    },
+}
+
+/// An item held for approval: a package, or a machine key to trust. For a package,
+/// `source_machine` and `commit` identify the manifest change it came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InboxItem {
+    #[serde(default)]
+    pub kind: Kind,
     /// Machine-state key: npm, pnpm, bun, gem, uv, brew_formulae, brew_casks or brew_taps
     pub manager: String,
     pub name: String,
@@ -45,6 +79,9 @@ pub struct InboxItem {
     pub source_machine: Option<String>,
     #[serde(default)]
     pub commit: Option<String>,
+    /// Fingerprint of the key that validly signed `commit`, trusted or not
+    #[serde(default)]
+    pub signer: Option<String>,
     pub reasons: Vec<Reason>,
     /// OSV advisory ids for this version, including non-blocking ones
     #[serde(default)]
@@ -53,6 +90,26 @@ pub struct InboxItem {
 }
 
 impl InboxItem {
+    /// A request to trust `key` as `machine_id`.
+    pub fn machine(machine_id: &str, key: &PublicKey, reason: Reason) -> Result<Self> {
+        Ok(Self {
+            kind: Kind::TrustMachine {
+                public_key: key.to_openssh()?,
+                fingerprint: signing::fingerprint(key),
+            },
+            manager: MACHINE.to_string(),
+            name: machine_id.to_string(),
+            version: None,
+            tap: None,
+            source_machine: Some(machine_id.to_string()),
+            commit: None,
+            signer: None,
+            reasons: vec![reason],
+            advisories: Vec::new(),
+            first_seen: Utc::now(),
+        })
+    }
+
     /// Stable id used by `tether packages approve|reject`.
     pub fn id(&self) -> String {
         format!("{}:{}", self.manager, self.name)
@@ -190,7 +247,8 @@ impl Inbox {
     }
 
     /// Approve a pending item. A Homebrew item from an untrusted tap also approves the tap,
-    /// because brew cannot install it otherwise.
+    /// because brew cannot install it otherwise. A machine item is only removed: the
+    /// trust store, not this list, records trusted keys.
     pub fn approve(&mut self, query: &str) -> Result<InboxItem> {
         let item = self.find(query)?;
         if item.reasons.contains(&Reason::Malicious) {
@@ -201,6 +259,9 @@ impl Inbox {
             );
         }
         let item = self.take(query)?;
+        if item.kind != Kind::Package {
+            return Ok(item);
+        }
         let now = Utc::now();
         self.approved.push(Decision {
             manager: item.manager.clone(),
@@ -233,11 +294,75 @@ impl Inbox {
         Ok(item)
     }
 
+    /// Queue a trust item for each published key `store` lacks, and untrust a machine whose
+    /// key changed. Returns the newly queued items.
+    pub fn hold_untrusted_keys(
+        &mut self,
+        store: &mut TrustStore,
+        published: Vec<(String, PublicKey)>,
+        this_machine: &str,
+    ) -> Result<Vec<InboxItem>> {
+        let mut queued = Vec::new();
+        for (id, key) in published {
+            if id == this_machine {
+                continue;
+            }
+            if let Some(owner) = store.machine_for(&key) {
+                // A renamed machine keeps its key, so follow the new name
+                if owner != id {
+                    store.trust(&id, &key);
+                }
+                continue;
+            }
+            let reason = match store.key_for(&id) {
+                Some(old) => {
+                    Output::warning(&format!(
+                        "SIGNING KEY CHANGED for machine {}: {} is now {}. Tether no longer trusts \
+                         it. If you did not set that machine up again, someone may be signing as \
+                         it. Check, then run 'tether machines trust {}'",
+                        id,
+                        signing::fingerprint(old),
+                        signing::fingerprint(&key),
+                        id
+                    ));
+                    store.untrust(&id);
+                    Reason::KeyChanged
+                }
+                None => Reason::NewMachine,
+            };
+            let item = InboxItem::machine(&id, &key, reason)?;
+            // Keep a pending item for this key, so a key change stays labeled as one
+            if self
+                .items
+                .iter()
+                .any(|i| i.is(MACHINE, &id) && i.kind == item.kind)
+            {
+                continue;
+            }
+            if self.add(item.clone()) {
+                queued.push(item);
+            }
+        }
+        Ok(queued)
+    }
+
     /// Drop pending items for packages that are now installed by other means.
     pub fn prune_installed(&mut self, manager: &str, installed: impl Fn(&str) -> bool) {
         self.items
             .retain(|i| i.manager != manager || !installed(&i.name));
     }
+}
+
+/// What verifying the commit that added a package found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Signer {
+    /// Unsigned, badly signed, or not added by a commit pulled in this sync
+    #[default]
+    None,
+    /// Validly signed by a key this machine does not trust
+    Untrusted,
+    /// Validly signed by a key in this machine's trust store
+    Trusted,
 }
 
 /// What the trust checks found for one synced package.
@@ -247,6 +372,7 @@ pub struct Checks {
     pub from_this_machine: bool,
     pub approved: bool,
     pub auto_install_from_trusted: bool,
+    pub signer: Signer,
     pub cooldown_unsupported: bool,
     pub untrusted_tap: bool,
     pub malicious: bool,
@@ -267,9 +393,13 @@ pub fn reasons(checks: Checks) -> Vec<Reason> {
     if checks.cooldown_unsupported {
         reasons.push(Reason::CooldownUnsupported);
     }
-    // Commit signatures do not exist yet, so another machine's package installs on its own only when auto_install_from_trusted opts in
-    if !checks.from_this_machine && !checks.auto_install_from_trusted {
-        reasons.push(Reason::Unsigned);
+    // Another machine's package installs on its own only when a trusted key signed the commit that added it
+    if !checks.from_this_machine {
+        match checks.signer {
+            Signer::Trusted if checks.auto_install_from_trusted => {}
+            Signer::Untrusted => reasons.push(Reason::UntrustedSigner),
+            _ => reasons.push(Reason::Unsigned),
+        }
     }
     reasons
 }
@@ -292,18 +422,100 @@ pub fn add(items: Vec<InboxItem>) -> Result<Vec<InboxItem>> {
     })
 }
 
-/// Record approval. The caller installs the item with [`install`] or leaves it to the next sync.
+/// Record approval. A machine item trusts its key now. For a package, the caller installs
+/// it with [`install`] or leaves it to the next sync.
 pub fn approve(query: &str) -> Result<InboxItem> {
-    Inbox::update(|inbox| inbox.approve(query))
+    Inbox::update(|inbox| {
+        let item = inbox.approve(query)?;
+        if let Kind::TrustMachine { public_key, .. } = &item.kind {
+            let mut store = TrustStore::load()?;
+            store.trust(&item.name, &PublicKey::from_openssh(public_key)?);
+            store.save()?;
+        }
+        Ok(item)
+    })
 }
 
 pub fn reject(query: &str) -> Result<InboxItem> {
     Inbox::update(|inbox| inbox.reject(query))
 }
 
+/// A machine key in this machine's trust store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedMachine {
+    pub machine_id: String,
+    /// `SHA256:...`, as `ssh-keygen -l` prints it
+    pub fingerprint: String,
+}
+
+pub fn trusted_machines() -> Result<Vec<TrustedMachine>> {
+    Ok(TrustStore::load()?
+        .keys
+        .iter()
+        .map(|(id, key)| TrustedMachine {
+            machine_id: id.clone(),
+            fingerprint: signing::fingerprint(key),
+        })
+        .collect())
+}
+
+/// Trust the key `machine_id` published in the sync repo, and settle its inbox item.
+pub fn trust_machine(sync_path: &Path, machine_id: &str) -> Result<TrustedMachine> {
+    let Some((_, key)) = signing::published_keys(sync_path)
+        .into_iter()
+        .find(|(id, _)| id == machine_id)
+    else {
+        bail!("Machine {} has not published a signing key", machine_id);
+    };
+    Inbox::update(|inbox| {
+        let mut store = TrustStore::load()?;
+        store.trust(machine_id, &key);
+        store.save()?;
+        inbox.items.retain(|i| !i.is(MACHINE, machine_id));
+        inbox
+            .rejected
+            .retain(|d| d.manager != MACHINE || d.name != machine_id);
+        Ok(TrustedMachine {
+            machine_id: machine_id.to_string(),
+            fingerprint: signing::fingerprint(&key),
+        })
+    })
+}
+
+/// Remove a machine's key from the trust store. Returns false when it was not trusted.
+/// Its published key returns to the inbox on the next sync.
+pub fn untrust_machine(machine_id: &str) -> Result<bool> {
+    Inbox::update(|_| {
+        let mut store = TrustStore::load()?;
+        let removed = store.untrust(machine_id);
+        store.save()?;
+        Ok(removed)
+    })
+}
+
+/// Queue every machine key published in the sync repo that this machine does not trust.
+/// A trusted machine that publishes a different key loses trust until the user approves
+/// the new key. Returns the newly queued items.
+pub fn queue_machine_keys(sync_path: &Path, this_machine: &str) -> Result<Vec<InboxItem>> {
+    let published = signing::published_keys(sync_path);
+    Inbox::update(|inbox| {
+        let mut store = TrustStore::load()?;
+        let before = store.clone();
+        let queued = inbox.hold_untrusted_keys(&mut store, published, this_machine)?;
+        if store != before {
+            store.save()?;
+        }
+        Ok(queued)
+    })
+}
+
 /// Install an approved item now. `interactive` lets a cask prompt for a password.
+/// A machine item has nothing to install.
 /// OSV is asked again, because an advisory can appear after the item was queued.
 pub async fn install(item: &InboxItem, interactive: bool) -> Result<()> {
+    if item.kind != Kind::Package {
+        return Ok(());
+    }
     let package = PackageInfo {
         name: item.name.clone(),
         version: item.version.clone(),
@@ -353,12 +565,14 @@ mod tests {
 
     fn item(manager: &str, name: &str) -> InboxItem {
         InboxItem {
+            kind: Kind::Package,
             manager: manager.to_string(),
             name: name.to_string(),
             version: Some("1.0.0".to_string()),
             tap: None,
             source_machine: Some("other".to_string()),
             commit: Some("abc123".to_string()),
+            signer: None,
             reasons: vec![Reason::Unsigned],
             advisories: Vec::new(),
             first_seen: Utc::now(),
@@ -430,13 +644,30 @@ mod tests {
 
     #[test]
     fn reasons_follow_the_trust_model() {
-        let other = Checks::default();
-        assert_eq!(reasons(other), vec![Reason::Unsigned]);
-        assert!(reasons(Checks {
+        let other = Checks {
             auto_install_from_trusted: true,
+            ..Checks::default()
+        };
+        assert_eq!(reasons(other), vec![Reason::Unsigned]);
+        let trusted = Checks {
+            signer: Signer::Trusted,
             ..other
-        })
-        .is_empty());
+        };
+        assert!(reasons(trusted).is_empty());
+        assert_eq!(
+            reasons(Checks {
+                auto_install_from_trusted: false,
+                ..trusted
+            }),
+            vec![Reason::Unsigned]
+        );
+        assert_eq!(
+            reasons(Checks {
+                signer: Signer::Untrusted,
+                ..other
+            }),
+            vec![Reason::UntrustedSigner]
+        );
         assert!(reasons(Checks {
             from_this_machine: true,
             ..other
@@ -444,10 +675,9 @@ mod tests {
         .is_empty());
         assert_eq!(
             reasons(Checks {
-                auto_install_from_trusted: true,
                 cooldown_unsupported: true,
                 untrusted_tap: true,
-                ..other
+                ..trusted
             }),
             vec![Reason::UntrustedTap, Reason::CooldownUnsupported]
         );
@@ -465,6 +695,71 @@ mod tests {
             }),
             vec![Reason::Malicious]
         );
+    }
+
+    fn key() -> PublicKey {
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap()
+            .public_key()
+            .clone()
+    }
+
+    #[test]
+    fn new_machine_keys_wait_for_trust() {
+        let (own, b, c) = (key(), key(), key());
+        let mut store = TrustStore::default();
+        store.trust("me", &own);
+        store.trust("b", &b);
+        let mut inbox = Inbox::default();
+        let published = vec![
+            ("me".to_string(), own.clone()),
+            ("b".to_string(), b.clone()),
+            ("c".to_string(), c.clone()),
+        ];
+        let queued = inbox
+            .hold_untrusted_keys(&mut store, published.clone(), "me")
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id(), "machine:c");
+        assert_eq!(queued[0].reasons, vec![Reason::NewMachine]);
+        assert!(inbox
+            .hold_untrusted_keys(&mut store, published, "me")
+            .unwrap()
+            .is_empty());
+
+        let approved = inbox.approve("machine:c").unwrap();
+        assert!(inbox.items.is_empty());
+        assert!(inbox.approved.is_empty());
+        let Kind::TrustMachine { fingerprint, .. } = approved.kind else {
+            panic!("not a machine item");
+        };
+        assert_eq!(fingerprint, signing::fingerprint(&c));
+    }
+
+    #[test]
+    fn rotated_machine_key_loses_trust() {
+        let (b, b2) = (key(), key());
+        let mut store = TrustStore::default();
+        store.trust("b", &b);
+        let mut inbox = Inbox::default();
+        let queued = inbox
+            .hold_untrusted_keys(&mut store, vec![("b".to_string(), b2.clone())], "me")
+            .unwrap();
+        assert!(store.key_for("b").is_none());
+        assert_eq!(queued[0].reasons, vec![Reason::KeyChanged]);
+        // The next sync keeps the key-change label instead of calling it a new machine
+        inbox
+            .hold_untrusted_keys(&mut store, vec![("b".to_string(), b2.clone())], "me")
+            .unwrap();
+        assert_eq!(inbox.items[0].reasons, vec![Reason::KeyChanged]);
+
+        // A renamed machine keeps its trusted key under the new name
+        store.trust("b", &b2);
+        assert!(inbox
+            .hold_untrusted_keys(&mut store, vec![("b-new".to_string(), b2.clone())], "me")
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.machine_for(&b2), Some("b-new"));
     }
 
     #[test]
