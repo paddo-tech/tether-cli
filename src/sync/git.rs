@@ -19,7 +19,7 @@ fn write_signed(
     let content = buffer
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Commit is not valid UTF-8"))?;
-    let signature = crate::sync::signing::sign(key, content.as_bytes())?;
+    let signature = crate::sync::signing::sign_commit(key, content.as_bytes())?;
     Ok(repo.commit_signed(content, &signature, None)?)
 }
 
@@ -51,13 +51,6 @@ impl GitBackend {
             Ok(out) => out.status.success(),
             Err(_) => false,
         }
-    }
-
-    /// HEAD's commit id, or None before the first commit.
-    pub fn head_commit(&self) -> Result<Option<String>> {
-        let repo = Repository::open(&self.repo_path)?;
-        let head = repo.head().ok().and_then(|h| h.target());
-        Ok(head.map(|oid| oid.to_string()))
     }
 
     /// Check if remote branch exists
@@ -101,23 +94,18 @@ impl GitBackend {
         })
     }
 
-    /// This machine's signing key when this is the personal sync repo. Only that repo's
-    /// commits are verified, so team and collab commits stay unsigned.
-    fn signing_key(&self) -> Result<Option<(String, ssh_key::PrivateKey)>> {
+    /// This machine's signing key when this is the personal sync repo. Commit signatures
+    /// there are an audit trail only, so team and collab commits stay unsigned.
+    fn signing_key(&self) -> Result<Option<ssh_key::PrivateKey>> {
         if self.repo_path != crate::sync::SyncEngine::sync_path()? {
             return Ok(None);
         }
         let machine_id = crate::sync::SyncState::load()?.machine_id;
-        let key = crate::sync::signing::load_or_create(&machine_id)?;
-        Ok(Some((machine_id, key)))
+        Ok(Some(crate::sync::signing::load_or_create(&machine_id)?))
     }
 
     pub fn commit(&self, message: &str, author: &str) -> Result<()> {
-        let key = self.signing_key()?;
-        if let Some((machine_id, key)) = &key {
-            crate::sync::signing::publish(&self.repo_path, machine_id, key.public_key())?;
-        }
-        self.commit_with_key(message, author, key.as_ref().map(|(_, k)| k))
+        self.commit_with_key(message, author, self.signing_key()?.as_ref())
     }
 
     pub(crate) fn commit_with_key(
@@ -159,49 +147,6 @@ impl GitBackend {
             }
         }
 
-        Ok(())
-    }
-
-    /// Rebase rewrites local commits without their signatures, so sign them again before
-    /// they are pushed.
-    fn sign_unpushed(&self, key: &ssh_key::PrivateKey) -> Result<()> {
-        let repo = Repository::open(&self.repo_path)?;
-        let Ok(base) = repo.revparse_single("origin/main") else {
-            return Ok(());
-        };
-        let mut walk = repo.revwalk()?;
-        walk.push_head()?;
-        walk.hide(base.id())?;
-        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)?;
-        let local: Vec<git2::Oid> = walk.collect::<std::result::Result<_, _>>()?;
-
-        let mut parent: Option<git2::Commit> = None;
-        for oid in local {
-            let commit = repo.find_commit(oid)?;
-            // A rebase under the user's own commit.gpgsign leaves a signature other machines do not trust
-            let signed_here = crate::sync::signing::commit_signer(&repo, oid)
-                .is_some_and(|k| k.key_data() == key.public_key().key_data());
-            if parent.is_none() && signed_here {
-                continue;
-            }
-            let parents: Vec<git2::Commit> = match parent.take() {
-                Some(p) => vec![p],
-                None => commit.parents().collect(),
-            };
-            let new = write_signed(
-                &repo,
-                key,
-                &commit.author(),
-                &commit.committer(),
-                commit.message_raw().unwrap_or_default(),
-                &commit.tree()?,
-                &parents.iter().collect::<Vec<_>>(),
-            )?;
-            parent = Some(repo.find_commit(new)?);
-        }
-        if let Some(tip) = parent {
-            set_head(&repo, tip.id(), "tether: sign rebased commits")?;
-        }
         Ok(())
     }
 
@@ -316,9 +261,7 @@ impl GitBackend {
             return Ok(true);
         }
 
-        if let Some((_, key)) = self.signing_key()? {
-            self.sign_unpushed(&key)?;
-        }
+        // Rebased commits stay unsigned: commit signatures carry no trust, signed machine records do
         Ok(false)
     }
 
@@ -1026,42 +969,6 @@ mod tests {
         a.commit_with_key("signed", "a", Some(&key)).unwrap();
         assert!(git_verifies_head(&a.repo_path, &key));
         assert!(!git_verifies_head(&a.repo_path, &signing_key()));
-
-        let repo = Repository::open(&a.repo_path).unwrap();
-        let head = repo.head().unwrap().target().unwrap();
-        let signer = crate::sync::signing::commit_signer(&repo, head).unwrap();
-        assert_eq!(signer.key_data(), key.public_key().key_data());
-        let parent = repo.find_commit(head).unwrap().parent_id(0).unwrap();
-        assert!(crate::sync::signing::commit_signer(&repo, parent).is_none());
-    }
-
-    #[test]
-    fn test_rebased_commits_are_signed_again() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let (a, b) = two_clones(tmp.path());
-        let key = signing_key();
-        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
-        a.commit("a", "a").unwrap();
-        a.push().unwrap();
-
-        std::fs::write(b.repo_path.join("one"), "1").unwrap();
-        b.commit_with_key("one", "b", Some(&key)).unwrap();
-        std::fs::write(b.repo_path.join("two"), "2").unwrap();
-        b.commit_with_key("two", "b", Some(&key)).unwrap();
-        git(&b.repo_path, &["fetch", "origin", "main"]);
-        git(&b.repo_path, &["rebase", "origin/main"]);
-        assert!(!git_verifies_head(&b.repo_path, &key));
-
-        b.sign_unpushed(&key).unwrap();
-        assert!(git_verifies_head(&b.repo_path, &key));
-        assert!(b.git(&["diff", "--quiet", "HEAD"]).is_ok());
-        let repo = Repository::open(&b.repo_path).unwrap();
-        let head = repo.head().unwrap().peel_to_commit().unwrap();
-        assert!(crate::sync::signing::commit_signer(&repo, head.parent_id(0).unwrap()).is_some());
-        assert_eq!(
-            head.parent(0).unwrap().parent_id(0).unwrap().to_string(),
-            git(&b.repo_path, &["rev-parse", "origin/main"])
-        );
     }
 
     #[test]

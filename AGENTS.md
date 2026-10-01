@@ -76,14 +76,14 @@ Managed via `tether config features`. Available toggles:
 - `inbox.json` - Approval inbox (never synced)
 - `inbox.lock` - Lock for inbox and trust store changes
 - `run/` - Empty working directory for package managers
-- `signing_key` - This machine's SSH commit signing key (0600)
-- `trusted_keys` - Trusted machine keys, git allowed signers format (never synced)
+- `signing_key` - This machine's ed25519 SSH key for record and commit signatures (0600)
+- `trusted_keys` - Trusted machine keys (never synced). TOML: `version = 1`, then `[machines."<id>"]` with `public_key` (OpenSSH line) and `fingerprint` (`SHA256:...`). Earlier builds wrote git allowed signers lines; Tether reads them and rewrites the file as TOML on the next trust change
 
 **Sync repo structure:**
 - `dotfiles/` - Dotfiles
 - `configs/` - App configs
 - `manifests/` - Package manifests
-- `machines/` - Machine-specific state (`<id>.json`) and public signing keys (`<id>.pub`)
+- `machines/` - Machine-specific state (`<id>.json`) and its signature (`<id>.json.sig`, sshsig, namespace `tether-machine`, over `tether-machine-v1\n<id>\n<sha256 of the json bytes>\n`). Only a record whose signature verifies against the trusted key for its id lets packages auto-install
 - `projects/` - Project secrets
 
 ## Code Quality

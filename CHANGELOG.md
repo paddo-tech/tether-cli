@@ -13,23 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New approval inbox in `~/.tether/inbox.json`. It stays on this machine and is never synced. Use `tether packages inbox` to list held packages, and `tether packages approve <id>` or `tether packages reject <id>` to decide. An approved package installs at once. A rejected package is not offered again. An approved Homebrew package from an untrusted tap also trusts that tap
 - `tether sync` in a terminal now asks about held packages. The daemon holds them and sends one notification for each new batch
 - New setting `packages.auto_install_from_trusted` (default true)
-- Each machine now has an SSH signing key in `~/.tether/signing_key`. Tether makes it on `tether init`, or on the first sync after an upgrade. Tether signs every commit it makes in the personal sync repo with it, and `git log --show-signature` can verify them. The public key goes to `machines/<id>.pub` in the sync repo
-- New trust store in `~/.tether/trusted_keys`. It stays on this machine and is never synced. It starts with this machine's own key. A key from a new machine waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
+- Each machine now has an SSH signing key in `~/.tether/signing_key`. Tether makes it on `tether init`, or on the first sync after an upgrade. Each sync signs this machine's record `machines/<id>.json` with it, in `machines/<id>.json.sig`. The signature covers the machine id and the exact bytes of the record. Tether also signs the commits it makes in the personal sync repo, and `git log --show-signature` can verify them. Commit signatures are an audit trail only
+- New trust store in `~/.tether/trusted_keys`, a TOML file with one entry per machine id: its public key and the key's fingerprint. It stays on this machine and is never synced. It starts with this machine's own key. A key that signs a new machine's record waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
 - `tether machines list` now shows each machine's key fingerprint and whether this machine trusts it
 - Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
 - The dashboard has a new Security tab for the approval inbox. It shows each held package with its reasons, source machine, commit and OSV advisories, and each machine key that waits for trust with its fingerprint. A changed key shows a loud warning. Press `a` to approve and install or to trust a key, `x` to reject, or `A` to approve all packages that are not malicious. The tab also lists the trusted machines. The header shows the number of held items
 
 ### Changed
 
-- A package that another machine added to a manifest no longer installs on its own unless a trusted machine signed the commit that added it. Other packages wait in the approval inbox. Only commits pulled since the last sync count, so older history does not fill the inbox. Set `packages.auto_install_from_trusted = false` to hold signed packages too
+- A package from the manifests no longer installs on its own unless a trusted machine record lists that exact package and version. A record is trusted when its signature verifies against the key this machine trusts for that machine id. The manifests and commit signatures do not count. Other packages wait in the approval inbox. Tether checks this again on every sync, and it checks held packages again too, so a package installs once a record that lists it becomes trusted. Set `packages.auto_install_from_trusted = false` to hold packages from trusted records too
 - Synced packages that the installed manager cannot hold to `packages.min_release_age_days` now wait in the approval inbox. Before, they installed after a warning. This covers gem and old npm, pnpm and bun
 - Homebrew taps that are not trusted, and formulae and casks from them, now wait in the approval inbox. Before, Tether skipped them with a warning
 
 ### Security
 
 - Dashboard installs and package rollbacks now check OSV first, like synced installs. A `MAL-` advisory blocks them
-- When a trusted machine publishes a different signing key, Tether stops trusting that machine, shows a warning, and asks again through the inbox
-- A machine record in `machines/` must have its machine id as its file name. Tether ignores other records. Tether counts its own record only when this machine signed the last change to it
+- When a trusted machine signs its record with a different key, Tether shows a warning and asks through the inbox. Until you approve the new key, Tether does not trust that record
+- Trust never moves to another machine id on its own. A renamed machine waits in the inbox as a new machine, even with a key that this machine trusts under the old name
+- A machine record in `machines/` must have a valid machine id (letters, digits, `.`, `_` and `-`) as its file name, and the same id inside it. Tether ignores other records and shows a warning. Tether counts its own record only when this machine's key signed it
 - Tether now checks every package name from a manifest before it runs a package manager. It skips names that look like flags, URLs, paths, tarballs or `git+`/`github:`/`file:`/`link:` specs, and shows a warning
 - New setting `packages.min_release_age_days` (default 7, 0 turns it off). npm, pnpm, bun and uv installs and upgrades skip releases newer than this. The daemon does not auto-upgrade a manager that is too old to enforce it (npm before 11.10, pnpm before 10.16, bun before 1.3, and gem), and it logs a warning once
 - npm, pnpm and bun now install and upgrade with install scripts turned off. List packages that need their scripts in `packages.allow_scripts`
@@ -40,9 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tether skips `pnpm update` for packages with scripts off on pnpm 12.0.0 to 12.3.1, because those versions reject `update --ignore-scripts`. It shows a warning once
 - `packages.allow_scripts` now runs scripts only for the listed package. pnpm 10.4 and later install it with `--allow-build=<name>`, and npm 12 and later with `--allow-scripts=<name>`. On older npm or pnpm the listed package also installs with scripts off, because those versions would run the scripts of all its dependencies too. Tether shows a warning once
 - uv now gets the release-age limit as a duration (`--exclude-newer "7 days"`) on uv 0.9.17 and later. uv saves the limit in each tool receipt. A saved timestamp kept later upgrades at that date, but a saved duration stays relative. With `packages.min_release_age_days = 0`, uv 0.11.24 and later get `--exclude-newer false`, which clears a saved limit. On older uv, run `uv tool install --force <name>` to clear it
-- Tether now looks up the tap of a short Homebrew name, such as `bun`, before it installs it. brew can resolve a short name to any tapped repository, so a name from an untrusted tap is skipped like a qualified one
+- Tether now looks up the tap of a short Homebrew name, such as `bun`, before it installs it. brew can resolve a short name to any tapped repository, so a name from an untrusted tap is skipped like a qualified one. The lookup asks brew only about the core tap and reads other taps' file names, because `brew info` runs a formula's Ruby code
 - `tether upgrade` now asks before it upgrades a manager that cannot enforce `packages.min_release_age_days`, such as gem or an old npm. Without a terminal, it skips that manager
 - Homebrew upgrades now upgrade only outdated formulae and casks from trusted taps. Before, Tether ran a plain `brew upgrade`, which also upgraded packages from untrusted taps
+- npm, pnpm, bun, uv and gem upgrades, from the daemon or `tether upgrade`, now check each target version against OSV first. A package whose target has a `MAL-` advisory keeps its installed version and waits in the inbox. Tether reads the targets from `npm outdated -g --json`, `pnpm outdated -g --format json`, the `bun outdated -g` table, `uv tool list --outdated` and `gem outdated`. Homebrew has no OSV data, so brew upgrades are not checked
+- `tether rollback` now checks the packages it would install like a sync does. Packages that fail a check wait in the inbox
+- `tether packages approve` now takes the sync lock while it installs, so the daemon cannot install the same package at the same time
+
+### Fixed
+
+- A uv tool that Tether installed at a pinned version now upgrades again. uv saves `name==version` in the tool receipt, so Tether installs the bare name a second time to drop that pin and keep the installed version
 
 ### Changed
 

@@ -15,6 +15,26 @@ fn parse_package_version(s: &str) -> (String, Option<String>) {
     (s.to_string(), None)
 }
 
+/// Name and `Latest` version from the `bun outdated` table, which has no JSON form, for
+/// each package whose `Latest` differs from `Current`. `bun add -g` installs `Latest`.
+/// bun marks a version that the release-age limit held back with ` *`.
+fn parse_outdated_table(stdout: &str) -> Vec<(String, String)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            // A row is "| Package | Current | Update | Latest |"
+            let [_, name, current, _, latest, _] = cells.as_slice() else {
+                return None;
+            };
+            let name = name.split_whitespace().next()?;
+            let latest = latest.trim_end_matches('*').trim();
+            (name != "Package" && !latest.is_empty() && latest != *current)
+                .then(|| (name.to_string(), latest.to_string()))
+        })
+        .collect()
+}
+
 pub struct BunManager;
 
 impl BunManager {
@@ -157,10 +177,14 @@ impl PackageManager for BunManager {
 
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
+        let held = super::inbox::hold_malicious_upgrades(self).await;
 
         // bun update -g is broken (only updates first package)
         // Workaround: reinstall each package to get latest version
         for pkg in packages {
+            if held.contains(&pkg.name) {
+                continue;
+            }
             if let Err(e) = validate_name(Ecosystem::Npm, &pkg.name) {
                 eprintln!("Warning: Skipping bun entry: {}", e);
                 continue;
@@ -180,6 +204,23 @@ impl PackageManager for BunManager {
         }
 
         Ok(())
+    }
+
+    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+        let output = command("bun")?
+            .args(["outdated", "-g"])
+            .args(self.cooldown_args().await)
+            .output()
+            .await?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "bun outdated failed: {}",
+                super::command_error_message(&output)
+            );
+        }
+        Ok(parse_outdated_table(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -235,5 +276,27 @@ mod tests {
         let (name, version) = parse_package_version("@types/node");
         assert_eq!(name, "@types/node");
         assert_eq!(version, None);
+    }
+
+    #[test]
+    fn outdated_table_yields_changed_latest_versions() {
+        let stdout = "bun outdated v1.4.2 (744846f84)
+|----------------------------------------------|
+| Package           | Current | Update | Latest  |
+|-------------------|---------|--------|---------|
+| cowsay            | 1.4.0   | 1.4.0  | 1.6.0   |
+| @scope/held       | 2.0.0   | 2.0.0  | 2.1.0 * |
+| same              | 1.0.0   | 1.0.0  | 1.0.0 * |
+|----------------------------------------------|
+Note: The * indicates that version isn't true latest due to minimum release age
+";
+        assert_eq!(
+            parse_outdated_table(stdout),
+            vec![
+                ("cowsay".to_string(), "1.6.0".to_string()),
+                ("@scope/held".to_string(), "2.1.0".to_string())
+            ]
+        );
+        assert!(parse_outdated_table("bun outdated v1.4.2 (744846f84)\n").is_empty());
     }
 }

@@ -335,7 +335,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
     // Save machine state for cross-machine comparison
     if !dry_run {
-        machine_state.save_to_repo(&sync_path)?;
+        crate::sync::signing::save_record(&sync_path, &machine_state)?;
     }
 
     // Always export tether config (hardcoded, not dependent on feature flags)

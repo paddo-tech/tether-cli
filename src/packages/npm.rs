@@ -16,6 +16,31 @@ struct NpmPackage {
     version: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OutdatedEntry {
+    current: Option<String>,
+    wanted: Option<String>,
+}
+
+/// Name and `wanted` version from `npm outdated --json` or `pnpm outdated --format json`,
+/// for each package whose `wanted` differs from `current`.
+pub(super) fn parse_outdated_json(stdout: &[u8]) -> Result<Vec<(String, String)>> {
+    let value: serde_json::Value = serde_json::from_slice(stdout)?;
+    if let Some(summary) = value.get("error").and_then(|e| e.get("summary")) {
+        anyhow::bail!("{}", summary.as_str().unwrap_or("outdated check failed"));
+    }
+    let entries: HashMap<String, OutdatedEntry> = serde_json::from_value(value)?;
+    let mut candidates: Vec<(String, String)> = entries
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            let wanted = entry.wanted?;
+            (entry.current.as_ref() != Some(&wanted)).then_some((name, wanted))
+        })
+        .collect();
+    candidates.sort();
+    Ok(candidates)
+}
+
 pub struct NpmManager;
 
 impl NpmManager {
@@ -134,10 +159,12 @@ impl PackageManager for NpmManager {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let major = self.version().await.map_or(0, |((major, _, _), _)| major);
+        let held = super::inbox::hold_malicious_upgrades(self).await;
 
         let names: Vec<String> = packages
             .into_iter()
             .map(|p| p.name)
+            .filter(|name| !held.contains(name))
             .filter(|name| match validate_name(Ecosystem::Npm, name) {
                 Ok(()) => true,
                 Err(e) => {
@@ -180,6 +207,17 @@ impl PackageManager for NpmManager {
         Ok(())
     }
 
+    /// `wanted` is what `npm update -g` installs; npm applies the release-age limit to it.
+    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+        let output = command("npm")?
+            .args(["outdated", "-g", "--json"])
+            .args(self.cooldown_args().await)
+            .output()
+            .await?;
+        // npm exits 1 when something is outdated, so the JSON decides
+        parse_outdated_json(&output.stdout)
+    }
+
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Npm, package)?;
         let output = command("npm")?
@@ -193,5 +231,34 @@ impl PackageManager for NpmManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outdated_json_yields_changed_wanted_versions() {
+        let stdout = br#"{
+            "cowsay": {"current": "1.4.0", "wanted": "1.6.0", "latest": "1.6.0"},
+            "@scope/same": {"current": "2.0.0", "wanted": "2.0.0", "latest": "3.0.0"},
+            "missing": {"wanted": "1.0.0", "latest": "1.0.0"}
+        }"#;
+        assert_eq!(
+            parse_outdated_json(stdout).unwrap(),
+            vec![
+                ("cowsay".to_string(), "1.6.0".to_string()),
+                ("missing".to_string(), "1.0.0".to_string())
+            ]
+        );
+        assert!(parse_outdated_json(b"{}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn outdated_json_error_is_an_error() {
+        let stdout =
+            br#"{"error": {"code": "ENOVERSIONS", "summary": "No versions", "detail": ""}}"#;
+        assert!(parse_outdated_json(stdout).is_err());
     }
 }
