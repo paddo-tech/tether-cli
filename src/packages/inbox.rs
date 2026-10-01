@@ -150,9 +150,20 @@ impl Inbox {
     }
 
     /// Queue an item. Returns false when it is already pending or was rejected.
+    /// A pending item takes the newer check results, so a cleared OSV report can be approved.
     pub fn add(&mut self, item: InboxItem) -> bool {
-        if self.is_pending(&item.manager, &item.name) || self.is_rejected(&item.manager, &item.name)
+        if self.is_rejected(&item.manager, &item.name) {
+            return false;
+        }
+        if let Some(pending) = self
+            .items
+            .iter_mut()
+            .find(|i| i.is(&item.manager, &item.name))
         {
+            *pending = InboxItem {
+                first_seen: pending.first_seen,
+                ..item
+            };
             return false;
         }
         self.items.push(item);
@@ -358,7 +369,10 @@ mod tests {
     fn add_skips_pending_and_rejected() {
         let mut inbox = Inbox::default();
         assert!(inbox.add(item("npm", "left-pad")));
-        assert!(!inbox.add(item("npm", "left-pad")));
+        let mut cleared = item("npm", "left-pad");
+        cleared.reasons = vec![Reason::CooldownUnsupported];
+        assert!(!inbox.add(cleared));
+        assert_eq!(inbox.items[0].reasons, vec![Reason::CooldownUnsupported]);
         assert!(inbox.add(item("pnpm", "left-pad")));
         inbox.reject("npm:left-pad").unwrap();
         assert!(inbox.is_rejected("npm", "left-pad"));

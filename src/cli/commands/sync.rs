@@ -311,7 +311,10 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         .await?;
 
         if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            super::packages::review_inbox().await?;
+            // A cancelled prompt defers the review; the sync must still save and push
+            if let Err(e) = super::packages::review_inbox().await {
+                Output::warning(&format!("Inbox review stopped: {}", e));
+            }
         }
 
         // Clear deferred casks after interactive sync (user had their chance)

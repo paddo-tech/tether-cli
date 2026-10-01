@@ -40,6 +40,10 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
             if matches!(job, Job::Rollback { .. }) {
                 app.flash_error("Could not start tether");
             }
+            // A follow-up sync sent before the running job's start was seen; retry when it exits.
+            if matches!(job, Job::Sync) && app.running.is_some() {
+                app.sync_pending = true;
+            }
             None
         }
         Msg::JobExited { job, success } => {
@@ -534,6 +538,21 @@ mod tests {
             last_toast(&app),
             Some((ToastKind::Error, "uninstall failed: boom"))
         );
+    }
+
+    #[test]
+    fn sync_refused_by_busy_runtime_runs_after_job() {
+        let mut app = app();
+        update(&mut app, Msg::JobStarted(Job::Sync));
+        update(&mut app, Msg::JobSpawnFailed(Job::Sync));
+        let cmd = update(
+            &mut app,
+            Msg::JobExited {
+                job: Job::Sync,
+                success: true,
+            },
+        );
+        assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
     }
 
     #[test]

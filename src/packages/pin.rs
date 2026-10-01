@@ -47,13 +47,27 @@ fn separator(ecosystem: Ecosystem) -> Option<&'static str> {
 }
 
 /// Compare dotted versions part by part, numerically where both parts are numbers.
+/// Build metadata is ignored, and a `-` prerelease sorts below its release (semver).
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
-    let parts = |v: &str| {
-        v.split(['.', '-', '+'])
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
+    let split = |v: &str| {
+        let v = v.split_once('+').map_or(v, |(v, _)| v);
+        match v.split_once('-') {
+            Some((core, pre)) => (core.to_string(), Some(pre.to_string())),
+            None => (v.to_string(), None),
+        }
     };
-    let (a, b) = (parts(a), parts(b));
+    let ((a_core, a_pre), (b_core, b_pre)) = (split(a), split(b));
+    compare_parts(&a_core, &b_core).then_with(|| match (a_pre, b_pre) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(x), Some(y)) => compare_parts(&x, &y),
+    })
+}
+
+fn compare_parts(a: &str, b: &str) -> Ordering {
+    let (a, b): (Vec<&str>, Vec<&str>) =
+        (a.split(['.', '-']).collect(), b.split(['.', '-']).collect());
     for (x, y) in a.iter().zip(&b) {
         let order = match (x.parse::<u64>(), y.parse::<u64>()) {
             (Ok(x), Ok(y)) => x.cmp(&y),
@@ -127,5 +141,7 @@ mod tests {
             compare_versions("1.0.0-beta", "1.0.0-alpha"),
             Ordering::Greater
         );
+        assert_eq!(compare_versions("2.0.0-rc.1", "2.0.0"), Ordering::Less);
+        assert_eq!(compare_versions("2.0.0+build.5", "2.0.0"), Ordering::Equal);
     }
 }
