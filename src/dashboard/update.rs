@@ -40,7 +40,11 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
             app.running = None;
             app.reload_state();
-            None
+            if std::mem::take(&mut app.sync_pending) {
+                app.sync_cmd()
+            } else {
+                None
+            }
         }
         Msg::DaemonOpStarted(op) => {
             app.daemon_op = op;
@@ -54,7 +58,7 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
         Msg::UninstallDone(result) => {
             app.uninstalling = None;
             match result {
-                Ok(()) => app.sync_cmd(),
+                Ok(()) => app.follow_up_sync(),
                 Err(e) => {
                     app.flash_error(format!("uninstall failed: {}", e));
                     None
@@ -77,7 +81,7 @@ pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
         } => match result {
             Ok(()) => {
                 app.flash_success(format!("Restored {} to {}", dotfile, short_hash));
-                app.sync_cmd()
+                app.follow_up_sync()
             }
             Err(e) => {
                 app.flash_error(format!("restore failed: {}", e));
@@ -213,7 +217,7 @@ fn on_install_done(
             }
         }
     }
-    app.sync_cmd()
+    app.follow_up_sync()
 }
 
 /// Live package lists replace this machine's state and persist, so disk reloads keep them.
@@ -358,6 +362,23 @@ mod tests {
             app.flash_error.as_ref().map(|(_, m)| m.as_str()),
             Some("uninstall failed: boom")
         );
+    }
+
+    #[test]
+    fn follow_up_sync_waits_for_running_job() {
+        let mut app = app();
+        update(&mut app, Msg::JobStarted(Job::Sync));
+        app.uninstalling = Some(("npm".into(), "left-pad".into()));
+        assert!(update(&mut app, Msg::UninstallDone(Ok(()))).is_none());
+        let cmd = update(
+            &mut app,
+            Msg::JobExited {
+                job: Job::Sync,
+                success: true,
+            },
+        );
+        assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
+        assert!(!app.sync_pending);
     }
 
     #[test]

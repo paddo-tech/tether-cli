@@ -107,6 +107,8 @@ pub struct App {
     pub config: ConfigTabState,
     pub uninstalling: Option<(String, String)>,
     pub installing: Option<(String, String)>,
+    /// A sync was asked for while a job ran; it starts when that job exits.
+    pub sync_pending: bool,
 }
 
 impl App {
@@ -129,6 +131,7 @@ impl App {
             config: ConfigTabState::default(),
             uninstalling: None,
             installing: None,
+            sync_pending: false,
         }
     }
 
@@ -171,6 +174,13 @@ impl App {
         } else {
             Some(Cmd::Run(Job::Sync))
         }
+    }
+
+    /// Sync after a change, or once the running job exits.
+    pub fn follow_up_sync(&mut self) -> Option<Cmd> {
+        let cmd = self.sync_cmd();
+        self.sync_pending = cmd.is_none();
+        cmd
     }
 
     pub fn reload_state(&mut self) {

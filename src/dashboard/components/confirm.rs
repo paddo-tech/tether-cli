@@ -77,7 +77,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             app.reload_state();
             let len = files::build_rows(&app.state, &app.files).len();
             clamp_cursor(&mut app.files.cursor, len);
-            app.sync_cmd()
+            app.follow_up_sync()
         }
     }
 }
