@@ -13,21 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New approval inbox in `~/.tether/inbox.json`. It stays on this machine and is never synced. Use `tether packages inbox` to list held packages, and `tether packages approve <id>` or `tether packages reject <id>` to decide. An approved package installs at once. A rejected package is not offered again. An approved Homebrew package from an untrusted tap also trusts that tap
 - `tether sync` in a terminal now asks about held packages. The daemon holds them and sends one notification for each new batch
 - New setting `packages.auto_install_from_trusted` (default true)
-- Each machine now has an SSH signing key in `~/.tether/signing_key`. Tether makes it on `tether init`, or on the first sync after an upgrade. Tether signs every commit it makes in the personal sync repo with it, and `git log --show-signature` can verify them. The public key goes to `machines/<id>.pub` in the sync repo
-- New trust store in `~/.tether/trusted_keys`. It stays on this machine and is never synced. It starts with this machine's own key. A key from a new machine waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
+- Each machine now has an SSH signing key in `~/.tether/signing_key`. Tether makes it on `tether init`, or on the first sync after an upgrade. Each sync signs this machine's record `machines/<id>.json` with it, in `machines/<id>.json.sig`. The signature covers the machine id and the exact bytes of the record. Tether also signs the commits it makes in the personal sync repo, and `git log --show-signature` can verify them. Commit signatures are an audit trail only
+- New trust store in `~/.tether/trusted_keys`, a TOML file with one entry per machine id: its public key and the key's fingerprint. It stays on this machine and is never synced. It starts with this machine's own key. A key that signs a new machine's record waits in the approval inbox as "trust machine". Approve it with `tether packages approve machine:<id>` or `tether machines trust <id>`. `tether machines untrust <id>` removes it
 - `tether machines list` now shows each machine's key fingerprint and whether this machine trusts it
 - Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
 
 ### Changed
 
-- A package that another machine added to a manifest no longer installs on its own unless a trusted machine signed the commit that added it. Other packages wait in the approval inbox. Only commits pulled since the last sync count, so older history does not fill the inbox. Set `packages.auto_install_from_trusted = false` to hold signed packages too
+- A package from the manifests no longer installs on its own unless a trusted machine record lists that exact package and version. A record is trusted when its signature verifies against the key this machine trusts for that machine id. The manifests and commit signatures do not count. Other packages wait in the approval inbox. Tether checks this again on every sync, and it checks held packages again too, so a package installs once a record that lists it becomes trusted. Set `packages.auto_install_from_trusted = false` to hold packages from trusted records too
 - Synced packages that the installed manager cannot hold to `packages.min_release_age_days` now wait in the approval inbox. Before, they installed after a warning. This covers gem and old npm, pnpm and bun
 - Homebrew taps that are not trusted, and formulae and casks from them, now wait in the approval inbox. Before, Tether skipped them with a warning
 
 ### Security
 
-- When a trusted machine publishes a different signing key, Tether stops trusting that machine, shows a warning, and asks again through the inbox
-- A machine record in `machines/` must have its machine id as its file name. Tether ignores other records. Tether counts its own record only when this machine signed the last change to it
+- When a trusted machine signs its record with a different key, Tether shows a warning and asks through the inbox. Until you approve the new key, Tether does not trust that record
+- Trust never moves to another machine id on its own. A renamed machine waits in the inbox as a new machine, even with a key that this machine trusts under the old name
+- A machine record in `machines/` must have a valid machine id (letters, digits, `.`, `_` and `-`) as its file name, and the same id inside it. Tether ignores other records and shows a warning. Tether counts its own record only when this machine's key signed it
 
 - Tether now checks every package name from a manifest before it runs a package manager. It skips names that look like flags, URLs, paths, tarballs or `git+`/`github:`/`file:`/`link:` specs, and shows a warning
 - New setting `packages.min_release_age_days` (default 7, 0 turns it off). npm, pnpm, bun and uv installs and upgrades skip releases newer than this. The daemon does not auto-upgrade a manager that is too old to enforce it (npm before 11.10, pnpm before 10.16, bun before 1.3, and gem), and it logs a warning once

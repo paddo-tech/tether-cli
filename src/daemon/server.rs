@@ -450,7 +450,7 @@ impl DaemonServer {
         }
 
         // Save machine state
-        machine_state.save_to_repo(&sync_path)?;
+        crate::sync::signing::save_record(&sync_path, &machine_state)?;
 
         // Export tether config to sync repo
         if config.security.encrypt_dotfiles {

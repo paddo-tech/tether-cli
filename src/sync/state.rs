@@ -23,10 +23,6 @@ pub struct SyncState {
     /// Dotfile paths dismissed when prompted to import from other profiles
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub dismissed_imports: std::collections::HashSet<String>,
-    /// Sync repo HEAD when package import last checked commit signatures. Only commits
-    /// after it are checked, so history from before signing never floods the inbox.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signatures_checked: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +105,16 @@ impl Default for MachineState {
     }
 }
 
+/// Machine ids name files in the sync repo and entries in the trust store, so only
+/// plain names pass.
+pub fn valid_machine_id(id: &str) -> bool {
+    id.len() <= 64
+        && id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 pub fn local_hostname() -> String {
     hostname::get()
         .ok()
@@ -171,7 +177,7 @@ impl MachineState {
     }
 
     /// Validate and sanitize machine state after deserialization
-    fn validate(&mut self) -> Result<()> {
+    pub(crate) fn validate(&mut self) -> Result<()> {
         // Limit files
         if self.files.len() > Self::MAX_FILES {
             anyhow::bail!(
@@ -250,10 +256,21 @@ impl MachineState {
             let entry = entry?;
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default();
+                if !valid_machine_id(stem) {
+                    crate::cli::Output::warning(&format!(
+                        "Ignoring {}: invalid machine id",
+                        path.display()
+                    ));
+                    continue;
+                }
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     if let Ok(mut state) = serde_json::from_str::<MachineState>(&content) {
                         // A record under another file name could pose as another machine
-                        if path.file_stem().and_then(|s| s.to_str()) != Some(&state.machine_id) {
+                        if stem != state.machine_id {
                             crate::cli::Output::warning(&format!(
                                 "Ignoring {}: it claims to be machine {}",
                                 path.display(),
@@ -357,7 +374,6 @@ impl SyncState {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
-            signatures_checked: None,
         }
     }
 
@@ -699,11 +715,31 @@ mod tests {
         let impostor = serde_json::to_string(&MachineState::new("real")).unwrap();
         std::fs::write(sync_path.join("machines/extra.json"), &impostor).unwrap();
         std::fs::write(sync_path.join("machines/other.json"), &impostor).unwrap();
+        let spaced = serde_json::to_string(&MachineState::new("a b")).unwrap();
+        std::fs::write(sync_path.join("machines/a b.json"), &spaced).unwrap();
 
         let all = MachineState::list_all(sync_path).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].machine_id, "real");
         assert!(MachineState::load_from_repo(sync_path, "other").is_err());
+    }
+
+    #[test]
+    fn test_valid_machine_id() {
+        for id in ["a1b2c3", "MacBook-Pro.local", "m_1"] {
+            assert!(valid_machine_id(id), "{}", id);
+        }
+        for id in [
+            "",
+            ".hidden",
+            "-x",
+            "a b",
+            "a/b",
+            "zz\nssh-ed25519",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_machine_id(id), "{}", id);
+        }
     }
 
     #[test]

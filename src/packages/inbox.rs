@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
-    /// It came from another machine, and no trusted signature lets it install on its own:
-    /// the change was unsigned, came from before this sync, or
-    /// `packages.auto_install_from_trusted` is off.
+    /// It came from another machine, and no trusted machine record lists this exact version,
+    /// or `packages.auto_install_from_trusted` is off.
     Unsigned,
-    /// The commit that added it carries a valid signature from a key this machine does not trust.
+    /// A machine record that lists it is validly signed, by a key this machine does not
+    /// trust for that machine.
     UntrustedSigner,
     /// It is a tap outside the trusted taps, or a formula or cask from one.
     UntrustedTap,
@@ -23,9 +23,10 @@ pub enum Reason {
     CooldownUnsupported,
     /// OSV lists a `MAL-` advisory for it. Approval cannot override this.
     Malicious,
-    /// A machine published a signing key this machine has not trusted yet.
+    /// A machine signs its record with a key this machine has not trusted for it yet.
     NewMachine,
-    /// A trusted machine published a different signing key, so its old key lost trust.
+    /// A trusted machine signs its record with a different key. The old key stays trusted
+    /// until the user approves the new one.
     KeyChanged,
 }
 
@@ -79,7 +80,7 @@ pub struct InboxItem {
     pub source_machine: Option<String>,
     #[serde(default)]
     pub commit: Option<String>,
-    /// Fingerprint of the key that validly signed `commit`, trusted or not
+    /// Fingerprint of the key that validly signed the source machine's record, trusted or not
     #[serde(default)]
     pub signer: Option<String>,
     pub reasons: Vec<Reason>,
@@ -294,54 +295,40 @@ impl Inbox {
         Ok(item)
     }
 
-    /// Queue a trust item for each published key `store` lacks, and untrust a machine whose
-    /// key changed. Returns the newly queued items.
+    /// Queue a trust item for each machine whose record is signed by a key `store` does not
+    /// trust for that machine. Trust never moves on its own: a renamed machine is a new item.
+    /// Returns the newly queued items.
     pub fn hold_untrusted_keys(
         &mut self,
-        store: &mut TrustStore,
-        published: Vec<(String, PublicKey)>,
+        store: &TrustStore,
+        signers: Vec<(String, PublicKey)>,
         this_machine: &str,
     ) -> Result<Vec<InboxItem>> {
         let mut queued = Vec::new();
-        for (id, key) in published {
-            if id == this_machine {
+        for (id, key) in signers {
+            if id == this_machine || store.trusts(&id, &key) {
                 continue;
             }
-            if let Some(owner) = store.machine_for(&key) {
-                // A renamed machine keeps its key, so follow the new name
-                if owner != id {
-                    store.trust(&id, &key);
-                }
-                continue;
-            }
-            let reason = match store.key_for(&id) {
-                Some(old) => {
-                    Output::warning(&format!(
-                        "SIGNING KEY CHANGED for machine {}: {} is now {}. Tether no longer trusts \
-                         it. If you did not set that machine up again, someone may be signing as \
-                         it. Check, then run 'tether machines trust {}'",
-                        id,
-                        signing::fingerprint(old),
-                        signing::fingerprint(&key),
-                        id
-                    ));
-                    store.untrust(&id);
-                    Reason::KeyChanged
-                }
+            let old = store.key_for(&id);
+            let reason = match old {
+                Some(_) => Reason::KeyChanged,
                 None => Reason::NewMachine,
             };
             let item = InboxItem::machine(&id, &key, reason)?;
-            // Keep a pending item for this key, so a key change stays labeled as one
-            if self
-                .items
-                .iter()
-                .any(|i| i.is(MACHINE, &id) && i.kind == item.kind)
-            {
+            if !self.add(item.clone()) {
                 continue;
             }
-            if self.add(item.clone()) {
-                queued.push(item);
+            if let Some(old) = old {
+                Output::warning(&format!(
+                    "SIGNING KEY CHANGED for machine {}: {} is now {}. Its record is not trusted \
+                     until you approve the new key. If you did not set that machine up again, \
+                     someone may be signing as it",
+                    id,
+                    signing::fingerprint(old),
+                    signing::fingerprint(&key),
+                ));
             }
+            queued.push(item);
         }
         Ok(queued)
     }
@@ -355,22 +342,22 @@ impl Inbox {
     }
 }
 
-/// What verifying the commit that added a package found.
+/// The best signature among the machine records that list a package at its version.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Signer {
-    /// Unsigned, badly signed, or not added by a commit pulled in this sync
+    /// No listing record is validly signed
     #[default]
     None,
-    /// Validly signed by a key this machine does not trust
+    /// A listing record is validly signed, by a key not trusted for its machine
     Untrusted,
-    /// Validly signed by a key in this machine's trust store
+    /// A listing record is signed by the key trusted for its machine
     Trusted,
 }
 
 /// What the trust checks found for one synced package.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Checks {
-    /// This machine's own state lists the package
+    /// This machine's own record, signed by this machine, lists the package at its version
     pub from_this_machine: bool,
     pub approved: bool,
     pub auto_install_from_trusted: bool,
@@ -395,7 +382,7 @@ pub fn reasons(checks: Checks) -> Vec<Reason> {
     if checks.cooldown_unsupported {
         reasons.push(Reason::CooldownUnsupported);
     }
-    // Another machine's package installs on its own only when a trusted key signed the commit that added it
+    // Another machine's package installs on its own only when a trusted machine record lists it
     if !checks.from_this_machine {
         match checks.signer {
             Signer::Trusted if checks.auto_install_from_trusted => {}
@@ -431,7 +418,7 @@ pub fn approve(query: &str) -> Result<InboxItem> {
         let item = inbox.approve(query)?;
         if let Kind::TrustMachine { public_key, .. } = &item.kind {
             let mut store = TrustStore::load()?;
-            store.trust(&item.name, &PublicKey::from_openssh(public_key)?);
+            store.trust(&item.name, &PublicKey::from_openssh(public_key)?)?;
             store.save()?;
         }
         Ok(item)
@@ -461,17 +448,17 @@ pub fn trusted_machines() -> Result<Vec<TrustedMachine>> {
         .collect())
 }
 
-/// Trust the key `machine_id` published in the sync repo, and settle its inbox item.
+/// Trust the key that signed `machine_id`'s record in the sync repo, and settle its inbox item.
 pub fn trust_machine(sync_path: &Path, machine_id: &str) -> Result<TrustedMachine> {
-    let Some((_, key)) = signing::published_keys(sync_path)
+    let Some((_, key)) = signing::record_signers(sync_path)
         .into_iter()
         .find(|(id, _)| id == machine_id)
     else {
-        bail!("Machine {} has not published a signing key", machine_id);
+        bail!("Machine {} has no signed machine record", machine_id);
     };
     Inbox::update(|inbox| {
         let mut store = TrustStore::load()?;
-        store.trust(machine_id, &key);
+        store.trust(machine_id, &key)?;
         store.save()?;
         inbox.items.retain(|i| !i.is(MACHINE, machine_id));
         inbox
@@ -485,7 +472,7 @@ pub fn trust_machine(sync_path: &Path, machine_id: &str) -> Result<TrustedMachin
 }
 
 /// Remove a machine's key from the trust store. Returns false when it was not trusted.
-/// Its published key returns to the inbox on the next sync.
+/// Its record's key returns to the inbox on the next sync.
 pub fn untrust_machine(machine_id: &str) -> Result<bool> {
     Inbox::update(|_| {
         let mut store = TrustStore::load()?;
@@ -495,20 +482,11 @@ pub fn untrust_machine(machine_id: &str) -> Result<bool> {
     })
 }
 
-/// Queue every machine key published in the sync repo that this machine does not trust.
-/// A trusted machine that publishes a different key loses trust until the user approves
-/// the new key. Returns the newly queued items.
+/// Queue every key that signs a machine record but is not trusted for that machine.
+/// Returns the newly queued items.
 pub fn queue_machine_keys(sync_path: &Path, this_machine: &str) -> Result<Vec<InboxItem>> {
-    let published = signing::published_keys(sync_path);
-    Inbox::update(|inbox| {
-        let mut store = TrustStore::load()?;
-        let before = store.clone();
-        let queued = inbox.hold_untrusted_keys(&mut store, published, this_machine)?;
-        if store != before {
-            store.save()?;
-        }
-        Ok(queued)
-    })
+    let signers = signing::record_signers(sync_path);
+    Inbox::update(|inbox| inbox.hold_untrusted_keys(&TrustStore::load()?, signers, this_machine))
 }
 
 /// Names whose upgrade target OSV lists as malicious. They go to the inbox, and
@@ -771,22 +749,22 @@ mod tests {
     fn new_machine_keys_wait_for_trust() {
         let (own, b, c) = (key(), key(), key());
         let mut store = TrustStore::default();
-        store.trust("me", &own);
-        store.trust("b", &b);
+        store.trust("me", &own).unwrap();
+        store.trust("b", &b).unwrap();
         let mut inbox = Inbox::default();
-        let published = vec![
+        let signers = vec![
             ("me".to_string(), own.clone()),
             ("b".to_string(), b.clone()),
             ("c".to_string(), c.clone()),
         ];
         let queued = inbox
-            .hold_untrusted_keys(&mut store, published.clone(), "me")
+            .hold_untrusted_keys(&store, signers.clone(), "me")
             .unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id(), "machine:c");
         assert_eq!(queued[0].reasons, vec![Reason::NewMachine]);
         assert!(inbox
-            .hold_untrusted_keys(&mut store, published, "me")
+            .hold_untrusted_keys(&store, signers, "me")
             .unwrap()
             .is_empty());
 
@@ -800,29 +778,37 @@ mod tests {
     }
 
     #[test]
-    fn rotated_machine_key_loses_trust() {
+    fn changed_machine_key_waits_without_untrusting() {
         let (b, b2) = (key(), key());
         let mut store = TrustStore::default();
-        store.trust("b", &b);
+        store.trust("b", &b).unwrap();
+        let before = store.clone();
         let mut inbox = Inbox::default();
         let queued = inbox
-            .hold_untrusted_keys(&mut store, vec![("b".to_string(), b2.clone())], "me")
+            .hold_untrusted_keys(&store, vec![("b".to_string(), b2.clone())], "me")
             .unwrap();
-        assert!(store.key_for("b").is_none());
+        assert_eq!(store, before);
         assert_eq!(queued[0].reasons, vec![Reason::KeyChanged]);
-        // The next sync keeps the key-change label instead of calling it a new machine
         inbox
-            .hold_untrusted_keys(&mut store, vec![("b".to_string(), b2.clone())], "me")
+            .hold_untrusted_keys(&store, vec![("b".to_string(), b2.clone())], "me")
             .unwrap();
+        assert_eq!(inbox.items.len(), 1);
         assert_eq!(inbox.items[0].reasons, vec![Reason::KeyChanged]);
+    }
 
-        // A renamed machine keeps its trusted key under the new name
-        store.trust("b", &b2);
-        assert!(inbox
-            .hold_untrusted_keys(&mut store, vec![("b-new".to_string(), b2.clone())], "me")
-            .unwrap()
-            .is_empty());
-        assert_eq!(store.machine_for(&b2), Some("b-new"));
+    #[test]
+    fn renamed_machine_needs_new_trust() {
+        let b = key();
+        let mut store = TrustStore::default();
+        store.trust("b", &b).unwrap();
+        let mut inbox = Inbox::default();
+        let queued = inbox
+            .hold_untrusted_keys(&store, vec![("b-new".to_string(), b.clone())], "me")
+            .unwrap();
+        assert_eq!(queued[0].id(), "machine:b-new");
+        assert_eq!(queued[0].reasons, vec![Reason::NewMachine]);
+        assert_eq!(store.machine_for(&b), Some("b"));
+        assert!(store.key_for("b-new").is_none());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageManager,
     PackagePolicy,
 };
-use crate::sync::signing::{self, TrustStore};
+use crate::sync::signing::{self, SignedRecord, TrustStore};
 use crate::sync::state::PackageState;
 use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::Result;
@@ -100,20 +100,8 @@ pub async fn import_packages(
 
     let mid = &machine_state.machine_id;
     prune_inbox(machine_state)?;
-    let own_key = signing::load_or_create(mid)?;
     let held_machines = inbox::queue_machine_keys(sync_path, mid)?;
-    let head = GitBackend::new(sync_path.to_path_buf()).head_commit()?;
-    let introduced = match &state.signatures_checked {
-        Some(since) => introductions(sync_path, since, &TrustStore::load()?, own_key.public_key())?,
-        None => HashMap::new(),
-    };
-    state.signatures_checked = head;
-    let trust = Trust {
-        inbox: Inbox::load()?,
-        provenance: Provenance::load(sync_path, mid, own_key.public_key()),
-        introduced,
-        auto_install_from_trusted: config.packages.auto_install_from_trusted,
-    };
+    let trust = Trust::load(config, sync_path, mid)?;
 
     // Homebrew - special handling for formulae/casks/taps
     if config.is_manager_enabled(mid, "brew") {
@@ -206,33 +194,51 @@ fn prune_inbox(machine_state: &MachineState) -> Result<()> {
 struct Trust {
     inbox: Inbox,
     provenance: Provenance,
-    introduced: HashMap<(String, String), Introduced>,
     auto_install_from_trusted: bool,
 }
 
 impl Trust {
+    fn load(config: &Config, sync_path: &Path, machine_id: &str) -> Result<Self> {
+        let own_key = signing::load_or_create(machine_id)?;
+        Ok(Self {
+            inbox: Inbox::load()?,
+            provenance: Provenance::load(
+                sync_path,
+                machine_id,
+                own_key.public_key(),
+                &TrustStore::load()?,
+            ),
+            auto_install_from_trusted: config.packages.auto_install_from_trusted,
+        })
+    }
+
     /// True when the package was already decided on: pending, or rejected.
     /// Items held as malicious are checked again, because approval cannot clear them and
-    /// an unpinned query can match a report that covers only some releases.
+    /// an unpinned query can match a report that covers only some releases. Items held only
+    /// for trust are checked again too, because a machine record can become trusted later.
     fn settled(&self, manager: &str, name: &str) -> bool {
         self.inbox.items.iter().any(|i| {
-            i.manager == manager && i.name == name && !i.reasons.contains(&Reason::Malicious)
+            i.manager == manager
+                && i.name == name
+                && !i.reasons.contains(&Reason::Malicious)
+                && !i
+                    .reasons
+                    .iter()
+                    .all(|r| matches!(r, Reason::Unsigned | Reason::UntrustedSigner))
         }) || self.inbox.is_rejected(manager, name)
     }
 
-    fn introduced(&self, manager: &str, name: &str) -> Option<&Introduced> {
-        self.introduced
-            .get(&(manager.to_string(), name.to_string()))
-    }
-
-    fn checks(&self, manager: &str, name: &str) -> Checks {
+    fn checks(&self, manager: &str, name: &str, version: Option<&str>) -> Checks {
+        let entry = (
+            manager.to_string(),
+            name.to_string(),
+            version.map(str::to_string),
+        );
         Checks {
-            from_this_machine: self.provenance.listed_here(manager, name),
+            from_this_machine: self.provenance.own.contains(&entry),
             approved: self.inbox.is_approved(manager, name),
             auto_install_from_trusted: self.auto_install_from_trusted,
-            signer: self
-                .introduced(manager, name)
-                .map_or(Signer::None, |i| i.signer),
+            signer: self.provenance.signer(&entry),
             ..Checks::default()
         }
     }
@@ -245,19 +251,7 @@ impl Trust {
         tap: Option<String>,
         reasons: Vec<Reason>,
     ) -> InboxItem {
-        let (source_machine, commit, signer) = match self.introduced(manager, name) {
-            Some(i) => (
-                i.machine
-                    .clone()
-                    .or_else(|| self.provenance.source(manager, name).0),
-                Some(i.commit.clone()),
-                i.fingerprint.clone(),
-            ),
-            None => {
-                let (machine, commit) = self.provenance.source(manager, name);
-                (machine, commit, None)
-            }
-        };
+        let (source_machine, commit, signer) = self.provenance.source(manager, name);
         InboxItem {
             kind: Kind::Package,
             manager: manager.to_string(),
@@ -274,187 +268,114 @@ impl Trust {
     }
 }
 
-/// Which machines list a package, and the commit that last changed the source machine's state.
+/// Manager key, name and reported version of one package.
+type Entry = (String, String, Option<String>);
+
+/// Every package a machine record lists, at the version the record reports.
+fn record_entries(record: &MachineState) -> impl Iterator<Item = Entry> + '_ {
+    record.packages.iter().flat_map(move |(manager, names)| {
+        names.iter().map(move |name| {
+            let version = record
+                .package_versions
+                .get(manager)
+                .and_then(|v| v.get(name))
+                .cloned();
+            (manager.clone(), name.clone(), version)
+        })
+    })
+}
+
+/// The packages machine records vouch for. A record counts only when its signature verifies
+/// against the key trusted for that record's machine id. Manifests are the union of every
+/// record, trusted or not, and commits can come from anyone who can push, so neither counts.
+/// Each sync works this out again from the repo, so nothing carries over between syncs.
 struct Provenance {
-    machines: Vec<MachineState>,
-    /// This machine's record, only when this machine signed the last change to it. A
-    /// record's own `machine_id` proves nothing: anyone who can push can write one.
-    this_record: Option<MachineState>,
+    records: Vec<SignedRecord>,
+    /// Listed by this machine's record, signed with this machine's key
+    own: HashSet<Entry>,
+    /// Listed by another machine's record, signed with the key trusted for that machine
+    trusted: HashSet<Entry>,
+    /// Listed by a validly signed record whose key is not trusted for its machine
+    untrusted: HashSet<Entry>,
     this_machine: String,
     sync_path: std::path::PathBuf,
 }
 
 impl Provenance {
-    fn load(sync_path: &Path, this_machine: &str, own_key: &PublicKey) -> Self {
-        let git = GitBackend::new(sync_path.to_path_buf());
-        let signed_here = git
-            .file_log(&format!("machines/{}.json", this_machine), 1)
-            .ok()
-            .and_then(|log| log.into_iter().next())
-            .and_then(|entry| {
-                let repo = git2::Repository::open(sync_path).ok()?;
-                signing::commit_signer(&repo, git2::Oid::from_str(&entry.commit_hash).ok()?)
-            })
-            .is_some_and(|key| key.key_data() == own_key.key_data());
+    fn load(sync_path: &Path, this_machine: &str, own_key: &PublicKey, store: &TrustStore) -> Self {
+        let records = signing::records(sync_path);
+        let (mut own, mut trusted, mut untrusted) =
+            (HashSet::new(), HashSet::new(), HashSet::new());
+        for r in &records {
+            let Some(signer) = &r.signer else {
+                continue;
+            };
+            let id = &r.record.machine_id;
+            let set = if id == this_machine {
+                if signer.key_data() == own_key.key_data() {
+                    &mut own
+                } else {
+                    &mut untrusted
+                }
+            } else if store.trusts(id, signer) {
+                &mut trusted
+            } else {
+                &mut untrusted
+            };
+            set.extend(record_entries(&r.record));
+        }
         Self {
-            machines: MachineState::list_all(sync_path).unwrap_or_default(),
-            this_record: signed_here
-                .then(|| MachineState::load_from_repo(sync_path, this_machine).ok()?)
-                .flatten(),
+            records,
+            own,
+            trusted,
+            untrusted,
             this_machine: this_machine.to_string(),
             sync_path: sync_path.to_path_buf(),
         }
     }
 
-    fn lists(machine: &MachineState, manager: &str, name: &str) -> bool {
-        machine
-            .packages
-            .get(manager)
-            .is_some_and(|names| names.iter().any(|n| n == name))
+    fn signer(&self, entry: &Entry) -> Signer {
+        if self.trusted.contains(entry) {
+            Signer::Trusted
+        } else if self.untrusted.contains(entry) {
+            Signer::Untrusted
+        } else {
+            Signer::None
+        }
     }
 
-    fn listed_here(&self, manager: &str, name: &str) -> bool {
-        self.this_record
-            .as_ref()
-            .is_some_and(|m| Self::lists(m, manager, name))
-    }
-
-    fn source(&self, manager: &str, name: &str) -> (Option<String>, Option<String>) {
-        let Some(machine) = self
-            .machines
+    /// The other machine that last synced a record listing the package, the commit that
+    /// last changed that record, and the fingerprint of the key that signed it.
+    fn source(
+        &self,
+        manager: &str,
+        name: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let Some(r) = self
+            .records
             .iter()
-            .filter(|m| m.machine_id != self.this_machine && Self::lists(m, manager, name))
-            .max_by_key(|m| m.last_sync)
+            .filter(|r| {
+                r.record.machine_id != self.this_machine
+                    && r.record
+                        .packages
+                        .get(manager)
+                        .is_some_and(|names| names.iter().any(|n| n == name))
+            })
+            .max_by_key(|r| r.record.last_sync)
         else {
-            return (None, None);
+            return (None, None, None);
         };
         let commit = GitBackend::new(self.sync_path.clone())
-            .file_log(&format!("machines/{}.json", machine.machine_id), 1)
+            .file_log(&format!("machines/{}.json", r.record.machine_id), 1)
             .ok()
             .and_then(|log| log.into_iter().next())
             .map(|entry| entry.commit_hash);
-        (Some(machine.machine_id.clone()), commit)
+        (
+            Some(r.record.machine_id.clone()),
+            commit,
+            r.signer.as_ref().map(signing::fingerprint),
+        )
     }
-}
-
-/// The newest pulled commit that added a manifest entry, and who signed it.
-#[derive(Debug, Clone, PartialEq)]
-struct Introduced {
-    commit: String,
-    signer: Signer,
-    /// Fingerprint of the valid signature's key, trusted or not
-    fingerprint: Option<String>,
-    /// Trust store name of the signing key
-    machine: Option<String>,
-}
-
-/// Manager key, name and pinned version of one manifest line.
-type Entry = (String, String, Option<String>);
-
-/// Every manifest entry in a commit's tree.
-fn manifest_entries(repo: &git2::Repository, commit: &git2::Commit) -> HashSet<Entry> {
-    let mut entries = HashSet::new();
-    let Ok(tree) = commit.tree() else {
-        return entries;
-    };
-    let read = |file: &str| -> Option<String> {
-        let entry = tree.get_path(&Path::new("manifests").join(file)).ok()?;
-        let blob = repo.find_blob(entry.id()).ok()?;
-        String::from_utf8(blob.content().to_vec()).ok()
-    };
-    if let Some(text) = read("Brewfile") {
-        let brew = BrewfilePackages::parse(&text);
-        for (key, names) in [
-            ("brew_taps", brew.taps),
-            ("brew_formulae", brew.formulae),
-            ("brew_casks", brew.casks),
-        ] {
-            entries.extend(names.into_iter().map(|n| (key.to_string(), n, None)));
-        }
-    }
-    for def in SIMPLE_MANAGERS {
-        if let Some(text) = read(def.manifest_file) {
-            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                let (name, version) = parse_pin(def.ecosystem, line);
-                entries.insert((def.state_key.to_string(), name, version));
-            }
-        }
-    }
-    entries
-}
-
-/// For each manifest entry that is in HEAD but not in `since`, find the newest commit after
-/// `since` that added it and verify that commit's signature. Keyed by (manager, name).
-/// A `since` the repo no longer has yields nothing, so those packages wait in the inbox.
-fn introductions(
-    sync_path: &Path,
-    since: &str,
-    store: &TrustStore,
-    own_key: &PublicKey,
-) -> Result<HashMap<(String, String), Introduced>> {
-    let repo = git2::Repository::open(sync_path)?;
-    let head = repo.head()?.peel_to_commit()?;
-    let Some(old) = git2::Oid::from_str(since)
-        .ok()
-        .and_then(|oid| repo.find_commit(oid).ok())
-    else {
-        return Ok(HashMap::new());
-    };
-
-    let old_entries = manifest_entries(&repo, &old);
-    let mut targets: Vec<Entry> = manifest_entries(&repo, &head)
-        .into_iter()
-        .filter(|e| !old_entries.contains(e))
-        .collect();
-
-    let mut walk = repo.revwalk()?;
-    walk.push(head.id())?;
-    walk.hide(old.id())?;
-    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)?;
-
-    let mut found = HashMap::new();
-    for oid in walk {
-        if targets.is_empty() {
-            break;
-        }
-        let commit = repo.find_commit(oid?)?;
-        let parent_entries = commit
-            .parent(0)
-            .map(|p| manifest_entries(&repo, &p))
-            .unwrap_or_default();
-        let added: HashSet<Entry> = manifest_entries(&repo, &commit)
-            .into_iter()
-            .filter(|e| !parent_entries.contains(e))
-            .collect();
-        if !targets.iter().any(|t| added.contains(t)) {
-            continue;
-        }
-        let key = signing::commit_signer(&repo, commit.id());
-        let trusted = key
-            .as_ref()
-            .is_some_and(|k| k.key_data() == own_key.key_data() || store.machine_for(k).is_some());
-        let introduced = Introduced {
-            commit: commit.id().to_string(),
-            signer: match &key {
-                None => Signer::None,
-                Some(_) if trusted => Signer::Trusted,
-                Some(_) => Signer::Untrusted,
-            },
-            fingerprint: key.as_ref().map(signing::fingerprint),
-            machine: key
-                .as_ref()
-                .and_then(|k| store.machine_for(k))
-                .map(str::to_string),
-        };
-        targets.retain(|t| {
-            if !added.contains(t) {
-                return true;
-            }
-            found.insert((t.0.clone(), t.1.clone()), introduced.clone());
-            false
-        });
-    }
-    Ok(found)
 }
 
 /// Update last_upgrade timestamp for a package manager
@@ -683,7 +604,7 @@ async fn gate_brew(
         if trust.settled(manager, &name) {
             continue;
         }
-        let mut checks = trust.checks(manager, &name);
+        let mut checks = trust.checks(manager, &name, None);
         let mut tap = None;
         if !checks.approved {
             tap = brew.tap_for(&name, manager == "brew_casks").await;
@@ -802,16 +723,7 @@ pub async fn gate_rollback(
     ) else {
         anyhow::bail!("Rollback is not supported for {}", state_key);
     };
-    let trust = Trust {
-        inbox: Inbox::load()?,
-        provenance: Provenance::load(
-            sync_path,
-            machine_id,
-            signing::load_or_create(machine_id)?.public_key(),
-        ),
-        introduced: HashMap::new(),
-        auto_install_from_trusted: config.packages.auto_install_from_trusted,
-    };
+    let trust = Trust::load(config, sync_path, machine_id)?;
     let candidates = lines
         .into_iter()
         .map(|line| {
@@ -845,7 +757,7 @@ async fn gate_simple(
         let checks = Checks {
             cooldown_unsupported,
             malicious: advisories.iter().any(|id| osv::is_malicious(id)),
-            ..trust.checks(def.state_key, &name)
+            ..trust.checks(def.state_key, &name, version.as_deref())
         };
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
@@ -1078,108 +990,196 @@ mod tests {
         GitBackend::new(dir.to_path_buf())
     }
 
-    #[test]
-    fn test_introductions_verify_the_commit_that_added_each_entry() {
+    /// Write `id`'s record listing npm packages at versions, signed with `key` when given.
+    fn record(dir: &Path, id: &str, npm: &[(&str, &str)], key: Option<&ssh_key::PrivateKey>) {
+        let mut machine = MachineState::new(id);
+        machine.packages.insert(
+            "npm".to_string(),
+            npm.iter().map(|(name, _)| name.to_string()).collect(),
+        );
+        machine.package_versions.insert(
+            "npm".to_string(),
+            npm.iter()
+                .map(|(name, version)| (name.to_string(), version.to_string()))
+                .collect(),
+        );
+        machine.save_to_repo(dir).unwrap();
+        if let Some(key) = key {
+            signing::sign_record(dir, id, key).unwrap();
+        }
+    }
+
+    /// The npm lines an export from these records writes.
+    fn exported_npm(dir: &Path) -> Vec<(String, Option<String>)> {
+        let machines = MachineState::list_all(dir).unwrap();
+        manifest_lines(
+            Ecosystem::Npm,
+            MachineState::compute_union_packages(&machines).get("npm"),
+            MachineState::compute_union_versions(&machines).get("npm"),
+        )
+        .lines()
+        .map(|line| parse_pin(Ecosystem::Npm, line))
+        .collect()
+    }
+
+    fn trust_as(dir: &Path, me: &str, key: &ssh_key::PrivateKey, store: &TrustStore) -> Trust {
+        Trust {
+            inbox: Inbox::default(),
+            provenance: Provenance::load(dir, me, key.public_key(), store),
+            auto_install_from_trusted: true,
+        }
+    }
+
+    fn held(trust: &Trust, name: &str, version: Option<&str>) -> Vec<Reason> {
+        inbox::reasons(trust.checks("npm", name, version))
+    }
+
+    /// Machines `me` and `t`, each trusting the other.
+    fn two_machines() -> (
+        tempfile::TempDir,
+        ssh_key::PrivateKey,
+        ssh_key::PrivateKey,
+        TrustStore,
+    ) {
         let tmp = tempfile::TempDir::new().unwrap();
-        let path = tmp.path();
-        let git = repo(path);
-        let (own, trusted, stranger) = (new_key(), new_key(), new_key());
+        repo(tmp.path());
+        let (me, t) = (new_key(), new_key());
         let mut store = TrustStore::default();
-        store.trust("t", trusted.public_key());
-        let commit = |npm: &str, brew: &str, key: Option<&ssh_key::PrivateKey>| {
-            std::fs::write(path.join("manifests/npm.txt"), npm).unwrap();
-            std::fs::write(path.join("manifests/Brewfile"), brew).unwrap();
-            git.commit_with_key("sync", "test", key).unwrap();
-        };
-
-        commit("a@1.0.0\n", "", None);
-        let since = git.head_commit().unwrap().unwrap();
-        commit("a@2.0.0\nb@1.0.0\n", "brew \"jq\"\n", Some(&trusted));
-        commit("a@2.0.0\nb@1.0.0\nc@1.0.0\n", "brew \"jq\"\n", None);
-        commit(
-            "a@2.0.0\nb@1.0.0\nc@1.0.0\nd@1.0.0\n",
-            "brew \"jq\"\n",
-            Some(&stranger),
-        );
-        commit(
-            "a@2.0.0\nb@1.0.0\nc@1.0.0\nd@1.0.0\ne@1.0.0\n",
-            "brew \"jq\"\n",
-            Some(&own),
-        );
-
-        let found = introductions(path, &since, &store, own.public_key()).unwrap();
-        let signer = |manager: &str, name: &str| {
-            found
-                .get(&(manager.to_string(), name.to_string()))
-                .map(|i| i.signer)
-        };
-        assert_eq!(signer("npm", "a"), Some(Signer::Trusted));
-        assert_eq!(signer("npm", "b"), Some(Signer::Trusted));
-        assert_eq!(signer("brew_formulae", "jq"), Some(Signer::Trusted));
-        assert_eq!(signer("npm", "c"), Some(Signer::None));
-        assert_eq!(signer("npm", "d"), Some(Signer::Untrusted));
-        assert_eq!(signer("npm", "e"), Some(Signer::Trusted));
-        let b = &found[&("npm".to_string(), "b".to_string())];
-        assert_eq!(b.machine.as_deref(), Some("t"));
-        assert_eq!(
-            b.fingerprint.as_deref(),
-            Some(signing::fingerprint(trusted.public_key()).as_str())
-        );
-        assert_eq!(found.len(), 6);
-
-        // Only commits after `since` count, and a lost `since` checks nothing
-        let head = git.head_commit().unwrap().unwrap();
-        assert!(introductions(path, &head, &store, own.public_key())
-            .unwrap()
-            .is_empty());
-        let missing = "0".repeat(40);
-        assert!(introductions(path, &missing, &store, own.public_key())
-            .unwrap()
-            .is_empty());
+        store.trust("me", me.public_key()).unwrap();
+        store.trust("t", t.public_key()).unwrap();
+        (tmp, me, t, store)
     }
 
     #[test]
-    fn test_this_machine_record_counts_only_when_this_machine_signed_it() {
-        let tmp = tempfile::TempDir::new().unwrap();
+    fn test_attack_a_union_laundering_is_not_trusted() {
+        let (tmp, me, t, store) = two_machines();
         let path = tmp.path();
-        let git = repo(path);
-        let own = new_key();
-        let mut me = MachineState::new("me");
-        me.packages
-            .insert("npm".to_string(), vec!["left-pad".to_string()]);
-        me.save_to_repo(path).unwrap();
-        git.commit_with_key("unsigned", "test", None).unwrap();
-        let provenance = Provenance::load(path, "me", own.public_key());
-        assert!(!provenance.listed_here("npm", "left-pad"));
-
-        me.hostname = "signed".to_string();
-        me.save_to_repo(path).unwrap();
-        git.commit_with_key("signed", "test", Some(&own)).unwrap();
-        assert!(Provenance::load(path, "me", own.public_key()).listed_here("npm", "left-pad"));
-
-        // Another file claiming this machine's id adds nothing
-        let mut impostor = me.clone();
-        impostor
-            .packages
-            .insert("npm".to_string(), vec!["evil".to_string()]);
-        std::fs::write(
-            path.join("machines/extra.json"),
-            serde_json::to_string(&impostor).unwrap(),
-        )
-        .unwrap();
-        git.commit_with_key("impostor", "test", Some(&own)).unwrap();
-        let provenance = Provenance::load(path, "me", own.public_key());
-        assert!(!provenance.listed_here("npm", "evil"));
-        assert!(provenance.machines.iter().all(|m| m.hostname == "signed"));
-        assert_eq!(provenance.machines.len(), 1);
-
-        // Nor does a change to this machine's record that another key signed
-        me.packages
-            .insert("npm".to_string(), vec!["evil".to_string()]);
-        me.save_to_repo(path).unwrap();
-        git.commit_with_key("forged", "test", Some(&new_key()))
+        record(path, "me", &[("left-pad", "1.0.0")], Some(&me));
+        record(path, "t", &[("good", "1.0.0")], Some(&t));
+        record(path, "phantom", &[("evilpkg", "6.6.6")], None);
+        assert!(exported_npm(path).contains(&("evilpkg".to_string(), Some("6.6.6".to_string()))));
+        // The exporting machine signs the commit that carries the union
+        GitBackend::new(path.to_path_buf())
+            .commit_with_key("sync", "test", Some(&me))
             .unwrap();
-        assert!(!Provenance::load(path, "me", own.public_key()).listed_here("npm", "evil"));
+
+        let here = trust_as(path, "me", &me, &store);
+        assert_eq!(
+            held(&here, "evilpkg", Some("6.6.6")),
+            vec![Reason::Unsigned]
+        );
+        assert!(held(&here, "good", Some("1.0.0")).is_empty());
+        assert!(held(&here, "left-pad", Some("1.0.0")).is_empty());
+        let there = trust_as(path, "t", &t, &store);
+        assert_eq!(
+            held(&there, "evilpkg", Some("6.6.6")),
+            vec![Reason::Unsigned]
+        );
+        assert!(held(&there, "left-pad", Some("1.0.0")).is_empty());
+    }
+
+    #[test]
+    fn test_attack_b_only_the_trusted_version_is_trusted() {
+        let (tmp, me, t, mut store) = two_machines();
+        let path = tmp.path();
+        let u = new_key();
+        store.trust("u", u.public_key()).unwrap();
+        record(path, "t", &[("example", "1.0.0")], Some(&t));
+        record(path, "u", &[("example", "1.5.0")], Some(&u));
+        record(path, "x", &[("example", "2.0.0")], None);
+        assert_eq!(
+            exported_npm(path),
+            vec![("example".to_string(), Some("2.0.0".to_string()))]
+        );
+
+        let trust = trust_as(path, "me", &me, &store);
+        assert_eq!(
+            held(&trust, "example", Some("2.0.0")),
+            vec![Reason::Unsigned]
+        );
+        assert_eq!(held(&trust, "example", None), vec![Reason::Unsigned]);
+        assert!(held(&trust, "example", Some("1.0.0")).is_empty());
+        assert!(held(&trust, "example", Some("1.5.0")).is_empty());
+    }
+
+    #[test]
+    fn test_attack_c_commit_signatures_grant_no_trust() {
+        let (tmp, me, _, store) = two_machines();
+        let path = tmp.path();
+        let git = GitBackend::new(path.to_path_buf());
+        record(path, "me", &[("left-pad", "1.0.0")], Some(&me));
+        git.commit_with_key("sync", "test", Some(&me)).unwrap();
+
+        // A replayed attacker commit, signed with this machine's key, edits its record
+        record(
+            path,
+            "me",
+            &[("left-pad", "1.0.0"), ("evilpkg", "1.0.0")],
+            None,
+        );
+        std::fs::write(path.join("manifests/npm.txt"), "evilpkg@1.0.0\n").unwrap();
+        git.commit_with_key("replayed", "test", Some(&me)).unwrap();
+
+        let trust = trust_as(path, "me", &me, &store);
+        assert_eq!(
+            held(&trust, "evilpkg", Some("1.0.0")),
+            vec![Reason::Unsigned]
+        );
+    }
+
+    #[test]
+    fn test_record_signed_with_another_machines_key_is_untrusted() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        record(path, "y", &[("thing", "1.0.0")], Some(&t));
+        record(path, "stranger", &[("other", "1.0.0")], Some(&new_key()));
+        // This machine's own record signed by another key does not count as its own
+        record(path, "me", &[("mine", "1.0.0")], Some(&t));
+
+        let trust = trust_as(path, "me", &me, &store);
+        assert_eq!(
+            held(&trust, "thing", Some("1.0.0")),
+            vec![Reason::UntrustedSigner]
+        );
+        assert_eq!(
+            held(&trust, "other", Some("1.0.0")),
+            vec![Reason::UntrustedSigner]
+        );
+        assert_eq!(
+            held(&trust, "mine", Some("1.0.0")),
+            vec![Reason::UntrustedSigner]
+        );
+        let item = trust.item("npm", "thing", None, None, Vec::new());
+        assert_eq!(item.source_machine.as_deref(), Some("y"));
+        assert_eq!(item.signer, Some(signing::fingerprint(t.public_key())));
+    }
+
+    #[test]
+    fn test_attack_e_trust_does_not_depend_on_earlier_syncs() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        record(path, "t", &[("good", "1.0.0")], Some(&t));
+        // A failed or deferred install leaves nothing behind, so the next sync decides the same
+        for _ in 0..2 {
+            let trust = trust_as(path, "me", &me, &store);
+            assert!(held(&trust, "good", Some("1.0.0")).is_empty());
+        }
+        let off = Trust {
+            auto_install_from_trusted: false,
+            ..trust_as(path, "me", &me, &store)
+        };
+        assert_eq!(held(&off, "good", Some("1.0.0")), vec![Reason::Unsigned]);
+
+        // An item held only for trust is checked again on the next sync
+        let mut trust = trust_as(path, "me", &me, &store);
+        let item = trust.item("npm", "good", None, None, vec![Reason::Unsigned]);
+        trust.inbox.add(item.clone());
+        assert!(!trust.settled("npm", "good"));
+        trust.inbox.add(InboxItem {
+            reasons: vec![Reason::Unsigned, Reason::CooldownUnsupported],
+            ..item
+        });
+        assert!(trust.settled("npm", "good"));
     }
 
     #[test]
@@ -1194,7 +1194,6 @@ mod tests {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
-            signatures_checked: None,
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -1221,7 +1220,6 @@ mod tests {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
-            signatures_checked: None,
         };
 
         state.packages.insert(

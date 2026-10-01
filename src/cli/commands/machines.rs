@@ -25,7 +25,7 @@ pub async fn list() -> Result<()> {
 
     let state = SyncState::load()?;
     let current_machine = &state.machine_id;
-    let published = signing::published_keys(&sync_path);
+    let signers = signing::record_signers(&sync_path);
     let trusted = inbox::trusted_machines()?;
 
     println!();
@@ -71,12 +71,16 @@ pub async fn list() -> Result<()> {
             .as_deref()
             .unwrap_or(config.profile_name(&machine.machine_id));
 
-        let key = published
+        let key = signers
             .iter()
             .find(|(id, _)| id == &machine.machine_id)
             .map(|(_, key)| signing::fingerprint(key));
         let key_cell = match key {
-            Some(fp) if trusted.iter().any(|t| t.fingerprint == fp) => {
+            Some(fp)
+                if trusted
+                    .iter()
+                    .any(|t| t.machine_id == machine.machine_id && t.fingerprint == fp) =>
+            {
                 Cell::new(format!("{} (trusted)", fp)).fg(Color::Green)
             }
             Some(fp) => Cell::new(format!("{} (untrusted)", fp)).fg(Color::Yellow),
@@ -183,6 +187,11 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
         return Ok(());
     }
 
+    if !crate::sync::state::valid_machine_id(new) {
+        Output::error("Machine names use letters, digits, '.', '_' and '-' only");
+        return Ok(());
+    }
+
     // Read and update the machine info
     let mut machine = MachineState::load_from_repo(&sync_path, old)?
         .ok_or_else(|| anyhow::anyhow!("Machine not found"))?;
@@ -194,10 +203,8 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 
     // Remove old file
     std::fs::remove_file(&old_file)?;
-    let old_key = signing::published_key_path(&sync_path, old);
-    if old_key.exists() {
-        std::fs::rename(&old_key, signing::published_key_path(&sync_path, new))?;
-    }
+    // The signature binds the old id; the machine signs its renamed record on its next sync
+    remove_signature(&sync_path, old)?;
 
     // Update local state if this is the current machine
     let mut state = SyncState::load()?;
@@ -253,10 +260,7 @@ pub async fn remove(name: &str) -> Result<()> {
     }
 
     std::fs::remove_file(&machine_file)?;
-    let key_file = signing::published_key_path(&sync_path, name);
-    if key_file.exists() {
-        std::fs::remove_file(&key_file)?;
-    }
+    remove_signature(&sync_path, name)?;
 
     // Clean up profile assignment
     if config.machine_profiles.remove(name).is_some() {
@@ -272,6 +276,21 @@ pub async fn remove(name: &str) -> Result<()> {
     git.push()?;
 
     Output::success(&format!("Removed machine '{}'", name));
+    Ok(())
+}
+
+/// Remove a machine's record signature and the public key file earlier builds published.
+fn remove_signature(sync_path: &std::path::Path, machine_id: &str) -> Result<()> {
+    for path in [
+        signing::record_sig_path(sync_path, machine_id),
+        sync_path
+            .join("machines")
+            .join(format!("{}.pub", machine_id)),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+        }
+    }
     Ok(())
 }
 
