@@ -2,7 +2,6 @@ use crate::config::{Config, PackagesConfig};
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
 use std::sync::Mutex;
-use tokio::process::Command;
 
 /// Supply-chain settings every manager applies to installs and upgrades.
 #[derive(Debug, Clone)]
@@ -29,10 +28,17 @@ impl PackagePolicy {
 
     /// Managers are built at many call sites without a config, so they read it here.
     /// An unreadable config falls back to the secure defaults.
+    /// Taps approved in the inbox are trusted like configured ones.
     pub fn load() -> Self {
-        Config::load()
+        let mut policy = Config::load()
             .map(|c| Self::from_config(&c.packages))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Ok(inbox) = super::inbox::Inbox::load() {
+            policy
+                .trusted_taps
+                .extend(inbox.approved_taps().map(str::to_string));
+        }
+        policy
     }
 
     pub fn scripts_allowed(&self, name: &str) -> bool {
@@ -88,7 +94,12 @@ pub fn parse_version(output: &str) -> Option<((u64, u64, u64), bool)> {
 }
 
 pub async fn tool_version(program: &str) -> Option<((u64, u64, u64), bool)> {
-    let output = Command::new(program).arg("--version").output().await.ok()?;
+    let output = super::command(program)
+        .ok()?
+        .arg("--version")
+        .output()
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -110,19 +121,32 @@ pub fn npm_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cool
 
 /// pnpm added `minimumReleaseAge` (minutes) in 10.16.0. The 12.0.0 prereleases before
 /// rc.9 silently ignored it on the command line, so every 12.0.0 prerelease is refused.
+/// pnpm 11.0.0 made the cutoff non-strict: it installs a too-new version when no mature
+/// one matches and writes it to `minimumReleaseAgeExclude`. 12.0.0 to 12.2.x also ignore
+/// that an explicit cutoff implies strict (pnpm/pnpm#14409), so strict is always passed.
+/// Before 11.0.0 the cutoff is always strict and the strict key does not exist.
 pub fn pnpm_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cooldown {
     if days == 0 {
         return Cooldown::Off;
     }
     match version {
         Some((v, pre)) if v >= (10, 16, 0) && !(v == (12, 0, 0) && pre) => {
-            Cooldown::Args(vec![format!(
+            let mut args = vec![format!(
                 "--config.minimum-release-age={}",
                 u64::from(days) * 24 * 60
-            )])
+            )];
+            if v >= (11, 0, 0) {
+                args.push("--config.minimum-release-age-strict=true".to_string());
+            }
+            Cooldown::Args(args)
         }
         _ => Cooldown::Unsupported,
     }
+}
+
+/// pnpm 12.0.0 to 12.3.1 reject `update --ignore-scripts` (pnpm/pnpm#14512).
+pub fn pnpm_update_accepts_ignore_scripts(version: Option<((u64, u64, u64), bool)>) -> bool {
+    !matches!(version, Some((v, _)) if ((12, 0, 0)..(12, 3, 2)).contains(&v))
 }
 
 /// bun added `minimumReleaseAge` (seconds) in 1.3.0.
@@ -139,38 +163,76 @@ pub fn bun_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cool
     }
 }
 
-/// uv takes an absolute cutoff. A timestamp works on every uv release with `uv tool`,
-/// unlike the duration syntax, which only newer releases accept.
-pub fn uv_cooldown(days: u32, now: DateTime<Utc>) -> Cooldown {
+/// uv saves `--exclude-newer` in the tool receipt, and later upgrades reuse it unless they
+/// pass their own. uv 0.9.17 and later accept a duration, which the receipt keeps relative
+/// (`exclude-newer-span`); older uv gets a timestamp, which each upgrade with the flag replaces.
+/// uv 0.11.24 and later accept `false`, which clears a saved cutoff when the limit is 0.
+/// On older uv a saved cutoff stays until `uv tool install --force <name>` reinstalls the tool.
+pub fn uv_cooldown(
+    days: u32,
+    version: Option<((u64, u64, u64), bool)>,
+    now: DateTime<Utc>,
+) -> Cooldown {
+    let v = version.map(|(v, _)| v);
     if days == 0 {
-        return Cooldown::Off;
+        return if v >= Some((0, 11, 24)) {
+            Cooldown::Args(vec!["--exclude-newer".to_string(), "false".to_string()])
+        } else {
+            Cooldown::Off
+        };
     }
-    let cutoff = now - chrono::Duration::days(i64::from(days));
-    Cooldown::Args(vec![
-        "--exclude-newer".to_string(),
-        cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-    ])
+    let value = if v >= Some((0, 9, 17)) {
+        format!("{} days", days)
+    } else {
+        let cutoff = now - chrono::Duration::days(i64::from(days));
+        cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    };
+    Cooldown::Args(vec!["--exclude-newer".to_string(), value])
 }
 
 /// npm and pnpm run dependency scripts unless told not to, so scripts stay off
 /// for every package outside `packages.allow_scripts`.
+/// npm 12 blocks unreviewed install scripts on its own, so `--allow-scripts` runs only the
+/// named package's. Older npm would also run every dependency's scripts, so an allowlisted
+/// package keeps scripts off there.
 pub fn npm_script_args(policy: &PackagePolicy, name: &str, npm_major: u64) -> Vec<String> {
-    if !policy.scripts_allowed(name) {
-        return vec!["--ignore-scripts".to_string()];
-    }
-    // npm 12 blocks unreviewed install scripts on its own, even without --ignore-scripts
-    if npm_major >= 12 {
+    if policy.scripts_allowed(name) && npm_major >= 12 {
         vec![format!("--allow-scripts={}", name)]
+    } else {
+        vec!["--ignore-scripts".to_string()]
+    }
+}
+
+/// pnpm 10.4 added `add --allow-build`, which approves the named package's builds and
+/// records them in pnpm's global `allowBuilds`, so later updates need no flag. Older pnpm
+/// cannot approve one package, so an allowlisted package keeps scripts off there.
+pub fn pnpm_script_args(
+    policy: &PackagePolicy,
+    name: &str,
+    version: Option<((u64, u64, u64), bool)>,
+    adding: bool,
+) -> Vec<String> {
+    if !policy.scripts_allowed(name) || !pnpm_can_allow_build(version) {
+        vec!["--ignore-scripts".to_string()]
+    } else if adding {
+        vec![format!("--allow-build={}", name)]
     } else {
         Vec::new()
     }
 }
 
-pub fn pnpm_script_args(policy: &PackagePolicy, name: &str) -> Vec<String> {
-    if policy.scripts_allowed(name) {
-        Vec::new()
-    } else {
-        vec!["--ignore-scripts".to_string()]
+pub fn pnpm_can_allow_build(version: Option<((u64, u64, u64), bool)>) -> bool {
+    version.is_some_and(|(v, _)| v >= (10, 4, 0))
+}
+
+/// Allowlisted packages whose manager version cannot limit scripts to them install with
+/// scripts off, and the user is told once.
+pub fn warn_scripts_unsupported_once(manager: &str, needs: &str) {
+    if first_warning(&format!("allow_scripts {}", manager)) {
+        eprintln!(
+            "Warning: packages.allow_scripts needs {} {} or later. Scripts stay off for allowlisted {} packages",
+            manager, needs, manager
+        );
     }
 }
 
@@ -250,8 +312,27 @@ mod tests {
         );
         assert_eq!(pnpm_cooldown(7, v("10.15.1")), Cooldown::Unsupported);
         assert_eq!(pnpm_cooldown(7, v("12.0.0-rc.6")), Cooldown::Unsupported);
-        assert!(matches!(pnpm_cooldown(7, v("12.8.1")), Cooldown::Args(_)));
         assert_eq!(pnpm_cooldown(0, None), Cooldown::Off);
+    }
+
+    #[test]
+    fn pnpm_cooldown_strict_from_11() {
+        let strict = Cooldown::Args(vec![
+            "--config.minimum-release-age=10080".to_string(),
+            "--config.minimum-release-age-strict=true".to_string(),
+        ]);
+        assert_eq!(pnpm_cooldown(7, v("11.0.0")), strict);
+        assert_eq!(pnpm_cooldown(7, v("12.2.1")), strict);
+        assert_eq!(pnpm_cooldown(7, v("12.8.1")), strict);
+    }
+
+    #[test]
+    fn pnpm_update_ignore_scripts_gap() {
+        assert!(pnpm_update_accepts_ignore_scripts(v("11.6.0")));
+        assert!(!pnpm_update_accepts_ignore_scripts(v("12.0.0")));
+        assert!(!pnpm_update_accepts_ignore_scripts(v("12.3.1")));
+        assert!(pnpm_update_accepts_ignore_scripts(v("12.3.2")));
+        assert!(pnpm_update_accepts_ignore_scripts(v("12.8.1")));
     }
 
     #[test]
@@ -265,18 +346,21 @@ mod tests {
     }
 
     #[test]
-    fn uv_cooldown_is_rfc3339_cutoff() {
+    fn uv_cooldown_duration_or_cutoff() {
         let now = DateTime::parse_from_rfc3339("2026-10-02T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        let args =
+            |value: &str| Cooldown::Args(vec!["--exclude-newer".to_string(), value.to_string()]);
+        assert_eq!(uv_cooldown(7, v("uv 0.12.21"), now), args("7 days"));
+        assert_eq!(uv_cooldown(7, v("uv 0.9.17"), now), args("7 days"));
         assert_eq!(
-            uv_cooldown(7, now),
-            Cooldown::Args(vec![
-                "--exclude-newer".to_string(),
-                "2026-09-25T12:00:00Z".to_string()
-            ])
+            uv_cooldown(7, v("uv 0.9.16"), now),
+            args("2026-09-25T12:00:00Z")
         );
-        assert_eq!(uv_cooldown(0, now), Cooldown::Off);
+        assert_eq!(uv_cooldown(7, None, now), args("2026-09-25T12:00:00Z"));
+        assert_eq!(uv_cooldown(0, v("uv 0.11.24"), now), args("false"));
+        assert_eq!(uv_cooldown(0, v("uv 0.11.23"), now), Cooldown::Off);
     }
 
     #[test]
@@ -290,9 +374,21 @@ mod tests {
             npm_script_args(&p, "esbuild", 12),
             vec!["--allow-scripts=esbuild"]
         );
-        assert!(npm_script_args(&p, "esbuild", 11).is_empty());
-        assert_eq!(pnpm_script_args(&p, "left-pad"), vec!["--ignore-scripts"]);
-        assert!(pnpm_script_args(&p, "esbuild").is_empty());
+        assert_eq!(npm_script_args(&p, "esbuild", 11), vec!["--ignore-scripts"]);
+        let pnpm12 = v("12.8.1");
+        assert_eq!(
+            pnpm_script_args(&p, "left-pad", pnpm12, true),
+            vec!["--ignore-scripts"]
+        );
+        assert_eq!(
+            pnpm_script_args(&p, "esbuild", pnpm12, true),
+            vec!["--allow-build=esbuild"]
+        );
+        assert!(pnpm_script_args(&p, "esbuild", pnpm12, false).is_empty());
+        assert_eq!(
+            pnpm_script_args(&p, "esbuild", v("10.3.0"), true),
+            vec!["--ignore-scripts"]
+        );
         assert_eq!(bun_script_args(&p, "left-pad"), vec!["--ignore-scripts"]);
         assert_eq!(bun_script_args(&p, "esbuild"), vec!["--trust"]);
     }

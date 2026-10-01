@@ -71,6 +71,9 @@ pub struct MachineState {
     /// Package manager -> list of installed packages
     /// Keys: brew_formulae, brew_casks, brew_taps, npm, pnpm, bun, gem
     pub packages: HashMap<String, Vec<String>>,
+    /// Package manager -> package -> installed version, for managers that report one
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub package_versions: HashMap<String, HashMap<String, String>>,
     /// Package manager -> list of packages explicitly removed on this machine
     /// These won't be reinstalled from the union manifest
     #[serde(default)]
@@ -140,6 +143,7 @@ impl MachineState {
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             files: HashMap::new(),
             packages: HashMap::new(),
+            package_versions: HashMap::new(),
             removed_packages: HashMap::new(),
             dotfiles: Vec::new(),
             ignored_dotfiles: Vec::new(),
@@ -190,6 +194,14 @@ impl MachineState {
             packages.retain(|p| Self::is_safe_package_name(p));
         }
 
+        // Versions become part of install specs on other machines
+        for versions in self.package_versions.values_mut() {
+            versions.retain(|name, version| {
+                Self::is_safe_package_name(name)
+                    && crate::packages::validate_version(version).is_ok()
+            });
+        }
+
         Ok(())
     }
 
@@ -238,6 +250,26 @@ impl MachineState {
             }
         }
         Ok(machines)
+    }
+
+    /// The newest version of each package that any machine runs, so a new machine
+    /// installs a release some machine already uses.
+    pub fn compute_union_versions(machines: &[Self]) -> HashMap<String, HashMap<String, String>> {
+        let mut union: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for machine in machines {
+            for (manager, versions) in &machine.package_versions {
+                let pins = union.entry(manager.clone()).or_default();
+                for (name, version) in versions {
+                    let newer = pins.get(name).is_none_or(|current| {
+                        crate::packages::pin::compare_versions(version, current).is_gt()
+                    });
+                    if newer {
+                        pins.insert(name.clone(), version.clone());
+                    }
+                }
+            }
+        }
+        union
     }
 
     /// Compute the union of packages across all machine states
@@ -480,6 +512,44 @@ mod tests {
         let union = MachineState::compute_union_packages(&[m1]);
         let npm = union.get("npm").unwrap();
         assert_eq!(npm, &vec!["a".to_string(), "z".to_string()]);
+    }
+
+    #[test]
+    fn test_compute_union_versions_takes_newest() {
+        let versions = |pairs: &[(&str, &str)]| {
+            HashMap::from([(
+                "npm".to_string(),
+                pairs
+                    .iter()
+                    .map(|(n, v)| (n.to_string(), v.to_string()))
+                    .collect(),
+            )])
+        };
+        let mut m1 = MachineState::new("m1");
+        m1.package_versions = versions(&[("a", "1.10.0"), ("b", "2.0.0")]);
+        let mut m2 = MachineState::new("m2");
+        m2.package_versions = versions(&[("a", "1.9.0"), ("c", "0.1.0")]);
+
+        let union = MachineState::compute_union_versions(&[m1, m2]);
+        assert_eq!(
+            union,
+            versions(&[("a", "1.10.0"), ("b", "2.0.0"), ("c", "0.1.0")])
+        );
+    }
+
+    #[test]
+    fn test_validate_drops_unsafe_versions() {
+        let mut state = MachineState::new("m");
+        state.package_versions.insert(
+            "npm".to_string(),
+            HashMap::from([
+                ("ok".to_string(), "1.0.0".to_string()),
+                ("bad".to_string(), "../evil.tgz".to_string()),
+            ]),
+        );
+        state.validate().unwrap();
+        assert_eq!(state.package_versions["npm"].len(), 1);
+        assert!(state.package_versions["npm"].contains_key("ok"));
     }
 
     #[test]

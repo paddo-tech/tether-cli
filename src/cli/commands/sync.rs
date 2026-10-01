@@ -310,6 +310,10 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         )
         .await?;
 
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            super::packages::review_inbox().await?;
+        }
+
         // Clear deferred casks after interactive sync (user had their chance)
         if !state.deferred_casks.is_empty() {
             state.deferred_casks.clear();
@@ -1847,12 +1851,20 @@ pub async fn build_machine_state(
         ),
     ];
 
+    machine_state.package_versions.clear();
     for (enabled, manager) in managers {
         if enabled && manager.is_available().await {
             if let Ok(packages) = manager.list_installed().await {
                 machine_state.packages.insert(
                     manager.name().to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
+                );
+                machine_state.package_versions.insert(
+                    manager.name().to_string(),
+                    packages
+                        .into_iter()
+                        .filter_map(|p| Some((p.name, p.version?)))
+                        .collect(),
                 );
             }
         }

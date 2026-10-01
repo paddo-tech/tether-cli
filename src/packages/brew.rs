@@ -1,9 +1,11 @@
+use super::command;
+use super::inbox::{self, InboxItem, Reason};
 use super::policy::first_warning;
 use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::Deserialize;
 use std::path::PathBuf;
-use tokio::process::Command;
 
 /// Structured representation of Brewfile contents
 #[derive(Debug, Clone, Default)]
@@ -107,35 +109,87 @@ impl BrewfilePackages {
     }
 }
 
+/// The fields Tether reads from `brew info --json=v2`. Formulae and casks share them.
+#[derive(Debug, Deserialize)]
+struct BrewInfo {
+    #[serde(default)]
+    formulae: Vec<BrewInfoEntry>,
+    #[serde(default)]
+    casks: Vec<BrewInfoEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrewInfoEntry {
+    #[serde(alias = "full_token")]
+    full_name: String,
+    tap: Option<String>,
+    #[serde(default)]
+    outdated: bool,
+    #[serde(default)]
+    pinned: bool,
+}
+
+/// Outdated, unpinned formulae and casks from trusted taps, so an upgrade never pulls
+/// a new release from a tap the user has not trusted.
+fn trusted_upgrades(info: BrewInfo, policy: &PackagePolicy) -> (Vec<String>, Vec<String>) {
+    let pick = |entries: Vec<BrewInfoEntry>| {
+        entries
+            .into_iter()
+            .filter(|e| e.outdated && !e.pinned)
+            .filter(|e| e.tap.as_deref().is_some_and(|tap| policy.tap_trusted(tap)))
+            .filter(|e| validate_name(Ecosystem::Brew, &e.full_name).is_ok())
+            .map(|e| e.full_name)
+            .collect()
+    };
+    (pick(info.formulae), pick(info.casks))
+}
+
 /// The `user/repo` tap of a qualified `user/repo/name` formula or cask.
 fn tap_of(name: &str) -> Option<&str> {
     name.rsplit_once('/').map(|(tap, _)| tap)
 }
 
-/// Untrusted taps and their packages are held back from install. The approval inbox
-/// takes them over here once it exists.
-/// The daemon re-reads the Brewfile every cycle, so each warning prints once per process.
+/// Untrusted taps and their packages go to the approval inbox instead of brew.
+/// The daemon re-reads the Brewfile every cycle, so only newly held items are reported.
 pub fn hold_untrusted(untrusted: &BrewfilePackages) {
-    let messages = untrusted
+    let item = |manager: &str, name: &String, tap: Option<&str>| InboxItem {
+        manager: manager.to_string(),
+        name: name.clone(),
+        version: None,
+        tap: tap.map(str::to_string),
+        source_machine: None,
+        commit: None,
+        reasons: vec![Reason::UntrustedTap],
+        advisories: Vec::new(),
+        first_seen: chrono::Utc::now(),
+    };
+    let items = untrusted
         .taps
         .iter()
-        .map(|tap| {
-            format!(
-                "Warning: Skipping untrusted tap {}. Add it to packages.brew.trusted_taps to allow it",
-                tap
-            )
-        })
+        .map(|t| item("brew_taps", t, None))
         .chain(
             untrusted
                 .formulae
                 .iter()
-                .chain(&untrusted.casks)
-                .map(|name| format!("Warning: Skipping {} from an untrusted tap", name)),
-        );
-    for message in messages {
-        if first_warning(&message) {
-            eprintln!("{}", message);
+                .map(|f| item("brew_formulae", f, tap_of(f))),
+        )
+        .chain(
+            untrusted
+                .casks
+                .iter()
+                .map(|c| item("brew_casks", c, tap_of(c))),
+        )
+        .collect();
+    match inbox::add(items) {
+        Ok(held) => {
+            for item in held {
+                eprintln!(
+                    "Warning: Holding {} from an untrusted tap for approval. Run 'tether packages inbox'",
+                    item.name
+                );
+            }
         }
+        Err(e) => eprintln!("Warning: Skipping untrusted Homebrew entries: {}", e),
     }
 }
 
@@ -150,15 +204,38 @@ impl BrewManager {
         PackagePolicy::load()
     }
 
-    /// Validate a formula or cask and refuse ones qualified with an untrusted tap.
-    fn check_package(&self, name: &str) -> Result<()> {
+    /// Validate a formula or cask and refuse ones from an untrusted tap.
+    async fn check_package(&self, name: &str, cask: bool) -> Result<()> {
         validate_name(Ecosystem::Brew, name)?;
-        if let Some(tap) = tap_of(name) {
-            if !self.policy().tap_trusted(tap) {
-                anyhow::bail!("{} is from untrusted tap {}", name, tap);
-            }
+        match self.tap_for(name, cask).await {
+            Some(tap) if self.policy().tap_trusted(&tap) => Ok(()),
+            Some(tap) => anyhow::bail!("{} is from untrusted tap {}", name, tap),
+            None => anyhow::bail!("cannot find the tap of {}", name),
         }
-        Ok(())
+    }
+
+    /// The tap a formula or cask installs from. A short name resolves to whichever tapped
+    /// repository brew picks, which can be an untrusted one, so it is looked up.
+    pub async fn tap_for(&self, name: &str, cask: bool) -> Option<String> {
+        if let Some(tap) = tap_of(name) {
+            return Some(tap.to_string());
+        }
+        let kind = if cask { "--cask" } else { "--formula" };
+        let output = command("brew")
+            .ok()?
+            .args(["info", "--json=v2", kind, name])
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let info: BrewInfo = serde_json::from_slice(&output.stdout).ok()?;
+        info.formulae
+            .into_iter()
+            .chain(info.casks)
+            .next()
+            .and_then(|entry| entry.tap)
     }
 
     /// Validate and trust-filter a Brewfile before brew sees it.
@@ -181,7 +258,7 @@ impl BrewManager {
                 let requested_version = &formula[at_pos + 1..];
 
                 // Check what versions of this formula are installed
-                let output = Command::new("brew")
+                let output = command("brew")?
                     .args(["list", "--versions"])
                     .output()
                     .await?;
@@ -201,7 +278,7 @@ impl BrewManager {
                                 if installed_base == base_name
                                     && installed_version != requested_version
                                 {
-                                    let _ = Command::new("brew")
+                                    let _ = command("brew")?
                                         .args(["unlink", installed_name])
                                         .output()
                                         .await;
@@ -217,7 +294,7 @@ impl BrewManager {
     }
 
     async fn run_brew(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("brew").args(args).output().await?;
+        let output = command("brew")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -268,8 +345,8 @@ impl BrewManager {
     pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {
         use std::process::Stdio;
 
-        self.check_package(cask)?;
-        let mut cmd = Command::new("brew");
+        self.check_package(cask, true).await?;
+        let mut cmd = command("brew")?;
         cmd.args(["install", "--cask", cask])
             .env("NONINTERACTIVE", "1")
             .env("HOMEBREW_NO_AUTO_UPDATE", "1");
@@ -341,7 +418,7 @@ impl PackageManager for BrewManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
-        self.check_package(&package.name)?;
+        self.check_package(&package.name, false).await?;
         self.run_brew(&["install", &package.name]).await?;
         Ok(())
     }
@@ -378,7 +455,7 @@ impl PackageManager for BrewManager {
         }
 
         // Generate Brewfile
-        let output = Command::new("brew")
+        let output = command("brew")?
             .args([
                 "bundle",
                 "dump",
@@ -428,7 +505,7 @@ impl PackageManager for BrewManager {
         // Use `brew bundle install` to install packages from Brewfile
         // --no-upgrade: don't upgrade existing packages (faster, less disruptive)
         // Stream output to terminal so user can see progress and any errors
-        let status = Command::new("brew")
+        let status = command("brew")?
             .args([
                 "bundle",
                 "install",
@@ -486,7 +563,7 @@ impl PackageManager for BrewManager {
                     eprintln!("Warning: Skipping brew entry: {}", e);
                     continue;
                 }
-                let output = Command::new("brew")
+                let output = command("brew")?
                     .args(["uninstall", &pkg.name])
                     .output()
                     .await?;
@@ -508,14 +585,27 @@ impl PackageManager for BrewManager {
             return Ok(());
         }
 
-        // Update Homebrew itself and upgrade all packages
-        Command::new("brew").args(["update"]).output().await?;
+        command("brew")?.args(["update"]).output().await?;
 
-        let output = Command::new("brew").args(["upgrade"]).output().await?;
+        let info: BrewInfo =
+            serde_json::from_str(&self.run_brew(&["info", "--json=v2", "--installed"]).await?)?;
+        let (formulae, casks) = trusted_upgrades(info, &self.policy());
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("brew upgrade failed: {}", stderr));
+        for (kind, names) in [("--formula", formulae), ("--cask", casks)] {
+            if names.is_empty() {
+                continue;
+            }
+            let output = command("brew")?
+                .args(["upgrade", kind])
+                .args(&names)
+                .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow::anyhow!("brew upgrade failed: {}", stderr));
+            }
         }
 
         Ok(())
@@ -523,7 +613,7 @@ impl PackageManager for BrewManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Brew, package)?;
-        let output = Command::new("brew")
+        let output = command("brew")?
             .args(["uninstall", package])
             .output()
             .await?;
@@ -537,7 +627,7 @@ impl PackageManager for BrewManager {
     }
 
     async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
-        let output = Command::new("brew")
+        let output = command("brew")?
             .args(["uses", "--installed", package])
             .output()
             .await?;
@@ -667,6 +757,35 @@ brew "git"
         assert_eq!(untrusted.taps, vec!["evil/tap"]);
         assert_eq!(untrusted.formulae, vec!["evil/tap/payload"]);
         assert_eq!(untrusted.casks, vec!["evil/tap/app"]);
+    }
+
+    #[test]
+    fn test_trusted_upgrades_skip_untrusted_taps() {
+        let policy = PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["oven-sh/bun".to_string()],
+        };
+        let info: BrewInfo = serde_json::from_str(
+            r#"{
+              "formulae": [
+                {"name": "wget", "full_name": "wget", "tap": "homebrew/core", "outdated": true, "pinned": false},
+                {"name": "bun", "full_name": "oven-sh/bun/bun", "tap": "oven-sh/bun", "outdated": true, "pinned": false},
+                {"name": "bd", "full_name": "evil/tap/bd", "tap": "evil/tap", "outdated": true, "pinned": false},
+                {"name": "node", "full_name": "node", "tap": "homebrew/core", "outdated": false, "pinned": false},
+                {"name": "jq", "full_name": "jq", "tap": "homebrew/core", "outdated": true, "pinned": true},
+                {"name": "local", "full_name": "local", "tap": null, "outdated": true, "pinned": false}
+              ],
+              "casks": [
+                {"token": "iterm2", "full_token": "iterm2", "tap": "homebrew/cask", "outdated": true},
+                {"token": "app", "full_token": "evil/tap/app", "tap": "evil/tap", "outdated": true}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let (formulae, casks) = trusted_upgrades(info, &policy);
+        assert_eq!(formulae, vec!["wget", "oven-sh/bun/bun"]);
+        assert_eq!(casks, vec!["iterm2"]);
     }
 
     #[test]

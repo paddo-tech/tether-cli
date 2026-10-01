@@ -1,8 +1,8 @@
+use super::command;
 use super::policy::{self, PackagePolicy};
-use super::{validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager};
+use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::process::Command;
 
 pub struct UvManager;
 
@@ -16,7 +16,7 @@ impl UvManager {
     }
 
     async fn run_uv(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("uv").args(args).output().await?;
+        let output = command("uv")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -71,10 +71,17 @@ impl PackageManager for UvManager {
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
         validate_name(Ecosystem::Python, &package.name)?;
+        let pkg_spec = match &package.version {
+            Some(version) => {
+                validate_version(version)?;
+                format!("{}=={}", package.name, version)
+            }
+            None => package.name.clone(),
+        };
         let cooldown = self.cooldown().await;
         let mut args = vec!["tool", "install"];
         args.extend(cooldown.args().iter().map(String::as_str));
-        args.push(&package.name);
+        args.push(&pkg_spec);
         self.run_uv(&args).await?;
         Ok(())
     }
@@ -92,7 +99,11 @@ impl PackageManager for UvManager {
     }
 
     async fn cooldown(&self) -> Cooldown {
-        policy::uv_cooldown(self.policy().min_release_age_days, chrono::Utc::now())
+        policy::uv_cooldown(
+            self.policy().min_release_age_days,
+            policy::tool_version("uv").await,
+            chrono::Utc::now(),
+        )
     }
 
     async fn update_all(&self) -> Result<()> {
@@ -101,7 +112,7 @@ impl PackageManager for UvManager {
             return Ok(());
         }
 
-        let output = Command::new("uv")
+        let output = command("uv")?
             .args(["tool", "upgrade", "--all"])
             .args(self.cooldown().await.args())
             .output()
@@ -117,7 +128,7 @@ impl PackageManager for UvManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Python, package)?;
-        let output = Command::new("uv")
+        let output = command("uv")?
             .args(["tool", "uninstall", package])
             .output()
             .await?;

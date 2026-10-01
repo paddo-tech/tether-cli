@@ -1,3 +1,4 @@
+use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{
     command_error_message, validate_name, validate_version, Cooldown, Ecosystem, PackageInfo,
@@ -6,7 +7,6 @@ use super::{
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::process::Command;
 
 pub struct PnpmManager;
 
@@ -29,7 +29,7 @@ impl PnpmManager {
     }
 
     async fn run_pnpm(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("pnpm").args(args).output().await?;
+        let output = command("pnpm")?.args(args).output().await?;
 
         if !output.status.success() {
             return Err(anyhow::anyhow!(
@@ -93,9 +93,19 @@ impl PackageManager for PnpmManager {
             package.name.clone()
         };
 
+        let package_policy = self.policy();
+        let version = policy::tool_version("pnpm").await;
+        if package_policy.scripts_allowed(&package.name) && !policy::pnpm_can_allow_build(version) {
+            policy::warn_scripts_unsupported_once("pnpm", "10.4");
+        }
         let mut args = vec!["add".to_string(), "-g".to_string()];
         args.extend(self.cooldown_args().await);
-        args.extend(policy::pnpm_script_args(&self.policy(), &package.name));
+        args.extend(policy::pnpm_script_args(
+            &package_policy,
+            &package.name,
+            version,
+            true,
+        ));
         args.push(pkg_spec);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.run_pnpm(&args).await?;
@@ -129,6 +139,7 @@ impl PackageManager for PnpmManager {
 
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
+        let version = policy::tool_version("pnpm").await;
         let names: Vec<String> = packages
             .into_iter()
             .map(|p| p.name)
@@ -143,16 +154,30 @@ impl PackageManager for PnpmManager {
         let (scripted, plain): (Vec<String>, Vec<String>) = names
             .into_iter()
             .partition(|name| package_policy.scripts_allowed(name));
+        if !scripted.is_empty() && !policy::pnpm_can_allow_build(version) {
+            policy::warn_scripts_unsupported_once("pnpm", "10.4");
+        }
 
         // Allowlisted packages update in a second run so only they get scripts
         for batch in [plain, scripted] {
             let Some(first) = batch.first() else {
                 continue;
             };
-            let output = Command::new("pnpm")
+            let script_args = policy::pnpm_script_args(&package_policy, first, version, false);
+            if script_args.iter().any(|a| a == "--ignore-scripts")
+                && !policy::pnpm_update_accepts_ignore_scripts(version)
+            {
+                if policy::first_warning("pnpm update --ignore-scripts") {
+                    eprintln!(
+                        "Warning: Skipping pnpm update: pnpm 12.0.0 to 12.3.1 cannot update with install scripts off. Upgrade pnpm to 12.3.2 or later"
+                    );
+                }
+                continue;
+            }
+            let output = command("pnpm")?
                 .args(["update", "-g"])
                 .args(&cooldown)
-                .args(policy::pnpm_script_args(&package_policy, first))
+                .args(script_args)
                 .args(&batch)
                 .output()
                 .await?;
@@ -170,7 +195,7 @@ impl PackageManager for PnpmManager {
 
     async fn uninstall(&self, package: &str) -> Result<()> {
         validate_name(Ecosystem::Npm, package)?;
-        let output = Command::new("pnpm")
+        let output = command("pnpm")?
             .args(["remove", "-g", package])
             .output()
             .await?;

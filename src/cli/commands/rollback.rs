@@ -1,8 +1,9 @@
 use crate::cli::Output;
 use crate::config::Config;
+use crate::packages::pin::parse_pin;
 use crate::sync::{GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Reverse-delta against the union manifest at `commit`; the follow-up sync records removals.
 pub async fn packages(manager: &str, commit: &str) -> Result<()> {
@@ -30,12 +31,13 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
     let git = GitBackend::open(&sync_path)?;
     let snapshot = git.show_at_commit(commit, &repo_path)?;
     let snapshot = String::from_utf8_lossy(&snapshot);
-    let target: HashSet<String> = snapshot
+    let pins: HashMap<String, String> = snapshot
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
-        .map(str::to_string)
+        .map(|l| (parse_pin(pkg_manager.ecosystem(), l).0, l.to_string()))
         .collect();
+    let target: HashSet<String> = pins.keys().cloned().collect();
 
     let installed: HashSet<String> = pkg_manager
         .list_installed()
@@ -72,7 +74,7 @@ pub async fn packages(manager: &str, commit: &str) -> Result<()> {
     if !to_install.is_empty() {
         let manifest_text = to_install
             .iter()
-            .map(|s| s.as_str())
+            .map(|name| pins[*name].as_str())
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";

@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
+use crate::packages::inbox::{self, InboxItem, Reason};
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
     UvManager,
@@ -183,5 +184,100 @@ async fn uninstall_package(
         }
     }
 
+    Ok(())
+}
+
+fn describe(item: &InboxItem) -> String {
+    let mut text = item.id();
+    if let Some(version) = &item.version {
+        text.push_str(&format!(" {}", version));
+    }
+    if let Some(machine) = &item.source_machine {
+        text.push_str(&format!(" from {}", machine));
+    }
+    let reasons: Vec<&str> = item.reasons.iter().map(|r| r.label()).collect();
+    text.push_str(&format!(" ({})", reasons.join(", ")));
+    if !item.advisories.is_empty() {
+        text.push_str(&format!(" [OSV: {}]", item.advisories.join(", ")));
+    }
+    text
+}
+
+/// List packages waiting for approval.
+pub async fn inbox_list() -> Result<()> {
+    let items = inbox::list()?;
+    if items.is_empty() {
+        Output::info("No packages wait for approval");
+        return Ok(());
+    }
+    Output::section("Packages waiting for approval");
+    for item in &items {
+        Output::list_item(&describe(item));
+    }
+    Output::dim("Run 'tether packages approve <id>' or 'tether packages reject <id>'");
+    Ok(())
+}
+
+/// Approve a held package and install it now.
+pub async fn approve(id: &str) -> Result<()> {
+    let item = inbox::approve(id)?;
+    Output::info(&format!("Approved {}. Installing...", item.id()));
+    inbox::install(&item, true).await?;
+    Output::success(&format!("Installed {}", item.name));
+    Ok(())
+}
+
+/// Reject a held package so later syncs do not offer it again.
+pub async fn reject(id: &str) -> Result<()> {
+    let item = inbox::reject(id)?;
+    Output::success(&format!("Rejected {}", item.id()));
+    Ok(())
+}
+
+/// Ask about each held package. Only a terminal user can answer, so callers check for one.
+pub async fn review_inbox() -> Result<()> {
+    let items = inbox::list()?;
+    if items.is_empty() {
+        return Ok(());
+    }
+    Output::section("Packages waiting for approval");
+    for item in &items {
+        Output::list_item(&describe(item));
+    }
+    // A new machine can inherit hundreds of packages, so one answer can cover them all
+    if items.len() > 1 {
+        let options = vec!["Review each", "Install all", "Decide later"];
+        match Prompt::select("Install these packages?", options, 0)? {
+            0 => {}
+            1 => {
+                for item in items {
+                    if item.reasons.contains(&Reason::Malicious) {
+                        continue;
+                    }
+                    if let Err(e) = approve(&item.id()).await {
+                        Output::warning(&format!("{}: {}", item.name, e));
+                    }
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+    }
+    for item in items {
+        let options = if item.reasons.contains(&Reason::Malicious) {
+            vec!["Reject", "Decide later"]
+        } else {
+            vec!["Install", "Reject", "Decide later"]
+        };
+        let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
+        let result = match choice {
+            "Install" => approve(&item.id()).await,
+            "Reject" => reject(&item.id()).await,
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            Output::warning(&format!("{}: {}", item.name, e));
+        }
+    }
     Ok(())
 }

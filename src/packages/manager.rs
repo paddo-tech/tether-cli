@@ -1,4 +1,5 @@
-use super::{validate_name, Cooldown, Ecosystem};
+use super::pin::{manifest_names, parse_pin};
+use super::{validate_name, validate_version, Cooldown, Ecosystem};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -45,36 +46,38 @@ pub trait PackageManager: Send + Sync {
     /// Import packages from a manifest file using native tooling
     /// The manifest_content is the content that was previously exported
     async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
-        let package_names: Vec<&str> = manifest_content
+        let packages: Vec<PackageInfo> = manifest_content
             .lines()
             .map(|line| line.trim())
             .filter(|line| !line.is_empty())
-            .filter(|line| match validate_name(self.ecosystem(), line) {
-                Ok(()) => true,
-                Err(e) => {
-                    eprintln!("Warning: Skipping {} entry: {}", self.name(), e);
-                    false
+            .map(|line| {
+                let (name, version) = parse_pin(self.ecosystem(), line);
+                PackageInfo { name, version }
+            })
+            .filter(|p| {
+                let checked = validate_name(self.ecosystem(), &p.name)
+                    .and_then(|()| p.version.as_deref().map_or(Ok(()), validate_version));
+                match checked {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("Warning: Skipping {} entry: {}", self.name(), e);
+                        false
+                    }
                 }
             })
             .collect();
 
-        if package_names.is_empty() {
+        if packages.is_empty() {
             return Ok(());
         }
 
         let installed = self.list_installed().await?;
         let installed_names: HashSet<_> = installed.iter().map(|p| p.name.as_str()).collect();
 
-        for name in package_names {
-            if !installed_names.contains(name) {
-                if let Err(e) = self
-                    .install(&PackageInfo {
-                        name: name.to_string(),
-                        version: None,
-                    })
-                    .await
-                {
-                    eprintln!("Warning: Failed to install {}: {}", name, e);
+        for package in packages {
+            if !installed_names.contains(package.name.as_str()) {
+                if let Err(e) = self.install(&package).await {
+                    eprintln!("Warning: Failed to install {}: {}", package.name, e);
                 }
             }
         }
@@ -84,11 +87,8 @@ pub trait PackageManager: Send + Sync {
 
     /// Remove packages not in the manifest
     async fn remove_unlisted(&self, manifest_content: &str) -> Result<()> {
-        let desired: HashSet<&str> = manifest_content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect();
+        let names = manifest_names(self.ecosystem(), manifest_content);
+        let desired: HashSet<&str> = names.iter().map(String::as_str).collect();
 
         if desired.is_empty() {
             return Ok(());

@@ -7,12 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Package manifests now record the version each machine has installed: `name@1.2.3` in `npm.txt`, `pnpm.txt` and `bun.txt`, `name==1.2.3` in `uv.txt`, and `name:1.2.3` in `gems.txt`. When machines differ, the manifest keeps the newest version. A new machine installs that exact version. Lines without a version still work and install the newest release that passes the release-age limit. The Brewfile stays unpinned, because Homebrew installs only the current release
+- New approval inbox in `~/.tether/inbox.json`. It stays on this machine and is never synced. Use `tether packages inbox` to list held packages, and `tether packages approve <id>` or `tether packages reject <id>` to decide. An approved package installs at once. A rejected package is not offered again. An approved Homebrew package from an untrusted tap also trusts that tap
+- `tether sync` in a terminal now asks about held packages. The daemon holds them and sends one notification for each new batch
+- New setting `packages.auto_install_from_trusted` (default false)
+- Tether now checks synced npm, pnpm, bun, uv and gem packages against OSV before it installs them. A `MAL-` advisory blocks the install, and the package waits in the inbox, where it cannot be approved. Other advisories show a warning and are stored with the inbox item. A network failure does not block installs. Tether uses `curl` with a 10-second limit. Without a pinned version, only `MAL-` advisories count
+
+### Changed
+
+- A package that another machine added to a manifest no longer installs on its own. It waits in the approval inbox. Set `packages.auto_install_from_trusted = true` to install such packages without approval when they pass every other check
+- Synced packages that the installed manager cannot hold to `packages.min_release_age_days` now wait in the approval inbox. Before, they installed after a warning. This covers gem and old npm, pnpm and bun
+- Homebrew taps that are not trusted, and formulae and casks from them, now wait in the approval inbox. Before, Tether skipped them with a warning
+
 ### Security
 
 - Tether now checks every package name from a manifest before it runs a package manager. It skips names that look like flags, URLs, paths, tarballs or `git+`/`github:`/`file:`/`link:` specs, and shows a warning
 - New setting `packages.min_release_age_days` (default 7, 0 turns it off). npm, pnpm, bun and uv installs and upgrades skip releases newer than this. The daemon does not auto-upgrade a manager that is too old to enforce it (npm before 11.10, pnpm before 10.16, bun before 1.3, and gem), and it logs a warning once
 - npm, pnpm and bun now install and upgrade with install scripts turned off. List packages that need their scripts in `packages.allow_scripts`
 - Homebrew taps outside `homebrew/*` must be listed in `packages.brew.trusted_taps`. Tether skips other taps, and formulae and casks from them, and shows a warning
+- Tether now rejects package names and versions that a package manager reads as a local file. The check ignores case. It covers `.tgz`, `.tar` and `.tar.gz` for npm, pnpm and bun, `.gem` for gem, `.rb`, `.json` and bottle tarballs for Homebrew, and `.tar.gz`, `.whl` and `.zip` for uv
+- Tether now runs every package manager in the empty directory `~/.tether/run`. Before, a package manager ran in your current directory and could install a local file or read project config from it. `gem install` and `gem update` also use `--remote`, so gem never installs a `*.gem` file
+- pnpm 11 and later now get `--config.minimum-release-age-strict=true` with the release-age cutoff. Without it, pnpm 11.0 to 12.2 could install a too-new version and add it to `minimumReleaseAgeExclude`
+- Tether skips `pnpm update` for packages with scripts off on pnpm 12.0.0 to 12.3.1, because those versions reject `update --ignore-scripts`. It shows a warning once
+- `packages.allow_scripts` now runs scripts only for the listed package. pnpm 10.4 and later install it with `--allow-build=<name>`, and npm 12 and later with `--allow-scripts=<name>`. On older npm or pnpm the listed package also installs with scripts off, because those versions would run the scripts of all its dependencies too. Tether shows a warning once
+- uv now gets the release-age limit as a duration (`--exclude-newer "7 days"`) on uv 0.9.17 and later. uv saves the limit in each tool receipt. A saved timestamp kept later upgrades at that date, but a saved duration stays relative. With `packages.min_release_age_days = 0`, uv 0.11.24 and later get `--exclude-newer false`, which clears a saved limit. On older uv, run `uv tool install --force <name>` to clear it
+- Tether now looks up the tap of a short Homebrew name, such as `bun`, before it installs it. brew can resolve a short name to any tapped repository, so a name from an untrusted tap is skipped like a qualified one
+- `tether upgrade` now asks before it upgrades a manager that cannot enforce `packages.min_release_age_days`, such as gem or an old npm. Without a terminal, it skips that manager
+- Homebrew upgrades now upgrade only outdated formulae and casks from trusted taps. Before, Tether ran a plain `brew upgrade`, which also upgraded packages from untrusted taps
 
 ### Changed
 

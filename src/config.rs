@@ -148,6 +148,9 @@ pub struct PackagesConfig {
     /// Packages whose install scripts may run; scripts are off for all others
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_scripts: Vec<String>,
+    /// Install packages from other machines without approval when every other check passes
+    #[serde(default)]
+    pub auto_install_from_trusted: bool,
     #[serde(default = "default_brew_config")]
     pub brew: BrewConfig,
     #[serde(default = "default_npm_config")]
@@ -1028,6 +1031,7 @@ impl Default for Config {
                 remove_unlisted: false,
                 min_release_age_days: default_min_release_age_days(),
                 allow_scripts: Vec::new(),
+                auto_install_from_trusted: false,
                 brew: default_brew_config(),
                 npm: NpmConfig {
                     enabled: true,
@@ -1389,6 +1393,7 @@ files = [".zshrc"]
         assert_eq!(parsed.packages.min_release_age_days, 7);
         assert!(parsed.packages.allow_scripts.is_empty());
         assert!(parsed.packages.brew.trusted_taps.is_empty());
+        assert!(!parsed.packages.auto_install_from_trusted);
     }
 
     #[test]
@@ -1405,6 +1410,7 @@ url = ""
 [packages]
 min_release_age_days = 0
 allow_scripts = ["esbuild"]
+auto_install_from_trusted = true
 
 [packages.brew]
 enabled = true
@@ -1418,6 +1424,7 @@ files = []
         let parsed: Config = toml::from_str(config).unwrap();
         assert_eq!(parsed.packages.min_release_age_days, 0);
         assert_eq!(parsed.packages.allow_scripts, vec!["esbuild"]);
+        assert!(parsed.packages.auto_install_from_trusted);
         assert_eq!(parsed.packages.brew.trusted_taps, vec!["oven-sh/bun"]);
     }
 

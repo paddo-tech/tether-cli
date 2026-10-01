@@ -128,6 +128,9 @@ pub enum Commands {
         /// List packages without interactive selection
         #[arg(long)]
         list: bool,
+
+        #[command(subcommand)]
+        action: Option<PackagesAction>,
     },
 
     /// Restore files from backup
@@ -161,6 +164,22 @@ pub enum Commands {
     Rollback {
         #[command(subcommand)]
         action: RollbackAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PackagesAction {
+    /// List synced packages waiting for approval
+    Inbox,
+    /// Approve a held package and install it
+    Approve {
+        /// Item id (manager:name) or a package name
+        id: String,
+    },
+    /// Reject a held package so syncs stop offering it
+    Reject {
+        /// Item id (manager:name) or a package name
+        id: String,
     },
 }
 
@@ -676,7 +695,12 @@ impl Cli {
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade => upgrade::run().await,
-            Commands::Packages { list } => packages::run(*list, self.yes).await,
+            Commands::Packages { list, action } => match action {
+                None => packages::run(*list, self.yes).await,
+                Some(PackagesAction::Inbox) => packages::inbox_list().await,
+                Some(PackagesAction::Approve { id }) => packages::approve(id).await,
+                Some(PackagesAction::Reject { id }) => packages::reject(id).await,
+            },
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,
                 RestoreAction::File { from, file } => {

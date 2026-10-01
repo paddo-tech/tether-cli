@@ -1,8 +1,14 @@
 use crate::cli::Output;
 use crate::config::Config;
-use crate::packages::{normalize_formula_name, BrewManager, BrewfilePackages, PackageManager};
+use crate::packages::inbox::{self, Checks, Inbox, InboxItem, Reason};
+use crate::packages::osv;
+use crate::packages::pin::{format_pin, parse_pin};
+use crate::packages::{
+    normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageManager,
+    PackagePolicy,
+};
 use crate::sync::state::PackageState;
-use crate::sync::{MachineState, SyncState};
+use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -15,6 +21,8 @@ struct PackageManagerDef {
     display_name: &'static str,
     /// Manifest filename
     manifest_file: &'static str,
+    /// Naming and version-pin syntax of the manifest lines
+    ecosystem: Ecosystem,
 }
 
 /// Map a machine-state package key to its manifest filename in `manifests/`.
@@ -34,32 +42,46 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
         state_key: "npm",
         display_name: "npm",
         manifest_file: "npm.txt",
+        ecosystem: Ecosystem::Npm,
     },
     PackageManagerDef {
         state_key: "pnpm",
         display_name: "pnpm",
         manifest_file: "pnpm.txt",
+        ecosystem: Ecosystem::Npm,
     },
     PackageManagerDef {
         state_key: "bun",
         display_name: "bun",
         manifest_file: "bun.txt",
+        ecosystem: Ecosystem::Npm,
     },
     PackageManagerDef {
         state_key: "gem",
         display_name: "gem",
         manifest_file: "gems.txt",
+        ecosystem: Ecosystem::Gem,
     },
     PackageManagerDef {
         state_key: "uv",
         display_name: "uv",
         manifest_file: "uv.txt",
+        ecosystem: Ecosystem::Python,
     },
 ];
 
-/// Import packages from manifests, installing only missing packages.
-/// In daemon mode, casks are deferred (require password).
-/// Returns list of deferred casks (empty if not in daemon mode).
+/// What an import did beyond installing.
+#[derive(Debug, Default)]
+pub struct ImportOutcome {
+    /// Casks that need a password; only the daemon defers them
+    pub deferred_casks: Vec<String>,
+    /// Packages newly held in the approval inbox
+    pub queued: Vec<InboxItem>,
+}
+
+/// Import packages from manifests, installing only missing packages that pass the
+/// trust checks. Others go to the approval inbox. In daemon mode, casks are deferred
+/// (require password).
 pub async fn import_packages(
     config: &Config,
     sync_path: &Path,
@@ -67,14 +89,21 @@ pub async fn import_packages(
     machine_state: &MachineState,
     daemon_mode: bool,
     previously_deferred: &[String],
-) -> Result<Vec<String>> {
+) -> Result<ImportOutcome> {
+    let mut outcome = ImportOutcome::default();
     let manifests_dir = sync_path.join("manifests");
     if !manifests_dir.exists() {
-        return Ok(Vec::new());
+        return Ok(outcome);
     }
 
+    prune_inbox(machine_state)?;
+    let trust = Trust {
+        inbox: Inbox::load()?,
+        provenance: Provenance::load(sync_path, &machine_state.machine_id),
+        auto_install_from_trusted: config.packages.auto_install_from_trusted,
+    };
+
     let mid = &machine_state.machine_id;
-    let mut deferred_casks = Vec::new();
 
     // Homebrew - special handling for formulae/casks/taps
     if config.is_manager_enabled(mid, "brew") {
@@ -83,9 +112,11 @@ pub async fn import_packages(
             machine_state,
             daemon_mode,
             previously_deferred,
+            &trust,
+            &mut outcome.queued,
         )
         .await;
-        deferred_casks = casks;
+        outcome.deferred_casks = casks;
 
         if installed {
             update_last_upgrade(state, "brew");
@@ -95,14 +126,149 @@ pub async fn import_packages(
     // Simple package managers (npm, pnpm, bun, gem)
     for def in SIMPLE_MANAGERS {
         if config.is_manager_enabled(mid, def.state_key) {
-            let installed = import_simple_manager(def, &manifests_dir, machine_state).await;
+            let installed = import_simple_manager(
+                def,
+                &manifests_dir,
+                machine_state,
+                &trust,
+                &mut outcome.queued,
+            )
+            .await;
             if installed {
                 update_last_upgrade(state, def.state_key);
             }
         }
     }
 
-    Ok(deferred_casks)
+    outcome.queued = inbox::add(outcome.queued)?;
+    for item in &outcome.queued {
+        Output::warning(&format!(
+            "Holding {} ({}) for approval: {}. Run 'tether packages inbox'",
+            item.name,
+            item.manager,
+            item.reasons
+                .iter()
+                .map(|r| r.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    Ok(outcome)
+}
+
+/// Pending items for packages the user has since installed are settled.
+fn prune_inbox(machine_state: &MachineState) -> Result<()> {
+    let installed = |manager: &str, name: &str| {
+        machine_state.packages.get(manager).is_some_and(|names| {
+            names.iter().any(|n| {
+                n == name || (manager.starts_with("brew_") && n == normalize_formula_name(name))
+            })
+        })
+    };
+    let inbox = Inbox::load()?;
+    if inbox.items.iter().any(|i| installed(&i.manager, &i.name)) {
+        Inbox::update(|inbox| {
+            for manager in machine_state.packages.keys() {
+                inbox.prune_installed(manager, |name| installed(manager, name));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Trust inputs shared by every manager in one import.
+struct Trust {
+    inbox: Inbox,
+    provenance: Provenance,
+    auto_install_from_trusted: bool,
+}
+
+impl Trust {
+    /// True when the package was already decided on: pending, or rejected.
+    fn settled(&self, manager: &str, name: &str) -> bool {
+        self.inbox.is_pending(manager, name) || self.inbox.is_rejected(manager, name)
+    }
+
+    fn checks(&self, manager: &str, name: &str) -> Checks {
+        Checks {
+            from_this_machine: self.provenance.listed_here(manager, name),
+            approved: self.inbox.is_approved(manager, name),
+            auto_install_from_trusted: self.auto_install_from_trusted,
+            ..Checks::default()
+        }
+    }
+
+    fn item(
+        &self,
+        manager: &str,
+        name: &str,
+        version: Option<String>,
+        tap: Option<String>,
+        reasons: Vec<Reason>,
+    ) -> InboxItem {
+        let (source_machine, commit) = self.provenance.source(manager, name);
+        InboxItem {
+            manager: manager.to_string(),
+            name: name.to_string(),
+            version,
+            tap,
+            source_machine,
+            commit,
+            reasons,
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        }
+    }
+}
+
+/// Which machines list a package, and the commit that last changed the source machine's
+/// state. Commit signatures will be checked against that commit.
+struct Provenance {
+    machines: Vec<MachineState>,
+    this_machine: String,
+    sync_path: std::path::PathBuf,
+}
+
+impl Provenance {
+    fn load(sync_path: &Path, this_machine: &str) -> Self {
+        Self {
+            machines: MachineState::list_all(sync_path).unwrap_or_default(),
+            this_machine: this_machine.to_string(),
+            sync_path: sync_path.to_path_buf(),
+        }
+    }
+
+    fn lists(machine: &MachineState, manager: &str, name: &str) -> bool {
+        machine
+            .packages
+            .get(manager)
+            .is_some_and(|names| names.iter().any(|n| n == name))
+    }
+
+    fn listed_here(&self, manager: &str, name: &str) -> bool {
+        self.machines
+            .iter()
+            .any(|m| m.machine_id == self.this_machine && Self::lists(m, manager, name))
+    }
+
+    fn source(&self, manager: &str, name: &str) -> (Option<String>, Option<String>) {
+        let Some(machine) = self
+            .machines
+            .iter()
+            .filter(|m| m.machine_id != self.this_machine && Self::lists(m, manager, name))
+            .max_by_key(|m| m.last_sync)
+        else {
+            return (None, None);
+        };
+        let commit = GitBackend::new(self.sync_path.clone())
+            .file_log(&format!("machines/{}.json", machine.machine_id), 1)
+            .ok()
+            .and_then(|log| log.into_iter().next())
+            .map(|entry| entry.commit_hash);
+        (Some(machine.machine_id.clone()), commit)
+    }
 }
 
 /// Update last_upgrade timestamp for a package manager
@@ -128,6 +294,8 @@ async fn import_brew(
     machine_state: &MachineState,
     daemon_mode: bool,
     previously_deferred: &[String],
+    trust: &Trust,
+    queued: &mut Vec<InboxItem>,
 ) -> (Vec<String>, bool) {
     let brewfile = manifests_dir.join("Brewfile");
     if !brewfile.exists() {
@@ -169,7 +337,25 @@ async fn import_brew(
         .retain(|p| !removed_formulae.contains(p));
     brew_packages.casks.retain(|p| !removed_casks.contains(p));
     brew_packages.taps.retain(|p| !removed_taps.contains(p));
-    brew.filter_brewfile(&mut brew_packages);
+    brew_packages.retain_valid();
+
+    // Untrusted taps that are not tapped yet wait for approval
+    let policy = PackagePolicy::load();
+    let local_taps: HashSet<String> = brew
+        .list_taps()
+        .await
+        .map(|t| t.into_iter().collect())
+        .unwrap_or_default();
+    let (trusted_taps, untrusted_taps): (Vec<String>, Vec<String>) = brew_packages
+        .taps
+        .drain(..)
+        .partition(|t| policy.tap_trusted(t));
+    for tap in untrusted_taps {
+        if !local_taps.contains(&tap) && !trust.settled("brew_taps", &tap) {
+            queued.push(trust.item("brew_taps", &tap, None, None, vec![Reason::UntrustedTap]));
+        }
+    }
+    brew_packages.taps = trusted_taps;
 
     // Calculate missing packages (normalize formula names for comparison)
     let local_formulae: HashSet<_> = machine_state
@@ -208,6 +394,17 @@ async fn import_brew(
         }
     }
 
+    let missing_formulae = gate_brew(
+        &brew,
+        &policy,
+        trust,
+        "brew_formulae",
+        missing_formulae,
+        queued,
+    )
+    .await;
+    let casks_to_try = gate_brew(&brew, &policy, trust, "brew_casks", casks_to_try, queued).await;
+
     let mut installed_any = false;
 
     // Install formulae via bundle (no password needed)
@@ -221,13 +418,10 @@ async fn import_brew(
 
         // Explicitly tap any missing taps before bundle install
         // (brew bundle sometimes fails to tap before installing)
-        if let Ok(local_taps) = brew.list_taps().await {
-            let local_taps_set: HashSet<_> = local_taps.iter().map(|s| s.as_str()).collect();
-            for tap in &brew_packages.taps {
-                if !local_taps_set.contains(tap.as_str()) {
-                    if let Err(e) = brew.tap(tap).await {
-                        Output::warning(&format!("Failed to tap {}: {}", tap, e));
-                    }
+        for tap in &brew_packages.taps {
+            if !local_taps.contains(tap) {
+                if let Err(e) = brew.tap(tap).await {
+                    Output::warning(&format!("Failed to tap {}: {}", tap, e));
                 }
             }
         }
@@ -288,12 +482,46 @@ async fn import_brew(
     (flagged_casks, installed_any)
 }
 
+/// Keep the formulae or casks that may install and queue the rest. A short name is
+/// looked up, because brew resolves it to whichever tapped repository has it.
+async fn gate_brew(
+    brew: &BrewManager,
+    policy: &PackagePolicy,
+    trust: &Trust,
+    manager: &str,
+    names: Vec<String>,
+    queued: &mut Vec<InboxItem>,
+) -> Vec<String> {
+    let mut allowed = Vec::new();
+    for name in names {
+        if trust.settled(manager, &name) {
+            continue;
+        }
+        let mut checks = trust.checks(manager, &name);
+        let mut tap = None;
+        if !checks.approved {
+            tap = brew.tap_for(&name, manager == "brew_casks").await;
+            checks.untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
+        }
+        let reasons = inbox::reasons(checks);
+        if reasons.is_empty() {
+            allowed.push(name);
+        } else {
+            let tap = tap.filter(|_| checks.untrusted_tap);
+            queued.push(trust.item(manager, &name, None, tap, reasons));
+        }
+    }
+    allowed
+}
+
 /// Import a simple package manager (one package per line manifest)
 /// Returns true if any packages were installed.
 async fn import_simple_manager(
     def: &PackageManagerDef,
     manifests_dir: &Path,
     machine_state: &MachineState,
+    trust: &Trust,
+    queued: &mut Vec<InboxItem>,
 ) -> bool {
     let manifest_path = manifests_dir.join(def.manifest_file);
     if !manifest_path.exists() {
@@ -325,28 +553,68 @@ async fn import_simple_manager(
         .map(|v| v.iter().cloned().collect())
         .unwrap_or_default();
 
-    // Filter to only missing packages
-    let missing: Vec<_> = manifest
+    // Filter to only missing packages that nobody has decided on yet
+    let missing: Vec<(String, Option<String>, String)> = manifest
         .lines()
-        .filter(|line| {
-            let pkg = line.trim();
-            !pkg.is_empty() && !removed_packages.contains(pkg) && !local_packages.contains(pkg)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (name, version) = parse_pin(def.ecosystem, line);
+            (name, version, line.to_string())
         })
-        .map(|s| s.to_string())
+        .filter(|(name, _, _)| {
+            !removed_packages.contains(name)
+                && !local_packages.contains(name)
+                && !trust.settled(def.state_key, name)
+        })
         .collect();
 
     if missing.is_empty() {
         return false;
     }
 
+    let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
+    let pins: Vec<(String, Option<String>)> = missing
+        .iter()
+        .map(|(name, version, _)| (name.clone(), version.clone()))
+        .collect();
+    let advisories = osv::advisories(def.ecosystem, &pins).await;
+    let mut allowed = Vec::new();
+    for ((name, version, line), advisories) in missing.into_iter().zip(advisories) {
+        let checks = Checks {
+            cooldown_unsupported,
+            malicious: advisories.iter().any(|id| osv::is_malicious(id)),
+            ..trust.checks(def.state_key, &name)
+        };
+        let reasons = inbox::reasons(checks);
+        if reasons.is_empty() {
+            if !advisories.is_empty() {
+                Output::warning(&format!(
+                    "{} has known vulnerabilities: {}",
+                    line,
+                    advisories.join(", ")
+                ));
+            }
+            allowed.push(line);
+        } else {
+            let mut item = trust.item(def.state_key, &name, version, None, reasons);
+            item.advisories = advisories;
+            queued.push(item);
+        }
+    }
+
+    if allowed.is_empty() {
+        return false;
+    }
+
     Output::info(&format!(
         "Installing {} {} package{}...",
-        missing.len(),
+        allowed.len(),
         def.display_name,
-        if missing.len() == 1 { "" } else { "s" }
+        if allowed.len() == 1 { "" } else { "s" }
     ));
 
-    let filtered_manifest = missing.join("\n") + "\n";
+    let filtered_manifest = allowed.join("\n") + "\n";
 
     match manager.import_manifest(&filtered_manifest).await {
         Ok(_) => true,
@@ -386,6 +654,7 @@ pub async fn sync_packages(
     }
 
     let union_packages = MachineState::compute_union_packages(&machines);
+    let union_versions = MachineState::compute_union_versions(&machines);
 
     // Homebrew - generate manifest from union
     if config.packages.brew.enabled {
@@ -404,7 +673,14 @@ pub async fn sync_packages(
         };
 
         if enabled {
-            sync_simple_manager(def, &union_packages, state, &manifests_dir, dry_run)?;
+            sync_simple_manager(
+                def,
+                &union_packages,
+                &union_versions,
+                state,
+                &manifests_dir,
+                dry_run,
+            )?;
         }
     }
 
@@ -469,19 +745,16 @@ fn sync_brew(
 fn sync_simple_manager(
     def: &PackageManagerDef,
     union_packages: &HashMap<String, Vec<String>>,
+    union_versions: &HashMap<String, HashMap<String, String>>,
     state: &mut SyncState,
     manifests_dir: &Path,
     dry_run: bool,
 ) -> Result<()> {
-    let packages = union_packages
-        .get(def.state_key)
-        .cloned()
-        .unwrap_or_default();
-    let manifest = if packages.is_empty() {
-        String::new()
-    } else {
-        packages.join("\n") + "\n"
-    };
+    let manifest = manifest_lines(
+        def.ecosystem,
+        union_packages.get(def.state_key),
+        union_versions.get(def.state_key),
+    );
     let hash = crate::sha256_hex(manifest.as_bytes());
     let manifest_path = manifests_dir.join(def.manifest_file);
 
@@ -516,9 +789,41 @@ fn sync_simple_manager(
     Ok(())
 }
 
+/// One pinned line per package; packages no machine reports a version for stay unpinned.
+fn manifest_lines(
+    ecosystem: Ecosystem,
+    packages: Option<&Vec<String>>,
+    versions: Option<&HashMap<String, String>>,
+) -> String {
+    let lines: Vec<String> = packages
+        .into_iter()
+        .flatten()
+        .map(|name| {
+            let version = versions.and_then(|v| v.get(name)).map(String::as_str);
+            format_pin(ecosystem, name, version)
+        })
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.join("\n") + "\n"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_manifest_lines_pin_known_versions() {
+        let packages = vec!["@types/node".to_string(), "left-pad".to_string()];
+        let versions = HashMap::from([("@types/node".to_string(), "24.1.0".to_string())]);
+        assert_eq!(
+            manifest_lines(Ecosystem::Npm, Some(&packages), Some(&versions)),
+            "@types/node@24.1.0\nleft-pad\n"
+        );
+        assert_eq!(manifest_lines(Ecosystem::Npm, None, None), "");
+    }
 
     #[test]
     fn test_update_last_upgrade_creates_entry() {

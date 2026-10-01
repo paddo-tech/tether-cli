@@ -1,11 +1,13 @@
 use crate::cli::output::Output;
+use crate::cli::prompts::Prompt;
 use crate::packages::{
     brew::BrewManager, bun::BunManager, gem::GemManager, manager::PackageManager, npm::NpmManager,
-    pnpm::PnpmManager, uv::UvManager,
+    pnpm::PnpmManager, uv::UvManager, Cooldown,
 };
 use crate::sync::SyncState;
 use anyhow::Result;
 use chrono::Utc;
+use std::io::IsTerminal;
 
 pub async fn run() -> Result<()> {
     Output::header("Upgrading packages");
@@ -27,6 +29,12 @@ pub async fn run() -> Result<()> {
         }
         let packages = manager.list_installed().await?;
         if packages.is_empty() {
+            continue;
+        }
+        if manager.cooldown().await == Cooldown::Unsupported
+            && !confirm_without_cooldown(manager.name())?
+        {
+            Output::warning(&format!("Skipped {}", manager.name()));
             continue;
         }
         available.push((i, packages.len()));
@@ -70,4 +78,19 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// A manager that cannot enforce the release-age limit upgrades only with the user's consent,
+/// so a run without a terminal skips it.
+fn confirm_without_cooldown(manager: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    Prompt::confirm(
+        &format!(
+            "This {} version cannot enforce packages.min_release_age_days. Upgrade {} packages anyway?",
+            manager, manager
+        ),
+        false,
+    )
 }

@@ -371,6 +371,28 @@ pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Send macOS notification that synced packages wait for approval
+pub fn notify_inbox(names: &[&str]) -> Result<()> {
+    use std::process::Command;
+
+    let message = match names {
+        [name] => format!("{} waits for approval", name),
+        _ => format!(
+            "{} packages wait for approval: {}",
+            names.len(),
+            names.join(", ")
+        ),
+    };
+    let script = format!(
+        r#"display notification "{}" with title "Tether" subtitle "Run 'tether packages inbox' to review""#,
+        escape_applescript(&message)
+    );
+
+    Command::new("osascript").args(["-e", &script]).output()?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
