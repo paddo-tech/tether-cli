@@ -589,27 +589,36 @@ mod tests {
     }
 
     #[test]
-    fn stale_install_result_is_ignored() {
+    fn second_install_waits_for_the_first() {
         let mut app = app();
-        let first = app.start_install("npm".into(), "left-pad".into());
-        let second = app.start_install("npm".into(), "left-pad".into());
-        let (Cmd::Install { op: first, .. }, Cmd::Install { op: second, .. }) = (first, second)
+        let Some(Cmd::Install { op: first, .. }) =
+            app.start_install("npm".into(), "left-pad".into())
         else {
-            panic!("expected install commands");
+            panic!("expected an install command");
+        };
+        assert!(app.start_install("npm".into(), "zx".into()).is_none());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Error, "Install in progress"))
+        );
+        assert_eq!(app.installing.as_ref(), Some(&first));
+        let stale = InstallOp {
+            id: first.id + 1,
+            ..first.clone()
         };
         update(
             &mut app,
             Msg::InstallDone {
-                op: first,
+                op: stale,
                 result: Ok(()),
             },
         );
-        assert_eq!(app.installing.as_ref(), Some(&second));
+        assert!(app.installing.is_some());
         update(
             &mut app,
             Msg::InstallDone {
-                op: second,
-                result: Ok(()),
+                op: first,
+                result: Err("boom".into()),
             },
         );
         assert!(app.installing.is_none());

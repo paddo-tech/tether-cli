@@ -81,14 +81,6 @@ fn reload(app: &mut App) {
     clamp_cursor(&mut app.security.cursor, app.state.inbox.items.len());
 }
 
-/// One install runs at a time, and its result toast names what it installed.
-fn install_busy(app: &mut App) -> bool {
-    if app.installing.is_some() {
-        app.flash_error("Wait for the running install to finish");
-    }
-    app.installing.is_some()
-}
-
 /// Record approval, then install a package in the background. A machine item trusts its key.
 pub fn approve(app: &mut App, id: &str) -> Option<Cmd> {
     let package = app
@@ -97,7 +89,7 @@ pub fn approve(app: &mut App, id: &str) -> Option<Cmd> {
         .items
         .iter()
         .any(|i| i.id() == id && i.kind == Kind::Package);
-    if package && install_busy(app) {
+    if package && app.install_busy() {
         return None;
     }
     let result = inbox::approve(id);
@@ -142,7 +134,7 @@ pub fn confirm_approve_all(app: &mut App) {
     let count = packages.count() - malicious;
     if count == 0 {
         app.flash_info("Nothing to approve");
-    } else if !install_busy(app) {
+    } else if !app.install_busy() {
         app.overlays
             .push(Overlay::Confirm(Confirm::ApproveAll { count, malicious }));
     }
@@ -150,7 +142,7 @@ pub fn confirm_approve_all(app: &mut App) {
 
 /// Approve every item that approval allows, then install them in one background run.
 pub fn approve_all(app: &mut App) -> Option<Cmd> {
-    if install_busy(app) {
+    if app.install_busy() {
         return None;
     }
     let ids: Vec<String> = app

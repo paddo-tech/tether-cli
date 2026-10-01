@@ -278,16 +278,29 @@ impl App {
         }
     }
 
-    /// Track a new install, replacing any earlier one, and return the command that runs it.
-    pub fn start_install(&mut self, manager_key: String, name: String) -> Cmd {
+    /// One install runs at a time: a second would hide the first one's result, and both
+    /// would rewrite this machine's state file.
+    pub fn install_busy(&mut self) -> bool {
+        if self.installing.is_some() {
+            self.flash_error("Install in progress");
+        }
+        self.installing.is_some()
+    }
+
+    /// Track a new install and return the command that runs it, unless one already runs.
+    pub fn start_install(&mut self, manager_key: String, name: String) -> Option<Cmd> {
+        if self.install_busy() {
+            return None;
+        }
         let op = self.track_install(manager_key, name);
-        Cmd::Install {
+        Some(Cmd::Install {
             op,
             machine_id: self.machine_id().to_string(),
-        }
+        })
     }
 
     /// Track an install of approved inbox items. `label` names them in the header and toasts.
+    /// The caller checks `install_busy` before it records the approval.
     pub fn start_inbox_install(&mut self, label: String, items: Vec<InboxItem>) -> Cmd {
         let manager_key = items.first().map(|i| i.manager.clone()).unwrap_or_default();
         let op = self.track_install(manager_key, label);

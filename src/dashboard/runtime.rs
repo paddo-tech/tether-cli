@@ -208,7 +208,8 @@ impl Runtime {
     }
 
     /// Run a future on its own thread and current-thread runtime, then send its `Msg`.
-    /// If the runtime cannot start, send `on_fail`'s message instead so no operation stays pending.
+    /// If the runtime cannot start or the future panics, send `on_fail`'s message instead,
+    /// so no operation stays pending.
     fn spawn<F, E>(&self, fut: F, on_fail: E)
     where
         F: Future<Output = Msg> + Send + 'static,
@@ -220,7 +221,12 @@ impl Runtime {
                 .enable_all()
                 .build()
             {
-                Ok(rt) => Some(rt.block_on(fut)),
+                Ok(rt) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rt.block_on(fut)
+                })) {
+                    Ok(msg) => Some(msg),
+                    Err(_) => on_fail("background task panicked".to_string()),
+                },
                 Err(e) => on_fail(format!("could not start async runtime: {}", e)),
             };
             if let Some(msg) = msg {
