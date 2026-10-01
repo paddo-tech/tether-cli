@@ -33,6 +33,7 @@ struct BatchResponse {
 struct BatchResult {
     #[serde(default)]
     vulns: Vec<Vuln>,
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -40,15 +41,25 @@ struct Vuln {
     id: String,
 }
 
-fn request_body(osv_ecosystem: &str, packages: &[(String, Option<String>)]) -> String {
-    let queries: Vec<serde_json::Value> = packages
+/// One querybatch entry. `page_token` asks for a later page of an earlier result.
+struct Query<'a> {
+    name: &'a str,
+    version: Option<&'a str>,
+    page_token: Option<String>,
+}
+
+fn request_body(osv_ecosystem: &str, queries: &[Query]) -> String {
+    let queries: Vec<serde_json::Value> = queries
         .iter()
-        .map(|(name, version)| {
+        .map(|q| {
             let mut query = serde_json::json!({
-                "package": { "name": name, "ecosystem": osv_ecosystem }
+                "package": { "name": q.name, "ecosystem": osv_ecosystem }
             });
-            if let Some(version) = version {
+            if let Some(version) = q.version {
                 query["version"] = serde_json::json!(version);
+            }
+            if let Some(token) = &q.page_token {
+                query["page_token"] = serde_json::json!(token);
             }
             query
         })
@@ -56,29 +67,29 @@ fn request_body(osv_ecosystem: &str, packages: &[(String, Option<String>)]) -> S
     serde_json::json!({ "queries": queries }).to_string()
 }
 
-/// Advisory ids per package, in request order. Without a version OSV returns advisories
-/// for every release, so only `MAL-` ids count for an unpinned package.
-/// Only the first page is read; OSV pages only past 1000 advisories for one package.
-fn parse_response(body: &str, packages: &[(String, Option<String>)]) -> Result<Vec<Vec<String>>> {
+/// Advisory ids and the next page token per query, in request order. Without a version
+/// OSV returns advisories for every release, so only `MAL-` ids count for an unpinned package.
+fn parse_response(body: &str, queries: &[Query]) -> Result<Vec<(Vec<String>, Option<String>)>> {
     let response: BatchResponse = serde_json::from_str(body)?;
-    if response.results.len() != packages.len() {
+    if response.results.len() != queries.len() {
         bail!(
             "OSV returned {} results for {} queries",
             response.results.len(),
-            packages.len()
+            queries.len()
         );
     }
     Ok(response
         .results
         .into_iter()
-        .zip(packages)
-        .map(|(result, (_, version))| {
-            result
+        .zip(queries)
+        .map(|(result, query)| {
+            let ids = result
                 .vulns
                 .into_iter()
                 .map(|v| v.id)
-                .filter(|id| version.is_some() || is_malicious(id))
-                .collect()
+                .filter(|id| query.version.is_some() || is_malicious(id))
+                .collect();
+            (ids, result.next_page_token)
         })
         .collect())
 }
@@ -114,32 +125,49 @@ async fn post(body: String) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-/// Advisory ids for each package, in input order. A network or API failure must not
-/// stop installs, so it is logged and only the packages in the failed batch get no
-/// advisories. Results from other batches are kept.
+/// Advisory ids for each package, in input order. A result with a page token is asked
+/// again with that token until OSV has no more pages. A network or API failure must not
+/// stop installs, so it is logged, and the packages in the failed request keep only the
+/// ids already received.
 pub async fn advisories(
     ecosystem: Ecosystem,
     packages: &[(String, Option<String>)],
 ) -> Vec<Vec<String>> {
+    let mut found = vec![Vec::new(); packages.len()];
     let Some(osv_ecosystem) = ecosystem_name(ecosystem) else {
-        return vec![Vec::new(); packages.len()];
+        return found;
     };
-    let mut found = Vec::with_capacity(packages.len());
-    for chunk in packages.chunks(MAX_BATCH) {
-        let result = match post(request_body(osv_ecosystem, chunk)).await {
-            Ok(body) => parse_response(&body, chunk),
+    let mut pending: Vec<(usize, Option<String>)> =
+        (0..packages.len()).map(|i| (i, None)).collect();
+    while !pending.is_empty() {
+        let size = pending.len().min(MAX_BATCH);
+        let batch: Vec<(usize, Option<String>)> = pending.drain(..size).collect();
+        let queries: Vec<Query> = batch
+            .iter()
+            .map(|(i, token)| Query {
+                name: &packages[*i].0,
+                version: packages[*i].1.as_deref(),
+                page_token: token.clone(),
+            })
+            .collect();
+        let result = match post(request_body(osv_ecosystem, &queries)).await {
+            Ok(body) => parse_response(&body, &queries),
             Err(e) => Err(e),
         };
         match result {
-            Ok(ids) => found.extend(ids),
-            Err(e) => {
-                eprintln!(
-                    "Warning: OSV check skipped for {} packages: {}",
-                    chunk.len(),
-                    e
-                );
-                found.extend(vec![Vec::new(); chunk.len()]);
+            Ok(pages) => {
+                for ((i, _), (ids, next)) in batch.into_iter().zip(pages) {
+                    found[i].extend(ids);
+                    if next.is_some() {
+                        pending.push((i, next));
+                    }
+                }
             }
+            Err(e) => eprintln!(
+                "Warning: OSV check incomplete for {} packages: {}",
+                queries.len(),
+                e
+            ),
         }
     }
     found
@@ -149,47 +177,68 @@ pub async fn advisories(
 mod tests {
     use super::*;
 
-    fn pkgs(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+    fn queries<'a>(list: &[(&'a str, Option<&'a str>, Option<&str>)]) -> Vec<Query<'a>> {
         list.iter()
-            .map(|(n, v)| (n.to_string(), v.map(str::to_string)))
+            .map(|(name, version, token)| Query {
+                name,
+                version: *version,
+                page_token: token.map(str::to_string),
+            })
             .collect()
     }
 
     #[test]
     fn request_matches_querybatch_format() {
-        let body = request_body("npm", &pkgs(&[("nx", Some("21.5.0")), ("left-pad", None)]));
+        let body = request_body(
+            "npm",
+            &queries(&[
+                ("nx", Some("21.5.0"), None),
+                ("left-pad", None, None),
+                ("big", Some("1.0.0"), Some("tok")),
+            ]),
+        );
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             json,
             serde_json::json!({"queries": [
                 {"package": {"name": "nx", "ecosystem": "npm"}, "version": "21.5.0"},
-                {"package": {"name": "left-pad", "ecosystem": "npm"}}
+                {"package": {"name": "left-pad", "ecosystem": "npm"}},
+                {"package": {"name": "big", "ecosystem": "npm"}, "version": "1.0.0", "page_token": "tok"}
             ]})
         );
     }
 
     #[test]
-    fn parses_ids_and_keeps_only_mal_for_unpinned() {
+    fn parses_ids_page_tokens_and_keeps_only_mal_for_unpinned() {
         let body = r#"{"results":[{},
             {"vulns":[{"id":"GHSA-g2r8-wvmj-jf5w","modified":"2026-07-31T17:00:20Z"},
-                      {"id":"MAL-2025-41443","modified":"2026-07-28T05:21:53Z"}]},
+                      {"id":"MAL-2025-41443","modified":"2026-07-28T05:21:53Z"}],
+             "next_page_token":"page2"},
             {"vulns":[{"id":"GHSA-x","modified":"2026-07-31T17:00:20Z"},
                       {"id":"MAL-2026-1","modified":"2026-07-28T05:21:53Z"}]}]}"#;
-        let packages = pkgs(&[
-            ("left-pad", Some("1.3.0")),
-            ("nx", Some("21.5.0")),
-            ("x", None),
+        let packages = queries(&[
+            ("left-pad", Some("1.3.0"), None),
+            ("nx", Some("21.5.0"), None),
+            ("x", None, None),
         ]);
-        let ids = parse_response(body, &packages).unwrap();
-        assert!(ids[0].is_empty());
-        assert_eq!(ids[1], vec!["GHSA-g2r8-wvmj-jf5w", "MAL-2025-41443"]);
-        assert_eq!(ids[2], vec!["MAL-2026-1"]);
-        assert!(ids[1].iter().any(|id| is_malicious(id)));
+        let results = parse_response(body, &packages).unwrap();
+        assert_eq!(results[0], (Vec::new(), None));
+        assert_eq!(
+            results[1],
+            (
+                vec![
+                    "GHSA-g2r8-wvmj-jf5w".to_string(),
+                    "MAL-2025-41443".to_string()
+                ],
+                Some("page2".to_string())
+            )
+        );
+        assert_eq!(results[2], (vec!["MAL-2026-1".to_string()], None));
     }
 
     #[test]
     fn rejects_mismatched_result_count() {
-        assert!(parse_response(r#"{"results":[]}"#, &pkgs(&[("a", None)])).is_err());
+        assert!(parse_response(r#"{"results":[]}"#, &queries(&[("a", None, None)])).is_err());
     }
 
     #[test]
