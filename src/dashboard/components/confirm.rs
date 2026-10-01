@@ -22,6 +22,12 @@ pub enum Confirm {
     RemoveFile {
         path: String,
     },
+    /// Install a package that OSV could not check. Only `y` accepts.
+    InstallWithoutOsv {
+        manager_key: String,
+        name: String,
+        error: String,
+    },
     /// Approve and install these inbox items, as displayed when the confirm opened.
     ApproveAll {
         items: Vec<crate::packages::inbox::InboxItem>,
@@ -32,6 +38,8 @@ pub enum Confirm {
 /// The overlay was popped off the stack; push it back to keep it open.
 pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd> {
     match key.code {
+        // Installing without the malicious-package check is never the default answer
+        KeyCode::Enter if matches!(confirm, Confirm::InstallWithoutOsv { .. }) => None,
         KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
         KeyCode::Char('n') | KeyCode::Esc => None,
         _ => {
@@ -84,6 +92,9 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             app.follow_up_sync()
         }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items),
+        Confirm::InstallWithoutOsv {
+            manager_key, name, ..
+        } => app.start_install(manager_key, name, false),
     }
 }
 
@@ -126,6 +137,22 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             app,
             "Remove",
             &format!("Remove {} from profile?", path),
+            t.error,
+        ),
+        Confirm::InstallWithoutOsv {
+            manager_key,
+            name,
+            error,
+        } => render_popup(
+            f,
+            app,
+            "OSV unreachable",
+            &format!(
+                "OSV could not check {} ({}): {}. Install it without the malicious-package check?",
+                name,
+                manager_label(manager_key),
+                error
+            ),
             t.error,
         ),
         Confirm::ApproveAll { items, malicious } => {

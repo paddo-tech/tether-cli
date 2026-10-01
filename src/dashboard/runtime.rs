@@ -1,6 +1,6 @@
 //! Executes `Cmd`s off the UI thread and reports results as `Msg`s.
 
-use super::app::{DaemonOp, Job};
+use super::app::{DaemonOp, InstallOp, Job};
 use super::msg::{Cmd, Msg};
 use crate::packages::inbox::{InboxItem, Kind};
 use std::collections::HashMap;
@@ -44,11 +44,21 @@ impl Runtime {
                     |e| Some(Msg::UninstallDone(Err(e))),
                 );
             }
-            Cmd::Install { op, machine_id } => {
+            Cmd::Install {
+                op,
+                machine_id,
+                osv_required,
+            } => {
                 let failed_op = op.clone();
                 self.spawn(
                     async move {
-                        let result = run_install(&op.manager_key, &op.name).await;
+                        let result = match install_check(&op, osv_required).await {
+                            Err(Blocked::OsvUnreachable(error)) => {
+                                return Msg::OsvUnreachable { op, error };
+                            }
+                            Err(Blocked::Refused(e)) => Err(e),
+                            Ok(()) => run_install(&op.manager_key, &op.name).await,
+                        };
                         if result.is_ok() {
                             // Sync would uninstall it again while it is still tombstoned.
                             remove_from_removed_packages(&machine_id, &op.manager_key, &op.name);
@@ -266,34 +276,46 @@ async fn run_uninstall(manager_key: &str, package: &str) -> Result<(), String> {
     manager.uninstall(package).await.map_err(|e| e.to_string())
 }
 
-/// Refuse packages OSV lists as malicious, like `inbox::install` does. Homebrew has no
-/// OSV ecosystem, and an OSV outage does not block, as for synced installs.
-async fn osv_guard(manager_key: &str, packages: &[(String, Option<String>)]) -> Result<(), String> {
+/// Why a dashboard install did not run.
+enum Blocked {
+    Refused(String),
+    OsvUnreachable(String),
+}
+
+/// Refuse a package the inbox holds as malicious, or that OSV lists as malicious, like
+/// `inbox::install` does. Homebrew has no OSV ecosystem. Unlike a sync, a dashboard install
+/// is not checked against trusted records, so when `osv_required` an OSV outage blocks it
+/// until the user agrees.
+async fn install_check(op: &InstallOp, osv_required: bool) -> Result<(), Blocked> {
     use crate::packages::osv;
 
-    let Some(manager) = crate::packages::manager_for_key(manager_key) else {
+    let inbox =
+        crate::packages::inbox::Inbox::load().map_err(|e| Blocked::Refused(e.to_string()))?;
+    if inbox.holds_malicious(&op.manager_key, &op.name) {
+        return Err(Blocked::Refused(format!(
+            "The inbox holds {} as malicious. Tether will not install it",
+            op.name
+        )));
+    }
+    let Some(manager) = crate::packages::manager_for_key(&op.manager_key) else {
         return Ok(());
     };
-    if packages.is_empty() {
-        return Ok(());
+    let (found, errors) = osv::query(manager.ecosystem(), &[(op.name.clone(), None)]).await;
+    let malicious: Vec<&String> = found[0].iter().filter(|id| osv::is_malicious(id)).collect();
+    if !malicious.is_empty() {
+        return Err(Blocked::Refused(format!(
+            "OSV lists {} as malicious ({}). Tether will not install it",
+            op.name,
+            malicious
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
     }
-    let found = osv::advisories(manager.ecosystem(), packages).await;
-    let hits: Vec<String> = packages
-        .iter()
-        .zip(found)
-        .flat_map(|((name, _), ids)| {
-            ids.into_iter()
-                .filter(|id| osv::is_malicious(id))
-                .map(move |id| format!("{} ({})", name, id))
-        })
-        .collect();
-    if hits.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "OSV lists {} as malicious. Tether will not install it",
-            hits.join(", ")
-        ))
+    match errors.into_iter().next() {
+        Some(error) if osv_required => Err(Blocked::OsvUnreachable(error)),
+        _ => Ok(()),
     }
 }
 
@@ -319,8 +341,6 @@ async fn approve_and_install(items: &[InboxItem]) -> Result<(), String> {
 
 async fn run_install(manager_key: &str, package: &str) -> Result<(), String> {
     use crate::packages::*;
-
-    osv_guard(manager_key, &[(package.to_string(), None)]).await?;
 
     if manager_key == "brew_casks" {
         return BrewManager

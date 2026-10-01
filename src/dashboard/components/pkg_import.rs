@@ -36,7 +36,7 @@ pub fn handle_key(app: &mut App, mut picker: PkgImport, key: KeyEvent) -> Option
     if let Some((manager_key, name)) = picker.confirm.take() {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                cmd = app.start_install(manager_key, name);
+                cmd = app.start_install(manager_key, name, true);
             }
             KeyCode::Char('n') | KeyCode::Esc => {}
             _ => picker.confirm = Some((manager_key, name)),

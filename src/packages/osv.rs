@@ -125,17 +125,31 @@ async fn post(body: String) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
-/// Advisory ids for each package, in input order. A result with a page token is asked
-/// again with that token until OSV has no more pages. A network or API failure must not
-/// stop installs, so it is logged, and the packages in the failed request keep only the
+/// Advisory ids for each package, in input order. A network or API failure must not stop
+/// synced installs, so it is logged, and the packages in the failed request keep only the
 /// ids already received.
 pub async fn advisories(
     ecosystem: Ecosystem,
     packages: &[(String, Option<String>)],
 ) -> Vec<Vec<String>> {
+    let (found, errors) = query(ecosystem, packages).await;
+    for e in errors {
+        crate::cli::Output::warning(&e);
+    }
+    found
+}
+
+/// Advisory ids for each package, in input order, and an error for each request that
+/// failed. A result with a page token is asked again with that token until OSV has no more
+/// pages. The packages in a failed request keep only the ids already received.
+pub async fn query(
+    ecosystem: Ecosystem,
+    packages: &[(String, Option<String>)],
+) -> (Vec<Vec<String>>, Vec<String>) {
     let mut found = vec![Vec::new(); packages.len()];
+    let mut errors = Vec::new();
     let Some(osv_ecosystem) = ecosystem_name(ecosystem) else {
-        return found;
+        return (found, errors);
     };
     let mut pending: Vec<(usize, Option<String>)> =
         (0..packages.len()).map(|i| (i, None)).collect();
@@ -163,14 +177,14 @@ pub async fn advisories(
                     }
                 }
             }
-            Err(e) => eprintln!(
-                "Warning: OSV check incomplete for {} packages: {}",
+            Err(e) => errors.push(format!(
+                "OSV check incomplete for {} packages: {}",
                 queries.len(),
                 e
-            ),
+            )),
         }
     }
-    found
+    (found, errors)
 }
 
 #[cfg(test)]

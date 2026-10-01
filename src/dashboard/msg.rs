@@ -24,6 +24,11 @@ pub enum Msg {
         op: InstallOp,
         result: Result<(), String>,
     },
+    /// An install did not run because OSV could not be reached; the user decides.
+    OsvUnreachable {
+        op: InstallOp,
+        error: String,
+    },
     LocalPackages(HashMap<String, Vec<String>>),
     /// Sync commits per day, oldest first, ending today.
     Activity(Vec<u64>),
@@ -44,9 +49,11 @@ pub enum Cmd {
         manager_key: String,
         name: String,
     },
+    /// With `osv_required`, an install that OSV cannot check waits for the user.
     Install {
         op: InstallOp,
         machine_id: String,
+        osv_required: bool,
     },
     /// Approve inbox items exactly as displayed, then install them one after another.
     /// Reports one `InstallDone`. Inbox writes wait on its lock, so they run off the UI thread.

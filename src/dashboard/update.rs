@@ -89,6 +89,18 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
         }
         Msg::InstallDone { op, result } => on_install_done(app, op, result),
+        Msg::OsvUnreachable { op, error } => {
+            if app.installing.as_ref().map(|i| i.id) == Some(op.id) {
+                app.installing = None;
+                app.overlays
+                    .push(Overlay::Confirm(confirm::Confirm::InstallWithoutOsv {
+                        manager_key: op.manager_key,
+                        name: op.name,
+                        error,
+                    }));
+            }
+            None
+        }
         Msg::InboxDone(result) => {
             security::reload(app);
             match result {
@@ -596,11 +608,11 @@ mod tests {
     fn second_install_waits_for_the_first() {
         let mut app = app();
         let Some(Cmd::Install { op: first, .. }) =
-            app.start_install("npm".into(), "left-pad".into())
+            app.start_install("npm".into(), "left-pad".into(), true)
         else {
             panic!("expected an install command");
         };
-        assert!(app.start_install("npm".into(), "zx".into()).is_none());
+        assert!(app.start_install("npm".into(), "zx".into(), true).is_none());
         assert_eq!(
             last_toast(&app),
             Some((ToastKind::Error, "Install in progress"))
@@ -626,6 +638,37 @@ mod tests {
             },
         );
         assert!(app.installing.is_none());
+    }
+
+    #[test]
+    fn unreachable_osv_asks_and_defaults_to_no() {
+        let mut app = app();
+        let Some(Cmd::Install { op, .. }) = app.start_install("npm".into(), "zx".into(), true)
+        else {
+            panic!("expected an install command");
+        };
+        let unreachable = |op: InstallOp| Msg::OsvUnreachable {
+            op,
+            error: "timeout".into(),
+        };
+        update(&mut app, unreachable(op.clone()));
+        assert!(app.installing.is_none());
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+
+        let Some(Cmd::Install { op, .. }) = app.start_install("npm".into(), "zx".into(), true)
+        else {
+            panic!("expected an install command");
+        };
+        update(&mut app, unreachable(op));
+        let cmd = key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(
+            cmd,
+            Some(Cmd::Install {
+                osv_required: false,
+                ..
+            })
+        ));
     }
 
     #[test]

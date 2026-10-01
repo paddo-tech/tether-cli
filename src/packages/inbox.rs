@@ -222,6 +222,13 @@ impl Inbox {
         self.items.iter().any(|i| i.is(manager, name))
     }
 
+    /// Whether a release of this package waits here as malicious.
+    pub fn holds_malicious(&self, manager: &str, name: &str) -> bool {
+        self.items
+            .iter()
+            .any(|i| i.is(manager, name) && i.reasons.contains(&Reason::Malicious))
+    }
+
     /// Taps the user approved as tap items, which count as trusted like
     /// `packages.brew.trusted_taps`.
     pub fn approved_taps(&self) -> impl Iterator<Item = &str> {
@@ -721,6 +728,10 @@ mod tests {
         let shown = inbox.find("nx").unwrap().clone();
         assert!(inbox.approve(&shown).is_err());
         assert!(inbox.is_pending("npm", "nx"));
+        assert!(inbox.holds_malicious("npm", "nx"));
+        assert!(!inbox.holds_malicious("pnpm", "nx"));
+        inbox.add(item("npm", "safe"));
+        assert!(!inbox.holds_malicious("npm", "safe"));
     }
 
     #[test]

@@ -293,7 +293,13 @@ impl App {
     }
 
     /// Track a new install and return the command that runs it, unless one already runs.
-    pub fn start_install(&mut self, manager_key: String, name: String) -> Option<Cmd> {
+    /// Without `osv_required`, the user has agreed to install without an OSV answer.
+    pub fn start_install(
+        &mut self,
+        manager_key: String,
+        name: String,
+        osv_required: bool,
+    ) -> Option<Cmd> {
         if self.install_busy() {
             return None;
         }
@@ -301,6 +307,7 @@ impl App {
         Some(Cmd::Install {
             op,
             machine_id: self.machine_id().to_string(),
+            osv_required,
         })
     }
 
