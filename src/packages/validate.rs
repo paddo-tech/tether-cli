@@ -16,6 +16,14 @@ pub enum Ecosystem {
 // npm's own limit; no registry in scope allows longer names
 const MAX_NAME_LEN: usize = 214;
 
+const ALL_ECOSYSTEMS: [Ecosystem; 5] = [
+    Ecosystem::Npm,
+    Ecosystem::Brew,
+    Ecosystem::BrewTap,
+    Ecosystem::Python,
+    Ecosystem::Gem,
+];
+
 /// Reject any manifest entry that a package manager could read as a flag, URL, path,
 /// tarball or non-registry spec. Manifest lines arrive from other machines, so only
 /// plain registry names may reach a process.
@@ -36,7 +44,13 @@ pub fn validate_version(version: &str) -> Result<()> {
             .is_some_and(|c| c.is_ascii_alphanumeric())
         && version
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'));
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+        // npm reads `name@x.tgz` as a local file, so versions get the same suffix check
+        && !ALL_ECOSYSTEMS.iter().any(|&eco| {
+            local_file_suffixes(eco)
+                .iter()
+                .any(|ext| version.to_ascii_lowercase().ends_with(ext))
+        });
     if !ok {
         bail!("invalid package version {:?}", version);
     }
@@ -58,6 +72,13 @@ fn check_name(ecosystem: Ecosystem, name: &str) -> std::result::Result<(), &'sta
     }
     if name.contains(':') {
         return Err("URLs and protocol specs are not allowed");
+    }
+    let lower = name.to_ascii_lowercase();
+    if local_file_suffixes(ecosystem)
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+    {
+        return Err("local package files are not allowed");
     }
 
     match ecosystem {
@@ -93,14 +114,20 @@ fn check_name(ecosystem: Ecosystem, name: &str) -> std::result::Result<(), &'sta
     }
 }
 
-fn check_npm(name: &str) -> std::result::Result<(), &'static str> {
-    // npm reads names ending in a tarball extension as local file specs
-    if [".tgz", ".tar", ".tar.gz"]
-        .iter()
-        .any(|ext| name.ends_with(ext))
-    {
-        return Err("tarballs are not allowed");
+/// Suffixes each tool reads as a local file instead of a registry name, matched without case.
+/// npm-package-arg uses /[.](?:tgz|tar\.gz|tar)$/i; gem installs `x.gem`; brew installs
+/// `.rb`/`.json` formula files and bottle tarballs; uv installs sdists and wheels.
+fn local_file_suffixes(ecosystem: Ecosystem) -> &'static [&'static str] {
+    match ecosystem {
+        Ecosystem::Npm => &[".tgz", ".tar", ".tar.gz"],
+        Ecosystem::Gem => &[".gem"],
+        Ecosystem::Brew => &[".rb", ".json", ".tar.gz"],
+        Ecosystem::BrewTap => &[],
+        Ecosystem::Python => &[".tar.gz", ".whl", ".zip"],
     }
+}
+
+fn check_npm(name: &str) -> std::result::Result<(), &'static str> {
     let bare = match name.strip_prefix('@') {
         Some(scoped) => {
             let (scope, bare) = scoped
@@ -189,7 +216,10 @@ mod tests {
             "../up",
             "/abs/path",
             "evil.tgz",
+            "evil.TGZ",
             "evil.tar.gz",
+            "evil.Tar.Gz",
+            "evil.tar",
             "@scope",
             "@scope/a/b",
             "@./x",
@@ -226,6 +256,10 @@ mod tests {
             "../x",
             "https://x/y.rb",
             "./Formula/x.rb",
+            "payload.rb",
+            "payload.RB",
+            "formula.json",
+            "git--2.0.arm64_sonoma.bottle.tar.gz",
             "x y",
         ] {
             assert!(!ok(Ecosystem::Brew, name), "{name:?}");
@@ -254,6 +288,10 @@ mod tests {
             "pkg-",
             "pkg[extra]",
             "pkg==1.0",
+            "pkg-1.0.tar.gz",
+            "pkg-1.0-py3-none-any.whl",
+            "pkg.WHL",
+            "pkg.zip",
         ] {
             assert!(!ok(Ecosystem::Python, name), "{name:?}");
         }
@@ -263,7 +301,7 @@ mod tests {
     fn gem_names() {
         assert!(ok(Ecosystem::Gem, "rails"));
         assert!(ok(Ecosystem::Gem, "net-http_persistent.x"));
-        for name in ["--source", "../x", "x/y", "http://x", "a b"] {
+        for name in ["--source", "../x", "x/y", "http://x", "a b", "x.gem", "x.GEM"] {
             assert!(!ok(Ecosystem::Gem, name), "{name:?}");
         }
     }
@@ -273,7 +311,18 @@ mod tests {
         for v in ["1.2.3", "1.0.0-beta.1+build.5", "latest", "24.10.0"] {
             assert!(validate_version(v).is_ok(), "{v}");
         }
-        for v in ["", "-1", "file:../x", "1.0 || 2.0", "^1.0", "../x"] {
+        for v in [
+            "",
+            "-1",
+            "file:../x",
+            "1.0 || 2.0",
+            "^1.0",
+            "../x",
+            "evil.TGZ",
+            "1.0.tar",
+            "x.gem",
+            "x.whl",
+        ] {
             assert!(validate_version(v).is_err(), "{v:?}");
         }
     }
