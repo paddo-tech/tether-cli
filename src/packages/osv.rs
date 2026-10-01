@@ -115,14 +115,14 @@ async fn post(body: String) -> Result<String> {
 }
 
 /// Advisory ids for each package, in input order. A network or API failure must not
-/// stop installs, so it is logged and every package gets no advisories.
+/// stop installs, so it is logged and only the packages in the failed batch get no
+/// advisories. Results from other batches are kept.
 pub async fn advisories(
     ecosystem: Ecosystem,
     packages: &[(String, Option<String>)],
 ) -> Vec<Vec<String>> {
-    let empty = || vec![Vec::new(); packages.len()];
     let Some(osv_ecosystem) = ecosystem_name(ecosystem) else {
-        return empty();
+        return vec![Vec::new(); packages.len()];
     };
     let mut found = Vec::with_capacity(packages.len());
     for chunk in packages.chunks(MAX_BATCH) {
@@ -133,8 +133,12 @@ pub async fn advisories(
         match result {
             Ok(ids) => found.extend(ids),
             Err(e) => {
-                eprintln!("Warning: OSV check skipped: {}", e);
-                return empty();
+                eprintln!(
+                    "Warning: OSV check skipped for {} packages: {}",
+                    chunk.len(),
+                    e
+                );
+                found.extend(vec![Vec::new(); chunk.len()]);
             }
         }
     }
