@@ -23,6 +23,8 @@ pub struct DiffLine {
 /// Classify each line of a unified diff and number it from the hunk headers.
 pub fn annotate(lines: &[String]) -> Vec<DiffLine> {
     let (mut old, mut new) = (0usize, 0usize);
+    // Inside a hunk, `---` and `+++` are removed or added lines that start with `--` or `++`.
+    let mut in_hunk = false;
     lines
         .iter()
         .map(|line| {
@@ -31,9 +33,13 @@ pub fn annotate(lines: &[String]) -> Vec<DiffLine> {
                     old = o;
                     new = n;
                 }
+                in_hunk = true;
                 (DiffKind::Hunk, None, None)
-            } else if line.starts_with("+++") || line.starts_with("---") {
+            } else if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
                 (DiffKind::FileHeader, None, None)
+            } else if line.starts_with('\\') {
+                // `\ No newline at end of file` annotates the line above; it has no number.
+                (DiffKind::Context, None, None)
             } else if let Some(rest) = line.strip_prefix('+') {
                 new += 1;
                 return DiffLine {
@@ -146,6 +152,18 @@ mod tests {
         assert_eq!(nums[6], (None, Some(5)));
         assert_eq!(nums[7], (Some(5), Some(6)));
         assert_eq!(diff[4].text, "old");
+    }
+
+    #[test]
+    fn dash_lines_inside_hunk_are_changes() {
+        let diff = annotate(&lines(
+            "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n--- old comment\n+++ new comment\n keep\n\\ No newline at end of file",
+        ));
+        assert_eq!(diff[3].kind, DiffKind::Del);
+        assert_eq!(diff[3].text, "-- old comment");
+        assert_eq!(diff[4].kind, DiffKind::Add);
+        assert_eq!((diff[5].old, diff[5].new), (Some(2), Some(2)));
+        assert_eq!((diff[6].old, diff[6].new), (None, None));
     }
 
     #[test]
