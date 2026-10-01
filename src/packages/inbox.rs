@@ -121,12 +121,16 @@ impl InboxItem {
     }
 }
 
+/// An approval or rejection. An approval covers only this version, and for a Homebrew
+/// formula or cask only this tap: a different one is a new decision.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Decision {
     pub manager: String,
     pub name: String,
     #[serde(default)]
     pub version: Option<String>,
+    #[serde(default)]
+    pub tap: Option<String>,
     pub at: DateTime<Utc>,
 }
 
@@ -183,10 +187,19 @@ impl Inbox {
         Ok(result)
     }
 
-    pub fn is_approved(&self, manager: &str, name: &str) -> bool {
-        self.approved
-            .iter()
-            .any(|d| d.manager == manager && d.name == name)
+    pub fn is_approved(
+        &self,
+        manager: &str,
+        name: &str,
+        version: Option<&str>,
+        tap: Option<&str>,
+    ) -> bool {
+        self.approved.iter().any(|d| {
+            d.manager == manager
+                && d.name == name
+                && d.version.as_deref() == version
+                && d.tap.as_deref() == tap
+        })
     }
 
     pub fn is_rejected(&self, manager: &str, name: &str) -> bool {
@@ -199,12 +212,21 @@ impl Inbox {
         self.items.iter().any(|i| i.is(manager, name))
     }
 
-    /// Taps the user approved, which count as trusted like `packages.brew.trusted_taps`.
+    /// Taps the user approved as tap items, which count as trusted like
+    /// `packages.brew.trusted_taps`.
     pub fn approved_taps(&self) -> impl Iterator<Item = &str> {
         self.approved
             .iter()
             .filter(|d| d.manager == "brew_taps")
             .map(|d| d.name.as_str())
+    }
+
+    /// Homebrew formulae and casks the user approved from a tap that is not trusted, as
+    /// manager key, name and tap.
+    pub fn approved_from_taps(&self) -> impl Iterator<Item = (&str, &str, &str)> {
+        self.approved
+            .iter()
+            .filter_map(|d| Some((d.manager.as_str(), d.name.as_str(), d.tap.as_deref()?)))
     }
 
     /// Queue an item. Returns false when it is already pending or was rejected.
@@ -247,9 +269,8 @@ impl Inbox {
         Ok(self.items.remove(pos))
     }
 
-    /// Approve a pending item. A Homebrew item from an untrusted tap also approves the tap,
-    /// because brew cannot install it otherwise. A machine item is only removed: the
-    /// trust store, not this list, records trusted keys.
+    /// Approve a pending item. Approving a Homebrew formula or cask does not trust its tap.
+    /// A machine item is only removed: the trust store, not this list, records trusted keys.
     pub fn approve(&mut self, query: &str) -> Result<InboxItem> {
         let item = self.find(query)?;
         if item.reasons.contains(&Reason::Malicious) {
@@ -263,23 +284,13 @@ impl Inbox {
         if item.kind != Kind::Package {
             return Ok(item);
         }
-        let now = Utc::now();
         self.approved.push(Decision {
             manager: item.manager.clone(),
             name: item.name.clone(),
             version: item.version.clone(),
-            at: now,
+            tap: item.tap.clone(),
+            at: Utc::now(),
         });
-        if let Some(tap) = &item.tap {
-            if !self.approved_taps().any(|t| t == tap) {
-                self.approved.push(Decision {
-                    manager: "brew_taps".to_string(),
-                    name: tap.clone(),
-                    version: None,
-                    at: now,
-                });
-            }
-        }
         Ok(item)
     }
 
@@ -290,6 +301,7 @@ impl Inbox {
             manager: item.manager.clone(),
             name: item.name.clone(),
             version: item.version.clone(),
+            tap: item.tap.clone(),
             at: Utc::now(),
         });
         Ok(item)
@@ -643,19 +655,40 @@ mod tests {
     }
 
     #[test]
-    fn approve_moves_item_and_trusts_its_tap() {
+    fn approving_a_formula_does_not_trust_its_tap() {
         let mut inbox = Inbox::default();
         let mut formula = item("brew_formulae", "bd");
+        formula.version = None;
         formula.tap = Some("gastownhall/beads".to_string());
         inbox.add(formula);
         let approved = inbox.approve("bd").unwrap();
         assert_eq!(approved.name, "bd");
         assert!(inbox.items.is_empty());
-        assert!(inbox.is_approved("brew_formulae", "bd"));
+        assert!(inbox.is_approved("brew_formulae", "bd", None, Some("gastownhall/beads")));
+        assert!(!inbox.is_approved("brew_formulae", "bd", None, Some("evil/beads")));
+        assert!(!inbox.is_approved("brew_formulae", "bd", None, None));
+        assert_eq!(inbox.approved_taps().count(), 0);
+        assert_eq!(
+            inbox.approved_from_taps().collect::<Vec<_>>(),
+            vec![("brew_formulae", "bd", "gastownhall/beads")]
+        );
+
+        inbox.add(item("brew_taps", "gastownhall/beads"));
+        inbox.approve("brew_taps:gastownhall/beads").unwrap();
         assert_eq!(
             inbox.approved_taps().collect::<Vec<_>>(),
             vec!["gastownhall/beads"]
         );
+    }
+
+    #[test]
+    fn approval_covers_only_the_approved_version() {
+        let mut inbox = Inbox::default();
+        inbox.add(item("npm", "left-pad"));
+        inbox.approve("left-pad").unwrap();
+        assert!(inbox.is_approved("npm", "left-pad", Some("1.0.0"), None));
+        assert!(!inbox.is_approved("npm", "left-pad", Some("6.6.6"), None));
+        assert!(!inbox.is_approved("npm", "left-pad", None, None));
     }
 
     #[test]

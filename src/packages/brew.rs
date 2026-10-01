@@ -73,10 +73,15 @@ impl BrewfilePackages {
     /// Move untrusted taps, and formulae and casks qualified with one, out of `self`.
     /// Short names stay: without their tap tapped they only resolve to trusted taps.
     pub fn take_untrusted(&mut self, policy: &PackagePolicy) -> BrewfilePackages {
-        let trusted = |name: &String| tap_of(name).is_none_or(|tap| policy.tap_trusted(tap));
+        let allowed = |manager: &str, name: &String| {
+            tap_of(name).is_none_or(|tap| policy.brew_allowed(manager, name, tap))
+        };
         let (taps, untrusted_taps) = self.taps.drain(..).partition(|t| policy.tap_trusted(t));
-        let (formulae, untrusted_formulae) = self.formulae.drain(..).partition(trusted);
-        let (casks, untrusted_casks) = self.casks.drain(..).partition(trusted);
+        let (formulae, untrusted_formulae) = self
+            .formulae
+            .drain(..)
+            .partition(|f| allowed("brew_formulae", f));
+        let (casks, untrusted_casks) = self.casks.drain(..).partition(|c| allowed("brew_casks", c));
         self.taps = taps;
         self.formulae = formulae;
         self.casks = casks;
@@ -264,11 +269,13 @@ impl BrewManager {
         PackagePolicy::load()
     }
 
-    /// Validate a formula or cask and refuse ones from an untrusted tap.
+    /// Validate a formula or cask and refuse ones from an untrusted tap, unless the user
+    /// approved this one from it.
     async fn check_package(&self, name: &str, cask: bool) -> Result<()> {
         validate_name(Ecosystem::Brew, name)?;
+        let manager = if cask { "brew_casks" } else { "brew_formulae" };
         match self.tap_for(name, cask).await {
-            Some(tap) if self.policy().tap_trusted(&tap) => Ok(()),
+            Some(tap) if self.policy().brew_allowed(manager, name, &tap) => Ok(()),
             Some(tap) => anyhow::bail!("{} is from untrusted tap {}", name, tap),
             None => anyhow::bail!("cannot find the tap of {}", name),
         }
@@ -816,6 +823,11 @@ brew "git"
             min_release_age_days: 7,
             allow_scripts: Vec::new(),
             trusted_taps: vec!["oven-sh/bun".to_string()],
+            approved_from_taps: vec![(
+                "brew_formulae".to_string(),
+                "evil/tap/approved".to_string(),
+                "evil/tap".to_string(),
+            )],
         };
         let mut packages = BrewfilePackages {
             taps: vec![
@@ -827,13 +839,18 @@ brew "git"
                 "git".to_string(),
                 "oven-sh/bun/bun".to_string(),
                 "evil/tap/payload".to_string(),
+                "evil/tap/approved".to_string(),
             ],
             casks: vec!["iterm2".to_string(), "evil/tap/app".to_string()],
         };
         let untrusted = packages.take_untrusted(&policy);
         assert_eq!(packages.taps, vec!["homebrew/cask", "oven-sh/bun"]);
-        assert_eq!(packages.formulae, vec!["git", "oven-sh/bun/bun"]);
+        assert_eq!(
+            packages.formulae,
+            vec!["git", "oven-sh/bun/bun", "evil/tap/approved"]
+        );
         assert_eq!(packages.casks, vec!["iterm2"]);
+        // An approved formula trusts neither its tap nor the tap's other packages
         assert_eq!(untrusted.taps, vec!["evil/tap"]);
         assert_eq!(untrusted.formulae, vec!["evil/tap/payload"]);
         assert_eq!(untrusted.casks, vec!["evil/tap/app"]);
@@ -845,6 +862,7 @@ brew "git"
             min_release_age_days: 7,
             allow_scripts: Vec::new(),
             trusted_taps: vec!["oven-sh/bun".to_string()],
+            approved_from_taps: Vec::new(),
         };
         let info: BrewInfo = serde_json::from_str(
             r#"{

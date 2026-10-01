@@ -203,7 +203,7 @@ fn explain(reason: Reason) -> &'static str {
             "Another machine added this package. Tether cannot yet prove that machine made the change."
         }
         Reason::UntrustedTap => {
-            "It comes from a Homebrew tap outside your trusted taps. Approval also trusts the tap."
+            "It comes from a Homebrew tap outside your trusted taps. Approval covers this package only, not the tap."
         }
         Reason::CooldownUnsupported => {
             "The installed package manager cannot enforce the minimum release age, so a very new release could install."

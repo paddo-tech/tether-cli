@@ -228,7 +228,15 @@ impl Trust {
         }) || self.inbox.is_rejected(manager, name)
     }
 
-    fn checks(&self, manager: &str, name: &str, version: Option<&str>) -> Checks {
+    /// `tap` is the tap a Homebrew formula or cask resolves to, because an approval covers
+    /// only that tap.
+    fn checks(
+        &self,
+        manager: &str,
+        name: &str,
+        version: Option<&str>,
+        tap: Option<&str>,
+    ) -> Checks {
         let entry = (
             manager.to_string(),
             name.to_string(),
@@ -236,7 +244,7 @@ impl Trust {
         );
         Checks {
             from_this_machine: self.provenance.own.contains(&entry),
-            approved: self.inbox.is_approved(manager, name),
+            approved: self.inbox.is_approved(manager, name, version, tap),
             auto_install_from_trusted: self.auto_install_from_trusted,
             signer: self.provenance.signer(&entry),
             ..Checks::default()
@@ -604,12 +612,9 @@ async fn gate_brew(
         if trust.settled(manager, &name) {
             continue;
         }
-        let mut checks = trust.checks(manager, &name, None);
-        let mut tap = None;
-        if !checks.approved {
-            tap = brew.tap_for(&name, manager == "brew_casks").await;
-            checks.untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
-        }
+        let tap = brew.tap_for(&name, manager == "brew_casks").await;
+        let mut checks = trust.checks(manager, &name, None, tap.as_deref());
+        checks.untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
             allowed.push(name);
@@ -775,7 +780,7 @@ async fn gate_simple(
         let checks = Checks {
             cooldown_unsupported,
             malicious: advisories.iter().any(|id| osv::is_malicious(id)),
-            ..trust.checks(def.state_key, &name, version.as_deref())
+            ..trust.checks(def.state_key, &name, version.as_deref(), None)
         };
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
@@ -1077,7 +1082,7 @@ mod tests {
     }
 
     fn held(trust: &Trust, name: &str, version: Option<&str>) -> Vec<Reason> {
-        inbox::reasons(trust.checks("npm", name, version))
+        inbox::reasons(trust.checks("npm", name, version, None))
     }
 
     /// Machines `me` and `t`, each trusting the other.
@@ -1198,6 +1203,27 @@ mod tests {
         let item = trust.item("npm", "thing", None, None, Vec::new());
         assert_eq!(item.source_machine.as_deref(), Some("y"));
         assert_eq!(item.signer, Some(signing::fingerprint(t.public_key())));
+    }
+
+    #[test]
+    fn test_approval_does_not_carry_to_another_version() {
+        let (tmp, me, _, store) = two_machines();
+        let mut trust = trust_as(tmp.path(), "me", &me, &store);
+        let item = trust.item(
+            "npm",
+            "example",
+            Some("1.0.0".to_string()),
+            None,
+            vec![Reason::Unsigned],
+        );
+        trust.inbox.add(item);
+        trust.inbox.approve("npm:example").unwrap();
+        assert!(held(&trust, "example", Some("1.0.0")).is_empty());
+        assert_eq!(
+            held(&trust, "example", Some("6.6.6")),
+            vec![Reason::Unsigned]
+        );
+        assert_eq!(held(&trust, "example", None), vec![Reason::Unsigned]);
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub struct PackagePolicy {
     pub min_release_age_days: u32,
     pub allow_scripts: Vec<String>,
     pub trusted_taps: Vec<String>,
+    /// Formulae and casks approved from a tap that is not trusted: manager key, name, tap
+    pub approved_from_taps: Vec<(String, String, String)>,
 }
 
 impl Default for PackagePolicy {
@@ -23,12 +25,14 @@ impl PackagePolicy {
             min_release_age_days: packages.min_release_age_days,
             allow_scripts: packages.allow_scripts.clone(),
             trusted_taps: packages.brew.trusted_taps.clone(),
+            approved_from_taps: Vec::new(),
         }
     }
 
     /// Managers are built at many call sites without a config, so they read it here.
     /// An unreadable config falls back to the secure defaults.
-    /// Taps approved in the inbox are trusted like configured ones.
+    /// Tap items approved in the inbox are trusted like configured taps. An approved formula
+    /// or cask allows only itself from its tap.
     pub fn load() -> Self {
         let mut policy = Config::load()
             .map(|c| Self::from_config(&c.packages))
@@ -37,6 +41,10 @@ impl PackagePolicy {
             policy
                 .trusted_taps
                 .extend(inbox.approved_taps().map(str::to_string));
+            policy.approved_from_taps = inbox
+                .approved_from_taps()
+                .map(|(m, n, t)| (m.to_string(), n.to_string(), t.to_string()))
+                .collect();
         }
         policy
     }
@@ -53,6 +61,16 @@ impl PackagePolicy {
                 .trusted_taps
                 .iter()
                 .any(|t| t.to_ascii_lowercase() == tap)
+    }
+
+    /// A formula or cask (`manager` is `brew_formulae` or `brew_casks`) may install from
+    /// `tap` when the tap is trusted or the user approved this one from it.
+    pub fn brew_allowed(&self, manager: &str, name: &str, tap: &str) -> bool {
+        self.tap_trusted(tap)
+            || self
+                .approved_from_taps
+                .iter()
+                .any(|(m, n, t)| m == manager && n == name && t.eq_ignore_ascii_case(tap))
     }
 }
 
@@ -278,6 +296,7 @@ mod tests {
             min_release_age_days: 7,
             allow_scripts: allow.iter().map(|s| s.to_string()).collect(),
             trusted_taps: vec!["oven-sh/bun".to_string()],
+            approved_from_taps: Vec::new(),
         }
     }
 
