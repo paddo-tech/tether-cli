@@ -11,7 +11,18 @@ use std::time::{Duration, Instant};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Any message other than a tick may change what is on screen, so the regions from the
+/// last draw are dropped. A click before the next draw hits nothing instead of a stale row.
 pub fn update(app: &mut App, msg: Msg) -> Option<Cmd> {
+    let tick = matches!(msg, Msg::Tick);
+    let cmd = apply(app, msg);
+    if !tick {
+        app.hits.borrow_mut().clear();
+    }
+    cmd
+}
+
+fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
     match msg {
         Msg::Key(key) => on_key(app, key),
         Msg::Mouse(m) => on_mouse(app, m),
@@ -120,6 +131,7 @@ fn on_tick(app: &mut App) -> Option<Cmd> {
     app.toasts.retain(|t| t.alive(now));
     if app.last_refresh.elapsed() >= REFRESH_INTERVAL {
         app.reload_state();
+        app.hits.borrow_mut().clear();
         return Some(Cmd::LoadActivity);
     }
     None
@@ -295,6 +307,9 @@ fn on_mouse(app: &mut App, m: MouseEvent) -> Option<Cmd> {
         MouseEventKind::ScrollDown => on_key(app, KeyEvent::from(KeyCode::Down)),
         MouseEventKind::ScrollUp => on_key(app, KeyEvent::from(KeyCode::Up)),
         MouseEventKind::Down(MouseButton::Left) => match app.hit_at(m.column, m.row)? {
+            // Under a modal only its own buttons and items answer; a row click would become
+            // Enter on the modal and could accept a destructive confirm.
+            Hit::Tab(_) | Hit::Row(_) if app.overlays.last().is_some_and(Overlay::is_modal) => None,
             Hit::Tab(tab) => {
                 app.active_tab = tab;
                 None
@@ -681,6 +696,32 @@ mod tests {
         app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(3));
         click(&mut app, 2, 5);
         assert_eq!(app.files.cursor, 3);
+    }
+
+    #[test]
+    fn second_click_before_redraw_hits_nothing() {
+        let mut app = app();
+        app.add_hit(
+            Rect::new(0, 0, 5, 1),
+            Hit::Key(KeyEvent::from(KeyCode::Char('?'))),
+        );
+        click(&mut app, 1, 0);
+        click(&mut app, 1, 0);
+        assert!(app.help_open());
+    }
+
+    #[test]
+    fn row_click_cannot_answer_a_confirm() {
+        let mut app = app();
+        app.active_tab = Tab::Files;
+        app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
+            manager_key: "npm".into(),
+            name: "left-pad".into(),
+        }));
+        app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(0));
+        assert!(click(&mut app, 2, 5).is_none());
+        assert_eq!(app.overlays.len(), 1);
+        assert!(app.uninstalling.is_none());
     }
 
     #[test]
