@@ -63,7 +63,11 @@ pub trait PackageManager: Send + Sync {
                 match checked {
                     Ok(()) => true,
                     Err(e) => {
-                        eprintln!("Warning: Skipping {} entry: {}", self.name(), e);
+                        crate::cli::Output::warning(&format!(
+                            "Skipping {} entry: {}",
+                            self.name(),
+                            e
+                        ));
                         false
                     }
                 }
@@ -80,7 +84,10 @@ pub trait PackageManager: Send + Sync {
         for package in packages {
             if !installed_names.contains(package.name.as_str()) {
                 if let Err(e) = self.install(&package).await {
-                    eprintln!("Warning: Failed to install {}: {}", package.name, e);
+                    crate::cli::Output::warning(&format!(
+                        "Failed to install {}: {}",
+                        package.name, e
+                    ));
                 }
             }
         }
@@ -102,7 +109,10 @@ pub trait PackageManager: Send + Sync {
         for pkg in installed {
             if !desired.contains(pkg.name.as_str()) {
                 if let Err(e) = self.uninstall(&pkg.name).await {
-                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, e);
+                    crate::cli::Output::warning(&format!(
+                        "Failed to uninstall {}: {}",
+                        pkg.name, e
+                    ));
                 }
             }
         }

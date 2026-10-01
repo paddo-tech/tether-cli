@@ -537,11 +537,11 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
     let candidates = match manager.upgrade_candidates().await {
         Ok(candidates) => candidates,
         Err(e) => {
-            eprintln!(
-                "Warning: {} upgrades not checked against OSV: {}",
+            Output::warning(&format!(
+                "{} upgrades not checked against OSV: {}",
                 manager.name(),
                 e
-            );
+            ));
             return Vec::new();
         }
     };
@@ -556,13 +556,13 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
         if !advisories.iter().any(|id| osv::is_malicious(id)) {
             continue;
         }
-        eprintln!(
-            "Warning: Skipping {} upgrade of {} to {}: OSV lists it as malicious ({})",
+        Output::warning(&format!(
+            "Skipping {} upgrade of {} to {}: OSV lists it as malicious ({})",
             manager.name(),
             name,
             version.as_deref().unwrap_or_default(),
             advisories.join(", ")
-        );
+        ));
         held.push(name.clone());
         items.push(InboxItem {
             kind: Kind::Package,
@@ -579,7 +579,7 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
         });
     }
     if let Err(e) = add(items) {
-        eprintln!("Warning: Could not hold malicious upgrades: {}", e);
+        Output::warning(&format!("Could not hold malicious upgrades: {}", e));
     }
     held
 }

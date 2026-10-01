@@ -168,7 +168,7 @@ impl PackageManager for NpmManager {
             .filter(|name| match validate_name(Ecosystem::Npm, name) {
                 Ok(()) => true,
                 Err(e) => {
-                    eprintln!("Warning: Skipping npm entry: {}", e);
+                    crate::cli::Output::warning(&format!("Skipping npm entry: {}", e));
                     false
                 }
             })

@@ -247,10 +247,10 @@ pub fn pnpm_can_allow_build(version: Option<((u64, u64, u64), bool)>) -> bool {
 /// scripts off, and the user is told once.
 pub fn warn_scripts_unsupported_once(manager: &str, needs: &str) {
     if first_warning(&format!("allow_scripts {}", manager)) {
-        eprintln!(
-            "Warning: packages.allow_scripts needs {} {} or later. Scripts stay off for allowlisted {} packages",
+        crate::cli::Output::warning(&format!(
+            "packages.allow_scripts needs {} {} or later. Scripts stay off for allowlisted {} packages",
             manager, needs, manager
-        );
+        ));
     }
 }
 
@@ -276,10 +276,10 @@ pub fn first_warning(key: &str) -> bool {
 
 pub fn warn_unsupported_once(manager: &str, days: u32) {
     if first_warning(manager) {
-        eprintln!(
-            "Warning: this {} version cannot enforce packages.min_release_age_days = {}. Upgrade {} to get the cooldown",
+        crate::cli::Output::warning(&format!(
+            "this {} version cannot enforce packages.min_release_age_days = {}. Upgrade {} to get the cooldown",
             manager, days, manager
-        );
+        ));
     }
 }
 

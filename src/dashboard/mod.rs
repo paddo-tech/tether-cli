@@ -48,6 +48,7 @@ impl Drop for TerminalGuard {
         let _ = stdout().execute(DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = stdout().execute(LeaveAlternateScreen);
+        crate::cli::Output::capture_warnings(false);
     }
 }
 
@@ -57,6 +58,8 @@ pub fn run() -> Result<()> {
             "Dashboard requires an interactive terminal. Use 'tether status' for non-interactive output."
         );
     }
+    // Package code warns from background work; printed, it would draw over the screen
+    crate::cli::Output::capture_warnings(true);
 
     let state = DashboardState::load();
     let deleted = repo::load_deleted_files(&state);

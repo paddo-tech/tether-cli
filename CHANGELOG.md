@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The dashboard header shows the machine, the daemon state and a spinner while a sync runs. The Overview tab shows a chart of sync commits per day
 - The Machines tab shows a card for each machine with its last sync, online/idle/stale state, OS and tether version
 - File and manifest diffs in the dashboard show line numbers and colored added and removed lines
-- Dashboard messages appear as notices in the top-right corner and disappear after a few seconds
+- Dashboard messages appear as notices in the top-right corner and disappear after a few seconds. Package warnings from background work, such as an incomplete OSV check, appear there too and go to the log, instead of printing over the screen
 - The dashboard supports the mouse: click a tab, a row or a key hint, and scroll lists with the wheel
 - Press Ctrl+K in the dashboard to search actions, tabs, files and packages
 - The dashboard redraws only when something changes, so it uses almost no CPU when idle

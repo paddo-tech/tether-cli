@@ -148,7 +148,7 @@ impl PackageManager for PnpmManager {
             .filter(|name| match validate_name(Ecosystem::Npm, name) {
                 Ok(()) => true,
                 Err(e) => {
-                    eprintln!("Warning: Skipping pnpm entry: {}", e);
+                    crate::cli::Output::warning(&format!("Skipping pnpm entry: {}", e));
                     false
                 }
             })
@@ -170,8 +170,8 @@ impl PackageManager for PnpmManager {
                 && !policy::pnpm_update_accepts_ignore_scripts(version)
             {
                 if policy::first_warning("pnpm update --ignore-scripts") {
-                    eprintln!(
-                        "Warning: Skipping pnpm update: pnpm 12.0.0 to 12.3.1 cannot update with install scripts off. Upgrade pnpm to 12.3.2 or later"
+                    crate::cli::Output::warning(
+                        "Skipping pnpm update: pnpm 12.0.0 to 12.3.1 cannot update with install scripts off. Upgrade pnpm to 12.3.2 or later",
                     );
                 }
                 continue;

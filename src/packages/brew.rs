@@ -58,9 +58,9 @@ impl BrewfilePackages {
         let keep = |ecosystem: Ecosystem, name: &String| match validate_name(ecosystem, name) {
             Ok(()) => true,
             Err(e) => {
-                let message = format!("Warning: Skipping Brewfile entry: {}", e);
+                let message = format!("Skipping Brewfile entry: {}", e);
                 if first_warning(&message) {
-                    eprintln!("{}", message);
+                    crate::cli::Output::warning(&message);
                 }
                 false
             }
@@ -248,13 +248,15 @@ pub fn hold_untrusted(untrusted: &BrewfilePackages) {
     match inbox::add(items) {
         Ok(held) => {
             for item in held {
-                eprintln!(
-                    "Warning: Holding {} from an untrusted tap for approval. Run 'tether packages inbox'",
+                crate::cli::Output::warning(&format!(
+                    "Holding {} from an untrusted tap for approval. Run 'tether packages inbox'",
                     item.name
-                );
+                ));
             }
         }
-        Err(e) => eprintln!("Warning: Skipping untrusted Homebrew entries: {}", e),
+        Err(e) => {
+            crate::cli::Output::warning(&format!("Skipping untrusted Homebrew entries: {}", e))
+        }
     }
 }
 
@@ -615,7 +617,7 @@ impl PackageManager for BrewManager {
         // brew bundle may return non-zero even if most packages installed
         // (e.g., one cask failed). Log but don't fail.
         if !status.success() {
-            eprintln!("Warning: brew bundle had issues (exit code: {})", status);
+            crate::cli::Output::warning(&format!("brew bundle had issues (exit code: {})", status));
         }
 
         Ok(())
@@ -647,7 +649,7 @@ impl PackageManager for BrewManager {
         for pkg in installed {
             if !desired.contains(pkg.name.as_str()) {
                 if let Err(e) = validate_name(Ecosystem::Brew, &pkg.name) {
-                    eprintln!("Warning: Skipping brew entry: {}", e);
+                    crate::cli::Output::warning(&format!("Skipping brew entry: {}", e));
                     continue;
                 }
                 let output = command("brew")?
@@ -657,7 +659,10 @@ impl PackageManager for BrewManager {
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Warning: Failed to uninstall {}: {}", pkg.name, stderr);
+                    crate::cli::Output::warning(&format!(
+                        "Failed to uninstall {}: {}",
+                        pkg.name, stderr
+                    ));
                 }
             }
         }

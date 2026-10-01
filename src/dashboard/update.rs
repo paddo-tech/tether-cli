@@ -130,10 +130,14 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
     }
 }
 
-/// Expire toasts; every refresh interval reload state and recount sync activity.
+/// Expire toasts and show held warnings; every refresh interval reload state and recount
+/// sync activity.
 fn on_tick(app: &mut App) -> Option<Cmd> {
     let now = Instant::now();
     app.toasts.retain(|t| t.alive(now));
+    for warning in crate::cli::Output::take_warnings() {
+        app.flash_info(warning);
+    }
     if app.last_refresh.elapsed() >= REFRESH_INTERVAL {
         app.reload_state();
         app.hits.borrow_mut().clear();
@@ -669,6 +673,19 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn package_warnings_become_toasts_while_the_dashboard_runs() {
+        let mut app = app();
+        crate::cli::Output::capture_warnings(true);
+        crate::cli::Output::warning("OSV check incomplete for 1 packages: timeout");
+        update(&mut app, Msg::Tick);
+        crate::cli::Output::capture_warnings(false);
+        assert!(app
+            .toasts
+            .iter()
+            .any(|t| t.text == "OSV check incomplete for 1 packages: timeout"));
     }
 
     #[test]

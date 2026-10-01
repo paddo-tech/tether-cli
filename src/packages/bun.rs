@@ -186,7 +186,7 @@ impl PackageManager for BunManager {
                 continue;
             }
             if let Err(e) = validate_name(Ecosystem::Npm, &pkg.name) {
-                eprintln!("Warning: Skipping bun entry: {}", e);
+                crate::cli::Output::warning(&format!("Skipping bun entry: {}", e));
                 continue;
             }
             let output = command("bun")?
@@ -199,7 +199,7 @@ impl PackageManager for BunManager {
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("Warning: Failed to update {}: {}", pkg.name, stderr);
+                crate::cli::Output::warning(&format!("Failed to update {}: {}", pkg.name, stderr));
             }
         }
 

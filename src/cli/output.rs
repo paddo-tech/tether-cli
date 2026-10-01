@@ -1,7 +1,10 @@
 use comfy_table::{presets, ContentArrangement, Table};
 use owo_colors::OwoColorize;
+use std::sync::Mutex;
 
 pub struct Output;
+
+static CAPTURED: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
 // Icon constants
 impl Output {
@@ -27,8 +30,30 @@ impl Output {
         println!("{} {}", Self::INFO.bright_blue().bold(), message);
     }
 
+    /// While the dashboard owns the terminal, a warning goes to the log and waits for the
+    /// dashboard to show it, because printing would draw over its screen.
     pub fn warning(message: &str) {
+        if let Some(queue) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            log::warn!("{}", message);
+            queue.push(message.to_string());
+            return;
+        }
         println!("{} {}", Self::WARN.yellow().bold(), message.yellow());
+    }
+
+    /// Hold warnings for the dashboard from now on, or print them again with `false`.
+    pub fn capture_warnings(on: bool) {
+        *CAPTURED.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Vec::new);
+    }
+
+    /// Warnings held since the last call.
+    pub fn take_warnings() -> Vec<String> {
+        CAPTURED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     pub fn header(message: &str) {
