@@ -69,9 +69,10 @@ pub enum Confirm {
         arming: Arming,
     },
     /// Approve and install inbox items that OSV could not check. Only `y` accepts.
+    /// Each item comes with its own OSV error, because one may warn of malicious releases
+    /// while another only timed out.
     ApproveWithoutOsv {
-        items: Vec<crate::packages::inbox::InboxItem>,
-        error: String,
+        items: Vec<(crate::packages::inbox::InboxItem, String)>,
         arming: Arming,
     },
     /// Remove another machine's record that looks like an old id of this machine. Only `y`
@@ -238,7 +239,9 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             Some(Cmd::RemoveMachine { machine_id, digest })
         }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
-        Confirm::ApproveWithoutOsv { items, .. } => security::approve_all(app, items, false),
+        Confirm::ApproveWithoutOsv { items, .. } => {
+            security::approve_all(app, items.into_iter().map(|(i, _)| i).collect(), false)
+        }
         Confirm::InstallWithoutOsv {
             manager_key, name, ..
         } => app.start_install(manager_key, name, false),
@@ -313,19 +316,23 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
-        Confirm::ApproveWithoutOsv { items, error, .. } => render_popup(
+        Confirm::ApproveWithoutOsv { items, .. } => render_popup(
             f,
             app,
             wait,
             "OSV unreachable",
             &format!(
-                "OSV could not check {}: {}. Approve and install without the malicious-package check?",
+                "OSV could not check {}. Approve and install without the malicious-package check?",
                 items
                     .iter()
-                    .map(|i| format!("{} ({})", i.name, manager_label(&i.manager)))
+                    .map(|(i, error)| format!(
+                        "{} ({}): {}",
+                        i.name,
+                        manager_label(&i.manager),
+                        error
+                    ))
                     .collect::<Vec<_>>()
-                    .join(", "),
-                error
+                    .join("; "),
             ),
             t.error,
         ),
@@ -344,7 +351,9 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                     last_sync
                         .with_timezone(&chrono::Local)
                         .format("%Y-%m-%d %H:%M"),
-                    chrono::Utc::now().signed_duration_since(last_sync).num_days()
+                    chrono::Utc::now()
+                        .signed_duration_since(last_sync)
+                        .num_days()
                 ),
                 format!("packages   {}", packages),
             ];

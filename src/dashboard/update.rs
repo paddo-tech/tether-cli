@@ -106,7 +106,6 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             op,
             result,
             unchecked,
-            error,
         } => {
             if app.installing.as_ref().map(|i| i.id) == Some(op.id) {
                 app.installing = None;
@@ -116,7 +115,6 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                 app.overlays
                     .push(Overlay::Confirm(confirm::Confirm::ApproveWithoutOsv {
                         items: unchecked,
-                        error,
                         arming: Default::default(),
                     }));
                 // Items OSV did check are approved and installed already. Their sync waits
@@ -1156,8 +1154,10 @@ mod tests {
         let unreachable = |op: InstallOp| Msg::ApproveOsvUnreachable {
             op,
             result: Ok(()),
-            unchecked: items.clone(),
-            error: "timeout".into(),
+            unchecked: items
+                .iter()
+                .map(|i| (i.clone(), "timeout".into()))
+                .collect(),
         };
         // The sync for the items OSV did check waits for the answer: it would hold the sync
         // lock that `y` needs
@@ -1184,6 +1184,47 @@ mod tests {
             })
         ));
         assert_eq!(approved_names(cmd), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn approve_without_osv_shows_each_package_error() {
+        let mut app = with_inbox();
+        let Some(Cmd::ApprovePackages { op, .. }) = security::approve_all(
+            &mut app,
+            vec![
+                inbox_item("aaa", vec![Reason::Unsigned]),
+                inbox_item("bbb", vec![Reason::Unsigned]),
+            ],
+            true,
+        ) else {
+            panic!("expected an approval");
+        };
+        update(
+            &mut app,
+            Msg::ApproveOsvUnreachable {
+                op,
+                result: Ok(()),
+                unchecked: vec![
+                    (inbox_item("aaa", vec![]), "MALICIOUS releases".into()),
+                    (inbox_item("bbb", vec![]), "timeout".into()),
+                ],
+            },
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        // A timeout on one package does not hide the malicious-releases warning on another
+        assert!(text.contains("aaa (npm): MALICIOUS releases"));
+        assert!(text.contains("bbb (npm): timeout"));
     }
 
     #[test]

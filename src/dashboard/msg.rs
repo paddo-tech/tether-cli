@@ -34,8 +34,8 @@ pub enum Msg {
     ApproveOsvUnreachable {
         op: InstallOp,
         result: Result<(), String>,
-        unchecked: Vec<InboxItem>,
-        error: String,
+        /// Each item with its own OSV error
+        unchecked: Vec<(InboxItem, String)>,
     },
     LocalPackages(HashMap<String, Vec<String>>),
     /// Sync commits per day, oldest first, ending today.

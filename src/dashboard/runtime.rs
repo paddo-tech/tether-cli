@@ -93,13 +93,14 @@ impl Runtime {
                 self.spawn(
                     async move {
                         match approve_and_install(&items, osv_required).await {
-                            (result, unchecked, Some(error)) => Msg::ApproveOsvUnreachable {
+                            (result, unchecked) if unchecked.is_empty() => {
+                                Msg::InstallDone { op, result }
+                            }
+                            (result, unchecked) => Msg::ApproveOsvUnreachable {
                                 op,
                                 result,
                                 unchecked,
-                                error,
                             },
-                            (result, _, None) => Msg::InstallDone { op, result },
                         }
                     },
                     move |e| {
@@ -340,20 +341,19 @@ async fn install_check(op: &InstallOp, osv_required: bool) -> Result<Option<Stri
 
 /// Approve each item as displayed and install it, and report every failure together.
 /// An item that changed since it was displayed is not approved. With `osv_required`, an
-/// item that OSV cannot check is neither approved nor installed: it is returned, with the
+/// item that OSV cannot check is neither approved nor installed: it is returned, with its
 /// error, for the user to decide.
 async fn approve_and_install(
     items: &[InboxItem],
     osv_required: bool,
-) -> (Result<(), String>, Vec<InboxItem>, Option<String>) {
+) -> (Result<(), String>, Vec<(InboxItem, String)>) {
     // The daemon must not install the same packages meanwhile; the dashboard cannot wait on it
     let _sync_lock = match crate::sync::acquire_sync_lock(false) {
         Ok(lock) => lock,
-        Err(e) => return (Err(e.to_string()), Vec::new(), None),
+        Err(e) => return (Err(e.to_string()), Vec::new()),
     };
     let mut failed = Vec::new();
     let mut unchecked = Vec::new();
-    let mut osv_error = None;
     for item in items {
         let check = crate::packages::inbox::check_osv(
             &item.manager,
@@ -365,8 +365,7 @@ async fn approve_and_install(
         let result = match check {
             Err(e) => match e.downcast::<OsvUnchecked>() {
                 Ok(e) => {
-                    osv_error = Some(e.error);
-                    unchecked.push(item.clone());
+                    unchecked.push((item.clone(), e.error));
                     continue;
                 }
                 Err(e) => Err(e),
@@ -388,7 +387,7 @@ async fn approve_and_install(
     } else {
         Err(failed.join("; "))
     };
-    (result, unchecked, osv_error)
+    (result, unchecked)
 }
 
 async fn run_install(
