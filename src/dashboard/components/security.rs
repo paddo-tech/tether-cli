@@ -153,7 +153,7 @@ pub fn confirm_approve_all(app: &mut App) {
         app.flash_info("Nothing to approve");
     } else if !app.install_busy() {
         app.overlays
-            .push(Overlay::Confirm(Confirm::ApproveAll { items, malicious }));
+            .push(Overlay::Confirm(Confirm::approve_all(items, malicious)));
     }
 }
 

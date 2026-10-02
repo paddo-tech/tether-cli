@@ -33,11 +33,27 @@ pub enum Confirm {
         items: Vec<crate::packages::inbox::InboxItem>,
         error: String,
     },
-    /// Approve and install these inbox items, as displayed when the confirm opened.
+    /// Approve and install these inbox items, as displayed when the confirm opened. It lists
+    /// every one of them, because `y` approves exactly this list.
     ApproveAll {
         items: Vec<crate::packages::inbox::InboxItem>,
         malicious: usize,
+        /// First listed item
+        scroll: usize,
+        /// Items the last draw had room for
+        rows: std::cell::Cell<usize>,
     },
+}
+
+impl Confirm {
+    pub fn approve_all(items: Vec<crate::packages::inbox::InboxItem>, malicious: usize) -> Self {
+        Confirm::ApproveAll {
+            items,
+            malicious,
+            scroll: 0,
+            rows: std::cell::Cell::new(1),
+        }
+    }
 }
 
 /// The overlay was popped off the stack; push it back to keep it open.
@@ -54,6 +70,33 @@ pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd>
         }
         KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
         KeyCode::Char('n') | KeyCode::Esc => None,
+        KeyCode::Char('j')
+        | KeyCode::Char('k')
+        | KeyCode::Down
+        | KeyCode::Up
+        | KeyCode::PageDown
+        | KeyCode::PageUp => {
+            let mut confirm = confirm;
+            if let Confirm::ApproveAll {
+                items,
+                scroll,
+                rows,
+                ..
+            } = &mut confirm
+            {
+                let page = rows.get().max(1);
+                let last = items.len().saturating_sub(page);
+                *scroll = match key.code {
+                    KeyCode::Char('j') | KeyCode::Down => *scroll + 1,
+                    KeyCode::PageDown => *scroll + page,
+                    KeyCode::PageUp => scroll.saturating_sub(page),
+                    _ => scroll.saturating_sub(1),
+                }
+                .min(last);
+            }
+            app.overlays.push(Overlay::Confirm(confirm));
+            None
+        }
         _ => {
             app.overlays.push(Overlay::Confirm(confirm));
             None
@@ -183,18 +226,115 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
-        Confirm::ApproveAll { items, malicious } => {
+        Confirm::ApproveAll {
+            items,
+            malicious,
+            scroll,
+            rows,
+        } => {
             let mut msg = format!(
-                "Approve and install {} package{}?",
+                "Approve and install these {} package{}?",
                 items.len(),
                 if items.len() == 1 { "" } else { "s" }
             );
             if *malicious > 0 {
                 msg.push_str(&format!(" {} malicious stay held.", malicious));
             }
-            render_popup(f, app, "Approve all", &msg, t.ok)
+            let lines: Vec<String> = items.iter().map(approve_all_line).collect();
+            render_list_popup(f, app, "Approve all", &msg, &lines, *scroll, rows, t.ok)
         }
     }
+}
+
+/// One package as the approve-all question lists it: name, version, manager and tap.
+pub fn approve_all_line(item: &crate::packages::inbox::InboxItem) -> String {
+    let mut line = format!(
+        "{} {} ({})",
+        item.name,
+        item.version.as_deref().unwrap_or("unpinned"),
+        manager_label(&item.manager)
+    );
+    if let Some(tap) = &item.tap {
+        line.push_str(&format!(" from {}", tap));
+    }
+    line
+}
+
+/// A question over a scrollable list, with the buttons of [`render_popup`]. `rows` gets the
+/// number of list lines that fit, so scrolling stops at the last page.
+#[allow(clippy::too_many_arguments)]
+fn render_list_popup(
+    f: &mut Frame,
+    app: &App,
+    title: &str,
+    msg: &str,
+    lines: &[String],
+    scroll: usize,
+    rows: &std::cell::Cell<usize>,
+    color: Color,
+) {
+    let t = &app.theme;
+    let area = f.area();
+    let widest = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .chain([msg.chars().count()])
+        .max()
+        .unwrap_or(0);
+    let width = (widest as u16 + 8)
+        .max(36)
+        .min(area.width.saturating_sub(4));
+    let inner_w = width.saturating_sub(4).max(1) as usize;
+    let msg_lines = msg.chars().count().div_ceil(inner_w).max(1) as u16;
+    // Border, gap, question, gap, list, gap, buttons, border
+    let chrome = msg_lines + 6;
+    let height = (chrome + lines.len() as u16).min(area.height.saturating_sub(2));
+    let rect = centered(area, width, height);
+    let block = popup(f, rect, title, color, t);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    f.render_widget(
+        Paragraph::new(msg)
+            .style(Style::default().fg(t.text))
+            .wrap(Wrap { trim: true }),
+        Rect {
+            y: inner.y + 1,
+            height: msg_lines,
+            ..inner
+        },
+    );
+    let visible = height.saturating_sub(chrome) as usize;
+    rows.set(visible.max(1));
+    let start = scroll.min(lines.len().saturating_sub(visible));
+    let list = Rect {
+        y: inner.y + msg_lines + 2,
+        height: visible as u16,
+        ..inner
+    };
+    f.render_widget(
+        Paragraph::new(
+            lines[start..]
+                .iter()
+                .take(visible)
+                .map(|l| Line::from(l.as_str()))
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::default().fg(t.text)),
+        list,
+    );
+    super::scrollbar(
+        f,
+        Rect {
+            y: list.y.saturating_sub(1),
+            height: list.height + 2,
+            ..rect
+        },
+        lines.len(),
+        start,
+        visible,
+        t,
+    );
+    buttons(f, app, inner, color);
 }
 
 /// A question with clickable confirm and cancel buttons.
@@ -222,6 +362,12 @@ pub fn render_popup(f: &mut Frame, app: &App, title: &str, msg: &str, color: Col
         },
     );
 
+    buttons(f, app, inner, color);
+}
+
+/// Clickable confirm and cancel buttons on the last line of `inner`.
+fn buttons(f: &mut Frame, app: &App, inner: Rect, color: Color) {
+    let t = &app.theme;
     let yes = " y  confirm ";
     let no = " n  cancel ";
     let by = inner.bottom().saturating_sub(1);

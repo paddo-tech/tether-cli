@@ -1046,9 +1046,9 @@ mod tests {
 
     fn approve_all_names(app: &App) -> Option<(Vec<String>, usize)> {
         match app.overlays.last() {
-            Some(Overlay::Confirm(Confirm::ApproveAll { items, malicious })) => {
-                Some((items.iter().map(|i| i.name.clone()).collect(), *malicious))
-            }
+            Some(Overlay::Confirm(Confirm::ApproveAll {
+                items, malicious, ..
+            })) => Some((items.iter().map(|i| i.name.clone()).collect(), *malicious)),
             _ => None,
         }
     }
@@ -1124,6 +1124,42 @@ mod tests {
             })
         ));
         assert_eq!(approved_names(cmd), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn approve_all_lists_every_item_it_approves() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        for i in 0..40 {
+            app.state
+                .inbox
+                .items
+                .push(inbox_item(&format!("pkg{:02}", i), vec![Reason::Unsigned]));
+        }
+        key(&mut app, KeyCode::Char('A'));
+        let mut shown = std::collections::BTreeSet::new();
+        for _ in 0..50 {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+            terminal
+                .draw(|f| crate::dashboard::view::view(f, &app))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+            for name in std::iter::once("left-pad".to_string())
+                .chain((0..40).map(|i| format!("pkg{:02}", i)))
+            {
+                if text.contains(&format!("{} 1.0.0 (npm)", name)) {
+                    shown.insert(name);
+                }
+            }
+            key(&mut app, KeyCode::Char('j'));
+        }
+        let cmd = key(&mut app, KeyCode::Char('y'));
+        let approved: std::collections::BTreeSet<String> =
+            approved_names(cmd).into_iter().collect();
+        assert_eq!(approved.len(), 41);
+        assert_eq!(shown, approved);
     }
 
     fn draw(app: &App) {
