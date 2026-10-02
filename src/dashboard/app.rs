@@ -320,11 +320,21 @@ impl App {
     }
 
     /// Track the approval and install of inbox items as displayed. `label` names them in the
-    /// header and toasts. The caller checks `install_busy` first.
-    pub fn start_inbox_install(&mut self, label: String, items: Vec<InboxItem>) -> Cmd {
+    /// header and toasts. The caller checks `install_busy` first. Without `osv_required`, the
+    /// user has agreed to install without an OSV answer.
+    pub fn start_inbox_install(
+        &mut self,
+        label: String,
+        items: Vec<InboxItem>,
+        osv_required: bool,
+    ) -> Cmd {
         let manager_key = items.first().map(|i| i.manager.clone()).unwrap_or_default();
         let op = self.track_install(manager_key, label);
-        Cmd::ApprovePackages { op, items }
+        Cmd::ApprovePackages {
+            op,
+            items,
+            osv_required,
+        }
     }
 
     fn track_install(&mut self, manager_key: String, name: String) -> InstallOp {

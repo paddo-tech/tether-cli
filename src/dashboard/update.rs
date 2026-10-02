@@ -101,6 +101,25 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
             None
         }
+        Msg::ApproveOsvUnreachable {
+            op,
+            result,
+            unchecked,
+            error,
+        } => {
+            if app.installing.as_ref().map(|i| i.id) == Some(op.id) {
+                app.installing = None;
+                if let Err(e) = result {
+                    app.flash_error(format!("install failed: {}", e));
+                }
+                app.overlays
+                    .push(Overlay::Confirm(confirm::Confirm::ApproveWithoutOsv {
+                        items: unchecked,
+                        error,
+                    }));
+            }
+            None
+        }
         Msg::InboxDone(result) => {
             security::reload(app);
             match result {
@@ -1063,6 +1082,47 @@ mod tests {
             .items
             .push(inbox_item("late", vec![Reason::Unsigned]));
         let cmd = key(&mut app, KeyCode::Char('y'));
+        assert_eq!(approved_names(cmd), vec!["left-pad"]);
+    }
+
+    #[test]
+    fn approve_asks_before_it_installs_without_osv() {
+        let mut app = with_inbox();
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('A'));
+        let Some(Cmd::ApprovePackages {
+            op,
+            items,
+            osv_required: true,
+        }) = key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected an approval that requires OSV");
+        };
+        let unreachable = |op: InstallOp| Msg::ApproveOsvUnreachable {
+            op,
+            result: Ok(()),
+            unchecked: items.clone(),
+            error: "timeout".into(),
+        };
+        update(&mut app, unreachable(op));
+        assert!(app.installing.is_none());
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+
+        let Some(Cmd::ApprovePackages { op, .. }) =
+            security::approve_all(&mut app, items.clone(), true)
+        else {
+            panic!("expected an approval");
+        };
+        update(&mut app, unreachable(op));
+        let cmd = key(&mut app, KeyCode::Char('y'));
+        assert!(matches!(
+            cmd,
+            Some(Cmd::ApprovePackages {
+                osv_required: false,
+                ..
+            })
+        ));
         assert_eq!(approved_names(cmd), vec!["left-pad"]);
     }
 

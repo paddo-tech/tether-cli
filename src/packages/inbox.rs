@@ -695,9 +695,63 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
     held
 }
 
+/// OSV could not be asked about a package, and the caller needs an answer before it installs.
+#[derive(Debug, thiserror::Error)]
+#[error("OSV could not check {name}: {error}")]
+pub struct OsvUnreachable {
+    pub name: String,
+    pub error: String,
+}
+
+/// Refuse a package that OSV lists as malicious, or that this inbox holds as malicious.
+/// With `osv_required`, an OSV outage refuses it too, as [`OsvUnreachable`], so the user can
+/// decide. Homebrew has no OSV ecosystem.
+pub async fn check_osv(
+    manager_key: &str,
+    name: &str,
+    version: Option<&str>,
+    osv_required: bool,
+) -> Result<()> {
+    if Inbox::load()?.holds_malicious(manager_key, name) {
+        bail!(
+            "The inbox holds {} as malicious. Tether will not install it",
+            name
+        );
+    }
+    let Some(manager) = manager_for_key(manager_key) else {
+        return Ok(());
+    };
+    let pin = [(name.to_string(), version.map(str::to_string))];
+    let (found, errors) = osv::query(manager.ecosystem(), &pin).await;
+    let malicious: Vec<&str> = found[0]
+        .iter()
+        .filter(|id| osv::is_malicious(id))
+        .map(String::as_str)
+        .collect();
+    if !malicious.is_empty() {
+        bail!(
+            "OSV lists {} as malicious ({}). Tether will not install it",
+            name,
+            malicious.join(", ")
+        );
+    }
+    match errors.into_iter().next() {
+        Some(error) if osv_required => Err(OsvUnreachable {
+            name: name.to_string(),
+            error,
+        }
+        .into()),
+        Some(error) => {
+            Output::warning(&error);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
+
 /// Install an approved item now. `interactive` lets a cask prompt for a password.
-/// A machine item has nothing to install.
-/// OSV is asked again, because an advisory can appear after the item was queued.
+/// A machine item has nothing to install. The caller asks [`check_osv`] first, before it
+/// approves the item, because an advisory can appear after the item was queued.
 pub async fn install(item: &InboxItem, interactive: bool) -> Result<()> {
     if item.kind != Kind::Package {
         return Ok(());
@@ -706,22 +760,6 @@ pub async fn install(item: &InboxItem, interactive: bool) -> Result<()> {
         name: item.name.clone(),
         version: item.version.clone(),
     };
-    if let Some(manager) = manager_for_key(&item.manager) {
-        let pin = [(item.name.clone(), item.version.clone())];
-        let found = osv::advisories(manager.ecosystem(), &pin).await;
-        let malicious: Vec<&String> = found[0].iter().filter(|id| osv::is_malicious(id)).collect();
-        if !malicious.is_empty() {
-            bail!(
-                "OSV lists {} as malicious ({}). Tether will not install it",
-                item.name,
-                malicious
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
-    }
     match item.manager.as_str() {
         "brew_taps" => BrewManager::new().tap(&item.name).await,
         "brew_formulae" => BrewManager::new().install(&package).await,

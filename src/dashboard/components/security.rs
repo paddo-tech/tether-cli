@@ -126,7 +126,7 @@ pub fn approve(app: &mut App, item: InboxItem) -> Option<Cmd> {
             if app.install_busy() {
                 return None;
             }
-            Some(app.start_inbox_install(item.name.clone(), vec![item]))
+            Some(app.start_inbox_install(item.name.clone(), vec![item], true))
         }
         Kind::TrustMachine { .. } => {
             let label = machine_name(app, &item.name);
@@ -158,7 +158,8 @@ pub fn confirm_approve_all(app: &mut App) {
 }
 
 /// Approve and install exactly the items the confirm showed, in one background run.
-pub fn approve_all(app: &mut App, items: Vec<InboxItem>) -> Option<Cmd> {
+/// Without `osv_required`, the user has agreed to install them without an OSV answer.
+pub fn approve_all(app: &mut App, items: Vec<InboxItem>, osv_required: bool) -> Option<Cmd> {
     if app.install_busy() {
         return None;
     }
@@ -167,7 +168,7 @@ pub fn approve_all(app: &mut App, items: Vec<InboxItem>) -> Option<Cmd> {
         [one] => one.name.clone(),
         many => format!("{} packages", many.len()),
     };
-    Some(app.start_inbox_install(label, items))
+    Some(app.start_inbox_install(label, items, osv_required))
 }
 
 fn is_malicious(item: &InboxItem) -> bool {

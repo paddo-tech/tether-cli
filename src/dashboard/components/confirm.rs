@@ -28,6 +28,11 @@ pub enum Confirm {
         name: String,
         error: String,
     },
+    /// Approve and install inbox items that OSV could not check. Only `y` accepts.
+    ApproveWithoutOsv {
+        items: Vec<crate::packages::inbox::InboxItem>,
+        error: String,
+    },
     /// Approve and install these inbox items, as displayed when the confirm opened.
     ApproveAll {
         items: Vec<crate::packages::inbox::InboxItem>,
@@ -39,7 +44,14 @@ pub enum Confirm {
 pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd> {
     match key.code {
         // Installing without the malicious-package check is never the default answer
-        KeyCode::Enter if matches!(confirm, Confirm::InstallWithoutOsv { .. }) => None,
+        KeyCode::Enter
+            if matches!(
+                confirm,
+                Confirm::InstallWithoutOsv { .. } | Confirm::ApproveWithoutOsv { .. }
+            ) =>
+        {
+            None
+        }
         KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
         KeyCode::Char('n') | KeyCode::Esc => None,
         _ => {
@@ -91,7 +103,8 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             clamp_cursor(&mut app.files.cursor, len);
             app.follow_up_sync()
         }
-        Confirm::ApproveAll { items, .. } => security::approve_all(app, items),
+        Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
+        Confirm::ApproveWithoutOsv { items, .. } => security::approve_all(app, items, false),
         Confirm::InstallWithoutOsv {
             manager_key, name, ..
         } => app.start_install(manager_key, name, false),
@@ -151,6 +164,21 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 "OSV could not check {} ({}): {}. Install it without the malicious-package check?",
                 name,
                 manager_label(manager_key),
+                error
+            ),
+            t.error,
+        ),
+        Confirm::ApproveWithoutOsv { items, error } => render_popup(
+            f,
+            app,
+            "OSV unreachable",
+            &format!(
+                "OSV could not check {}: {}. Approve and install without the malicious-package check?",
+                items
+                    .iter()
+                    .map(|i| format!("{} ({})", i.name, manager_label(&i.manager)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 error
             ),
             t.error,

@@ -2,7 +2,7 @@
 
 use super::app::{DaemonOp, InstallOp, Job};
 use super::msg::{Cmd, Msg};
-use crate::packages::inbox::{InboxItem, Kind};
+use crate::packages::inbox::{InboxItem, Kind, OsvUnreachable};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Child, Command, Stdio};
@@ -84,12 +84,23 @@ impl Runtime {
                     },
                 );
             }
-            Cmd::ApprovePackages { op, items } => {
+            Cmd::ApprovePackages {
+                op,
+                items,
+                osv_required,
+            } => {
                 let failed_op = op.clone();
                 self.spawn(
                     async move {
-                        let result = approve_and_install(&items).await;
-                        Msg::InstallDone { op, result }
+                        match approve_and_install(&items, osv_required).await {
+                            (result, unchecked, Some(error)) => Msg::ApproveOsvUnreachable {
+                                op,
+                                result,
+                                unchecked,
+                                error,
+                            },
+                            (result, _, None) => Msg::InstallDone { op, result },
+                        }
                     },
                     move |e| {
                         Some(Msg::InstallDone {
@@ -293,63 +304,66 @@ enum Blocked {
     OsvUnreachable(String),
 }
 
-/// Refuse a package the inbox holds as malicious, or that OSV lists as malicious, like
-/// `inbox::install` does. Homebrew has no OSV ecosystem. Unlike a sync, a dashboard install
-/// is not checked against trusted records, so when `osv_required` an OSV outage blocks it
-/// until the user agrees.
+/// The checks of `inbox::check_osv`. Unlike a sync, a dashboard install is not checked
+/// against trusted records, so when `osv_required` an OSV outage blocks it until the user
+/// agrees.
 async fn install_check(op: &InstallOp, osv_required: bool) -> Result<(), Blocked> {
-    use crate::packages::osv;
-
-    let inbox =
-        crate::packages::inbox::Inbox::load().map_err(|e| Blocked::Refused(e.to_string()))?;
-    if inbox.holds_malicious(&op.manager_key, &op.name) {
-        return Err(Blocked::Refused(format!(
-            "The inbox holds {} as malicious. Tether will not install it",
-            op.name
-        )));
-    }
-    let Some(manager) = crate::packages::manager_for_key(&op.manager_key) else {
-        return Ok(());
-    };
-    let (found, errors) = osv::query(manager.ecosystem(), &[(op.name.clone(), None)]).await;
-    let malicious: Vec<&String> = found[0].iter().filter(|id| osv::is_malicious(id)).collect();
-    if !malicious.is_empty() {
-        return Err(Blocked::Refused(format!(
-            "OSV lists {} as malicious ({}). Tether will not install it",
-            op.name,
-            malicious
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
-    match errors.into_iter().next() {
-        Some(error) if osv_required => Err(Blocked::OsvUnreachable(error)),
-        _ => Ok(()),
-    }
+    crate::packages::inbox::check_osv(&op.manager_key, &op.name, None, osv_required)
+        .await
+        .map_err(|e| match e.downcast::<OsvUnreachable>() {
+            Ok(unreachable) => Blocked::OsvUnreachable(unreachable.error),
+            Err(e) => Blocked::Refused(e.to_string()),
+        })
 }
 
 /// Approve each item as displayed and install it, and report every failure together.
-/// An item that changed since it was displayed is not approved.
-async fn approve_and_install(items: &[InboxItem]) -> Result<(), String> {
+/// An item that changed since it was displayed is not approved. With `osv_required`, an
+/// item that OSV cannot check is neither approved nor installed: it is returned, with the
+/// error, for the user to decide.
+async fn approve_and_install(
+    items: &[InboxItem],
+    osv_required: bool,
+) -> (Result<(), String>, Vec<InboxItem>, Option<String>) {
     // The daemon must not install the same packages meanwhile; the dashboard cannot wait on it
-    let _sync_lock = crate::sync::acquire_sync_lock(false).map_err(|e| e.to_string())?;
+    let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+        Ok(lock) => lock,
+        Err(e) => return (Err(e.to_string()), Vec::new(), None),
+    };
     let mut failed = Vec::new();
+    let mut unchecked = Vec::new();
+    let mut osv_error = None;
     for item in items {
-        let result = match crate::packages::inbox::approve(item) {
-            Ok(item) => crate::packages::inbox::install(&item, false).await,
-            Err(e) => Err(e),
+        let check = crate::packages::inbox::check_osv(
+            &item.manager,
+            &item.name,
+            item.version.as_deref(),
+            osv_required,
+        )
+        .await;
+        let result = match check {
+            Err(e) => match e.downcast::<OsvUnreachable>() {
+                Ok(unreachable) => {
+                    osv_error = Some(unreachable.error);
+                    unchecked.push(item.clone());
+                    continue;
+                }
+                Err(e) => Err(e),
+            },
+            Ok(()) => match crate::packages::inbox::approve(item) {
+                Ok(item) => crate::packages::inbox::install(&item, false).await,
+                Err(e) => Err(e),
+            },
         };
         if let Err(e) = result {
             failed.push(format!("{}: {}", item.name, e));
         }
     }
-    if failed.is_empty() {
+    let result = if failed.is_empty() {
         Ok(())
     } else {
         Err(failed.join("; "))
-    }
+    };
+    (result, unchecked, osv_error)
 }
 
 async fn run_install(manager_key: &str, package: &str) -> Result<(), String> {

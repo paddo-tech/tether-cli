@@ -290,6 +290,9 @@ pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
 
 /// Approve exactly the item shown to the user. The caller holds the sync lock.
 async fn approve_locked(shown: &InboxItem) -> Result<()> {
+    if shown.kind == Kind::Package && !osv_checked(shown).await? {
+        return Ok(());
+    }
     let item = inbox::approve(shown)?;
     if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
         Output::success(&format!(
@@ -302,6 +305,23 @@ async fn approve_locked(shown: &InboxItem) -> Result<()> {
     inbox::install(&item, true).await?;
     Output::success(&format!("Installed {}", item.name));
     Ok(())
+}
+
+/// Check OSV before the package is approved. When OSV cannot be reached, a terminal user
+/// may install without the check. Without a terminal the approval fails, so nothing installs
+/// unchecked. False when the user declines.
+async fn osv_checked(item: &InboxItem) -> Result<bool> {
+    let Err(e) = inbox::check_osv(&item.manager, &item.name, item.version.as_deref(), true).await
+    else {
+        return Ok(true);
+    };
+    if e.downcast_ref::<inbox::OsvUnreachable>().is_none()
+        || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
+        return Err(e);
+    }
+    Output::warning(&e.to_string());
+    Prompt::confirm("Install it without the malicious-package check?", false)
 }
 
 /// Reject a held item so later syncs do not offer that version, tap or key again.

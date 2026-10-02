@@ -29,6 +29,14 @@ pub enum Msg {
         op: InstallOp,
         error: String,
     },
+    /// Inbox items in `unchecked` were not approved because OSV could not be reached; the
+    /// user decides. `result` reports the other items.
+    ApproveOsvUnreachable {
+        op: InstallOp,
+        result: Result<(), String>,
+        unchecked: Vec<InboxItem>,
+        error: String,
+    },
     LocalPackages(HashMap<String, Vec<String>>),
     /// Sync commits per day, oldest first, ending today.
     Activity(Vec<u64>),
@@ -57,9 +65,11 @@ pub enum Cmd {
     },
     /// Approve inbox items exactly as displayed, then install them one after another.
     /// Reports one `InstallDone`. Inbox writes wait on its lock, so they run off the UI thread.
+    /// With `osv_required`, an item that OSV cannot check waits for the user.
     ApprovePackages {
         op: InstallOp,
         items: Vec<InboxItem>,
+        osv_required: bool,
     },
     /// Trust the machine key of an inbox item as displayed. `label` names the machine.
     TrustKey {
