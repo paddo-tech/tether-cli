@@ -2,6 +2,7 @@ use crate::cli::{Output, Prompt};
 use crate::config::Config;
 use crate::packages::inbox;
 use crate::sync::signing;
+use crate::sync::state::valid_machine_id;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
@@ -207,6 +208,10 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
         ));
         return Ok(());
     }
+    if !valid_machine_id(new) {
+        Output::error("Machine names use letters, digits, '.', '_' and '-' only");
+        return Ok(());
+    }
     let machines_dir = sync_path.join("machines");
 
     let old_file = machines_dir.join(format!("{}.json", old));
@@ -219,11 +224,6 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 
     if new_file.exists() {
         Output::error(&format!("Machine '{}' already exists", new));
-        return Ok(());
-    }
-
-    if !crate::sync::state::valid_machine_id(new) {
-        Output::error("Machine names use letters, digits, '.', '_' and '-' only");
         return Ok(());
     }
 
@@ -259,6 +259,11 @@ pub async fn remove(name: &str) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
         Output::warning("Machine management not available in team-only mode");
+        return Ok(());
+    }
+
+    if !valid_machine_id(name) {
+        Output::error(&format!("Invalid machine id '{}'", name));
         return Ok(());
     }
 
@@ -314,6 +319,10 @@ pub fn remove_old_record(machine_id: &str, digest: &str) -> Result<()> {
 /// Remove another machine's record, its signature and its profile assignment, and commit.
 /// The caller holds the sync lock and pushes.
 pub fn remove_record(name: &str) -> Result<()> {
+    // The id names files to delete, so a path such as `../../state` never reaches a join
+    if !valid_machine_id(name) {
+        anyhow::bail!("Invalid machine id '{}'", name);
+    }
     if SyncState::load()?.machine_id == name {
         anyhow::bail!("Cannot remove the current machine");
     }
@@ -679,4 +688,17 @@ pub async fn profile_list() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_record_refuses_ids_that_leave_the_machines_dir() {
+        for id in ["../../state", "../config", "a/b", ".git"] {
+            let err = remove_record(id).unwrap_err().to_string();
+            assert!(err.contains("Invalid machine id"), "{}: {}", id, err);
+        }
+    }
 }

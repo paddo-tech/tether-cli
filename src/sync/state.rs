@@ -225,6 +225,9 @@ impl MachineState {
 
     /// Load machine state from sync repo
     pub fn load_from_repo(sync_path: &std::path::Path, machine_id: &str) -> Result<Option<Self>> {
+        if !valid_machine_id(machine_id) {
+            anyhow::bail!("Invalid machine id '{}'", machine_id);
+        }
         let path = sync_path
             .join("machines")
             .join(format!("{}.json", machine_id));
@@ -919,6 +922,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let result = MachineState::load_from_repo(temp.path(), "nonexistent").unwrap();
         assert!(result.is_none());
+        assert!(MachineState::load_from_repo(temp.path(), "../state").is_err());
     }
 
     #[test]
