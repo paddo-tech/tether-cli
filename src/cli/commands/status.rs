@@ -1,7 +1,7 @@
 use crate::cli::output::relative_time;
 use crate::cli::Output;
 use crate::config::Config;
-use crate::sync::{ConflictState, SyncState};
+use crate::sync::{signing, ConflictState, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use owo_colors::OwoColorize;
 
@@ -60,6 +60,16 @@ pub async fn run() -> Result<()> {
     }
     if !enabled_features.is_empty() {
         Output::key_value("Features", &enabled_features.join(", "));
+    }
+
+    if config.has_personal_features() {
+        let sync_path = SyncEngine::sync_path()?;
+        let machines = MachineState::list_all(&sync_path).unwrap_or_default();
+        let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, &state.machine_id);
+        if !old_ids.is_empty() {
+            println!();
+            super::machines::print_old_id_hints(&old_ids);
+        }
     }
 
     // Conflicts warning

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::packages::inbox::{self, Inbox, TrustedMachine};
-use crate::sync::{ConflictState, MachineState, SyncEngine, SyncState, TeamManifest};
+use crate::sync::{signing, ConflictState, MachineState, SyncEngine, SyncState, TeamManifest};
 
 pub struct DashboardState {
     pub config: Option<Config>,
@@ -13,6 +13,8 @@ pub struct DashboardState {
     pub activity_lines: Vec<String>,
     pub inbox: Inbox,
     pub trusted: Vec<TrustedMachine>,
+    /// Records that are likely an earlier id of this machine.
+    pub old_ids: Vec<String>,
 }
 
 impl DashboardState {
@@ -22,11 +24,17 @@ impl DashboardState {
         let conflicts = ConflictState::load().unwrap_or_default();
         let team_manifest = TeamManifest::load().unwrap_or_default();
 
-        let machines = sync_state
+        let sync_path = sync_state
             .as_ref()
-            .and_then(|_| SyncEngine::sync_path().ok())
-            .and_then(|p| MachineState::list_all(&p).ok())
+            .and_then(|_| SyncEngine::sync_path().ok());
+        let machines = sync_path
+            .as_ref()
+            .and_then(|p| MachineState::list_all(p).ok())
             .unwrap_or_default();
+        let old_ids = match (&sync_path, &sync_state) {
+            (Some(p), Some(s)) => signing::old_ids_of_this_machine(p, &machines, &s.machine_id),
+            _ => Vec::new(),
+        };
 
         let (daemon_pid, daemon_running) = Self::check_daemon();
         let activity_lines = Self::read_activity_log();
@@ -42,6 +50,7 @@ impl DashboardState {
             activity_lines,
             inbox: Inbox::load().unwrap_or_default(),
             trusted: inbox::trusted_machines().unwrap_or_default(),
+            old_ids,
         }
     }
 

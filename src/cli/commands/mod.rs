@@ -6,7 +6,7 @@ mod history;
 mod identity;
 mod ignore;
 mod init;
-mod machines;
+pub mod machines;
 mod packages;
 mod resolve;
 mod restore;

@@ -33,6 +33,14 @@ pub enum Confirm {
         items: Vec<crate::packages::inbox::InboxItem>,
         error: String,
     },
+    /// Remove another machine's record that looks like an old id of this machine. Only `y`
+    /// accepts.
+    RemoveMachine {
+        machine_id: String,
+        hostname: String,
+        last_sync: chrono::DateTime<chrono::Utc>,
+        packages: usize,
+    },
     /// Approve and install these inbox items, as displayed when the confirm opened. It lists
     /// every one of them, because `y` approves exactly this list.
     ApproveAll {
@@ -59,11 +67,14 @@ impl Confirm {
 /// The overlay was popped off the stack; push it back to keep it open.
 pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd> {
     match key.code {
-        // Installing without the malicious-package check is never the default answer
+        // Installing without the malicious-package check, or deleting a record, is never
+        // the default answer
         KeyCode::Enter
             if matches!(
                 confirm,
-                Confirm::InstallWithoutOsv { .. } | Confirm::ApproveWithoutOsv { .. }
+                Confirm::InstallWithoutOsv { .. }
+                    | Confirm::ApproveWithoutOsv { .. }
+                    | Confirm::RemoveMachine { .. }
             ) =>
         {
             None
@@ -146,6 +157,13 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             clamp_cursor(&mut app.files.cursor, len);
             app.follow_up_sync()
         }
+        Confirm::RemoveMachine { machine_id, .. } => {
+            if machine_id == app.machine_id() {
+                app.flash_error("Cannot remove this machine's current record");
+                return None;
+            }
+            Some(Cmd::RemoveMachine(machine_id))
+        }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveWithoutOsv { items, .. } => security::approve_all(app, items, false),
         Confirm::InstallWithoutOsv {
@@ -226,6 +244,36 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
+        Confirm::RemoveMachine {
+            machine_id,
+            hostname,
+            last_sync,
+            packages,
+        } => {
+            let lines = [
+                format!("id         {}", machine_id),
+                format!("hostname   {}", hostname),
+                format!(
+                    "last sync  {} ({} days ago)",
+                    last_sync
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M"),
+                    chrono::Utc::now().signed_duration_since(last_sync).num_days()
+                ),
+                format!("packages   {}", packages),
+            ];
+            render_list_popup(
+                f,
+                app,
+                "Remove old record",
+                "This record looks like an old id of this machine. It no longer syncs, but its \
+                 packages still count for every machine. Remove it and commit the removal?",
+                &lines,
+                0,
+                &std::cell::Cell::new(lines.len()),
+                t.error,
+            )
+        }
         Confirm::ApproveAll {
             items,
             malicious,
@@ -278,7 +326,8 @@ fn render_list_popup(
     let widest = lines
         .iter()
         .map(|l| l.chars().count() + 2)
-        .chain([msg.chars().count()])
+        // A long question wraps rather than stretching the popup across the screen
+        .chain([msg.chars().count().min(64)])
         .max()
         .unwrap_or(0);
     let width = (widest as u16 + 8)

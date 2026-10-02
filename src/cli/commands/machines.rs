@@ -27,6 +27,7 @@ pub async fn list() -> Result<()> {
     let current_machine = &state.machine_id;
     let signers = signing::record_signers(&sync_path);
     let trusted = inbox::trusted_machines()?;
+    let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, current_machine);
 
     println!();
     println!("{}", "Synced Machines".bright_cyan().bold());
@@ -57,7 +58,13 @@ pub async fn list() -> Result<()> {
 
     for machine in &machines {
         let is_current = &machine.machine_id == current_machine;
-        let marker = if is_current { "(this machine)" } else { "" };
+        let marker = if is_current {
+            Cell::new("(this machine)").fg(Color::Green)
+        } else if old_ids.contains(&machine.machine_id) {
+            Cell::new("(old id of this machine?)").fg(Color::Yellow)
+        } else {
+            Cell::new("")
+        };
         let local_time = machine.last_sync.with_timezone(&Local);
 
         let version = if machine.cli_version.is_empty() {
@@ -98,14 +105,29 @@ pub async fn list() -> Result<()> {
             Cell::new(version),
             Cell::new(local_time.format("%Y-%m-%d %H:%M:%S").to_string()),
             key_cell,
-            Cell::new(marker).fg(Color::Green),
+            marker,
         ]);
     }
 
     println!("{table}");
     println!();
+    if !old_ids.is_empty() {
+        print_old_id_hints(&old_ids);
+        println!();
+    }
 
     Ok(())
+}
+
+/// One line per record that looks like an earlier id of this machine, with the command
+/// that removes it.
+pub fn print_old_id_hints(old_ids: &[String]) {
+    for id in old_ids {
+        Output::info(&format!(
+            "{} looks like an old id of this machine. Remove it: tether machines remove {}",
+            id, id
+        ));
+    }
 }
 
 pub async fn profile_set(profile: &str) -> Result<()> {
@@ -233,7 +255,7 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 }
 
 pub async fn remove(name: &str) -> Result<()> {
-    let mut config = Config::load()?;
+    let config = Config::load()?;
     if !config.has_personal_features() {
         Output::warning("Machine management not available in team-only mode");
         return Ok(());
@@ -248,10 +270,11 @@ pub async fn remove(name: &str) -> Result<()> {
     }
 
     let sync_path = SyncEngine::sync_path()?;
-    let machines_dir = sync_path.join("machines");
-    let machine_file = machines_dir.join(format!("{}.json", name));
-
-    if !machine_file.exists() {
+    if !sync_path
+        .join("machines")
+        .join(format!("{}.json", name))
+        .exists()
+    {
         Output::error(&format!("Machine '{}' not found", name));
         return Ok(());
     }
@@ -260,24 +283,38 @@ pub async fn remove(name: &str) -> Result<()> {
         return Ok(());
     }
 
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    remove_record(name)?;
+    GitBackend::open(&sync_path)?.push()?;
+
+    Output::success(&format!("Removed machine '{}'", name));
+    Ok(())
+}
+
+/// Remove another machine's record, its signature and its profile assignment, and commit.
+/// The caller holds the sync lock and pushes.
+pub fn remove_record(name: &str) -> Result<()> {
+    if SyncState::load()?.machine_id == name {
+        anyhow::bail!("Cannot remove the current machine");
+    }
+    let sync_path = SyncEngine::sync_path()?;
+    let machine_file = sync_path.join("machines").join(format!("{}.json", name));
+    if !machine_file.exists() {
+        anyhow::bail!("Machine '{}' not found", name);
+    }
+
     std::fs::remove_file(&machine_file)?;
     remove_signature(&sync_path, name)?;
 
-    // Clean up profile assignment
+    let mut config = Config::load()?;
     if config.machine_profiles.remove(name).is_some() {
         config.save()?;
     }
 
-    // Commit and push
-    let git = GitBackend::open(&sync_path)?;
-    git.commit(
+    GitBackend::open(&sync_path)?.commit(
         &format!("Remove machine {}", name),
         &crate::sync::local_hostname(),
-    )?;
-    git.push()?;
-
-    Output::success(&format!("Removed machine '{}'", name));
-    Ok(())
+    )
 }
 
 /// Remove a machine's record signature and the public key file earlier builds published.

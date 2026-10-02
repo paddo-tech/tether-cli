@@ -138,6 +138,25 @@ impl Runtime {
                     |e| Some(Msg::InboxDone(Err(e))),
                 );
             }
+            Cmd::RemoveMachine(machine_id) => {
+                let failed_id = machine_id.clone();
+                self.spawn(
+                    async move {
+                        let result = crate::sync::acquire_sync_lock(false)
+                            .and_then(|_lock| {
+                                crate::cli::commands::machines::remove_record(&machine_id)
+                            })
+                            .map_err(|e| e.to_string());
+                        Msg::MachineRemoved { machine_id, result }
+                    },
+                    move |e| {
+                        Some(Msg::MachineRemoved {
+                            machine_id: failed_id,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
             Cmd::LoadActivity => {
                 if self.activity_running.swap(true, Ordering::SeqCst) {
                     return;

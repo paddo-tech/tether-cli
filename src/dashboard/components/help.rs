@@ -25,6 +25,7 @@ const PACKAGES: &[Hint] = &[
 const MACHINES: &[Hint] = &[
     ("⏎", "details", k(KeyCode::Enter)),
     ("p", "profile", k(KeyCode::Char('p'))),
+    ("D", "remove old id", k(KeyCode::Char('D'))),
 ];
 const CONFIG: &[Hint] = &[("⏎", "edit", k(KeyCode::Enter))];
 const SECURITY: &[Hint] = &[
@@ -152,11 +153,14 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         section("Config list"),
         key("a / d", "Add / delete item"),
         key("t", "Toggle create"),
+        Line::from(""),
+        section("Machines"),
+        key("D", "Remove old id record"),
     ];
 
     // One blank row above and below the longest column.
     let two_col = area.width >= 78 && area.height >= 24;
-    let height = if two_col { 22 } else { 39 }.min(area.height.saturating_sub(2));
+    let height = if two_col { 22 } else { 41 }.min(area.height.saturating_sub(2));
     let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
     let rect = centered(area, width, height);
     app.add_hit(rect, Hit::Block);

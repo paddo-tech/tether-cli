@@ -23,6 +23,8 @@ pub enum Target {
     },
     /// Show an inbox item by id with its details. Deciding happens on the Security tab.
     Inbox(String),
+    /// Ask before removing a record that looks like an old id of this machine.
+    RemoveOldRecord(String),
 }
 
 pub struct Entry {
@@ -161,6 +163,13 @@ pub fn entries(app: &App) -> Vec<Entry> {
             label: label.to_string(),
             kind: "action".into(),
             target: Target::Action(action),
+        });
+    }
+    for id in &app.state.old_ids {
+        out.push(Entry {
+            label: format!("Remove old record {}", id),
+            kind: "action".into(),
+            target: Target::RemoveOldRecord(id.clone()),
         });
     }
     let pending = &app.state.inbox.items;
@@ -348,6 +357,7 @@ pub fn render(f: &mut Frame, app: &App, p: &Palette) {
         }
         let (icon, icon_color) = match entry.target {
             Target::Action(_) => ("»", t.accent),
+            Target::RemoveOldRecord(_) => ("»", t.warn),
             Target::Tab(_) => ("#", t.info),
             Target::File { .. } => ("◇", t.ok),
             Target::Package { .. } => ("▪", t.key),

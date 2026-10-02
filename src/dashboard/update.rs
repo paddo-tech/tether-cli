@@ -128,6 +128,20 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
             None
         }
+        Msg::MachineRemoved { machine_id, result } => match result {
+            Ok(()) => {
+                app.reload_state();
+                app.machines.expanded = None;
+                super::components::clamp_cursor(&mut app.machines.cursor, app.state.machines.len());
+                app.flash_success(format!("Removed old record {}", machine_id));
+                // The sync pushes the removal commit
+                app.follow_up_sync()
+            }
+            Err(e) => {
+                app.flash_error(format!("remove failed: {}", e));
+                None
+            }
+        },
         Msg::LocalPackages(packages) => {
             on_local_packages(app, packages);
             None
@@ -291,6 +305,13 @@ fn run_target(app: &mut App, target: Target) -> Option<Cmd> {
         Target::Inbox(id) => {
             app.active_tab = Tab::Security;
             security::open(app, &id);
+        }
+        Target::RemoveOldRecord(id) => {
+            app.active_tab = Tab::Machines;
+            if let Some(i) = app.state.machines.iter().position(|m| m.machine_id == id) {
+                app.machines.cursor = i;
+            }
+            machines::confirm_remove(app, &id);
         }
         Target::Tab(tab) => app.active_tab = tab,
         Target::File { section, path } => {
@@ -472,6 +493,7 @@ mod tests {
             activity_lines: Vec::new(),
             inbox: Default::default(),
             trusted: Vec::new(),
+            old_ids: Vec::new(),
         };
         App::new(state, HashMap::new())
     }
@@ -1314,6 +1336,62 @@ mod tests {
             job.args(),
             vec!["rollback", "packages", "npm", "abc123", "--yes"]
         );
+    }
+
+    #[test]
+    fn old_record_is_removed_only_after_y() {
+        let mut app = app();
+        app.state.sync_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "me",
+                "last_sync": "2026-01-01T00:00:00Z",
+                "files": {},
+                "packages": {},
+            }))
+            .unwrap(),
+        );
+        app.state.machines = vec![
+            crate::sync::MachineState::new("me"),
+            crate::sync::MachineState::new("mac.local"),
+            crate::sync::MachineState::new("studio"),
+        ];
+        app.state.old_ids = vec!["mac.local".into()];
+        app.active_tab = Tab::Machines;
+
+        // This machine's record and another machine's record never get the question
+        for cursor in [0, 2] {
+            app.machines.cursor = cursor;
+            assert!(key(&mut app, KeyCode::Char('D')).is_none());
+            assert!(app.overlays.is_empty());
+        }
+        run_target(&mut app, Target::RemoveOldRecord("me".into()));
+        assert!(app.overlays.is_empty());
+
+        app.machines.cursor = 1;
+        key(&mut app, KeyCode::Char('D'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::RemoveMachine { .. }))
+        ));
+        draw(&app);
+        // Enter cancels, so a stray Enter never deletes a record
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('D'));
+        let Some(Cmd::RemoveMachine(id)) = key(&mut app, KeyCode::Char('y')) else {
+            panic!("expected a remove command");
+        };
+        assert_eq!(id, "mac.local");
+
+        let palette = palette::entries(&app);
+        assert!(palette
+            .iter()
+            .any(|e| e.target == Target::RemoveOldRecord("mac.local".into())));
+        run_target(&mut app, Target::RemoveOldRecord("mac.local".into()));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::RemoveMachine { .. }))
+        ));
     }
 
     #[test]

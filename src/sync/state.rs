@@ -350,6 +350,49 @@ impl MachineState {
             })
             .collect()
     }
+
+    /// Records that are likely an earlier id of this machine, such as the hostname id that
+    /// builds before random ids wrote. Such a record never syncs again, but its packages
+    /// still count in the union. A record matches when its hostname or its id is this
+    /// machine's hostname. It must also be older than this machine's record and silent for
+    /// [`OLD_ID_SILENT_DAYS`]. A record that another key validly signed belongs to another
+    /// machine, so it never matches.
+    pub fn old_ids_of_this_machine<'a>(
+        machines: &'a [Self],
+        this_id: &str,
+        this_hostname: &str,
+        signed_by_other_keys: &[String],
+        now: DateTime<Utc>,
+    ) -> Vec<&'a Self> {
+        let host = host_key(this_hostname);
+        let Some(this) = machines.iter().find(|m| m.machine_id == this_id) else {
+            return Vec::new();
+        };
+        if host.is_empty() {
+            return Vec::new();
+        }
+        machines
+            .iter()
+            .filter(|m| {
+                m.machine_id != this_id
+                    && (host_key(&m.hostname) == host || host_key(&m.machine_id) == host)
+                    && m.last_sync < this.last_sync
+                    && now.signed_duration_since(m.last_sync)
+                        > chrono::Duration::days(OLD_ID_SILENT_DAYS)
+                    && !signed_by_other_keys.contains(&m.machine_id)
+            })
+            .collect()
+    }
+}
+
+/// Two machines can share a hostname. A daemon syncs every 5 minutes, so a week without a
+/// sync separates a record nothing writes from a twin that is only switched off for a day.
+pub const OLD_ID_SILENT_DAYS: i64 = 7;
+
+/// A hostname as macOS and Linux may both report it: no case, no `.local` suffix.
+fn host_key(name: &str) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    lower.strip_suffix(".local").unwrap_or(&lower).to_string()
 }
 
 impl SyncState {
@@ -736,6 +779,85 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].machine_id, "real");
         assert!(MachineState::load_from_repo(sync_path, "other").is_err());
+    }
+
+    fn record_at(id: &str, hostname: &str, days_ago: i64) -> MachineState {
+        let mut m = MachineState::new(id);
+        m.hostname = hostname.to_string();
+        m.last_sync = Utc::now() - chrono::Duration::days(days_ago);
+        m
+    }
+
+    fn old_ids(machines: &[MachineState], this_host: &str, signed: &[String]) -> Vec<String> {
+        MachineState::old_ids_of_this_machine(
+            machines,
+            "7d184e5919ef",
+            this_host,
+            signed,
+            Utc::now(),
+        )
+        .into_iter()
+        .map(|m| m.machine_id.clone())
+        .collect()
+    }
+
+    #[test]
+    fn test_old_id_with_hostname_id_is_flagged() {
+        let machines = [
+            record_at("7d184e5919ef", "Paddos-Macbook-Pro-M5-Max.local", 0),
+            record_at(
+                "Paddos-Macbook-Pro-M5-Max.local",
+                "Paddos-Macbook-Pro-M5-Max.local",
+                17,
+            ),
+            record_at("a1b2c3d4e5f6", "studio.local", 30),
+        ];
+        assert_eq!(
+            old_ids(&machines, "Paddos-Macbook-Pro-M5-Max.local", &[]),
+            ["Paddos-Macbook-Pro-M5-Max.local"]
+        );
+    }
+
+    #[test]
+    fn test_old_id_ignores_case_and_local_suffix() {
+        let machines = [
+            record_at("7d184e5919ef", "paddos-macbook", 0),
+            record_at("PADDOS-MACBOOK.local", "", 20),
+            record_at("0123456789ab", "Paddos-MacBook.local", 20),
+        ];
+        let mut found = old_ids(&machines, "paddos-macbook", &[]);
+        found.sort();
+        assert_eq!(found, ["0123456789ab", "PADDOS-MACBOOK.local"]);
+    }
+
+    #[test]
+    fn test_old_id_skips_active_twin_with_same_hostname() {
+        let machines = [
+            record_at("7d184e5919ef", "mac.local", 0),
+            record_at("0123456789ab", "mac.local", 1),
+        ];
+        assert!(old_ids(&machines, "mac.local", &[]).is_empty());
+    }
+
+    #[test]
+    fn test_old_id_skips_newer_and_foreign_signed_records() {
+        let machines = [
+            record_at("7d184e5919ef", "mac.local", 10),
+            record_at("mac.local", "mac.local", 8),
+            record_at("0123456789ab", "mac.local", 30),
+        ];
+        assert!(old_ids(&machines, "mac.local", &["0123456789ab".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn test_old_id_needs_this_machines_record() {
+        let machines = [record_at("mac.local", "mac.local", 30)];
+        assert!(old_ids(&machines, "mac.local", &[]).is_empty());
+        let machines = [
+            record_at("7d184e5919ef", "mac.local", 0),
+            record_at("mac.local", "mac.local", 30),
+        ];
+        assert!(old_ids(&machines, "", &[]).is_empty());
     }
 
     #[test]

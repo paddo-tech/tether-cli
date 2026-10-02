@@ -1,3 +1,4 @@
+use super::confirm::Confirm;
 use super::profile_picker::ProfilePicker;
 use super::{clamp_cursor, manager_label, panel, row, security::pill, truncate};
 use crate::cli::output::relative_time;
@@ -54,6 +55,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match key.code {
         KeyCode::Enter => toggle_expand(app),
         KeyCode::Char('p') => open_profile_picker(app),
+        KeyCode::Char('D') => {
+            clamp_cursor(&mut app.machines.cursor, len);
+            if let Some(id) = app
+                .state
+                .machines
+                .get(app.machines.cursor)
+                .map(|m| m.machine_id.clone())
+            {
+                confirm_remove(app, &id);
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             if *c + cols < len {
                 *c += cols;
@@ -102,7 +114,42 @@ pub fn open_profile_picker(app: &mut App) {
         .push(Overlay::ProfilePicker(ProfilePicker { options, cursor }));
 }
 
-fn display_name(m: &MachineState) -> String {
+/// Ask before removing a record that looks like an old id of this machine. Other records
+/// stay: only the CLI removes another machine.
+pub fn confirm_remove(app: &mut App, machine_id: &str) {
+    if machine_id == app.machine_id() {
+        app.flash_error("Cannot remove this machine's current record");
+        return;
+    }
+    if !is_old_id(app, machine_id) {
+        app.flash_info(format!(
+            "{} is not an old id of this machine. Remove it with 'tether machines remove {}'",
+            machine_id, machine_id
+        ));
+        return;
+    }
+    let Some(m) = app
+        .state
+        .machines
+        .iter()
+        .find(|m| m.machine_id == machine_id)
+    else {
+        return;
+    };
+    let confirm = Confirm::RemoveMachine {
+        machine_id: m.machine_id.clone(),
+        hostname: m.hostname.clone(),
+        last_sync: m.last_sync,
+        packages: m.packages.values().map(|v| v.len()).sum(),
+    };
+    app.overlays.push(Overlay::Confirm(confirm));
+}
+
+pub fn is_old_id(app: &App, machine_id: &str) -> bool {
+    app.state.old_ids.iter().any(|id| id == machine_id)
+}
+
+pub fn display_name(m: &MachineState) -> String {
     let host = m.hostname.trim_end_matches(".local");
     if host.is_empty() {
         m.machine_id.clone()
@@ -252,9 +299,13 @@ fn card(
     let text = |s: String| Span::styled(s, Style::default().fg(t.text));
     let sep = || Span::styled(" · ", Style::default().fg(t.border));
 
+    let old_id = is_old_id(app, &m.machine_id);
     let mut first = Vec::new();
     if is_current {
         first.push(pill("this", t.accent, t));
+        first.push(Span::raw(" "));
+    } else if old_id {
+        first.push(pill("old id of this machine?", t.warn, t));
         first.push(Span::raw(" "));
     }
     first.push(Span::styled(
@@ -279,6 +330,16 @@ fn card(
     }
     if breakdown.is_empty() {
         breakdown.push(dim("no packages"));
+    }
+    if old_id {
+        breakdown = vec![
+            Span::styled(
+                "no longer syncs, packages still count ",
+                Style::default().fg(t.warn),
+            ),
+            Span::styled("D", t.key_hint()),
+            dim(" remove"),
+        ];
     }
 
     let (key_word, key_color, fingerprint) = key_state(app, m);
@@ -368,8 +429,25 @@ fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String
 fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
     let t = &app.theme;
     let block = panel(format!(" {} ", display_name(m)), true, t);
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     f.render_widget(block, area);
+    if is_old_id(app, &m.machine_id) {
+        let note = format!(
+            "Likely an old id of this machine: it matches this hostname and has not synced \
+             for over {} days. Its packages still count for every machine. Press D to remove it.",
+            crate::sync::state::OLD_ID_SILENT_DAYS
+        );
+        // A blank line under the note, which word wrap may take
+        let h = (note.chars().count().div_ceil(inner.width.max(1) as usize) as u16 + 1)
+            .min(inner.height);
+        f.render_widget(
+            Paragraph::new(Span::styled(note, Style::default().fg(t.warn)))
+                .wrap(Wrap { trim: true }),
+            Rect { height: h, ..inner },
+        );
+        inner.y += h;
+        inner.height -= h;
+    }
     let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
         .spacing(2)
         .areas(inner);
@@ -457,14 +535,19 @@ pub fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 },
             ),
         ];
+        let mut right = Vec::new();
+        if is_old_id(app, &m.machine_id) {
+            right.push(Span::styled("old id? ", Style::default().fg(t.warn)));
+        }
+        right.push(Span::styled(
+            relative_time(m.last_sync),
+            Style::default().fg(t.dim),
+        ));
         row(
             f,
             Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
             Line::from(left),
-            Line::from(Span::styled(
-                relative_time(m.last_sync),
-                Style::default().fg(t.dim),
-            )),
+            Line::from(right),
         );
     }
 }

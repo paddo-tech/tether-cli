@@ -386,6 +386,36 @@ pub fn record_signers(sync_path: &Path) -> Vec<(String, PublicKey)> {
         .collect()
 }
 
+/// Ids of the records in `machines` that are likely an earlier id of this machine. Reading
+/// them must not create a signing key, so without one every signed record counts as another
+/// machine's.
+pub fn old_ids_of_this_machine(
+    sync_path: &Path,
+    machines: &[MachineState],
+    this_id: &str,
+) -> Vec<String> {
+    let own = key_path()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| PrivateKey::from_openssh(b).ok())
+        .map(|k| k.public_key().key_data().clone());
+    let signed_by_other_keys: Vec<String> = record_signers(sync_path)
+        .into_iter()
+        .filter(|(_, key)| own.as_ref() != Some(key.key_data()))
+        .map(|(id, _)| id)
+        .collect();
+    MachineState::old_ids_of_this_machine(
+        machines,
+        this_id,
+        &crate::sync::local_hostname(),
+        &signed_by_other_keys,
+        chrono::Utc::now(),
+    )
+    .into_iter()
+    .map(|m| m.machine_id.clone())
+    .collect()
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TrustFile {

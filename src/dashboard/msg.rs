@@ -47,6 +47,11 @@ pub enum Msg {
     },
     /// A machine key was trusted or an item rejected: the toast text, or the error.
     InboxDone(Result<String, String>),
+    /// Another machine's record was removed and committed, or the error.
+    MachineRemoved {
+        machine_id: String,
+        result: Result<(), String>,
+    },
 }
 
 /// Side effects `update` asks for. The runtime executes them and reports back with a `Msg`.
@@ -78,6 +83,8 @@ pub enum Cmd {
     },
     /// Reject an inbox item.
     Reject(Box<InboxItem>),
+    /// Remove another machine's record as `tether machines remove` does, without the push.
+    RemoveMachine(String),
     /// Count sync commits per day; `git log` over the sync repo is too slow for the UI thread.
     LoadActivity,
     CollectPackages {
