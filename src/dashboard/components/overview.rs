@@ -21,16 +21,28 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let spark_h = if area.height >= 30 { 7 } else { 5 };
+    // The top row needs only the package bars; the rest goes to machines and the log.
+    let managers = app
+        .state
+        .machines
+        .iter()
+        .find(|m| m.machine_id == app.machine_id())
+        .map_or(0, |m| m.packages.len()) as u16;
+    let top_h = (managers + 2).max(area.height.saturating_sub(spark_h) * 2 / 5);
     let [spark, top, bottom] = Layout::vertical([
         Constraint::Length(spark_h),
-        Constraint::Percentage(55),
-        Constraint::Percentage(45),
+        Constraint::Length(top_h),
+        Constraint::Min(0),
     ])
     .areas(area);
     let [left, right] =
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(top);
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .spacing(1)
+            .areas(top);
     let [machines_area, activity_area] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(bottom);
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .spacing(1)
+            .areas(bottom);
 
     render_activity_chart(f, spark, app);
     files::render_overview(f, left, app);

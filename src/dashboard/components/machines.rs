@@ -1,8 +1,9 @@
 use super::profile_picker::ProfilePicker;
-use super::{clamp_cursor, manager_label, panel, row, truncate};
+use super::{clamp_cursor, manager_label, panel, row, security::pill, truncate};
 use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, Hit, Overlay};
 use crate::dashboard::msg::KeyOutcome;
+use crate::packages::inbox::{Kind, Reason};
 use crate::sync::MachineState;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -10,8 +11,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
 };
 
-const CARD_MIN_W: u16 = 36;
-const CARD_H: u16 = 5;
+const CARD_MIN_W: u16 = 46;
+/// Borders and six info lines.
+const CARD_H: u16 = 8;
 
 #[derive(Default)]
 pub struct MachinesTabState {
@@ -149,7 +151,8 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let (grid, detail_area) = match detail {
         Some(_) if area.height >= CARD_H + 6 => {
             let needed = machines.len().div_ceil(grid_cols(area.width)) as u16 * CARD_H;
-            let grid_h = needed.min(area.height - 6).max(CARD_H);
+            // Whole card rows only, so no blank band sits above the detail panel.
+            let grid_h = (needed.min(area.height - 6) / CARD_H).max(1) * CARD_H;
             let [g, d] =
                 Layout::vertical([Constraint::Length(grid_h), Constraint::Min(6)]).areas(area);
             (g, Some(d))
@@ -205,7 +208,7 @@ fn card(
         Presence::Stale => ("stale", t.error),
     };
     let border = if selected { t.border_focus } else { t.border };
-    let mut block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border))
@@ -213,21 +216,13 @@ fn card(
         .title(Line::from(vec![
             Span::styled(" ● ", Style::default().fg(color)),
             Span::styled(
-                truncate(
-                    &display_name(m),
-                    rect.width.saturating_sub(if is_current { 14 } else { 8 }) as usize,
-                ),
+                truncate(&display_name(m), rect.width.saturating_sub(7) as usize),
                 Style::default()
                     .fg(if selected { t.accent } else { t.text })
                     .bold(),
             ),
             Span::raw(" "),
         ]));
-    if is_current {
-        block = block.title_top(
-            Line::from(Span::styled(" this ", Style::default().fg(t.accent))).right_aligned(),
-        );
-    }
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     if inner.height == 0 {
@@ -253,37 +248,83 @@ fn card(
     } else {
         format!("v{}", m.cli_version)
     };
+    let dim = |s: &str| Span::styled(s.to_string(), Style::default().fg(t.dim));
+    let text = |s: String| Span::styled(s, Style::default().fg(t.text));
+    let sep = || Span::styled(" · ", Style::default().fg(t.border));
+
+    let mut first = Vec::new();
+    if is_current {
+        first.push(pill("this", t.accent, t));
+        first.push(Span::raw(" "));
+    }
+    first.push(Span::styled(
+        os,
+        Style::default().fg(if m.os_version.is_empty() {
+            t.dim
+        } else {
+            t.muted
+        }),
+    ));
+
     let pkgs: usize = m.packages.values().map(|v| v.len()).sum();
+    let mut managers: Vec<_> = m.packages.iter().filter(|(_, p)| !p.is_empty()).collect();
+    managers.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+    let mut breakdown = Vec::new();
+    for (key, list) in managers {
+        if !breakdown.is_empty() {
+            breakdown.push(sep());
+        }
+        breakdown.push(dim(manager_label(key)));
+        breakdown.push(text(format!(" {}", list.len())));
+    }
+    if breakdown.is_empty() {
+        breakdown.push(dim("no packages"));
+    }
+
+    let (key_word, key_color, fingerprint) = key_state(app, m);
+    let key_line = Line::from(vec![
+        dim("key "),
+        Span::styled(key_word, Style::default().fg(key_color)),
+    ]);
+    let room = (inner.width as usize).saturating_sub(key_line.width() + 2);
+    let fingerprint = fingerprint
+        .filter(|_| room >= 12)
+        .map(|fp| truncate(&fp, room))
+        .unwrap_or_default();
+
     let lines = [
         (
-            Line::from(Span::styled(
-                os,
-                Style::default().fg(if m.os_version.is_empty() {
-                    t.dim
-                } else {
-                    t.muted
-                }),
-            )),
+            Line::from(first),
             Line::from(Span::styled(version, Style::default().fg(t.info))),
         ),
         (
             Line::from(vec![
-                Span::styled("seen ", Style::default().fg(t.dim)),
-                Span::styled(relative_time(m.last_sync), Style::default().fg(t.text)),
+                dim("id "),
+                Span::styled(m.machine_id.clone(), Style::default().fg(t.muted)),
             ]),
             Line::from(Span::styled(word, Style::default().fg(color).bold())),
         ),
         (
+            Line::from(vec![dim("synced "), text(relative_time(m.last_sync))]),
             Line::from(vec![
-                Span::styled(format!("{}", m.files.len()), Style::default().fg(t.text)),
-                Span::styled(" files  ", Style::default().fg(t.dim)),
-                Span::styled(format!("{}", pkgs), Style::default().fg(t.text)),
-                Span::styled(" pkgs", Style::default().fg(t.dim)),
+                dim("profile "),
+                Span::styled(profile_of(app, m), Style::default().fg(t.team)),
             ]),
-            Line::from(Span::styled(
-                profile_of(app, m),
-                Style::default().fg(t.team),
-            )),
+        ),
+        (
+            Line::from(vec![
+                text(m.files.len().to_string()),
+                dim(" files"),
+                sep(),
+                text(pkgs.to_string()),
+                dim(" packages"),
+            ]),
+            Line::from(vec![text(m.dotfiles.len().to_string()), dim(" dotfiles")]),
+        ),
+        (Line::from(breakdown), Line::default()),
+        (
+            key_line,
+            Line::from(Span::styled(fingerprint, Style::default().fg(t.hash))),
         ),
     ];
     for (i, (l, r)) in lines.into_iter().enumerate().take(inner.height as usize) {
@@ -296,12 +337,40 @@ fn card(
     }
 }
 
+/// How this machine treats the machine's signing key: a word, its color, and the key's
+/// fingerprint when known.
+fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String>) {
+    let t = &app.theme;
+    if m.machine_id == app.machine_id() {
+        return ("this machine", t.accent, None);
+    }
+    let pending = app.state.inbox.items.iter().find_map(|i| match &i.kind {
+        Kind::TrustMachine { fingerprint, .. } if i.name == m.machine_id => {
+            Some((i.reasons.contains(&Reason::KeyChanged), fingerprint.clone()))
+        }
+        _ => None,
+    });
+    match pending {
+        Some((true, fp)) => ("changed, review in Security", t.error, Some(fp)),
+        Some((false, fp)) => ("new, not trusted yet", t.info, Some(fp)),
+        None => match app
+            .state
+            .trusted
+            .iter()
+            .find(|k| k.machine_id == m.machine_id)
+        {
+            Some(k) => ("trusted", t.ok, Some(k.fingerprint.clone())),
+            None => ("not trusted", t.dim, None),
+        },
+    }
+}
+
 fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
     let t = &app.theme;
     let block = panel(format!(" {} ", display_name(m)), true, t);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let [info, dots] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+    let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
         .spacing(2)
         .areas(inner);
 
@@ -376,20 +445,18 @@ pub fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             Presence::Stale => t.error,
         };
         let current = m.machine_id == app.machine_id();
-        let mut left = vec![
+        // The accent marks this machine; a "this" label would cut the hostname short.
+        let left = vec![
             Span::styled("● ", Style::default().fg(color)),
             Span::styled(
                 display_name(m),
                 if current {
-                    Style::default().fg(t.text).bold()
+                    Style::default().fg(t.accent).bold()
                 } else {
                     Style::default().fg(t.text)
                 },
             ),
         ];
-        if current {
-            left.push(Span::styled("  this", Style::default().fg(t.accent)));
-        }
         row(
             f,
             Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
@@ -416,7 +483,8 @@ mod tests {
     #[test]
     fn grid_fits_cards() {
         assert_eq!(grid_cols(20), 1);
-        assert_eq!(grid_cols(78), 2);
-        assert_eq!(grid_cols(158), 4);
+        assert_eq!(grid_cols(78), 1);
+        assert_eq!(grid_cols(98), 2);
+        assert_eq!(grid_cols(158), 3);
     }
 }

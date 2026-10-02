@@ -236,11 +236,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Section headers interleave with fields; `None` marks a header row.
+    // Section headers interleave with fields; `None` marks a header row, and an empty
+    // header is the blank row between sections.
     let mut rows: Vec<(Option<usize>, &str)> = Vec::new();
     let mut last_section = "";
     for (i, field) in config_edit::fields().iter().enumerate() {
         if field.section != last_section {
+            if !rows.is_empty() {
+                rows.push((None, ""));
+            }
             rows.push((None, field.section));
             last_section = field.section;
         }
@@ -256,6 +260,9 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     for (n, (field, label)) in rows.iter().enumerate().skip(scroll).take(visible) {
         let r = Rect::new(inner.x, inner.y + (n - scroll) as u16, inner.width, 1);
         let Some(idx) = *field else {
+            if label.is_empty() {
+                continue;
+            }
             let rule = "─".repeat((inner.width as usize).saturating_sub(label.len() + 1));
             f.render_widget(
                 Line::from(vec![

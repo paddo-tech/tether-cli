@@ -1,8 +1,21 @@
-use super::panel;
+use super::{panel, row};
 use crate::dashboard::theme::Theme;
 use ratatui::{prelude::*, widgets::Paragraph};
 
+/// Runs of equal lines as (line, count), in order.
+fn collapse(lines: Vec<String>) -> Vec<(String, usize)> {
+    let mut runs: Vec<(String, usize)> = Vec::new();
+    for line in lines {
+        match runs.last_mut() {
+            Some((last, n)) if *last == line => *n += 1,
+            _ => runs.push((line, 1)),
+        }
+    }
+    runs
+}
+
 /// Daemon log tail, newest at the bottom, colored by the glyph or level each line carries.
+/// A line the daemon repeats shows once, with its count at the right.
 pub fn render(f: &mut Frame, area: Rect, lines: &[String], t: &Theme) {
     let block = panel(" Daemon log ", false, t);
     let inner = block.inner(area);
@@ -19,26 +32,33 @@ pub fn render(f: &mut Frame, area: Rect, lines: &[String], t: &Theme) {
         );
         return;
     }
-    let start = clean.len().saturating_sub(inner.height as usize);
-    let text: Vec<Line> = clean[start..]
-        .iter()
-        .map(|l| {
-            let s = l.trim_start();
-            let color = if s.starts_with('✗') || s.contains(" ERROR ") || s.starts_with("ERROR") {
-                t.error
-            } else if s.starts_with('⚠') || s.contains(" WARN ") || s.starts_with("Warning") {
-                t.warn
-            } else if s.starts_with('✓') {
-                t.ok
-            } else if s.starts_with('ℹ') {
-                t.info
-            } else {
-                t.muted
-            };
-            Line::from(Span::styled(l.clone(), Style::default().fg(color)))
-        })
-        .collect();
-    f.render_widget(Paragraph::new(text), inner);
+    let runs = collapse(clean);
+    let start = runs.len().saturating_sub(inner.height as usize);
+    for (i, (l, n)) in runs[start..].iter().enumerate() {
+        let s = l.trim_start();
+        let color = if s.starts_with('✗') || s.contains(" ERROR ") || s.starts_with("ERROR") {
+            t.error
+        } else if s.starts_with('⚠') || s.contains(" WARN ") || s.starts_with("Warning") {
+            t.warn
+        } else if s.starts_with('✓') {
+            t.ok
+        } else if s.starts_with('ℹ') {
+            t.info
+        } else {
+            t.muted
+        };
+        let count = if *n > 1 {
+            Line::from(Span::styled(format!("×{}", n), Style::default().fg(t.dim)))
+        } else {
+            Line::default()
+        };
+        row(
+            f,
+            Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+            Line::from(Span::styled(l.as_str(), Style::default().fg(color))),
+            count,
+        );
+    }
 }
 
 /// Drop ANSI escape sequences that the CLI writes into the log.
@@ -67,6 +87,15 @@ pub fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collapses_repeated_lines() {
+        let lines = ["a", "b", "b", "b", "a"].map(String::from).to_vec();
+        assert_eq!(
+            collapse(lines),
+            vec![("a".into(), 1), ("b".into(), 3), ("a".into(), 1)]
+        );
+    }
 
     #[test]
     fn strips_sgr_sequences() {

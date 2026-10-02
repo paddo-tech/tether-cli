@@ -277,7 +277,7 @@ fn render_list_popup(
     let area = f.area();
     let widest = lines
         .iter()
-        .map(|l| l.chars().count())
+        .map(|l| l.chars().count() + 2)
         .chain([msg.chars().count()])
         .max()
         .unwrap_or(0);
@@ -316,7 +316,12 @@ fn render_list_popup(
             lines[start..]
                 .iter()
                 .take(visible)
-                .map(|l| Line::from(l.as_str()))
+                .map(|l| {
+                    Line::from(vec![
+                        Span::styled("• ", Style::default().fg(t.dim)),
+                        Span::raw(l.as_str()),
+                    ])
+                })
                 .collect::<Vec<_>>(),
         )
         .style(Style::default().fg(t.text)),

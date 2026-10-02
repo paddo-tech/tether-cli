@@ -13,9 +13,12 @@ pub fn view(f: &mut Frame, app: &App) {
         f.area(),
     );
 
-    let [head, tab_bar, body, footer] = Layout::vertical([
+    // A blank row keeps panel titles off the tab bar, once the body can spare it.
+    let gap = u16::from(f.area().height >= 16);
+    let [head, tab_bar, _, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(gap),
         Constraint::Min(3),
         Constraint::Length(1),
     ])

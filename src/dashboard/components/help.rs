@@ -111,7 +111,7 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         |s: &'static str| Line::from(Span::styled(s, Style::default().fg(t.accent).bold()));
     let key = |k: &str, d: &'static str| {
         Line::from(vec![
-            Span::styled(format!("  {:<10}", k), t.key_hint()),
+            Span::styled(format!("  {:<11}", k), t.key_hint()),
             Span::styled(d, Style::default().fg(t.text)),
         ])
     };
@@ -154,8 +154,9 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         key("t", "Toggle create"),
     ];
 
-    let two_col = area.width >= 78 && area.height >= 23;
-    let height = if two_col { 21 } else { 38 }.min(area.height.saturating_sub(2));
+    // One blank row above and below the longest column.
+    let two_col = area.width >= 78 && area.height >= 24;
+    let height = if two_col { 22 } else { 39 }.min(area.height.saturating_sub(2));
     let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
     let rect = centered(area, width, height);
     app.add_hit(rect, Hit::Block);
@@ -169,6 +170,7 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
     };
     if two_col {
         let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .spacing(2)
             .split(inner);
         f.render_widget(Paragraph::new(left), cols[0]);
         f.render_widget(Paragraph::new(right), cols[1]);

@@ -4,6 +4,7 @@
 use super::confirm::Confirm;
 use super::{
     clamp_cursor, cursor_down, manager_label, panel, row, scroll_for, scrollbar, select_row,
+    truncate,
 };
 use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, Hit, Overlay};
@@ -21,6 +22,8 @@ use std::cell::RefCell;
 const ITEM_H: u16 = 3;
 /// Below this body width the detail pane opens under the list on Enter.
 const SPLIT_MIN_W: u16 = 110;
+/// Width of the detail pane's label column; values wrap under the column after it.
+const LABEL_W: usize = 12;
 
 #[derive(Default)]
 pub struct SecurityTabState {
@@ -230,7 +233,7 @@ fn explain(reason: Reason) -> &'static str {
 }
 
 /// Soft pill: tinted background, colored text. Malicious gets a solid pill so it stands out.
-fn pill(text: &str, color: Color, t: &Theme) -> Span<'static> {
+pub(super) fn pill(text: &str, color: Color, t: &Theme) -> Span<'static> {
     let style = if color == t.error {
         Style::default().fg(t.brand_fg).bg(color).bold()
     } else if t.rgb {
@@ -255,15 +258,92 @@ fn short(commit: &str) -> &str {
     &commit[..commit.len().min(7)]
 }
 
+/// Relative age without the trailing " ago", for rows short on room.
+fn short_age(at: chrono::DateTime<chrono::Utc>) -> String {
+    let age = relative_time(at);
+    age.strip_suffix(" ago").map(str::to_string).unwrap_or(age)
+}
+
+/// One line of the detail pane. Labeled values and advisories wrap at draw time,
+/// so continuation lines indent under their value instead of under the label.
+enum Detail {
+    Text(Line<'static>),
+    /// Label and value; the value wraps under the value column.
+    Kv(&'static str, Span<'static>),
+    /// Two parts on one line when they fit, else the second indents on the next line.
+    Pair(Span<'static>, Span<'static>),
+}
+
+impl From<Line<'static>> for Detail {
+    fn from(line: Line<'static>) -> Self {
+        Detail::Text(line)
+    }
+}
+
+/// Split at spaces to fit `width` columns; a word longer than a line breaks inside it.
+fn wrap_words(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = vec![String::new()];
+    for word in s.split(' ') {
+        let mut word: Vec<char> = word.chars().collect();
+        let len = lines.last().map_or(0, |l| l.chars().count());
+        if len > 0 && len + 1 + word.len() <= width {
+            lines.last_mut().expect("never empty").push(' ');
+        } else if len > 0 {
+            lines.push(String::new());
+        }
+        while word.len() > width {
+            let rest = word.split_off(width);
+            lines.last_mut().expect("never empty").extend(word);
+            lines.push(String::new());
+            word = rest;
+        }
+        lines.last_mut().expect("never empty").extend(word);
+    }
+    lines
+}
+
+fn detail_lines(detail: Vec<Detail>, width: usize, t: &Theme) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    for d in detail {
+        match d {
+            Detail::Text(line) => out.push(line),
+            Detail::Kv(label, value) => {
+                let label_w = LABEL_W.min(width / 2);
+                for (i, part) in wrap_words(&value.content, width - label_w)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let head = if i == 0 { label } else { "" };
+                    out.push(Line::from(vec![
+                        Span::styled(format!("{:<label_w$}", head), Style::default().fg(t.dim)),
+                        Span::styled(part, value.style),
+                    ]));
+                }
+            }
+            Detail::Pair(a, b) => {
+                if a.width() + 2 + b.width() <= width {
+                    out.push(Line::from(vec![a, Span::raw("  "), b]));
+                } else {
+                    out.push(Line::from(a));
+                    out.push(Line::from(vec![Span::raw("  "), b]));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// How one inbox item draws: its two list lines and its detail pane.
 /// A new item kind adds a match arm here and nowhere else in the view.
 struct ItemView {
     heading: String,
     title: Line<'static>,
     badges: Line<'static>,
-    meta: Line<'static>,
-    advisories: Line<'static>,
-    detail: Vec<Line<'static>>,
+    /// The second list line as (left, right), fullest first. The list takes the first
+    /// that fits, so detail drops in a fixed order instead of overlapping.
+    meta: Vec<(Line<'static>, Line<'static>)>,
+    detail: Vec<Detail>,
     /// Label of the approve button; None when only rejection is possible.
     approve: Option<&'static str>,
 }
@@ -275,26 +355,26 @@ fn item_view(app: &App, item: &InboxItem) -> ItemView {
     }
 }
 
-fn reason_lines(item: &InboxItem, t: &Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
+fn reason_lines(item: &InboxItem, t: &Theme) -> Vec<Detail> {
+    let mut lines: Vec<Detail> = vec![Line::from(Span::styled(
         "Why it is held",
         Style::default().fg(t.accent).bold(),
-    ))];
+    ))
+    .into()];
     for reason in &item.reasons {
         let loud = *reason == Reason::KeyChanged;
-        lines.push(Line::from(pill(
-            reason.label(),
-            reason_color(*reason, t),
-            t,
-        )));
-        lines.push(Line::from(Span::styled(
-            explain(*reason),
-            if loud {
-                Style::default().fg(t.error).bold()
-            } else {
-                Style::default().fg(t.muted)
-            },
-        )));
+        lines.push(Line::from(pill(reason.label(), reason_color(*reason, t), t)).into());
+        lines.push(
+            Line::from(Span::styled(
+                explain(*reason),
+                if loud {
+                    Style::default().fg(t.error).bold()
+                } else {
+                    Style::default().fg(t.muted)
+                },
+            ))
+            .into(),
+        );
     }
     lines
 }
@@ -307,13 +387,6 @@ fn badges(item: &InboxItem, t: &Theme) -> Line<'static> {
     }
     spans.pop();
     Line::from(spans)
-}
-
-fn kv(k: &str, v: Span<'static>, t: &Theme) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("{:<12}", k), Style::default().fg(t.dim)),
-        v,
-    ])
 }
 
 fn machine_view(app: &App, item: &InboxItem, fingerprint: &str) -> ItemView {
@@ -330,39 +403,49 @@ fn machine_view(app: &App, item: &InboxItem, fingerprint: &str) -> ItemView {
         Span::styled(name.clone(), Style::default().fg(t.text).bold()),
         Span::styled("  machine key", Style::default().fg(t.dim)),
     ]);
-    let meta = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(fingerprint.to_string(), Style::default().fg(t.hash)),
-        Span::styled(" · ", Style::default().fg(t.border)),
-        Span::styled(
-            format!("held {}", relative_time(item.first_seen)),
-            Style::default().fg(t.dim),
+    let meta = |age: String| {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(fingerprint.to_string(), Style::default().fg(t.hash)),
+            Span::styled(" · ", Style::default().fg(t.border)),
+            Span::styled(age, Style::default().fg(t.dim)),
+        ])
+    };
+    let meta = vec![
+        (
+            meta(format!("held {}", relative_time(item.first_seen))),
+            Line::default(),
         ),
-    ]);
+        (meta(short_age(item.first_seen)), Line::default()),
+    ];
     let text = |s: String| Span::styled(s, Style::default().fg(t.text));
-    let mut detail = vec![kv("Machine", text(name.clone()), t)];
+    let mut detail = vec![Detail::Kv("Machine", text(name.clone()))];
     if name != item.name {
-        detail.push(kv("Machine ID", text(item.name.clone()), t));
+        detail.push(Detail::Kv("Machine ID", text(item.name.clone())));
     }
-    detail.push(kv(
+    detail.push(Detail::Kv(
         "Key",
         Span::styled(fingerprint.to_string(), Style::default().fg(t.hash).bold()),
-        t,
     ));
-    detail.push(kv("First seen", text(relative_time(item.first_seen)), t));
-    detail.push(Line::default());
+    detail.push(Detail::Kv(
+        "First seen",
+        text(relative_time(item.first_seen)),
+    ));
+    detail.push(Line::default().into());
     detail.extend(reason_lines(item, t));
-    detail.push(Line::default());
-    detail.push(Line::from(Span::styled(
-        "Trusting this key lets package changes signed by it install without approval.",
-        Style::default().fg(t.dim),
-    )));
+    detail.push(Line::default().into());
+    detail.push(
+        Line::from(Span::styled(
+            "Trusting this key lets package changes signed by it install without approval.",
+            Style::default().fg(t.dim),
+        ))
+        .into(),
+    );
     ItemView {
         heading: name,
         title,
         badges: badges(item, t),
         meta,
-        advisories: Line::default(),
         detail,
         approve: Some("trust key"),
     }
@@ -393,23 +476,23 @@ fn package_view(app: &App, item: &InboxItem) -> ItemView {
         .as_deref()
         .map(|id| machine_name(app, id));
     let sep = || Span::styled(" · ", Style::default().fg(t.border));
-    let mut meta = vec![Span::raw("  ")];
-    if let Some(source) = &source {
-        meta.push(Span::styled("from ", Style::default().fg(t.dim)));
-        meta.push(Span::styled(source.clone(), Style::default().fg(t.muted)));
-        meta.push(sep());
-    }
-    if let Some(commit) = &item.commit {
-        meta.push(Span::styled(
-            short(commit).to_string(),
-            Style::default().fg(t.hash),
-        ));
-        meta.push(sep());
-    }
-    meta.push(Span::styled(
-        format!("held {}", relative_time(item.first_seen)),
-        Style::default().fg(t.dim),
-    ));
+    let meta = |commit: bool, age: String| {
+        let mut meta = vec![Span::raw("  ")];
+        if let Some(source) = &source {
+            meta.push(Span::styled("from ", Style::default().fg(t.dim)));
+            meta.push(Span::styled(source.clone(), Style::default().fg(t.muted)));
+            meta.push(sep());
+        }
+        if let Some(c) = item.commit.as_deref().filter(|_| commit) {
+            meta.push(Span::styled(
+                short(c).to_string(),
+                Style::default().fg(t.hash),
+            ));
+            meta.push(sep());
+        }
+        meta.push(Span::styled(age, Style::default().fg(t.dim)));
+        Line::from(meta)
+    };
 
     let advisory_style = |id: &str| {
         if crate::packages::osv::is_malicious(id) {
@@ -418,20 +501,33 @@ fn package_view(app: &App, item: &InboxItem) -> ItemView {
             Style::default().fg(t.warn)
         }
     };
-    let mut advisories = Vec::new();
-    if let Some(first) = item.advisories.first() {
-        advisories.push(Span::styled(first.clone(), advisory_style(first)));
-        if item.advisories.len() > 1 {
-            advisories.push(Span::styled(
-                format!(" +{}", item.advisories.len() - 1),
-                Style::default().fg(t.dim),
-            ));
+    let advisories = |more: bool| {
+        let mut spans = Vec::new();
+        if let Some(first) = item.advisories.first() {
+            spans.push(Span::styled(first.clone(), advisory_style(first)));
+            if more && item.advisories.len() > 1 {
+                spans.push(Span::styled(
+                    format!(" +{}", item.advisories.len() - 1),
+                    Style::default().fg(t.dim),
+                ));
+            }
         }
-    }
+        Line::from(spans)
+    };
+    let held = format!("held {}", relative_time(item.first_seen));
+    let age = short_age(item.first_seen);
+    let meta = vec![
+        (meta(true, held.clone()), advisories(true)),
+        (meta(false, held), advisories(true)),
+        (meta(false, age.clone()), advisories(true)),
+        (meta(false, age), advisories(false)),
+    ];
 
-    let kv = |k: &str, v: Span<'static>| kv(k, v, t);
+    let kv = Detail::Kv;
     let text = |s: String| Span::styled(s, Style::default().fg(t.text));
-    let section = |s: String| Line::from(Span::styled(s, Style::default().fg(t.accent).bold()));
+    let section = |s: String| -> Detail {
+        Line::from(Span::styled(s, Style::default().fg(t.accent).bold())).into()
+    };
     let mut detail = vec![
         kv(
             "Version",
@@ -475,41 +571,46 @@ fn package_view(app: &App, item: &InboxItem) -> ItemView {
             Span::styled(signer.clone(), Style::default().fg(t.hash)),
         ));
     }
-    detail.push(Line::default());
+    detail.push(Line::default().into());
     detail.extend(reason_lines(item, t));
-    detail.push(Line::default());
+    detail.push(Line::default().into());
     detail.push(section(format!("Advisories ({})", item.advisories.len())));
     if item.advisories.is_empty() {
-        detail.push(Line::from(Span::styled(
-            "OSV lists no advisories for this version",
-            Style::default().fg(t.dim),
-        )));
+        detail.push(
+            Line::from(Span::styled(
+                "OSV lists no advisories for this version",
+                Style::default().fg(t.dim),
+            ))
+            .into(),
+        );
     }
     for id in &item.advisories {
         let what = if crate::packages::osv::is_malicious(id) {
-            "  malicious, blocks install"
+            "malicious, blocks install"
         } else {
-            "  vulnerability, does not block"
+            "vulnerability, does not block"
         };
-        detail.push(Line::from(vec![
+        detail.push(Detail::Pair(
             Span::styled(id.clone(), advisory_style(id)),
             Span::styled(what, Style::default().fg(t.dim)),
-        ]));
-        detail.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("osv.dev/vulnerability/{}", id),
-                Style::default().fg(t.dim).underlined(),
-            ),
-        ]));
+        ));
+        detail.push(
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("osv.dev/vulnerability/{}", id),
+                    Style::default().fg(t.dim).underlined(),
+                ),
+            ])
+            .into(),
+        );
     }
 
     ItemView {
         heading: item.name.clone(),
         title: Line::from(title),
         badges: badges(item, t),
-        meta: Line::from(meta),
-        advisories: Line::from(advisories),
+        meta,
         detail,
         approve: (!malicious).then_some("approve & install"),
     }
@@ -591,26 +692,39 @@ fn render_trusted(f: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
-    for (i, m) in trusted.iter().take(inner.height as usize).enumerate() {
-        let mut left = vec![
-            Span::styled("✓ ", Style::default().fg(t.ok)),
-            Span::styled(
-                machine_name(app, &m.machine_id),
-                Style::default().fg(t.text),
-            ),
-        ];
-        if m.machine_id == app.machine_id() {
-            left.push(Span::styled("  this", Style::default().fg(t.accent)));
-        }
+    // Machine ids are unique where hostnames are not, so the id stays whole and the
+    // fingerprint gives way.
+    let rows: Vec<Line> = trusted
+        .iter()
+        .take(inner.height as usize)
+        .map(|m| {
+            let mut left = vec![
+                Span::styled("✓ ", Style::default().fg(t.ok)),
+                Span::styled(m.machine_id.clone(), Style::default().fg(t.text)),
+            ];
+            if m.machine_id == app.machine_id() {
+                left.push(Span::styled("  this", Style::default().fg(t.accent)));
+            }
+            Line::from(left)
+        })
+        .collect();
+    // Fingerprints start in one column, after the longest id.
+    let name_w = rows.iter().map(Line::width).max().unwrap_or(0) + 2;
+    let room = (inner.width as usize).saturating_sub(name_w);
+    for (i, (m, left)) in trusted.iter().zip(rows).enumerate() {
+        let y = inner.y + i as u16;
         row(
             f,
-            Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
-            Line::from(left),
-            Line::from(Span::styled(
-                m.fingerprint.clone(),
-                Style::default().fg(t.hash),
-            )),
+            Rect::new(inner.x, y, inner.width, 1),
+            left,
+            Line::default(),
         );
+        if room >= 12 {
+            f.render_widget(
+                Span::styled(truncate(&m.fingerprint, room), Style::default().fg(t.hash)),
+                Rect::new(inner.x + name_w as u16, y, room as u16, 1),
+            );
+        }
     }
 }
 
@@ -651,12 +765,14 @@ fn render_list(f: &mut Frame, area: Rect, app: &App, cursor: usize) {
         let view = item_view(app, item);
         row(f, Rect { height: 1, ..rect }, view.title, view.badges);
         if h > 1 {
-            row(
-                f,
-                Rect::new(inner.x, y + 1, inner.width, 1),
-                view.meta,
-                view.advisories,
-            );
+            let w = inner.width as usize;
+            let mut meta = view.meta;
+            let fits = meta
+                .iter()
+                .position(|(l, r)| l.width() + 2 + r.width() <= w)
+                .unwrap_or(meta.len() - 1);
+            let (left, right) = meta.swap_remove(fits);
+            row(f, Rect::new(inner.x, y + 1, inner.width, 1), left, right);
         }
         app.add_hit(rect, Hit::Row(i));
     }
@@ -685,7 +801,8 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, view: ItemView) {
         height: inner.height.saturating_sub(1 + buttons_h),
         ..inner
     };
-    f.render_widget(Paragraph::new(view.detail).wrap(Wrap { trim: false }), body);
+    let lines = detail_lines(view.detail, body.width as usize, t);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
     if buttons_h == 0 {
         return;
     }

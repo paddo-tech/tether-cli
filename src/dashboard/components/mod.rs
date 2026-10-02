@@ -139,11 +139,14 @@ pub fn select_row(f: &mut Frame, row: Rect, t: &Theme) {
     }
 }
 
-/// One list row: `left` truncated so `right` stays visible at the right edge.
+/// One list row: `left` truncated with an ellipsis so `right` stays visible at the right edge.
 pub fn row(f: &mut Frame, area: Rect, left: Line, right: Line) {
     let rw = (right.width() as u16).min(area.width);
     let lw = area.width.saturating_sub(if rw > 0 { rw + 1 } else { 0 });
-    f.render_widget(Paragraph::new(left), Rect { width: lw, ..area });
+    f.render_widget(
+        Paragraph::new(fit(left, lw as usize)),
+        Rect { width: lw, ..area },
+    );
     if rw > 0 {
         f.render_widget(
             Paragraph::new(right),
@@ -287,6 +290,38 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Shorten a styled line to `max` display columns, ending in an ellipsis when it cuts.
+pub fn fit(line: Line<'_>, max: usize) -> Line<'_> {
+    if line.width() <= max {
+        return line;
+    }
+    let room = max.saturating_sub(1);
+    let mut used = 0;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let w = span.width();
+        if used + w <= room {
+            used += w;
+            spans.push(span);
+            continue;
+        }
+        let mut cut = String::new();
+        for ch in span.content.chars() {
+            let cw = Span::raw(ch.to_string()).width();
+            if used + cw > room {
+                break;
+            }
+            used += cw;
+            cut.push(ch);
+        }
+        if max > 0 {
+            spans.push(Span::styled(format!("{}…", cut.trim_end()), span.style));
+        }
+        break;
+    }
+    Line::from(spans).style(line.style)
+}
+
 /// Braille spinner frame for an animation clock in milliseconds.
 pub fn spinner(ms: u128) -> &'static str {
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -315,6 +350,15 @@ mod tests {
     fn truncate_adds_ellipsis() {
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 4), "abc");
+    }
+
+    #[test]
+    fn fit_ellipsizes_across_spans() {
+        let line = Line::from(vec![Span::raw("from "), Span::raw("Paddos-Mac-mini")]);
+        assert_eq!(fit(line.clone(), 30).to_string(), "from Paddos-Mac-mini");
+        assert_eq!(fit(line.clone(), 10).to_string(), "from Padd…");
+        assert_eq!(fit(line.clone(), 6).to_string(), "from …");
+        assert_eq!(fit(line, 0).to_string(), "");
     }
 
     #[test]
