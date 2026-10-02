@@ -23,6 +23,10 @@ pub enum Reason {
     CooldownUnsupported,
     /// OSV lists a `MAL-` advisory for it. Approval cannot override this.
     Malicious,
+    /// OSV lists a `MAL-` advisory for the version an upgrade would install. Approval cannot
+    /// override this. The hold covers only that version, and ends when that version is no
+    /// longer the upgrade target.
+    MaliciousUpgrade,
     /// OSV lists a `MAL-` advisory for some release of it, and Tether could not find the
     /// release an unpinned install would pick. Approval overrides this, after a warning.
     MaliciousUnresolved,
@@ -41,6 +45,7 @@ impl Reason {
             Reason::UntrustedTap => "untrusted tap",
             Reason::CooldownUnsupported => "release age not checked",
             Reason::Malicious => "malicious (OSV)",
+            Reason::MaliciousUpgrade => "malicious upgrade (OSV)",
             Reason::MaliciousUnresolved => "malicious releases (OSV), install version unknown",
             Reason::NewMachine => "new machine key",
             Reason::KeyChanged => "machine key changed",
@@ -122,6 +127,13 @@ impl InboxItem {
 
     fn is(&self, manager: &str, name: &str) -> bool {
         self.manager == manager && self.name == name
+    }
+
+    /// OSV lists the held version as malicious, so approval cannot install it.
+    pub fn malicious(&self) -> bool {
+        self.reasons
+            .iter()
+            .any(|r| matches!(r, Reason::Malicious | Reason::MaliciousUpgrade))
     }
 
     /// Fingerprint of the key a machine item asks to trust.
@@ -282,11 +294,28 @@ impl Inbox {
         self.items.iter().any(|i| i.is(manager, name))
     }
 
-    /// Whether a release of this package waits here as malicious.
-    pub fn holds_malicious(&self, manager: &str, name: &str) -> bool {
-        self.items
-            .iter()
-            .any(|i| i.is(manager, name) && i.reasons.contains(&Reason::Malicious))
+    /// Whether this package waits here as malicious. A held upgrade blocks only its own
+    /// version, or any install whose version is unknown.
+    pub fn holds_malicious(&self, manager: &str, name: &str, version: Option<&str>) -> bool {
+        self.items.iter().any(|i| {
+            i.is(manager, name)
+                && (i.reasons.contains(&Reason::Malicious)
+                    || (i.reasons.contains(&Reason::MaliciousUpgrade)
+                        && (version.is_none() || version == i.version.as_deref())))
+        })
+    }
+
+    /// Drop this manager's held upgrades whose version is no longer the upgrade target, for
+    /// example because a later release replaced it or the package moved past it. `targets`
+    /// is every outdated package with the version an upgrade would install.
+    pub fn clear_upgrade_holds(&mut self, manager: &str, targets: &[(String, String)]) {
+        self.items.retain(|i| {
+            i.manager != manager
+                || !i.reasons.contains(&Reason::MaliciousUpgrade)
+                || targets
+                    .iter()
+                    .any(|(name, version)| *name == i.name && i.version.as_ref() == Some(version))
+        });
     }
 
     /// Taps the user approved as tap items, which count as trusted like
@@ -370,7 +399,7 @@ impl Inbox {
     pub fn approve(&mut self, reviewed: &InboxItem) -> Result<InboxItem> {
         let id = reviewed.id();
         let item = self.reviewed(reviewed)?;
-        if item.reasons.contains(&Reason::Malicious) {
+        if item.malicious() {
             bail!(
                 "OSV lists {} as malicious ({}). Tether will not install it",
                 item.name,
@@ -448,9 +477,8 @@ impl Inbox {
     /// Drop pending items for packages that are now installed by other means. Malicious
     /// items stay, because a held upgrade is for a package that is already installed.
     pub fn prune_installed(&mut self, manager: &str, installed: impl Fn(&str) -> bool) {
-        self.items.retain(|i| {
-            i.manager != manager || i.reasons.contains(&Reason::Malicious) || !installed(&i.name)
-        });
+        self.items
+            .retain(|i| i.manager != manager || i.malicious() || !installed(&i.name));
     }
 }
 
@@ -665,8 +693,8 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
         }
     };
     let pins: Vec<(String, Option<String>)> = candidates
-        .into_iter()
-        .map(|(name, version)| (name, Some(version)))
+        .iter()
+        .map(|(name, version)| (name.clone(), Some(version.clone())))
         .collect();
     let found = osv::advisories(manager.ecosystem(), &pins).await;
     let mut held = Vec::new();
@@ -692,12 +720,19 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
             source_machine: None,
             commit: None,
             signer: None,
-            reasons: vec![Reason::Malicious],
+            reasons: vec![Reason::MaliciousUpgrade],
             advisories,
             first_seen: Utc::now(),
         });
     }
-    if let Err(e) = add(items) {
+    let saved = Inbox::update(|inbox| {
+        inbox.clear_upgrade_holds(manager.name(), &candidates);
+        for item in items {
+            inbox.add(item);
+        }
+        Ok(())
+    });
+    if let Err(e) = saved {
         Output::warning(&format!("Could not hold malicious upgrades: {}", e));
     }
     held
@@ -724,13 +759,19 @@ pub async fn check_osv(
     version: Option<&str>,
     osv_required: bool,
 ) -> Result<Option<String>> {
-    if Inbox::load()?.holds_malicious(manager_key, name) {
-        bail!(
-            "The inbox holds {} as malicious. Tether will not install it",
-            name
-        );
-    }
+    let inbox = Inbox::load()?;
+    let held = |version: Option<&str>| -> Result<()> {
+        if inbox.holds_malicious(manager_key, name, version) {
+            bail!(
+                "The inbox holds {} {} as malicious. Tether will not install it",
+                name,
+                version.unwrap_or_default()
+            );
+        }
+        Ok(())
+    };
     let Some(manager) = manager_for_key(manager_key) else {
+        held(version)?;
         return Ok(version.map(str::to_string));
     };
     let (version, unresolved) = match version {
@@ -743,6 +784,7 @@ pub async fn check_osv(
             }
         }
     };
+    held(version.as_deref())?;
     let pin = [(name.to_string(), version.clone())];
     let (found, errors) = osv::query(manager.ecosystem(), &pin).await;
     let malicious: Vec<&str> = found[0]
@@ -997,10 +1039,41 @@ mod tests {
         let shown = inbox.find("nx").unwrap().clone();
         assert!(inbox.approve(&shown).is_err());
         assert!(inbox.is_pending("npm", "nx"));
-        assert!(inbox.holds_malicious("npm", "nx"));
-        assert!(!inbox.holds_malicious("pnpm", "nx"));
+        assert!(inbox.holds_malicious("npm", "nx", Some("1.0.0")));
+        assert!(!inbox.holds_malicious("pnpm", "nx", None));
         inbox.add(item("npm", "safe"));
-        assert!(!inbox.holds_malicious("npm", "safe"));
+        assert!(!inbox.holds_malicious("npm", "safe", None));
+    }
+
+    #[test]
+    fn upgrade_hold_blocks_only_its_version_until_the_target_moves() {
+        let mut inbox = Inbox::default();
+        let mut bad = item("npm", "zx");
+        bad.version = Some("2.0.1".to_string());
+        bad.reasons = vec![Reason::MaliciousUpgrade];
+        inbox.add(bad.clone());
+        assert!(inbox.approve(&bad).is_err());
+        assert!(inbox.holds_malicious("npm", "zx", Some("2.0.1")));
+        assert!(inbox.holds_malicious("npm", "zx", None));
+        assert!(!inbox.holds_malicious("npm", "zx", Some("2.0.2")));
+
+        // The flagged version is still the upgrade target, and other managers do not count
+        let target = |v: &str| vec![("zx".to_string(), v.to_string())];
+        inbox.clear_upgrade_holds("npm", &target("2.0.1"));
+        inbox.clear_upgrade_holds("pnpm", &[]);
+        assert!(inbox.is_pending("npm", "zx"));
+        // A clean 2.0.2 replaced it as the target
+        inbox.clear_upgrade_holds("npm", &target("2.0.2"));
+        assert!(!inbox.is_pending("npm", "zx"));
+
+        // The package is no longer outdated, so it moved past the flagged version
+        inbox.add(bad);
+        let mut sync_held = item("npm", "evil");
+        sync_held.reasons = vec![Reason::Malicious];
+        inbox.add(sync_held);
+        inbox.clear_upgrade_holds("npm", &[]);
+        assert!(!inbox.is_pending("npm", "zx"));
+        assert!(inbox.holds_malicious("npm", "evil", Some("2.0.2")));
     }
 
     #[test]

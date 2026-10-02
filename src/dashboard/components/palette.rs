@@ -2,7 +2,7 @@
 
 use super::{cursor_down, files, manager_label, scroll_for, select_row, truncate};
 use crate::dashboard::app::{Action, App, Hit, Overlay, Tab};
-use crate::packages::inbox::{Kind, Reason};
+use crate::packages::inbox::Kind;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -176,7 +176,7 @@ pub fn entries(app: &App) -> Vec<Entry> {
     // Approve all skips machine keys, so only a safe package makes the action useful.
     if pending
         .iter()
-        .any(|i| i.kind == Kind::Package && !i.reasons.contains(&Reason::Malicious))
+        .any(|i| i.kind == Kind::Package && !i.malicious())
     {
         out.push(Entry {
             label: "Approve all pending packages".into(),

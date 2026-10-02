@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
-use crate::packages::inbox::{self, InboxItem, Kind, Reason};
+use crate::packages::inbox::{self, InboxItem, Kind};
 use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
     UvManager,
@@ -373,7 +373,7 @@ pub async fn review_inbox() -> Result<()> {
             1 => {
                 // A machine key needs its own answer, so "Install all" leaves it pending
                 for item in items {
-                    if item.reasons.contains(&Reason::Malicious) || item.kind != Kind::Package {
+                    if item.malicious() || item.kind != Kind::Package {
                         continue;
                     }
                     if let Err(e) = approve_locked(&item).await {
@@ -386,7 +386,7 @@ pub async fn review_inbox() -> Result<()> {
         }
     }
     for item in items {
-        let options = if item.reasons.contains(&Reason::Malicious) {
+        let options = if item.malicious() {
             vec!["Reject", "Decide later"]
         } else if item.kind != Kind::Package {
             vec!["Trust", "Reject", "Decide later"]
@@ -409,6 +409,7 @@ pub async fn review_inbox() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packages::inbox::Reason;
 
     #[test]
     fn approve_requires_the_reviewed_version_tap_or_key() {

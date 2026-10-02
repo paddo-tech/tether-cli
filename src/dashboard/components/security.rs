@@ -175,7 +175,7 @@ pub fn approve_all(app: &mut App, items: Vec<InboxItem>, osv_required: bool) -> 
 }
 
 fn is_malicious(item: &InboxItem) -> bool {
-    item.reasons.contains(&Reason::Malicious)
+    item.malicious()
 }
 
 /// Short badge text for the list; the detail pane uses `Reason::label`.
@@ -185,6 +185,7 @@ fn badge(reason: Reason) -> &'static str {
         Reason::UntrustedTap => "untrusted tap",
         Reason::CooldownUnsupported => "no age check",
         Reason::Malicious => "MALICIOUS",
+        Reason::MaliciousUpgrade => "MALICIOUS UPGRADE",
         Reason::MaliciousUnresolved => "MALICIOUS RELEASES",
         Reason::UntrustedSigner => "untrusted signer",
         Reason::NewMachine => "new machine",
@@ -197,7 +198,10 @@ fn reason_color(reason: Reason, t: &Theme) -> Color {
         Reason::Unsigned => t.warn,
         Reason::UntrustedTap => t.key,
         Reason::CooldownUnsupported => t.info,
-        Reason::Malicious | Reason::MaliciousUnresolved | Reason::KeyChanged => t.error,
+        Reason::Malicious
+        | Reason::MaliciousUpgrade
+        | Reason::MaliciousUnresolved
+        | Reason::KeyChanged => t.error,
         Reason::UntrustedSigner => t.key,
         Reason::NewMachine => t.info,
     }
@@ -216,6 +220,9 @@ fn explain(reason: Reason) -> &'static str {
         }
         Reason::Malicious => {
             "OSV reports this package as malicious. Tether will not install it, even with approval."
+        }
+        Reason::MaliciousUpgrade => {
+            "OSV reports the version an upgrade would install as malicious. Tether keeps the installed version and will not install this one, even with approval. A later clean release upgrades as usual."
         }
         Reason::MaliciousUnresolved => {
             "OSV reports malicious releases of this package, and Tether could not find the release that would install. Approve only if you checked that release yourself."
