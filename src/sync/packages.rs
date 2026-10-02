@@ -682,30 +682,40 @@ async fn gate_brew(
     let mut allowed = Vec::new();
     for name in names {
         let tap = brew.tap_for(&name, manager == "brew_casks").await;
-        let untrusted_tap = !tap.as_deref().is_some_and(|t| policy.tap_trusted(t));
-        // Items record only an untrusted tap, so the decision lookups must use the same tap
-        let tap = tap.filter(|_| untrusted_tap);
-        if trust
-            .inbox
-            .is_rejected(manager, &name, None, tap.as_deref())
-        {
-            continue;
-        }
-        let checks = Checks {
-            untrusted_tap,
-            ..trust.checks(manager, &name, None, tap.as_deref())
-        };
-        let reasons = inbox::reasons(checks);
-        if reasons.is_empty() {
-            gated.passed.push((manager.to_string(), name.clone()));
+        if gate_brew_entry(policy, trust, manager, &name, tap, gated) {
             allowed.push(name);
-        } else {
-            gated
-                .held
-                .push(trust.item(manager, &name, None, tap, reasons));
         }
     }
     allowed
+}
+
+/// Whether a formula or cask that resolves to `tap` now may install; else it is held,
+/// unless rejected. Decisions and items bind to that tap, trusted or not, so an approval
+/// or rejection never carries over when the name moves to another tap.
+fn gate_brew_entry(
+    policy: &PackagePolicy,
+    trust: &Trust,
+    manager: &str,
+    name: &str,
+    tap: Option<String>,
+    gated: &mut Gated,
+) -> bool {
+    if trust.inbox.is_rejected(manager, name, None, tap.as_deref()) {
+        return false;
+    }
+    let checks = Checks {
+        untrusted_tap: !tap.as_deref().is_some_and(|t| policy.tap_trusted(t)),
+        ..trust.checks(manager, name, None, tap.as_deref())
+    };
+    let reasons = inbox::reasons(checks);
+    if reasons.is_empty() {
+        gated.passed.push((manager.to_string(), name.to_string()));
+        return true;
+    }
+    gated
+        .held
+        .push(trust.item(manager, name, None, tap, reasons));
+    false
 }
 
 /// Import a simple package manager (one package per line manifest)
@@ -1415,6 +1425,48 @@ mod tests {
         trust.inbox.settle(gated.held, &gated.passed);
         let pending: Vec<String> = trust.inbox.items.iter().map(|i| i.id()).collect();
         assert_eq!(pending, vec!["brew_taps:added/tap"]);
+    }
+
+    #[test]
+    fn test_brew_decisions_bind_to_the_resolved_trusted_tap() {
+        let (tmp, me, _, store) = two_machines();
+        let mut trust = trust_as(tmp.path(), "me", &me, &store);
+        let policy = crate::packages::PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["vendor/one".to_string(), "vendor/two".to_string()],
+            approved_from_taps: Vec::new(),
+        };
+        let gate = |trust: &Trust, tap: &str| {
+            let mut gated = Gated::default();
+            let allowed = gate_brew_entry(
+                &policy,
+                trust,
+                "brew_formulae",
+                "tool",
+                Some(tap.to_string()),
+                &mut gated,
+            );
+            (allowed, gated)
+        };
+
+        let (allowed, gated) = gate(&trust, "vendor/one");
+        assert!(!allowed);
+        assert_eq!(gated.held[0].tap.as_deref(), Some("vendor/one"));
+        trust.inbox.add(gated.held[0].clone());
+        let shown = gated.held[0].clone();
+        trust.inbox.approve(&shown).unwrap();
+        assert!(gate(&trust, "vendor/one").0);
+
+        // The short name now resolves to another trusted tap: the approval does not carry
+        let (allowed, gated) = gate(&trust, "vendor/two");
+        assert!(!allowed);
+        assert_eq!(gated.held[0].tap.as_deref(), Some("vendor/two"));
+        trust.inbox.add(gated.held[0].clone());
+        let shown = gated.held[0].clone();
+        trust.inbox.reject(&shown).unwrap();
+        assert!(gate(&trust, "vendor/two").1.held.is_empty());
+        assert!(gate(&trust, "vendor/one").0);
     }
 
     #[test]
