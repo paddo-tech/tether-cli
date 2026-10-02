@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
 /// Reverse-delta against the union manifest at `commit`; the follow-up sync records removals.
-/// The sync lock covers the whole rollback, so the daemon cannot install or record packages
+/// Nothing changes before the user confirms the plan. The sync lock covers the whole rollback, so the daemon cannot install or record packages
 /// between its steps. Each package installs at the newest version a trusted machine record
 /// lists, as in a sync, unless the user confirms the snapshot's version in a terminal. Every
 /// install passes the trust and OSV checks of a sync, and a confirmed version counts as
@@ -32,10 +32,6 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     let manifest = crate::sync::packages::manifest_filename(manager)
         .ok_or_else(|| anyhow::anyhow!("No manifest for {}", manager))?;
     let repo_path = format!("manifests/{}", manifest);
-
-    // Removal tombstones are diffed against the saved package list, so it must
-    // match what is installed before anything is removed.
-    super::sync::run_locked(false, false, false).await?;
 
     let sync_path = SyncEngine::sync_path()?;
     let git = GitBackend::open(&sync_path)?;
@@ -116,6 +112,14 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
         Output::list_item(&format!("install {}", line));
     }
 
+    // A sync tombstones only packages its saved list knew, so the rollback records its own
+    // removals; else the next sync would install them again.
+    let mut record = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
+        .unwrap_or_else(|| crate::sync::MachineState::new(&state.machine_id));
+    if add_tombstones(&mut record, manager, &to_uninstall) {
+        crate::sync::signing::save_record(&sync_path, &record)?;
+    }
+
     let mut failed: Vec<&str> = Vec::new();
     for pkg in &to_uninstall {
         if let Err(e) = pkg_manager.uninstall(pkg).await {
@@ -152,6 +156,25 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
+/// Add `names` to the record's removals for `manager`. Returns true when the record changed.
+fn add_tombstones(
+    record: &mut crate::sync::MachineState,
+    manager: &str,
+    names: &[&String],
+) -> bool {
+    let removed = record
+        .removed_packages
+        .entry(manager.to_string())
+        .or_default();
+    let before = removed.len();
+    for name in names {
+        if !removed.contains(name) {
+            removed.push((*name).clone());
+        }
+    }
+    removed.len() != before
+}
+
 fn describe(line: &RollbackLine) -> String {
     if line.needs_confirmation() {
         let otherwise = match &line.trusted {
@@ -176,5 +199,22 @@ fn not_trusted(line: &RollbackLine) -> String {
     match &line.trusted {
         Some(newest) => format!("the newest version a trusted machine lists is {}", newest),
         None => "no trusted machine lists it".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_tombstones_records_each_removal_once() {
+        let mut record = crate::sync::MachineState::new("this");
+        record
+            .removed_packages
+            .insert("npm".to_string(), vec!["old".to_string()]);
+        let (old, new) = ("old".to_string(), "new".to_string());
+        assert!(add_tombstones(&mut record, "npm", &[&old, &new]));
+        assert_eq!(record.removed_packages["npm"], vec!["old", "new"]);
+        assert!(!add_tombstones(&mut record, "npm", &[&new]));
     }
 }
