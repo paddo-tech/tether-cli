@@ -134,19 +134,130 @@ struct BrewInfoEntry {
     pinned: bool,
 }
 
-/// Outdated, unpinned formulae and casks from trusted taps, so an upgrade never pulls
-/// a new release from a tap the user has not trusted.
+/// Outdated, unpinned formulae and casks from trusted taps, fully qualified, so an upgrade
+/// never pulls a new release from a tap the user has not trusted.
 fn trusted_upgrades(info: BrewInfo, policy: &PackagePolicy) -> (Vec<String>, Vec<String>) {
     let pick = |entries: Vec<BrewInfoEntry>| {
         entries
             .into_iter()
             .filter(|e| e.outdated && !e.pinned)
-            .filter(|e| e.tap.as_deref().is_some_and(|tap| policy.tap_trusted(tap)))
-            .filter(|e| validate_name(Ecosystem::Brew, &e.full_name).is_ok())
-            .map(|e| e.full_name)
+            .filter_map(|e| {
+                let tap = e.tap.filter(|tap| policy.tap_trusted(tap))?;
+                Some(format!("{}/{}", tap, normalize_formula_name(&e.full_name)))
+            })
+            .filter(|name| validate_name(Ecosystem::Brew, name).is_ok())
             .collect()
     };
     (pick(info.formulae), pick(info.casks))
+}
+
+/// A brew command that loads only the formulae and casks named on it. Without these, brew
+/// updates itself first, and checks dependents and cleans up after an upgrade, and each of
+/// those loads the Ruby of every installed formula or cask, from any tap.
+fn brew_without_installed_scan() -> Result<tokio::process::Command> {
+    let mut cmd = command("brew")?;
+    cmd.env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .env("HOMEBREW_FORCE_API_AUTO_UPDATE", "1")
+        .env("HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK", "1")
+        .env("HOMEBREW_NO_INSTALL_CLEANUP", "1")
+        .env("HOMEBREW_NO_ENV_HINTS", "1");
+    Ok(cmd)
+}
+
+/// The tap an install receipt names, from `source.tap`.
+fn receipt_tap(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.pointer("/source/tap")?.as_str().map(str::to_string)
+}
+
+/// Installed formulae and the tap of each, read from the install receipts in the Cellar.
+/// A formula whose kegs have no tap, or disagree on it, gets `None`.
+fn installed_formulae(cellar: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let Ok(racks) = std::fs::read_dir(cellar) else {
+        return Vec::new();
+    };
+    let mut installed: Vec<_> = racks
+        .filter_map(|e| e.ok())
+        .filter(|rack| rack.path().is_dir())
+        .map(|rack| {
+            let taps: std::collections::BTreeSet<Option<String>> = std::fs::read_dir(rack.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|keg| keg.path().is_dir())
+                .map(|keg| receipt_tap(&keg.path().join("INSTALL_RECEIPT.json")))
+                .collect();
+            let tap = match taps.len() {
+                1 => taps.into_iter().next().flatten(),
+                _ => None,
+            };
+            (rack.file_name().to_string_lossy().to_string(), tap)
+        })
+        .collect();
+    installed.sort();
+    installed
+}
+
+/// Installed casks and the tap of each, read from the install receipts in the Caskroom.
+fn installed_casks(caskroom: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let Ok(tokens) = std::fs::read_dir(caskroom) else {
+        return Vec::new();
+    };
+    let mut installed: Vec<_> = tokens
+        .filter_map(|e| e.ok())
+        .filter(|token| token.path().is_dir())
+        .map(|token| {
+            let receipt = token.path().join(".metadata/INSTALL_RECEIPT.json");
+            (
+                token.file_name().to_string_lossy().to_string(),
+                receipt_tap(&receipt),
+            )
+        })
+        .collect();
+    installed.sort();
+    installed
+}
+
+/// Fully qualified `tap/name` of each installed package from a trusted tap. brew then
+/// loads only these, never a package from a tap the user has not trusted.
+fn trusted_names(installed: Vec<(String, Option<String>)>, policy: &PackagePolicy) -> Vec<String> {
+    installed
+        .into_iter()
+        .filter_map(|(name, tap)| {
+            let tap = tap.filter(|tap| policy.tap_trusted(tap))?;
+            let qualified = format!("{}/{}", tap, name);
+            validate_name(Ecosystem::Brew, &qualified)
+                .is_ok()
+                .then_some(qualified)
+        })
+        .collect()
+}
+
+/// Tapped repositories under `taps_dir` as (`user/repo`, path).
+fn installed_taps(taps_dir: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let mut taps = Vec::new();
+    for user in std::fs::read_dir(taps_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+    {
+        for repo in std::fs::read_dir(user.path())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+        {
+            let repo_name = repo.file_name().to_string_lossy().to_string();
+            if let Some(short) = repo_name.strip_prefix("homebrew-") {
+                taps.push((
+                    format!("{}/{}", user.file_name().to_string_lossy(), short),
+                    repo.path(),
+                ));
+            }
+        }
+    }
+    taps.sort();
+    taps
 }
 
 /// The `user/repo` tap of a qualified `user/repo/name` formula or cask.
@@ -671,26 +782,59 @@ impl PackageManager for BrewManager {
     }
 
     async fn update_all(&self) -> Result<()> {
-        // Check if there are any packages to update
-        let packages = self.list_installed().await?;
-        if packages.is_empty() {
-            return Ok(());
+        let policy = self.policy();
+        let repository = PathBuf::from(self.run_brew(&["--repository"]).await?.trim());
+        let cellar = PathBuf::from(self.run_brew(&["--cellar"]).await?.trim());
+        let caskroom = PathBuf::from(self.run_brew(&["--caskroom"]).await?.trim());
+
+        // `brew update` would load every installed formula and cask after it fetches the taps,
+        // so git updates the trusted taps and brew refreshes its API data for the core taps.
+        for tap in installed_taps(&repository.join("Library/Taps")) {
+            if !policy.tap_trusted(&tap.0) {
+                continue;
+            }
+            let output = command("git")?
+                .arg("-C")
+                .arg(&tap.1)
+                .args(["pull", "--ff-only", "--quiet"])
+                .output()
+                .await?;
+            if !output.status.success() {
+                crate::cli::Output::warning(&format!(
+                    "Could not update tap {}: {}",
+                    tap.0,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
         }
 
-        command("brew")?.args(["update"]).output().await?;
-
-        let info: BrewInfo =
-            serde_json::from_str(&self.run_brew(&["info", "--json=v2", "--installed"]).await?)?;
-        let (formulae, casks) = trusted_upgrades(info, &self.policy());
-
-        for (kind, names) in [("--formula", formulae), ("--cask", casks)] {
+        let installed = [
+            ("--formula", installed_formulae(&cellar)),
+            ("--cask", installed_casks(&caskroom)),
+        ];
+        for (kind, installed) in installed {
+            let names = trusted_names(installed, &policy);
             if names.is_empty() {
                 continue;
             }
-            let output = command("brew")?
+            let output = brew_without_installed_scan()?
+                .args(["info", "--json=v2", kind])
+                .args(&names)
+                .output()
+                .await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow::anyhow!("brew info failed: {}", stderr));
+            }
+            let info: BrewInfo = serde_json::from_slice(&output.stdout)?;
+            let (formulae, casks) = trusted_upgrades(info, &policy);
+            let names: Vec<String> = formulae.into_iter().chain(casks).collect();
+            if names.is_empty() {
+                continue;
+            }
+            let output = brew_without_installed_scan()?
                 .args(["upgrade", kind])
                 .args(&names)
-                .env("HOMEBREW_NO_AUTO_UPDATE", "1")
                 .output()
                 .await?;
 
@@ -887,8 +1031,48 @@ brew "git"
         )
         .unwrap();
         let (formulae, casks) = trusted_upgrades(info, &policy);
-        assert_eq!(formulae, vec!["wget", "oven-sh/bun/bun"]);
-        assert_eq!(casks, vec!["iterm2"]);
+        assert_eq!(formulae, vec!["homebrew/core/wget", "oven-sh/bun/bun"]);
+        assert_eq!(casks, vec!["homebrew/cask/iterm2"]);
+    }
+
+    #[test]
+    fn trusted_names_reads_receipts_and_skips_untrusted_taps() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = |path: &str, tap: Option<&str>| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let json = serde_json::json!({ "source": { "tap": tap } });
+            std::fs::write(path, json.to_string()).unwrap();
+        };
+        receipt(
+            "Cellar/wget/1.0/INSTALL_RECEIPT.json",
+            Some("homebrew/core"),
+        );
+        receipt("Cellar/bun/1.3/INSTALL_RECEIPT.json", Some("oven-sh/bun"));
+        receipt("Cellar/bd/0.1/INSTALL_RECEIPT.json", Some("evil/tap"));
+        receipt("Cellar/mixed/1/INSTALL_RECEIPT.json", Some("homebrew/core"));
+        receipt("Cellar/mixed/2/INSTALL_RECEIPT.json", Some("evil/tap"));
+        receipt("Cellar/local/1/INSTALL_RECEIPT.json", None);
+        receipt(
+            "Caskroom/iterm2/.metadata/INSTALL_RECEIPT.json",
+            Some("homebrew/cask"),
+        );
+        receipt(
+            "Caskroom/app/.metadata/INSTALL_RECEIPT.json",
+            Some("evil/tap"),
+        );
+        std::fs::create_dir_all(dir.path().join("Caskroom/bare")).unwrap();
+        let policy = PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["oven-sh/bun".to_string()],
+            approved_from_taps: Vec::new(),
+        };
+
+        let formulae = trusted_names(installed_formulae(&dir.path().join("Cellar")), &policy);
+        assert_eq!(formulae, vec!["oven-sh/bun/bun", "homebrew/core/wget"]);
+        let casks = trusted_names(installed_casks(&dir.path().join("Caskroom")), &policy);
+        assert_eq!(casks, vec!["homebrew/cask/iterm2"]);
     }
 
     #[test]
