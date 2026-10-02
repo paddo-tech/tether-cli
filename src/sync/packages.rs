@@ -510,6 +510,15 @@ async fn import_brew(
     let taps = std::mem::take(&mut brew_packages.taps);
     brew_packages.taps = gate_taps(&policy, trust, &local_taps, taps, gated);
 
+    // gate_brew resolves a short name only among tapped repositories, so allowed taps come first
+    for tap in &brew_packages.taps {
+        if !local_taps.contains(tap) {
+            if let Err(e) = brew.tap(tap).await {
+                Output::warning(&format!("Failed to tap {}: {}", tap, e));
+            }
+        }
+    }
+
     // Calculate missing packages (normalize formula names for comparison)
     let local_formulae: HashSet<_> = machine_state
         .packages
@@ -568,16 +577,6 @@ async fn import_brew(
             if missing_formulae.len() == 1 { "" } else { "e" },
             missing_formulae.join(", ")
         ));
-
-        // Explicitly tap any missing taps before bundle install
-        // (brew bundle sometimes fails to tap before installing)
-        for tap in &brew_packages.taps {
-            if !local_taps.contains(tap) {
-                if let Err(e) = brew.tap(tap).await {
-                    Output::warning(&format!("Failed to tap {}: {}", tap, e));
-                }
-            }
-        }
 
         let formulae_manifest = BrewfilePackages {
             taps: brew_packages.taps,
