@@ -129,11 +129,18 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             None
         }
         Msg::MachineRemoved { machine_id, result } => match result {
-            Ok(()) => {
+            Ok(untrusted) => {
                 app.reload_state();
                 app.machines.expanded = None;
                 super::components::clamp_cursor(&mut app.machines.cursor, app.state.machines.len());
-                app.flash_success(format!("Removed old record {}", machine_id));
+                app.flash_success(if untrusted {
+                    format!(
+                        "Removed old record {} and untrusted its key on this machine",
+                        machine_id
+                    )
+                } else {
+                    format!("Removed old record {}", machine_id)
+                });
                 // The sync pushes the removal commit
                 app.follow_up_sync()
             }

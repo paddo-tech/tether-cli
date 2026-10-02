@@ -290,17 +290,23 @@ pub async fn remove(name: &str) -> Result<()> {
     }
 
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
-    remove_record(name)?;
+    let untrusted = remove_record(name)?;
     GitBackend::open(&sync_path)?.push()?;
 
     Output::success(&format!("Removed machine '{}'", name));
+    if untrusted {
+        Output::info(&format!(
+            "This machine no longer trusts the key of '{}'. Other machines still trust it",
+            name
+        ));
+    }
     Ok(())
 }
 
 /// Remove a record the dashboard showed as an old id of this machine, only while it still is
 /// one with the same bytes. A pull may have replaced it with another machine's record since.
 /// The caller holds the sync lock and pushes.
-pub fn remove_old_record(machine_id: &str, digest: &str) -> Result<()> {
+pub fn remove_old_record(machine_id: &str, digest: &str) -> Result<bool> {
     let sync_path = SyncEngine::sync_path()?;
     let machines = MachineState::list_all(&sync_path)?;
     let this_id = SyncState::load()?.machine_id;
@@ -316,9 +322,10 @@ pub fn remove_old_record(machine_id: &str, digest: &str) -> Result<()> {
     remove_record(machine_id)
 }
 
-/// Remove another machine's record, its signature and its profile assignment, and commit.
+/// Remove another machine's record, its signature and its profile assignment, commit, and
+/// untrust its key on this machine. Returns true when this machine trusted the key.
 /// The caller holds the sync lock and pushes.
-pub fn remove_record(name: &str) -> Result<()> {
+pub fn remove_record(name: &str) -> Result<bool> {
     // The id names files to delete, so a path such as `../../state` never reaches a join
     if !valid_machine_id(name) {
         anyhow::bail!("Invalid machine id '{}'", name);
@@ -348,7 +355,8 @@ pub fn remove_record(name: &str) -> Result<()> {
     if config.machine_profiles.remove(name).is_some() {
         config.save()?;
     }
-    Ok(())
+    // A later record under this id with the same key must wait for approval again
+    inbox::untrust_machine(name)
 }
 
 /// Trust only a key whose fingerprint the user gave or was shown and accepted.

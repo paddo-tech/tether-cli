@@ -47,10 +47,11 @@ pub enum Msg {
     },
     /// A machine key was trusted or an item rejected: the toast text, or the error.
     InboxDone(Result<String, String>),
-    /// Another machine's record was removed and committed, or the error.
+    /// Another machine's record was removed and committed, and whether this machine
+    /// untrusted its key, or the error.
     MachineRemoved {
         machine_id: String,
-        result: Result<(), String>,
+        result: Result<bool, String>,
     },
 }
 
