@@ -394,27 +394,51 @@ pub fn old_ids_of_this_machine(
     machines: &[MachineState],
     this_id: &str,
 ) -> Vec<String> {
-    let host = crate::sync::local_hostname();
-    let now = chrono::Utc::now();
-    // The dashboard calls this on every refresh. Verifying every signature repeats the
-    // record warnings as toasts, so verify only when a record could match.
-    if MachineState::old_ids_of_this_machine(machines, this_id, &host, &[], now).is_empty() {
-        return Vec::new();
-    }
     let own = key_path()
         .ok()
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| PrivateKey::from_openssh(b).ok())
-        .map(|k| k.public_key().key_data().clone());
-    let signed_by_other_keys: Vec<String> = record_signers(sync_path)
-        .into_iter()
-        .filter(|(_, key)| own.as_ref() != Some(key.key_data()))
-        .map(|(id, _)| id)
-        .collect();
-    MachineState::old_ids_of_this_machine(machines, this_id, &host, &signed_by_other_keys, now)
+        .map(|k| k.public_key().clone());
+    old_ids_at(
+        sync_path,
+        machines,
+        this_id,
+        &crate::sync::local_hostname(),
+        own.as_ref(),
+        chrono::Utc::now(),
+    )
+}
+
+fn old_ids_at(
+    sync_path: &Path,
+    machines: &[MachineState],
+    this_id: &str,
+    host: &str,
+    own: Option<&PublicKey>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    // Who signed the bytes decides, not whether validation keeps the signer: a record that
+    // another key signed belongs to that machine even when it has entries Tether drops.
+    let signed_by_other_keys: Vec<String> =
+        MachineState::old_ids_of_this_machine(machines, this_id, host, &[], now)
+            .into_iter()
+            .filter(|m| {
+                file_signer(sync_path, &m.machine_id)
+                    .is_some_and(|k| own.map(|o| o.key_data()) != Some(k.key_data()))
+            })
+            .map(|m| m.machine_id.clone())
+            .collect();
+    MachineState::old_ids_of_this_machine(machines, this_id, host, &signed_by_other_keys, now)
         .into_iter()
         .map(|m| m.machine_id.clone())
         .collect()
+}
+
+/// The key whose signature over `machine_id`'s record file verifies, whatever the record holds.
+fn file_signer(sync_path: &Path, machine_id: &str) -> Option<PublicKey> {
+    let bytes = std::fs::read(record_path(sync_path, machine_id)).ok()?;
+    let signature = std::fs::read_to_string(record_sig_path(sync_path, machine_id)).ok()?;
+    record_signer(machine_id, &bytes, &signature)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -813,6 +837,43 @@ mod tests {
         let found = records(tmp.path());
         assert!(found[0].record.package_versions["npm"].is_empty());
         assert!(found[0].signer.is_none());
+    }
+
+    #[test]
+    fn old_id_signed_by_another_key_is_excluded_even_when_validation_drops_its_signer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let own = key();
+        let now = chrono::Utc::now();
+        let mut this = MachineState::new("7d184e5919ef");
+        this.hostname = "mac.local".to_string();
+        let mut twin = MachineState::new("mac.local");
+        twin.hostname = "mac.local".to_string();
+        twin.cli_version = "1.11.10".to_string();
+        twin.last_sync = now - chrono::Duration::days(30);
+        twin.package_versions.insert(
+            "npm".to_string(),
+            std::collections::HashMap::from([("widget".to_string(), "^1.2.3".to_string())]),
+        );
+        write_record(tmp.path(), "mac.local", &twin);
+        let machines = MachineState::list_all(tmp.path()).unwrap();
+        let machines = [this, machines[0].clone()];
+        let found = |own: &PrivateKey| {
+            old_ids_at(
+                tmp.path(),
+                &machines,
+                "7d184e5919ef",
+                "mac.local",
+                Some(own.public_key()),
+                now,
+            )
+        };
+
+        assert_eq!(found(&own), ["mac.local"]);
+        sign_record(tmp.path(), "mac.local", &own).unwrap();
+        assert_eq!(found(&own), ["mac.local"]);
+        sign_record(tmp.path(), "mac.local", &key()).unwrap();
+        assert!(signer_of(tmp.path(), "mac.local").is_none());
+        assert!(found(&own).is_empty());
     }
 
     #[test]
