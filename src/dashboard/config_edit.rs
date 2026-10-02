@@ -120,20 +120,8 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
             kind: FieldKind::Bool,
         },
         ConfigField {
-            key: "npm.sync_versions",
-            label: "npm sync versions",
-            section: "Packages",
-            kind: FieldKind::Bool,
-        },
-        ConfigField {
             key: "pnpm.enabled",
             label: "pnpm enabled",
-            section: "Packages",
-            kind: FieldKind::Bool,
-        },
-        ConfigField {
-            key: "pnpm.sync_versions",
-            label: "pnpm sync versions",
             section: "Packages",
             kind: FieldKind::Bool,
         },
@@ -144,20 +132,8 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
             kind: FieldKind::Bool,
         },
         ConfigField {
-            key: "bun.sync_versions",
-            label: "Bun sync versions",
-            section: "Packages",
-            kind: FieldKind::Bool,
-        },
-        ConfigField {
             key: "gem.enabled",
             label: "Gem enabled",
-            section: "Packages",
-            kind: FieldKind::Bool,
-        },
-        ConfigField {
-            key: "gem.sync_versions",
-            label: "Gem sync versions",
             section: "Packages",
             kind: FieldKind::Bool,
         },
@@ -167,11 +143,30 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
             section: "Packages",
             kind: FieldKind::Bool,
         },
+        // Package security
         ConfigField {
-            key: "uv.sync_versions",
-            label: "uv sync versions",
-            section: "Packages",
+            key: "min_release_age_days",
+            label: "Min release age (days)",
+            section: "Package security",
+            kind: FieldKind::Text,
+        },
+        ConfigField {
+            key: "auto_install_from_trusted",
+            label: "Auto-install from trusted machines",
+            section: "Package security",
             kind: FieldKind::Bool,
+        },
+        ConfigField {
+            key: "brew.trusted_taps",
+            label: "Trusted Homebrew taps",
+            section: "Package security",
+            kind: FieldKind::List,
+        },
+        ConfigField {
+            key: "allow_scripts",
+            label: "Allow install scripts",
+            section: "Package security",
+            kind: FieldKind::List,
         },
         // Project
         ConfigField {
@@ -227,15 +222,15 @@ pub fn get_value(config: &Config, idx: usize) -> String {
         "brew.sync_casks" => config.packages.brew.sync_casks.to_string(),
         "brew.sync_taps" => config.packages.brew.sync_taps.to_string(),
         "npm.enabled" => config.packages.npm.enabled.to_string(),
-        "npm.sync_versions" => config.packages.npm.sync_versions.to_string(),
         "pnpm.enabled" => config.packages.pnpm.enabled.to_string(),
-        "pnpm.sync_versions" => config.packages.pnpm.sync_versions.to_string(),
         "bun.enabled" => config.packages.bun.enabled.to_string(),
-        "bun.sync_versions" => config.packages.bun.sync_versions.to_string(),
         "gem.enabled" => config.packages.gem.enabled.to_string(),
-        "gem.sync_versions" => config.packages.gem.sync_versions.to_string(),
         "uv.enabled" => config.packages.uv.enabled.to_string(),
-        "uv.sync_versions" => config.packages.uv.sync_versions.to_string(),
+        // Package security
+        "min_release_age_days" => config.packages.min_release_age_days.to_string(),
+        "auto_install_from_trusted" => config.packages.auto_install_from_trusted.to_string(),
+        "brew.trusted_taps" => format!("{} items", config.packages.brew.trusted_taps.len()),
+        "allow_scripts" => format!("{} items", config.packages.allow_scripts.len()),
         // Project
         "project_configs.enabled" => config.project_configs.enabled.to_string(),
         "project_configs.search_paths" => {
@@ -264,6 +259,10 @@ pub fn set_value(config: &mut Config, idx: usize, val: &str) -> bool {
                 _ => return false,
             };
         }
+        "min_release_age_days" => match val.trim().parse() {
+            Ok(days) => config.packages.min_release_age_days = days,
+            Err(_) => return false,
+        },
         _ => return false,
     }
     config.save().is_ok()
@@ -289,23 +288,13 @@ pub fn toggle(config: &mut Config, idx: usize) -> bool {
         "brew.sync_casks" => config.packages.brew.sync_casks = !config.packages.brew.sync_casks,
         "brew.sync_taps" => config.packages.brew.sync_taps = !config.packages.brew.sync_taps,
         "npm.enabled" => config.packages.npm.enabled = !config.packages.npm.enabled,
-        "npm.sync_versions" => {
-            config.packages.npm.sync_versions = !config.packages.npm.sync_versions
-        }
         "pnpm.enabled" => config.packages.pnpm.enabled = !config.packages.pnpm.enabled,
-        "pnpm.sync_versions" => {
-            config.packages.pnpm.sync_versions = !config.packages.pnpm.sync_versions
-        }
         "bun.enabled" => config.packages.bun.enabled = !config.packages.bun.enabled,
-        "bun.sync_versions" => {
-            config.packages.bun.sync_versions = !config.packages.bun.sync_versions
-        }
         "gem.enabled" => config.packages.gem.enabled = !config.packages.gem.enabled,
-        "gem.sync_versions" => {
-            config.packages.gem.sync_versions = !config.packages.gem.sync_versions
-        }
         "uv.enabled" => config.packages.uv.enabled = !config.packages.uv.enabled,
-        "uv.sync_versions" => config.packages.uv.sync_versions = !config.packages.uv.sync_versions,
+        "auto_install_from_trusted" => {
+            config.packages.auto_install_from_trusted = !config.packages.auto_install_from_trusted
+        }
         "project_configs.enabled" => {
             config.project_configs.enabled = !config.project_configs.enabled
         }
@@ -318,6 +307,8 @@ pub fn toggle(config: &mut Config, idx: usize) -> bool {
 pub fn get_list_items(config: &Config, key: &str) -> Vec<String> {
     match key {
         "dotfiles.dirs" => config.dotfiles.dirs.clone(),
+        "brew.trusted_taps" => config.packages.brew.trusted_taps.clone(),
+        "allow_scripts" => config.packages.allow_scripts.clone(),
         "project_configs.search_paths" => config.project_configs.search_paths.clone(),
         "project_configs.patterns" => config.project_configs.patterns.clone(),
         _ => Vec::new(),
@@ -334,17 +325,25 @@ pub fn get_dotfile_items(config: &Config) -> Vec<(String, bool)> {
         .collect()
 }
 
+fn list_mut<'a>(config: &'a mut Config, key: &str) -> Option<&'a mut Vec<String>> {
+    Some(match key {
+        "dotfiles.dirs" => &mut config.dotfiles.dirs,
+        "brew.trusted_taps" => &mut config.packages.brew.trusted_taps,
+        "allow_scripts" => &mut config.packages.allow_scripts,
+        "project_configs.search_paths" => &mut config.project_configs.search_paths,
+        "project_configs.patterns" => &mut config.project_configs.patterns,
+        _ => return None,
+    })
+}
+
 /// Add an item to a List field. Returns false on empty, duplicate, or save failure.
 pub fn add_list_item(config: &mut Config, key: &str, value: &str) -> bool {
     let value = value.trim();
     if value.is_empty() {
         return false;
     }
-    let list = match key {
-        "dotfiles.dirs" => &mut config.dotfiles.dirs,
-        "project_configs.search_paths" => &mut config.project_configs.search_paths,
-        "project_configs.patterns" => &mut config.project_configs.patterns,
-        _ => return false,
+    let Some(list) = list_mut(config, key) else {
+        return false;
     };
     if list.iter().any(|v| v == value) {
         return false;
@@ -355,11 +354,8 @@ pub fn add_list_item(config: &mut Config, key: &str, value: &str) -> bool {
 
 /// Remove an item from a List field by index. Returns false on out-of-bounds or save failure.
 pub fn remove_list_item(config: &mut Config, key: &str, index: usize) -> bool {
-    let list = match key {
-        "dotfiles.dirs" => &mut config.dotfiles.dirs,
-        "project_configs.search_paths" => &mut config.project_configs.search_paths,
-        "project_configs.patterns" => &mut config.project_configs.patterns,
-        _ => return false,
+    let Some(list) = list_mut(config, key) else {
+        return false;
     };
     if index >= list.len() {
         return false;

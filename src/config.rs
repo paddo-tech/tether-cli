@@ -179,39 +179,31 @@ pub struct BrewConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NpmConfig {
     pub enabled: bool,
-    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnpmConfig {
     pub enabled: bool,
-    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BunConfig {
     pub enabled: bool,
-    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GemConfig {
     pub enabled: bool,
-    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UvConfig {
     pub enabled: bool,
-    pub sync_versions: bool,
 }
 
 impl Default for UvConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            sync_versions: false,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -229,31 +221,19 @@ fn default_brew_config() -> BrewConfig {
 }
 
 fn default_npm_config() -> NpmConfig {
-    NpmConfig {
-        enabled: true,
-        sync_versions: false,
-    }
+    NpmConfig { enabled: true }
 }
 
 fn default_pnpm_config() -> PnpmConfig {
-    PnpmConfig {
-        enabled: true,
-        sync_versions: false,
-    }
+    PnpmConfig { enabled: true }
 }
 
 fn default_bun_config() -> BunConfig {
-    BunConfig {
-        enabled: true,
-        sync_versions: false,
-    }
+    BunConfig { enabled: true }
 }
 
 fn default_gem_config() -> GemConfig {
-    GemConfig {
-        enabled: true,
-        sync_versions: false,
-    }
+    GemConfig { enabled: true }
 }
 
 impl Default for SecurityConfig {
@@ -1034,22 +1014,10 @@ impl Default for Config {
                 allow_scripts: Vec::new(),
                 auto_install_from_trusted: true,
                 brew: default_brew_config(),
-                npm: NpmConfig {
-                    enabled: true,
-                    sync_versions: false,
-                },
-                pnpm: PnpmConfig {
-                    enabled: true,
-                    sync_versions: false,
-                },
-                bun: BunConfig {
-                    enabled: true,
-                    sync_versions: false,
-                },
-                gem: GemConfig {
-                    enabled: true,
-                    sync_versions: false,
-                },
+                npm: NpmConfig { enabled: true },
+                pnpm: PnpmConfig { enabled: true },
+                bun: BunConfig { enabled: true },
+                gem: GemConfig { enabled: true },
                 uv: UvConfig::default(),
             },
             dotfiles: DotfilesConfig {
