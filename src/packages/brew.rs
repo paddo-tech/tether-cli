@@ -265,6 +265,15 @@ fn tap_of(name: &str) -> Option<&str> {
     name.rsplit_once('/').map(|(tap, _)| tap)
 }
 
+/// `name` qualified with the tap it was reviewed under. brew resolves a short name to
+/// whichever tapped repository has it now, which may not be the reviewed tap.
+pub fn qualified_name(name: &str, tap: Option<&str>) -> String {
+    match tap {
+        Some(tap) if tap_of(name).is_none() => format!("{}/{}", tap, name),
+        _ => name.to_string(),
+    }
+}
+
 /// Installed taps under `taps_dir` that could provide a short formula or cask name. It reads
 /// file names and JSON only, never Ruby. It mirrors brew's lookup: a formula file in
 /// `Formula/` or `HomebrewFormula/` (sharded or not), else a top-level `*.rb`, a cask file in
@@ -890,6 +899,32 @@ impl PackageManager for BrewManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approved_items_install_from_the_reviewed_tap() {
+        assert_eq!(
+            qualified_name("wget", Some("homebrew/core")),
+            "homebrew/core/wget"
+        );
+        assert_eq!(qualified_name("bd", Some("good/tap")), "good/tap/bd");
+        assert_eq!(
+            qualified_name("oven-sh/bun/bun", Some("oven-sh/bun")),
+            "oven-sh/bun/bun"
+        );
+        assert_eq!(qualified_name("wget", None), "wget");
+
+        // The approval names the short name, and the install the qualified one
+        let policy = PackagePolicy {
+            approved_from_taps: vec![(
+                "brew_formulae".to_string(),
+                "bd".to_string(),
+                "good/tap".to_string(),
+            )],
+            ..PackagePolicy::default()
+        };
+        assert!(policy.brew_allowed("brew_formulae", "good/tap/bd", "good/tap"));
+        assert!(!policy.brew_allowed("brew_formulae", "evil/tap/bd", "evil/tap"));
+    }
 
     // Brewfile parsing tests
     #[test]

@@ -835,12 +835,21 @@ pub async fn install(item: &InboxItem, interactive: bool) -> Result<()> {
         name: item.name.clone(),
         version: item.version.clone(),
     };
+    // The approval covers the tap the name resolved to at review, not the tap it resolves to now
+    let brew_name = super::brew::qualified_name(&item.name, item.tap.as_deref());
     match item.manager.as_str() {
         "brew_taps" => BrewManager::new().tap(&item.name).await,
-        "brew_formulae" => BrewManager::new().install(&package).await,
+        "brew_formulae" => {
+            BrewManager::new()
+                .install(&PackageInfo {
+                    name: brew_name,
+                    version: None,
+                })
+                .await
+        }
         "brew_casks" => {
             if BrewManager::new()
-                .install_cask(&item.name, interactive)
+                .install_cask(&brew_name, interactive)
                 .await?
             {
                 Ok(())

@@ -67,11 +67,16 @@ impl PackagePolicy {
     /// `tap` when the tap is trusted or the user approved this one from it.
     pub fn brew_allowed(&self, manager: &str, name: &str, tap: &str) -> bool {
         self.tap_trusted(tap)
-            || self
-                .approved_from_taps
-                .iter()
-                .any(|(m, n, t)| m == manager && n == name && t.eq_ignore_ascii_case(tap))
+            || self.approved_from_taps.iter().any(|(m, n, t)| {
+                m == manager && short(n) == short(name) && t.eq_ignore_ascii_case(tap)
+            })
     }
+}
+
+/// A formula or cask name without its tap. An approval may name it short or qualified, and
+/// the tap is compared on its own.
+fn short(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
 }
 
 /// How a manager enforces `min_release_age_days`.
