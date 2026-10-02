@@ -352,16 +352,38 @@ pub fn remove_record(name: &str) -> Result<bool> {
 
 /// The record, its signature, and the public key file earlier builds published, relative to
 /// the sync repo. Anyone who can push can commit a symlink, so a symlink or a path outside
-/// the repo is refused rather than removed or restored.
+/// the repo is refused rather than removed or restored. A file name must match `name`
+/// exactly: on a case-insensitive file system `MAC` would open `mac.json`, while the trust
+/// store and config know only `mac`.
 fn record_paths(sync_path: &Path, name: &str) -> Result<Vec<String>> {
     let root = sync_path.canonicalize()?;
+    let listed: Vec<String> = match std::fs::read_dir(sync_path.join("machines")) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let record = format!("{}.json", name);
+    if !listed.contains(&record) {
+        if let Some(other) = listed.iter().find(|f| f.eq_ignore_ascii_case(&record)) {
+            anyhow::bail!(
+                "Machine '{}' not found. Did you mean '{}'? Machine ids are case-sensitive",
+                name,
+                other.trim_end_matches(".json")
+            );
+        }
+        anyhow::bail!("Machine '{}' not found", name);
+    }
     let mut paths = Vec::new();
     for ext in ["json", "json.sig", "pub"] {
-        let path = format!("machines/{}.{}", name, ext);
-        let full = sync_path.join(&path);
-        let Ok(meta) = std::fs::symlink_metadata(&full) else {
+        let file = format!("{}.{}", name, ext);
+        if !listed.contains(&file) {
             continue;
-        };
+        }
+        let path = format!("machines/{}", file);
+        let full = sync_path.join(&path);
+        let meta = std::fs::symlink_metadata(&full)?;
         if meta.file_type().is_symlink() {
             anyhow::bail!("{} is a symlink. Tether will not remove it", path);
         }
@@ -369,9 +391,6 @@ fn record_paths(sync_path: &Path, name: &str) -> Result<Vec<String>> {
             anyhow::bail!("{} resolves outside the sync repo", path);
         }
         paths.push(path);
-    }
-    if !paths.iter().any(|p| p.ends_with(".json")) {
-        anyhow::bail!("Machine '{}' not found", name);
     }
     Ok(paths)
 }
@@ -738,6 +757,9 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not found"));
+        // On a case-insensitive file system `A` opens `a.json`, but it is not that machine
+        let err = record_paths(&repo, "A").unwrap_err().to_string();
+        assert!(err.contains("Did you mean 'a'"), "{err}");
 
         // A machines directory that is itself a link leaves the repo
         let outside = tmp.path().join("outside");
