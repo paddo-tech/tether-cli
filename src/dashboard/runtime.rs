@@ -2,7 +2,7 @@
 
 use super::app::{DaemonOp, InstallOp, Job};
 use super::msg::{Cmd, Msg};
-use crate::packages::inbox::{InboxItem, Kind, OsvUnreachable};
+use crate::packages::inbox::{InboxItem, Kind, OsvUnchecked};
 use std::collections::HashMap;
 use std::future::Future;
 use std::process::{Child, Command, Stdio};
@@ -68,7 +68,7 @@ impl Runtime {
                                 return Msg::OsvUnreachable { op, error };
                             }
                             Err(Blocked::Refused(e)) => Err(e),
-                            Ok(()) => run_install(&op.manager_key, &op.name).await,
+                            Ok(version) => run_install(&op.manager_key, &op.name, version).await,
                         };
                         if result.is_ok() {
                             // Sync would uninstall it again while it is still tombstoned.
@@ -304,14 +304,14 @@ enum Blocked {
     OsvUnreachable(String),
 }
 
-/// The checks of `inbox::check_osv`. Unlike a sync, a dashboard install is not checked
-/// against trusted records, so when `osv_required` an OSV outage blocks it until the user
-/// agrees.
-async fn install_check(op: &InstallOp, osv_required: bool) -> Result<(), Blocked> {
+/// The checks of `inbox::check_osv`, and the version to install. Unlike a sync, a dashboard
+/// install is not checked against trusted records, so when `osv_required` a release OSV
+/// could not check blocks it until the user agrees.
+async fn install_check(op: &InstallOp, osv_required: bool) -> Result<Option<String>, Blocked> {
     crate::packages::inbox::check_osv(&op.manager_key, &op.name, None, osv_required)
         .await
-        .map_err(|e| match e.downcast::<OsvUnreachable>() {
-            Ok(unreachable) => Blocked::OsvUnreachable(unreachable.error),
+        .map_err(|e| match e.downcast::<OsvUnchecked>() {
+            Ok(unchecked) => Blocked::OsvUnreachable(unchecked.error),
             Err(e) => Blocked::Refused(e.to_string()),
         })
 }
@@ -341,16 +341,19 @@ async fn approve_and_install(
         )
         .await;
         let result = match check {
-            Err(e) => match e.downcast::<OsvUnreachable>() {
-                Ok(unreachable) => {
-                    osv_error = Some(unreachable.error);
+            Err(e) => match e.downcast::<OsvUnchecked>() {
+                Ok(e) => {
+                    osv_error = Some(e.error);
                     unchecked.push(item.clone());
                     continue;
                 }
                 Err(e) => Err(e),
             },
-            Ok(()) => match crate::packages::inbox::approve(item) {
-                Ok(item) => crate::packages::inbox::install(&item, false).await,
+            Ok(version) => match crate::packages::inbox::approve(item) {
+                Ok(item) => {
+                    let item = InboxItem { version, ..item };
+                    crate::packages::inbox::install(&item, false).await
+                }
                 Err(e) => Err(e),
             },
         };
@@ -366,7 +369,11 @@ async fn approve_and_install(
     (result, unchecked, osv_error)
 }
 
-async fn run_install(manager_key: &str, package: &str) -> Result<(), String> {
+async fn run_install(
+    manager_key: &str,
+    package: &str,
+    version: Option<String>,
+) -> Result<(), String> {
     use crate::packages::*;
 
     if manager_key == "brew_casks" {
@@ -386,7 +393,7 @@ async fn run_install(manager_key: &str, package: &str) -> Result<(), String> {
     manager
         .install(&PackageInfo {
             name: package.to_string(),
-            version: None,
+            version,
         })
         .await
         .map_err(|e| e.to_string())

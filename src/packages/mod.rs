@@ -8,6 +8,7 @@ pub mod osv;
 pub mod pin;
 pub mod pnpm;
 pub mod policy;
+pub mod resolve;
 pub mod uv;
 pub mod validate;
 

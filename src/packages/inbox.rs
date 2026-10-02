@@ -1,4 +1,4 @@
-use super::{manager_for_key, osv, BrewManager, PackageInfo, PackageManager};
+use super::{manager_for_key, osv, resolve, BrewManager, PackageInfo, PackageManager};
 use crate::cli::Output;
 use crate::sync::signing::{self, TrustStore};
 use anyhow::{bail, Result};
@@ -23,6 +23,9 @@ pub enum Reason {
     CooldownUnsupported,
     /// OSV lists a `MAL-` advisory for it. Approval cannot override this.
     Malicious,
+    /// OSV lists a `MAL-` advisory for some release of it, and Tether could not find the
+    /// release an unpinned install would pick. Approval overrides this, after a warning.
+    MaliciousUnresolved,
     /// A machine signs its record with a key this machine has not trusted for it yet.
     NewMachine,
     /// A trusted machine signs its record with a different key. The old key stays trusted
@@ -38,6 +41,7 @@ impl Reason {
             Reason::UntrustedTap => "untrusted tap",
             Reason::CooldownUnsupported => "release age not checked",
             Reason::Malicious => "malicious (OSV)",
+            Reason::MaliciousUnresolved => "malicious releases (OSV), install version unknown",
             Reason::NewMachine => "new machine key",
             Reason::KeyChanged => "machine key changed",
         }
@@ -473,6 +477,7 @@ pub struct Checks {
     pub cooldown_unsupported: bool,
     pub untrusted_tap: bool,
     pub malicious: bool,
+    pub malicious_unresolved: bool,
 }
 
 /// Reasons to hold a package back. An empty list means it may install.
@@ -483,6 +488,9 @@ pub fn reasons(checks: Checks) -> Vec<Reason> {
     }
     if checks.approved {
         return reasons;
+    }
+    if checks.malicious_unresolved {
+        reasons.push(Reason::MaliciousUnresolved);
     }
     if checks.untrusted_tap {
         reasons.push(Reason::UntrustedTap);
@@ -695,23 +703,27 @@ pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String
     held
 }
 
-/// OSV could not be asked about a package, and the caller needs an answer before it installs.
+/// OSV could not check the release that would install, and the caller needs an answer before
+/// it installs. `version` is the release that would install, when Tether found it.
 #[derive(Debug, thiserror::Error)]
 #[error("OSV could not check {name}: {error}")]
-pub struct OsvUnreachable {
+pub struct OsvUnchecked {
     pub name: String,
     pub error: String,
+    pub version: Option<String>,
 }
 
 /// Refuse a package that OSV lists as malicious, or that this inbox holds as malicious.
-/// With `osv_required`, an OSV outage refuses it too, as [`OsvUnreachable`], so the user can
-/// decide. Homebrew has no OSV ecosystem.
+/// Without `version`, OSV checks the release an unpinned install would pick now, and the
+/// caller installs that release. Returns the version to install. With `osv_required`, a
+/// release OSV could not check is refused too, as [`OsvUnchecked`], so the user can decide.
+/// Homebrew has no OSV ecosystem.
 pub async fn check_osv(
     manager_key: &str,
     name: &str,
     version: Option<&str>,
     osv_required: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     if Inbox::load()?.holds_malicious(manager_key, name) {
         bail!(
             "The inbox holds {} as malicious. Tether will not install it",
@@ -719,33 +731,54 @@ pub async fn check_osv(
         );
     }
     let Some(manager) = manager_for_key(manager_key) else {
-        return Ok(());
+        return Ok(version.map(str::to_string));
     };
-    let pin = [(name.to_string(), version.map(str::to_string))];
+    let (version, unresolved) = match version {
+        Some(v) => (Some(v.to_string()), None),
+        None => {
+            let min_age = super::PackagePolicy::load().min_release_age_days;
+            match resolve::resolve_version(manager.ecosystem(), name, min_age).await {
+                Ok(v) => (Some(v), None),
+                Err(e) => (None, Some(e.to_string())),
+            }
+        }
+    };
+    let pin = [(name.to_string(), version.clone())];
     let (found, errors) = osv::query(manager.ecosystem(), &pin).await;
     let malicious: Vec<&str> = found[0]
         .iter()
         .filter(|id| osv::is_malicious(id))
         .map(String::as_str)
         .collect();
-    if !malicious.is_empty() {
-        bail!(
-            "OSV lists {} as malicious ({}). Tether will not install it",
+    let error = match (unresolved, malicious.is_empty()) {
+        (None, false) => bail!(
+            "OSV lists {} {} as malicious ({}). Tether will not install it",
             name,
+            version.as_deref().unwrap_or_default(),
             malicious.join(", ")
-        );
-    }
-    match errors.into_iter().next() {
-        Some(error) if osv_required => Err(OsvUnreachable {
+        ),
+        // An unpinned query returns every release's advisories, so this proves nothing about
+        // the release that installs: the user decides, after a loud warning.
+        (Some(e), false) => Some(format!(
+            "Tether could not find the release that would install ({}), and OSV lists \
+             MALICIOUS releases of it ({})",
+            e,
+            malicious.join(", ")
+        )),
+        _ => errors.into_iter().next(),
+    };
+    match error {
+        Some(error) if osv_required => Err(OsvUnchecked {
             name: name.to_string(),
             error,
+            version,
         }
         .into()),
         Some(error) => {
-            Output::warning(&error);
-            Ok(())
+            Output::warning(&format!("{}: {}", name, error));
+            Ok(version)
         }
-        None => Ok(()),
+        None => Ok(version),
     }
 }
 
@@ -1068,6 +1101,29 @@ mod tests {
             }),
             vec![Reason::Malicious]
         );
+        // A malicious release of an unpinned package whose install version is unknown holds
+        // it, but approval overrides that, unlike a malicious release that would install
+        assert_eq!(
+            reasons(Checks {
+                malicious_unresolved: true,
+                ..trusted
+            }),
+            vec![Reason::MaliciousUnresolved]
+        );
+        assert!(reasons(Checks {
+            approved: true,
+            malicious_unresolved: true,
+            ..other
+        })
+        .is_empty());
+        let mut inbox = Inbox::default();
+        let shown = InboxItem {
+            version: None,
+            reasons: vec![Reason::MaliciousUnresolved],
+            ..item("npm", "chalk")
+        };
+        inbox.add(shown.clone());
+        assert!(inbox.approve(&shown).is_ok());
     }
 
     fn key() -> PublicKey {

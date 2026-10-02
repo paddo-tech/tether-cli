@@ -182,6 +182,7 @@ fn badge(reason: Reason) -> &'static str {
         Reason::UntrustedTap => "untrusted tap",
         Reason::CooldownUnsupported => "no age check",
         Reason::Malicious => "MALICIOUS",
+        Reason::MaliciousUnresolved => "MALICIOUS RELEASES",
         Reason::UntrustedSigner => "untrusted signer",
         Reason::NewMachine => "new machine",
         Reason::KeyChanged => "KEY CHANGED",
@@ -193,7 +194,7 @@ fn reason_color(reason: Reason, t: &Theme) -> Color {
         Reason::Unsigned => t.warn,
         Reason::UntrustedTap => t.key,
         Reason::CooldownUnsupported => t.info,
-        Reason::Malicious | Reason::KeyChanged => t.error,
+        Reason::Malicious | Reason::MaliciousUnresolved | Reason::KeyChanged => t.error,
         Reason::UntrustedSigner => t.key,
         Reason::NewMachine => t.info,
     }
@@ -212,6 +213,9 @@ fn explain(reason: Reason) -> &'static str {
         }
         Reason::Malicious => {
             "OSV reports this package as malicious. Tether will not install it, even with approval."
+        }
+        Reason::MaliciousUnresolved => {
+            "OSV reports malicious releases of this package, and Tether could not find the release that would install. Approve only if you checked that release yourself."
         }
         Reason::UntrustedSigner => {
             "A valid signature covers the change, but this machine does not trust the key that made it."

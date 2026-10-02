@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::packages::inbox::{self, Checks, Inbox, InboxItem, Kind, Reason, Signer};
 use crate::packages::osv;
 use crate::packages::pin::{format_pin, parse_pin};
+use crate::packages::resolve::resolve_version;
 use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageManager,
     PackagePolicy,
@@ -957,30 +958,50 @@ async fn gate_simple(
     gated: &mut Gated,
 ) -> Vec<String> {
     let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
-    let pins: Vec<(String, Option<String>)> = missing
-        .iter()
-        .map(|(name, version, _)| (name.clone(), version.clone()))
-        .collect();
+    let min_age = crate::packages::PackagePolicy::load().min_release_age_days;
+    // An unpinned line installs the release resolved here, so OSV checks that release
+    let mut pins: Vec<(String, Option<String>)> = Vec::new();
+    for (name, version, _) in &missing {
+        let version = match version {
+            Some(v) => Some(v.clone()),
+            None => resolve_version(def.ecosystem, name, min_age).await.ok(),
+        };
+        pins.push((name.clone(), version));
+    }
     let advisories = osv::advisories(def.ecosystem, &pins).await;
     let mut allowed = Vec::new();
-    for ((name, version, line), advisories) in missing.into_iter().zip(advisories) {
+    for (((name, version, line), (_, resolved)), advisories) in
+        missing.into_iter().zip(pins).zip(advisories)
+    {
+        let malicious = advisories.iter().any(|id| osv::is_malicious(id));
         let mut checks = Checks {
             cooldown_unsupported,
-            malicious: advisories.iter().any(|id| osv::is_malicious(id)),
+            malicious: malicious && resolved.is_some(),
+            malicious_unresolved: malicious && resolved.is_none(),
             ..trust.checks(def.state_key, &name, version.as_deref(), None)
         };
         checks.approved |= confirmed.contains(&name);
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
-            if !advisories.is_empty() {
+            if checks.malicious_unresolved {
+                Output::warning(&format!(
+                    "Installing {} as approved, although OSV lists MALICIOUS releases of it ({}) \
+                     and Tether could not find the release that installs",
+                    line,
+                    advisories.join(", ")
+                ));
+            } else if !advisories.is_empty() {
                 Output::warning(&format!(
                     "{} has known vulnerabilities: {}",
                     line,
                     advisories.join(", ")
                 ));
             }
-            gated.passed.push((def.state_key.to_string(), name));
-            allowed.push(line);
+            gated.passed.push((def.state_key.to_string(), name.clone()));
+            allowed.push(match (&version, &resolved) {
+                (None, Some(resolved)) => format_pin(def.ecosystem, &name, Some(resolved)),
+                _ => line,
+            });
         } else {
             let mut item = trust.item(def.state_key, &name, version, None, reasons);
             item.advisories = advisories;
