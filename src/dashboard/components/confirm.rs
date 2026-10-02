@@ -141,9 +141,9 @@ pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd>
     match key.code {
         // Installing without the malicious-package check, approving, or deleting a record is
         // never the default answer
-        KeyCode::Enter if confirm.arming().is_some() => None,
+        KeyCode::Enter if confirm.arming().is_some() => cancel(app, confirm),
         KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
-        KeyCode::Char('n') | KeyCode::Esc => None,
+        KeyCode::Char('n') | KeyCode::Esc => cancel(app, confirm),
         KeyCode::Char('j')
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -175,6 +175,14 @@ pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd>
             app.overlays.push(Overlay::Confirm(confirm));
             None
         }
+    }
+}
+
+/// The packages approved before OSV became unreachable sync once the user declines the rest.
+fn cancel(app: &mut App, confirm: Confirm) -> Option<Cmd> {
+    match confirm {
+        Confirm::ApproveWithoutOsv { .. } => app.follow_up_sync(),
+        _ => None,
     }
 }
 

@@ -119,9 +119,9 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                         error,
                         arming: Default::default(),
                     }));
-                // Items OSV did check are approved and installed already
+                // Items OSV did check are approved and installed already. Their sync waits
+                // for the answer, because `y` needs the sync lock
                 security::reload(app);
-                return app.follow_up_sync();
             }
             None
         }
@@ -1159,9 +1159,14 @@ mod tests {
             unchecked: items.clone(),
             error: "timeout".into(),
         };
-        update(&mut app, unreachable(op));
+        // The sync for the items OSV did check waits for the answer: it would hold the sync
+        // lock that `y` needs
+        assert!(update(&mut app, unreachable(op)).is_none());
         assert!(app.installing.is_none());
-        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Enter),
+            Some(Cmd::Run(Job::Sync))
+        ));
         assert!(app.overlays.is_empty());
 
         let Some(Cmd::ApprovePackages { op, .. }) =
