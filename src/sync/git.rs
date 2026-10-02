@@ -181,16 +181,44 @@ impl GitBackend {
     }
 
     /// Write `paths` back from HEAD's tree. It does not touch the index, so a stale
-    /// index lock cannot stop it.
+    /// index lock cannot stop it. Each path is removed and created again, never written
+    /// through: a committed symlink such as `machines/old.json -> ../../state.json` comes
+    /// back as that symlink, and Tether's own files outside the repo stay untouched.
     fn restore_from_head(&self, paths: &[String]) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
         let repo = Repository::open(&self.repo_path)?;
         let tree = repo.head()?.peel_to_tree()?;
+        let root = self.repo_path.canonicalize()?;
         for path in paths {
-            let blob = tree
-                .get_path(Path::new(path))?
-                .to_object(&repo)?
-                .peel_to_blob()?;
-            std::fs::write(self.repo_path.join(path), blob.content())?;
+            let entry = tree.get_path(Path::new(path))?;
+            let blob = entry.to_object(&repo)?.peel_to_blob()?;
+            let target = self.repo_path.join(path);
+            let parent = target
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path))?;
+            if !parent.canonicalize()?.starts_with(&root) {
+                anyhow::bail!("{} resolves outside the repository", path);
+            }
+            match std::fs::symlink_metadata(&target) {
+                Ok(_) => std::fs::remove_file(&target)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            let mode = entry.filemode();
+            if mode == i32::from(git2::FileMode::Link) {
+                std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(blob.content()), &target)?;
+            } else {
+                let executable = mode == i32::from(git2::FileMode::BlobExecutable);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(if executable { 0o755 } else { 0o644 })
+                    .open(&target)?
+                    .write_all(blob.content())?;
+            }
         }
         Ok(())
     }
@@ -1098,5 +1126,23 @@ mod tests {
             "shared"
         );
         assert_eq!(git(&a.repo_path, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn test_restore_after_a_failed_commit_never_writes_through_a_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, _) = two_clones(tmp.path());
+        let victim = tmp.path().join("state.json");
+        std::fs::write(&victim, "state").unwrap();
+        std::fs::create_dir_all(a.repo_path.join("machines")).unwrap();
+        let link = a.repo_path.join("machines/old.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        a.commit("add old", "a").unwrap();
+        let paths = vec!["machines/old.json".to_string()];
+
+        std::fs::write(a.repo_path.join(".git/index.lock"), "").unwrap();
+        assert!(a.remove_and_commit(&paths, "remove old", "a").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "state");
+        assert_eq!(std::fs::read_link(&link).unwrap(), victim);
     }
 }

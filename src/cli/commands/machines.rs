@@ -8,6 +8,7 @@ use anyhow::Result;
 use chrono::Local;
 use comfy_table::{Attribute, Cell, Color};
 use owo_colors::OwoColorize;
+use std::path::Path;
 
 pub async fn list() -> Result<()> {
     let config = Config::load()?;
@@ -334,17 +335,7 @@ pub fn remove_record(name: &str) -> Result<bool> {
         anyhow::bail!("Cannot remove the current machine");
     }
     let sync_path = SyncEngine::sync_path()?;
-    let machine_file = sync_path.join("machines").join(format!("{}.json", name));
-    if !machine_file.exists() {
-        anyhow::bail!("Machine '{}' not found", name);
-    }
-
-    // The record, its signature, and the public key file earlier builds published
-    let paths: Vec<String> = ["json", "json.sig", "pub"]
-        .iter()
-        .map(|ext| format!("machines/{}.{}", name, ext))
-        .filter(|path| sync_path.join(path).exists())
-        .collect();
+    let paths = record_paths(&sync_path, name)?;
     GitBackend::open(&sync_path)?.remove_and_commit(
         &paths,
         &format!("Remove machine {}", name),
@@ -357,6 +348,32 @@ pub fn remove_record(name: &str) -> Result<bool> {
     }
     // A later record under this id with the same key must wait for approval again
     inbox::untrust_machine(name)
+}
+
+/// The record, its signature, and the public key file earlier builds published, relative to
+/// the sync repo. Anyone who can push can commit a symlink, so a symlink or a path outside
+/// the repo is refused rather than removed or restored.
+fn record_paths(sync_path: &Path, name: &str) -> Result<Vec<String>> {
+    let root = sync_path.canonicalize()?;
+    let mut paths = Vec::new();
+    for ext in ["json", "json.sig", "pub"] {
+        let path = format!("machines/{}.{}", name, ext);
+        let full = sync_path.join(&path);
+        let Ok(meta) = std::fs::symlink_metadata(&full) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            anyhow::bail!("{} is a symlink. Tether will not remove it", path);
+        }
+        if !full.canonicalize()?.starts_with(&root) {
+            anyhow::bail!("{} resolves outside the sync repo", path);
+        }
+        paths.push(path);
+    }
+    if !paths.iter().any(|p| p.ends_with(".json")) {
+        anyhow::bail!("Machine '{}' not found", name);
+    }
+    Ok(paths)
 }
 
 /// Trust only a key whose fingerprint the user gave or was shown and accepted.
@@ -698,5 +715,37 @@ mod tests {
             let err = remove_record(id).unwrap_err().to_string();
             assert!(err.contains("Invalid machine id"), "{}: {}", id, err);
         }
+    }
+
+    #[test]
+    fn record_paths_refuse_symlinks_and_paths_outside_the_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("sync");
+        let machines = repo.join("machines");
+        std::fs::create_dir_all(&machines).unwrap();
+        std::fs::write(tmp.path().join("state.json"), "state").unwrap();
+        std::fs::write(machines.join("a.json"), "{}").unwrap();
+        std::fs::write(machines.join("a.json.sig"), "sig").unwrap();
+        assert_eq!(
+            record_paths(&repo, "a").unwrap(),
+            vec!["machines/a.json", "machines/a.json.sig"]
+        );
+
+        std::os::unix::fs::symlink("../../state.json", machines.join("old.json")).unwrap();
+        let err = record_paths(&repo, "old").unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(record_paths(&repo, "gone")
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
+
+        // A machines directory that is itself a link leaves the repo
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("b.json"), "{}").unwrap();
+        std::fs::remove_dir_all(&machines).unwrap();
+        std::os::unix::fs::symlink(&outside, &machines).unwrap();
+        let err = record_paths(&repo, "b").unwrap_err().to_string();
+        assert!(err.contains("outside"), "{err}");
     }
 }
