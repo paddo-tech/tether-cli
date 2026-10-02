@@ -150,6 +150,51 @@ impl GitBackend {
         Ok(())
     }
 
+    /// Delete the tracked files at `paths` (relative to the repo) and commit the deletion.
+    /// When any step fails, the files come back from HEAD, so a retry starts from the
+    /// same tree.
+    pub fn remove_and_commit(&self, paths: &[String], message: &str, author: &str) -> Result<()> {
+        let removed = (|| {
+            let repo = Repository::open(&self.repo_path)?;
+            let mut index = repo.index()?;
+            for path in paths {
+                index.remove_path(Path::new(path))?;
+            }
+            index.write()?;
+            for path in paths {
+                std::fs::remove_file(self.repo_path.join(path))?;
+            }
+            self.commit(message, author)
+        })();
+        let Err(e) = removed else {
+            return Ok(());
+        };
+        if let Err(restore) = self.restore_from_head(paths) {
+            anyhow::bail!(
+                "{}. Restoring {} from HEAD also failed: {}",
+                e,
+                paths.join(", "),
+                restore
+            );
+        }
+        Err(e)
+    }
+
+    /// Write `paths` back from HEAD's tree. It does not touch the index, so a stale
+    /// index lock cannot stop it.
+    fn restore_from_head(&self, paths: &[String]) -> Result<()> {
+        let repo = Repository::open(&self.repo_path)?;
+        let tree = repo.head()?.peel_to_tree()?;
+        for path in paths {
+            let blob = tree
+                .get_path(Path::new(path))?
+                .to_object(&repo)?
+                .peel_to_blob()?;
+            std::fs::write(self.repo_path.join(path), blob.content())?;
+        }
+        Ok(())
+    }
+
     fn git(&self, args: &[&str]) -> Result<()> {
         let output = Command::new("git")
             .args(args)
@@ -1023,5 +1068,35 @@ mod tests {
         assert_eq!(kept, "from b");
         let stashed = git(&b.repo_path, &["show", "stash@{0}:shared"]);
         assert_eq!(stashed, "uncommitted");
+    }
+
+    #[test]
+    fn test_remove_and_commit_restores_files_when_the_commit_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, _) = two_clones(tmp.path());
+        std::fs::create_dir_all(a.repo_path.join("machines")).unwrap();
+        std::fs::write(a.repo_path.join("machines/old.json"), "record").unwrap();
+        std::fs::write(a.repo_path.join("machines/old.json.sig"), "sig").unwrap();
+        a.commit("add old", "a").unwrap();
+        let paths = vec![
+            "machines/old.json".to_string(),
+            "machines/old.json.sig".to_string(),
+        ];
+
+        let lock = a.repo_path.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        assert!(a.remove_and_commit(&paths, "remove old", "a").is_err());
+        let record = std::fs::read_to_string(a.repo_path.join("machines/old.json")).unwrap();
+        assert_eq!(record, "record");
+        assert!(a.repo_path.join("machines/old.json.sig").exists());
+
+        std::fs::remove_file(&lock).unwrap();
+        a.remove_and_commit(&paths, "remove old", "a").unwrap();
+        assert!(!a.repo_path.join("machines/old.json").exists());
+        assert_eq!(
+            git(&a.repo_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            "shared"
+        );
+        assert_eq!(git(&a.repo_path, &["status", "--porcelain"]), "");
     }
 }

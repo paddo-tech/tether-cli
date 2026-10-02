@@ -332,31 +332,21 @@ pub fn remove_record(name: &str) -> Result<()> {
         anyhow::bail!("Machine '{}' not found", name);
     }
 
-    std::fs::remove_file(&machine_file)?;
-    remove_signature(&sync_path, name)?;
+    // The record, its signature, and the public key file earlier builds published
+    let paths: Vec<String> = ["json", "json.sig", "pub"]
+        .iter()
+        .map(|ext| format!("machines/{}.{}", name, ext))
+        .filter(|path| sync_path.join(path).exists())
+        .collect();
+    GitBackend::open(&sync_path)?.remove_and_commit(
+        &paths,
+        &format!("Remove machine {}", name),
+        &crate::sync::local_hostname(),
+    )?;
 
     let mut config = Config::load()?;
     if config.machine_profiles.remove(name).is_some() {
         config.save()?;
-    }
-
-    GitBackend::open(&sync_path)?.commit(
-        &format!("Remove machine {}", name),
-        &crate::sync::local_hostname(),
-    )
-}
-
-/// Remove a machine's record signature and the public key file earlier builds published.
-fn remove_signature(sync_path: &std::path::Path, machine_id: &str) -> Result<()> {
-    for path in [
-        signing::record_sig_path(sync_path, machine_id),
-        sync_path
-            .join("machines")
-            .join(format!("{}.pub", machine_id)),
-    ] {
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
     }
     Ok(())
 }
