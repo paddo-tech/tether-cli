@@ -61,7 +61,7 @@ pub async fn list() -> Result<()> {
         let marker = if is_current {
             Cell::new("(this machine)").fg(Color::Green)
         } else if old_ids.contains(&machine.machine_id) {
-            Cell::new("(old id of this machine?)").fg(Color::Yellow)
+            Cell::new("(may be an old id of this machine)").fg(Color::Yellow)
         } else {
             Cell::new("")
         };
@@ -124,7 +124,8 @@ pub async fn list() -> Result<()> {
 pub fn print_old_id_hints(old_ids: &[String]) {
     for id in old_ids {
         Output::info(&format!(
-            "{} looks like an old id of this machine. Remove it: tether machines remove {}",
+            "{} may be an old id of this machine, a guess from its hostname, age and build. \
+             If no other machine uses this hostname, remove it: tether machines remove {}",
             id, id
         ));
     }

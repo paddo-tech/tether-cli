@@ -356,7 +356,8 @@ impl MachineState {
     /// still count in the union. A record matches when its hostname or its id is this
     /// machine's hostname. It must also be older than this machine's record and silent for
     /// [`OLD_ID_SILENT_DAYS`]. A record that another key validly signed belongs to another
-    /// machine, so it never matches.
+    /// machine, so it never matches. A match is a guess: an unsigned twin with this
+    /// hostname on an old build can still match.
     pub fn old_ids_of_this_machine<'a>(
         machines: &'a [Self],
         this_id: &str,
@@ -380,6 +381,9 @@ impl MachineState {
                     && now.signed_duration_since(m.last_sync)
                         > chrono::Duration::days(OLD_ID_SILENT_DAYS)
                     && !signed_by_other_keys.contains(&m.machine_id)
+                    // A random id or a 1.12+ build is another install: old ids are hostname ids
+                    && (!is_random_id(&m.machine_id) || host_key(&m.machine_id) == host)
+                    && written_before_random_ids(&m.cli_version)
             })
             .collect()
     }
@@ -388,6 +392,20 @@ impl MachineState {
 /// Two machines can share a hostname. A daemon syncs every 5 minutes, so a week without a
 /// sync separates a record nothing writes from a twin that is only switched off for a day.
 pub const OLD_ID_SILENT_DAYS: i64 = 7;
+
+/// The format of ids that [`crate::security::random_hex_id`] makes.
+fn is_random_id(id: &str) -> bool {
+    id.len() == 12 && id.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// Builds from 1.12.0 on make random ids. A record without a readable version may be older.
+fn written_before_random_ids(cli_version: &str) -> bool {
+    let mut parts = cli_version.split('.').map(|p| p.parse::<u64>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) < (1, 12),
+        _ => true,
+    }
+}
 
 /// A hostname as macOS and Linux may both report it: no case, no `.local` suffix.
 fn host_key(name: &str) -> String {
@@ -785,6 +803,7 @@ mod tests {
         let mut m = MachineState::new(id);
         m.hostname = hostname.to_string();
         m.last_sync = Utc::now() - chrono::Duration::days(days_ago);
+        m.cli_version = "1.11.10".to_string();
         m
     }
 
@@ -823,11 +842,28 @@ mod tests {
         let machines = [
             record_at("7d184e5919ef", "paddos-macbook", 0),
             record_at("PADDOS-MACBOOK.local", "", 20),
-            record_at("0123456789ab", "Paddos-MacBook.local", 20),
+            record_at("work-mac", "Paddos-MacBook.local", 20),
         ];
         let mut found = old_ids(&machines, "paddos-macbook", &[]);
         found.sort();
-        assert_eq!(found, ["0123456789ab", "PADDOS-MACBOOK.local"]);
+        assert_eq!(found, ["PADDOS-MACBOOK.local", "work-mac"]);
+    }
+
+    #[test]
+    fn test_old_id_skips_random_ids_and_newer_builds() {
+        let mut new_build = record_at("mac.local", "mac.local", 30);
+        new_build.cli_version = "1.12.0".to_string();
+        let machines = [
+            record_at("7d184e5919ef", "mac.local", 0),
+            record_at("0123456789ab", "mac.local", 30),
+            new_build,
+        ];
+        assert!(old_ids(&machines, "mac.local", &[]).is_empty());
+
+        let mut unknown = record_at("mac.local", "mac.local", 30);
+        unknown.cli_version = String::new();
+        let machines = [record_at("7d184e5919ef", "mac.local", 0), unknown];
+        assert_eq!(old_ids(&machines, "mac.local", &[]), ["mac.local"]);
     }
 
     #[test]

@@ -123,7 +123,7 @@ pub fn confirm_remove(app: &mut App, machine_id: &str) {
     }
     if !is_old_id(app, machine_id) {
         app.flash_info(format!(
-            "{} is not an old id of this machine. Remove it with 'tether machines remove {}'",
+            "{} does not look like an old id of this machine. Remove it with 'tether machines remove {}'",
             machine_id, machine_id
         ));
         return;
@@ -305,7 +305,7 @@ fn card(
         first.push(pill("this", t.accent, t));
         first.push(Span::raw(" "));
     } else if old_id {
-        first.push(pill("old id of this machine?", t.warn, t));
+        first.push(pill("may be old id", t.warn, t));
         first.push(Span::raw(" "));
     }
     first.push(Span::styled(
@@ -433,8 +433,9 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
     f.render_widget(block, area);
     if is_old_id(app, &m.machine_id) {
         let note = format!(
-            "Likely an old id of this machine: it matches this hostname and has not synced \
-             for over {} days. Its packages still count for every machine. Press D to remove it.",
+            "May be an old id of this machine. Tether guesses: it matches this hostname, comes \
+             from an old build and has not synced for over {} days. Check that no other machine \
+             uses this hostname. Its packages still count for every machine. Press D to remove it.",
             crate::sync::state::OLD_ID_SILENT_DAYS
         );
         // A blank line under the note, which word wrap may take
