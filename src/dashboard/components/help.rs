@@ -160,7 +160,7 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
 
     // One blank row above and below the longest column.
     let two_col = area.width >= 78 && area.height >= 24;
-    let height = if two_col { 22 } else { 41 }.min(area.height.saturating_sub(2));
+    let height = if two_col { 23 } else { 42 }.min(area.height.saturating_sub(2));
     let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
     let rect = centered(area, width, height);
     app.add_hit(rect, Hit::Block);

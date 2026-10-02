@@ -394,6 +394,13 @@ pub fn old_ids_of_this_machine(
     machines: &[MachineState],
     this_id: &str,
 ) -> Vec<String> {
+    let host = crate::sync::local_hostname();
+    let now = chrono::Utc::now();
+    // The dashboard calls this on every refresh. Verifying every signature repeats the
+    // record warnings as toasts, so verify only when a record could match.
+    if MachineState::old_ids_of_this_machine(machines, this_id, &host, &[], now).is_empty() {
+        return Vec::new();
+    }
     let own = key_path()
         .ok()
         .and_then(|p| std::fs::read(p).ok())
@@ -404,16 +411,10 @@ pub fn old_ids_of_this_machine(
         .filter(|(_, key)| own.as_ref() != Some(key.key_data()))
         .map(|(id, _)| id)
         .collect();
-    MachineState::old_ids_of_this_machine(
-        machines,
-        this_id,
-        &crate::sync::local_hostname(),
-        &signed_by_other_keys,
-        chrono::Utc::now(),
-    )
-    .into_iter()
-    .map(|m| m.machine_id.clone())
-    .collect()
+    MachineState::old_ids_of_this_machine(machines, this_id, &host, &signed_by_other_keys, now)
+        .into_iter()
+        .map(|m| m.machine_id.clone())
+        .collect()
 }
 
 #[derive(Serialize, Deserialize)]
