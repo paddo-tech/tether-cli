@@ -125,7 +125,7 @@ pub async fn list() -> Result<()> {
 pub fn print_old_id_hints(old_ids: &[signing::OldId]) {
     for id in old_ids.iter().map(|o| &o.machine_id) {
         Output::info(&format!(
-            "{} may be an old id of this machine, a guess from its hostname, age and build. \
+            "{} may be an old id of this machine, a guess from its hostname and age. \
              If no other machine uses this hostname, remove it: tether machines remove {}",
             id, id
         ));

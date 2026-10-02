@@ -271,8 +271,8 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 f,
                 app,
                 "Remove old record",
-                "This record may be an old id of this machine. Tether guesses from its hostname, \
-                 age and build, so check that no other machine uses this hostname. An old id no \
+                "This record may be an old id of this machine. Tether guesses from its hostname \
+                 and age, so check that no other machine uses this hostname. An old id no \
                  longer syncs, but its packages still count for every machine. Remove it and \
                  commit the removal?",
                 &lines,
