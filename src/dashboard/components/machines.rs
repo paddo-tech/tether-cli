@@ -148,6 +148,7 @@ pub fn confirm_remove(app: &mut App, machine_id: &str) {
         last_sync: m.last_sync,
         packages: m.packages.values().map(|v| v.len()).sum(),
         digest,
+        arming: Default::default(),
     };
     app.overlays.push(Overlay::Confirm(confirm));
 }

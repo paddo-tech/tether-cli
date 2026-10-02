@@ -5,6 +5,45 @@ use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+/// How long a confirm that can open under the user's typing ignores keys after its first draw.
+pub const ARM_DELAY: Duration = Duration::from_millis(400);
+
+/// When a confirm was first drawn. These confirms can open after a background result, while
+/// the user types elsewhere, so a key typed for something else must not answer them.
+#[derive(Default)]
+pub struct Arming {
+    drawn: Cell<Option<Instant>>,
+}
+
+impl Arming {
+    pub fn drawn(&self, now: Instant) {
+        if self.drawn.get().is_none() {
+            self.drawn.set(Some(now));
+        }
+    }
+
+    /// Time left before keys count, or `None` once armed. A confirm never drawn is not armed.
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        match self.drawn.get() {
+            None => Some(ARM_DELAY),
+            Some(at) => ARM_DELAY
+                .checked_sub(now.saturating_duration_since(at))
+                .filter(|d| !d.is_zero()),
+        }
+    }
+
+    pub fn armed(&self, now: Instant) -> bool {
+        self.remaining(now).is_none()
+    }
+
+    #[cfg(test)]
+    pub fn drawn_long_ago(&self) {
+        self.drawn.set(Some(Instant::now() - ARM_DELAY));
+    }
+}
 
 /// A yes/no question about one action.
 pub enum Confirm {
@@ -27,11 +66,13 @@ pub enum Confirm {
         manager_key: String,
         name: String,
         error: String,
+        arming: Arming,
     },
     /// Approve and install inbox items that OSV could not check. Only `y` accepts.
     ApproveWithoutOsv {
         items: Vec<crate::packages::inbox::InboxItem>,
         error: String,
+        arming: Arming,
     },
     /// Remove another machine's record that looks like an old id of this machine. Only `y`
     /// accepts.
@@ -42,6 +83,7 @@ pub enum Confirm {
         packages: usize,
         /// SHA-256 of the record file shown
         digest: String,
+        arming: Arming,
     },
     /// Approve and install these inbox items, as displayed when the confirm opened. It lists
     /// every one of them, because `y` approves exactly this list.
@@ -52,6 +94,7 @@ pub enum Confirm {
         scroll: usize,
         /// Items the last draw had room for
         rows: std::cell::Cell<usize>,
+        arming: Arming,
     },
 }
 
@@ -62,25 +105,43 @@ impl Confirm {
             malicious,
             scroll: 0,
             rows: std::cell::Cell::new(1),
+            arming: Arming::default(),
+        }
+    }
+
+    /// Confirms that install without the malicious-package check, approve, or delete a
+    /// record wait to be armed. Only `y` accepts them.
+    pub fn arming(&self) -> Option<&Arming> {
+        match self {
+            Confirm::InstallWithoutOsv { arming, .. }
+            | Confirm::ApproveWithoutOsv { arming, .. }
+            | Confirm::RemoveMachine { arming, .. }
+            | Confirm::ApproveAll { arming, .. } => Some(arming),
+            _ => None,
         }
     }
 }
 
 /// The overlay was popped off the stack; push it back to keep it open.
 pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd> {
+    let scroll = matches!(
+        key.code,
+        KeyCode::Char('j')
+            | KeyCode::Char('k')
+            | KeyCode::Down
+            | KeyCode::Up
+            | KeyCode::PageDown
+            | KeyCode::PageUp
+    );
+    // Scrolling is harmless, so it works before the confirm is armed
+    if !scroll && confirm.arming().is_some_and(|a| !a.armed(Instant::now())) {
+        app.overlays.push(Overlay::Confirm(confirm));
+        return None;
+    }
     match key.code {
-        // Installing without the malicious-package check, or deleting a record, is never
-        // the default answer
-        KeyCode::Enter
-            if matches!(
-                confirm,
-                Confirm::InstallWithoutOsv { .. }
-                    | Confirm::ApproveWithoutOsv { .. }
-                    | Confirm::RemoveMachine { .. }
-            ) =>
-        {
-            None
-        }
+        // Installing without the malicious-package check, approving, or deleting a record is
+        // never the default answer
+        KeyCode::Enter if confirm.arming().is_some() => None,
         KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
         KeyCode::Char('n') | KeyCode::Esc => None,
         KeyCode::Char('j')
@@ -178,10 +239,16 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
 
 pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
     let t = &app.theme;
+    let now = Instant::now();
+    if let Some(arming) = confirm.arming() {
+        arming.drawn(now);
+    }
+    let wait = confirm.arming().and_then(|a| a.remaining(now));
     match confirm {
         Confirm::Uninstall { manager_key, name } => render_popup(
             f,
             app,
+            wait,
             "Uninstall",
             &format!("Uninstall {} ({})?", name, manager_label(manager_key)),
             t.error,
@@ -193,6 +260,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
         } => render_popup(
             f,
             app,
+            wait,
             "Restore",
             &format!("Restore {} to {}?", dotfile, short_hash),
             t.warn,
@@ -200,6 +268,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
         Confirm::Rollback(plan) => render_popup(
             f,
             app,
+            wait,
             "Roll back packages",
             &format!(
                 "Roll back {} to {} (+{} install, -{} uninstall)?",
@@ -213,6 +282,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
         Confirm::RemoveFile { path } => render_popup(
             f,
             app,
+            wait,
             "Remove",
             &format!("Remove {} from profile?", path),
             t.error,
@@ -221,9 +291,11 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             manager_key,
             name,
             error,
+            ..
         } => render_popup(
             f,
             app,
+            wait,
             "OSV unreachable",
             &format!(
                 "OSV could not check {} ({}): {}. Install it without the malicious-package check?",
@@ -233,9 +305,10 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
-        Confirm::ApproveWithoutOsv { items, error } => render_popup(
+        Confirm::ApproveWithoutOsv { items, error, .. } => render_popup(
             f,
             app,
+            wait,
             "OSV unreachable",
             &format!(
                 "OSV could not check {}: {}. Approve and install without the malicious-package check?",
@@ -270,6 +343,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             render_list_popup(
                 f,
                 app,
+                wait,
                 "Remove old record",
                 "This record may be an old id of this machine. Tether guesses from its hostname \
                  and age, so check that no other machine uses this hostname. An old id no \
@@ -286,6 +360,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             malicious,
             scroll,
             rows,
+            ..
         } => {
             let mut msg = format!(
                 "Approve and install these {} package{}?",
@@ -296,7 +371,17 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 msg.push_str(&format!(" {} malicious stay held.", malicious));
             }
             let lines: Vec<String> = items.iter().map(approve_all_line).collect();
-            render_list_popup(f, app, "Approve all", &msg, &lines, *scroll, rows, t.ok)
+            render_list_popup(
+                f,
+                app,
+                wait,
+                "Approve all",
+                &msg,
+                &lines,
+                *scroll,
+                rows,
+                t.ok,
+            )
         }
     }
 }
@@ -321,6 +406,7 @@ pub fn approve_all_line(item: &crate::packages::inbox::InboxItem) -> String {
 fn render_list_popup(
     f: &mut Frame,
     app: &App,
+    wait: Option<Duration>,
     title: &str,
     msg: &str,
     lines: &[String],
@@ -395,11 +481,18 @@ fn render_list_popup(
         visible,
         t,
     );
-    buttons(f, app, inner, color);
+    buttons(f, app, wait, inner, color);
 }
 
 /// A question with clickable confirm and cancel buttons.
-pub fn render_popup(f: &mut Frame, app: &App, title: &str, msg: &str, color: Color) {
+pub fn render_popup(
+    f: &mut Frame,
+    app: &App,
+    wait: Option<Duration>,
+    title: &str,
+    msg: &str,
+    color: Color,
+) {
     let t = &app.theme;
     let area = f.area();
     let width = (msg.chars().count() as u16 + 8)
@@ -423,13 +516,18 @@ pub fn render_popup(f: &mut Frame, app: &App, title: &str, msg: &str, color: Col
         },
     );
 
-    buttons(f, app, inner, color);
+    buttons(f, app, wait, inner, color);
 }
 
-/// Clickable confirm and cancel buttons on the last line of `inner`.
-fn buttons(f: &mut Frame, app: &App, inner: Rect, color: Color) {
+/// Clickable confirm and cancel buttons on the last line of `inner`. A confirm that is not
+/// armed yet shows dim buttons and a countdown.
+fn buttons(f: &mut Frame, app: &App, wait: Option<Duration>, inner: Rect, color: Color) {
     let t = &app.theme;
-    let yes = " y  confirm ";
+    let yes = match wait {
+        Some(left) => format!(" y  wait {:.1}s ", left.as_secs_f32()),
+        None => " y  confirm ".to_string(),
+    };
+    let yes = yes.as_str();
     let no = " n  cancel ";
     let by = inner.bottom().saturating_sub(1);
     let yes_w = yes.chars().count() as u16;
@@ -438,15 +536,37 @@ fn buttons(f: &mut Frame, app: &App, inner: Rect, color: Color) {
     let yes_rect = Rect::new(x, by, yes_w, 1);
     let no_rect = Rect::new(x + yes_w + 2, by, no_w, 1);
     if no_rect.right() <= inner.right() {
-        f.render_widget(
-            Paragraph::new(yes).style(Style::default().fg(t.brand_fg).bg(color).bold()),
-            yes_rect,
-        );
-        f.render_widget(
-            Paragraph::new(no).style(Style::default().fg(t.text).bg(t.selection)),
-            no_rect,
-        );
+        let (yes_style, no_style) = match wait {
+            Some(_) => {
+                let dim = Style::default().fg(t.dim).bg(t.selection);
+                (dim, dim)
+            }
+            None => (
+                Style::default().fg(t.brand_fg).bg(color).bold(),
+                Style::default().fg(t.text).bg(t.selection),
+            ),
+        };
+        f.render_widget(Paragraph::new(yes).style(yes_style), yes_rect);
+        f.render_widget(Paragraph::new(no).style(no_style), no_rect);
         app.add_hit(yes_rect, Hit::Key(KeyEvent::from(KeyCode::Char('y'))));
         app.add_hit(no_rect, Hit::Key(KeyEvent::from(KeyCode::Char('n'))));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arming_waits_for_the_first_draw_and_the_delay() {
+        let arming = Arming::default();
+        let t0 = Instant::now();
+        assert!(!arming.armed(t0 + Duration::from_secs(60)));
+        arming.drawn(t0);
+        assert_eq!(arming.remaining(t0), Some(ARM_DELAY));
+        assert!(!arming.armed(t0 + ARM_DELAY - Duration::from_millis(1)));
+        // Later draws keep the first draw's time
+        arming.drawn(t0 + Duration::from_secs(1));
+        assert!(arming.armed(t0 + ARM_DELAY));
     }
 }

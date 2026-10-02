@@ -109,6 +109,7 @@ pub fn render(f: &mut Frame, app: &App, picker: &PkgImport) {
         confirm::render_popup(
             f,
             app,
+            None,
             "Install",
             &format!("Install {} ({})?", name, manager_label(manager_key)),
             t.ok,

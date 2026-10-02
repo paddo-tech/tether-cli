@@ -97,6 +97,7 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                         manager_key: op.manager_key,
                         name: op.name,
                         error,
+                        arming: Default::default(),
                     }));
             }
             None
@@ -116,6 +117,7 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                     .push(Overlay::Confirm(confirm::Confirm::ApproveWithoutOsv {
                         items: unchecked,
                         error,
+                        arming: Default::default(),
                     }));
                 // Items OSV did check are approved and installed already
                 security::reload(app);
@@ -518,6 +520,16 @@ mod tests {
         update(app, Msg::Key(KeyEvent::from(code)))
     }
 
+    /// Press a key once the top confirm has been on screen for the arming delay.
+    fn armed_key(app: &mut App, code: KeyCode) -> Option<Cmd> {
+        if let Some(Overlay::Confirm(c)) = app.overlays.last() {
+            if let Some(arming) = c.arming() {
+                arming.drawn_long_ago();
+            }
+        }
+        key(app, code)
+    }
+
     #[test]
     fn number_keys_and_tab_switch_tabs() {
         let mut app = app();
@@ -724,7 +736,7 @@ mod tests {
         };
         update(&mut app, unreachable(op.clone()));
         assert!(app.installing.is_none());
-        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
         assert!(app.overlays.is_empty());
 
         let Some(Cmd::Install { op, .. }) = app.start_install("npm".into(), "zx".into(), true)
@@ -732,7 +744,16 @@ mod tests {
             panic!("expected an install command");
         };
         update(&mut app, unreachable(op));
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        // A `y` typed before the question was drawn, or just after, does not answer it
+        assert!(key(&mut app, KeyCode::Char('y')).is_none());
+        draw(&app);
+        assert!(app.animating());
+        assert!(key(&mut app, KeyCode::Char('y')).is_none());
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::InstallWithoutOsv { .. }))
+        ));
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         assert!(matches!(
             cmd,
             Some(Cmd::Install {
@@ -1115,7 +1136,7 @@ mod tests {
             .inbox
             .items
             .push(inbox_item("late", vec![Reason::Unsigned]));
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         assert_eq!(approved_names(cmd), vec!["left-pad"]);
     }
 
@@ -1128,7 +1149,7 @@ mod tests {
             op,
             items,
             osv_required: true,
-        }) = key(&mut app, KeyCode::Char('y'))
+        }) = armed_key(&mut app, KeyCode::Char('y'))
         else {
             panic!("expected an approval that requires OSV");
         };
@@ -1140,7 +1161,7 @@ mod tests {
         };
         update(&mut app, unreachable(op));
         assert!(app.installing.is_none());
-        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
         assert!(app.overlays.is_empty());
 
         let Some(Cmd::ApprovePackages { op, .. }) =
@@ -1149,7 +1170,7 @@ mod tests {
             panic!("expected an approval");
         };
         update(&mut app, unreachable(op));
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         assert!(matches!(
             cmd,
             Some(Cmd::ApprovePackages {
@@ -1189,7 +1210,7 @@ mod tests {
             }
             key(&mut app, KeyCode::Char('j'));
         }
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         let approved: std::collections::BTreeSet<String> =
             approved_names(cmd).into_iter().collect();
         assert_eq!(approved.len(), 41);
@@ -1390,11 +1411,12 @@ mod tests {
         ));
         draw(&app);
         // Enter cancels, so a stray Enter never deletes a record
-        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
         assert!(app.overlays.is_empty());
         key(&mut app, KeyCode::Char('D'));
         // The command carries the record as shown, so the runtime can refuse a changed one
-        let Some(Cmd::RemoveMachine { machine_id, digest }) = key(&mut app, KeyCode::Char('y'))
+        let Some(Cmd::RemoveMachine { machine_id, digest }) =
+            armed_key(&mut app, KeyCode::Char('y'))
         else {
             panic!("expected a remove command");
         };

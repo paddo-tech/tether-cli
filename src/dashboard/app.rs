@@ -237,6 +237,15 @@ impl App {
             || self.installing.is_some()
             || self.uninstalling.is_some()
             || !self.toasts.is_empty()
+            || self.confirm_arming()
+    }
+
+    /// The top confirm counts down before it accepts keys.
+    fn confirm_arming(&self) -> bool {
+        match self.overlays.last() {
+            Some(Overlay::Confirm(c)) => c.arming().is_some_and(|a| !a.armed(Instant::now())),
+            _ => false,
+        }
     }
 
     /// Milliseconds since start, for spinners and pulses.
