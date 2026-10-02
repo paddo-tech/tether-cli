@@ -99,9 +99,12 @@ impl PackageManager for UvManager {
         args.push(&pkg_spec);
         self.run_uv(&args).await?;
         // uv saves `==version` in the tool receipt, and `uv tool upgrade` never moves past it.
-        // Installing the bare name again replaces that requirement and keeps the installed version.
+        // Installing the bare name again replaces that requirement. The installed version
+        // satisfies it, so uv keeps it, and `--offline` stops uv from fetching another release
+        // than the one OSV checked. uv does not save `--offline` in the receipt.
         if package.version.is_some() {
             args.pop();
+            args.push("--offline");
             args.push(&package.name);
             self.run_uv(&args).await?;
         }
