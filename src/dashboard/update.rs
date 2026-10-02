@@ -117,6 +117,9 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                         items: unchecked,
                         error,
                     }));
+                // Items OSV did check are approved and installed already
+                security::reload(app);
+                return app.follow_up_sync();
             }
             None
         }
@@ -452,7 +455,9 @@ fn on_install_done(app: &mut App, op: InstallOp, result: Result<(), String>) -> 
     app.installing = None;
     if let Err(e) = result {
         app.flash_error(format!("install failed: {}", e));
-        return None;
+        // A batch approval removes items and installs some before one fails
+        security::reload(app);
+        return app.follow_up_sync();
     }
     app.flash_success(format!("installed {}", name));
     if let Some(pos) = app

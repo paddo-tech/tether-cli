@@ -226,6 +226,8 @@ pub fn refresh_expanded(app: &mut App) {
         app.files.expanded_commit = None;
         app.files.expanded_diff.clear();
     }
+    let len = build_rows(&app.state, &app.files).len();
+    clamp_cursor(&mut app.files.cursor, len);
 }
 
 pub enum FileRow {

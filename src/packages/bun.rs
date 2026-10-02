@@ -28,6 +28,10 @@ fn parse_outdated_table(stdout: &str) -> Vec<(String, String)> {
                 return None;
             };
             let name = name.split_whitespace().next()?;
+            // The `|---|---|` separator row splits into cells too
+            if name.starts_with('-') {
+                return None;
+            }
             let latest = latest.trim_end_matches('*').trim();
             (name != "Package" && !latest.is_empty() && latest != *current)
                 .then(|| (name.to_string(), latest.to_string()))

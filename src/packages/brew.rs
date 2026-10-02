@@ -812,6 +812,7 @@ impl PackageManager for BrewManager {
             ("--formula", installed_formulae(&cellar)),
             ("--cask", installed_casks(&caskroom)),
         ];
+        let mut failures = Vec::new();
         for (kind, installed) in installed {
             let names = trusted_names(installed, &policy);
             if names.is_empty() {
@@ -822,9 +823,11 @@ impl PackageManager for BrewManager {
                 .args(&names)
                 .output()
                 .await?;
+            // One failed kind must not stop the other kind's upgrades
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow::anyhow!("brew info failed: {}", stderr));
+                failures.push(format!("brew info {} failed: {}", kind, stderr.trim()));
+                continue;
             }
             let info: BrewInfo = serde_json::from_slice(&output.stdout)?;
             let (formulae, casks) = trusted_upgrades(info, &policy);
@@ -840,10 +843,13 @@ impl PackageManager for BrewManager {
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(anyhow::anyhow!("brew upgrade failed: {}", stderr));
+                failures.push(format!("brew upgrade {} failed: {}", kind, stderr.trim()));
             }
         }
 
+        if !failures.is_empty() {
+            return Err(anyhow::anyhow!(failures.join("; ")));
+        }
         Ok(())
     }
 
