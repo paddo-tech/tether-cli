@@ -964,7 +964,9 @@ async fn gate_simple(
     for (name, version, _) in &missing {
         let version = match version {
             Some(v) => Some(v.clone()),
-            None => resolve_version(def.ecosystem, name, min_age).await.ok(),
+            None => resolve_version(def.state_key, def.ecosystem, name, min_age)
+                .await
+                .ok(),
         };
         pins.push((name.clone(), version));
     }

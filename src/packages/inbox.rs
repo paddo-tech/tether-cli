@@ -778,7 +778,7 @@ pub async fn check_osv(
         Some(v) => (Some(v.to_string()), None),
         None => {
             let min_age = super::PackagePolicy::load().min_release_age_days;
-            match resolve::resolve_version(manager.ecosystem(), name, min_age).await {
+            match resolve::resolve_version(manager_key, manager.ecosystem(), name, min_age).await {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e.to_string())),
             }

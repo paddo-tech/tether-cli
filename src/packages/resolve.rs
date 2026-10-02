@@ -4,10 +4,13 @@ use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 
-/// The release an unpinned install of `name` picks now: the newest stable release that is
-/// older than `min_age_days`, from the public registry. Tether checks this version against
-/// OSV and installs it pinned, so the version it checked is the version that installs.
+/// The release an unpinned install of `name` with `manager_key` picks now: the newest
+/// stable release that is older than `min_age_days`, from the registry that manager installs
+/// from. Tether checks this version against OSV and installs it pinned, so the version it
+/// checked is the version that installs. A registry that needs a login fails here, and the
+/// caller takes the cautious path for an unknown release.
 pub async fn resolve_version(
+    manager_key: &str,
     ecosystem: Ecosystem,
     name: &str,
     min_age_days: u32,
@@ -15,11 +18,8 @@ pub async fn resolve_version(
     let cutoff = (min_age_days > 0).then(|| Utc::now() - Duration::days(i64::from(min_age_days)));
     let picked = match ecosystem {
         Ecosystem::Npm => {
-            let url = format!(
-                "https://registry.npmjs.org/{}",
-                name.replacen('/', "%2f", 1)
-            );
-            pick_npm(&get(&url).await?, cutoff)
+            let registry = npm_registry(manager_key, name).await?;
+            pick_npm(&get(&packument_url(&registry, name)).await?, cutoff)
         }
         Ecosystem::Python => pick_pypi(
             &get(&format!("https://pypi.org/pypi/{}/json", name)).await?,
@@ -39,6 +39,100 @@ pub async fn resolve_version(
     picked
         .filter(|v| validate_version(ecosystem, v).is_ok())
         .ok_or_else(|| anyhow!("no release of {} passes the release-age limit", name))
+}
+
+const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
+
+/// The registry `manager_key` installs `name` from: its `@scope:registry`, else its
+/// `registry`. npm and pnpm report their own config. bun has no config command, so a bun
+/// registry setting anywhere Tether can see makes the release unknown.
+async fn npm_registry(manager_key: &str, name: &str) -> Result<String> {
+    if manager_key == "bun" {
+        if bun_registry_configured() {
+            bail!("bun uses a registry set in its config, so Tether cannot find the release");
+        }
+        return Ok(NPM_REGISTRY.to_string());
+    }
+    let mut keys = Vec::new();
+    if let Some((scope, _)) = name.split_once('/').filter(|_| name.starts_with('@')) {
+        keys.push(format!("{}:registry", scope));
+    }
+    keys.push("registry".to_string());
+    for key in keys {
+        let output = super::command(manager_key)?
+            .args(["config", "get", &key])
+            .output()
+            .await?;
+        if !output.status.success() {
+            bail!("{} config get {} failed", manager_key, key);
+        }
+        if let Some(registry) = config_value(&String::from_utf8_lossy(&output.stdout)) {
+            return Ok(registry);
+        }
+    }
+    Ok(NPM_REGISTRY.to_string())
+}
+
+/// A value from `npm config get` or `pnpm config get`. Both print `undefined` for an unset key.
+fn config_value(stdout: &str) -> Option<String> {
+    let value = stdout.trim();
+    (!value.is_empty() && value != "undefined" && value != "null").then(|| value.to_string())
+}
+
+fn packument_url(registry: &str, name: &str) -> String {
+    format!(
+        "{}/{}",
+        registry.trim_end_matches('/'),
+        name.replacen('/', "%2f", 1)
+    )
+}
+
+/// Whether bun may install from a registry other than npm's: an environment variable, a
+/// global `bunfig.toml` with `install.registry` or `install.scopes`, or a registry in
+/// `~/.npmrc`, which bun reads too. Global installs run in an empty directory, so project
+/// config does not apply.
+fn bun_registry_configured() -> bool {
+    if [
+        "BUN_CONFIG_REGISTRY",
+        "NPM_CONFIG_REGISTRY",
+        "npm_config_registry",
+    ]
+    .iter()
+    .any(|v| std::env::var_os(v).is_some())
+    {
+        return true;
+    }
+    let Ok(home) = crate::home_dir() else {
+        return true;
+    };
+    let mut bunfigs = vec![home.join(".bunfig.toml")];
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        bunfigs.push(std::path::PathBuf::from(xdg).join(".bunfig.toml"));
+    }
+    bunfigs
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .any(|text| bunfig_sets_registry(&text))
+        || std::fs::read_to_string(home.join(".npmrc")).is_ok_and(|text| npmrc_sets_registry(&text))
+}
+
+fn bunfig_sets_registry(text: &str) -> bool {
+    let Ok(config) = toml::from_str::<toml::Table>(text) else {
+        return true;
+    };
+    config
+        .get("install")
+        .and_then(|i| i.as_table())
+        .is_some_and(|i| i.contains_key("registry") || i.contains_key("scopes"))
+}
+
+/// A `registry` or `@scope:registry` key. Auth lines such as `//host/:_authToken` do not
+/// change where packages come from.
+fn npmrc_sets_registry(text: &str) -> bool {
+    text.lines().any(|line| {
+        let key = line.split_once('=').map_or("", |(k, _)| k).trim();
+        key == "registry" || (key.starts_with('@') && key.ends_with(":registry"))
+    })
 }
 
 async fn get(url: &str) -> Result<Value> {
@@ -235,6 +329,37 @@ mod tests {
 
     fn at(s: &str) -> Option<DateTime<Utc>> {
         Some(DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc))
+    }
+
+    #[test]
+    fn registry_config_decides_where_the_packument_comes_from() {
+        assert_eq!(config_value("undefined\n"), None);
+        assert_eq!(config_value("\n"), None);
+        assert_eq!(
+            config_value("https://npm.example.com/\n").as_deref(),
+            Some("https://npm.example.com/")
+        );
+        assert_eq!(
+            packument_url(NPM_REGISTRY, "@types/node"),
+            "https://registry.npmjs.org/@types%2fnode"
+        );
+        assert_eq!(
+            packument_url("https://npm.example.com/repo", "zx"),
+            "https://npm.example.com/repo/zx"
+        );
+
+        assert!(!npmrc_sets_registry("//registry.npmjs.org/:_authToken=x\n"));
+        assert!(npmrc_sets_registry("registry = https://npm.example.com/\n"));
+        assert!(npmrc_sets_registry(
+            "@acme:registry=https://npm.example.com/\n"
+        ));
+        assert!(!bunfig_sets_registry("[install]\nexact = true\n"));
+        assert!(bunfig_sets_registry(
+            "[install]\nregistry = \"https://npm.example.com/\"\n"
+        ));
+        assert!(bunfig_sets_registry(
+            "[install.scopes]\nacme = \"https://npm.example.com/\"\n"
+        ));
     }
 
     #[test]
