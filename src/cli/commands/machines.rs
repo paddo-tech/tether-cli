@@ -277,21 +277,22 @@ pub async fn remove(name: &str) -> Result<()> {
     }
 
     let sync_path = SyncEngine::sync_path()?;
-    if !sync_path
-        .join("machines")
-        .join(format!("{}.json", name))
-        .exists()
-    {
-        Output::error(&format!("Machine '{}' not found", name));
-        return Ok(());
-    }
+    // A sync may replace the record while the question is open, so only the record shown
+    // is removed
+    let digest = match record_digest(&sync_path, name) {
+        Ok(digest) => digest,
+        Err(e) => {
+            Output::error(&e.to_string());
+            return Ok(());
+        }
+    };
 
     if !Prompt::confirm(&format!("Remove machine '{}'?", name), false)? {
         return Ok(());
     }
 
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
-    let untrusted = remove_record(name)?;
+    let untrusted = remove_record(name, &digest)?;
     GitBackend::open(&sync_path)?.push()?;
 
     Output::success(&format!("Removed machine '{}'", name));
@@ -320,13 +321,14 @@ pub fn remove_old_record(machine_id: &str, digest: &str) -> Result<bool> {
             machine_id
         );
     }
-    remove_record(machine_id)
+    remove_record(machine_id, digest)
 }
 
 /// Remove another machine's record, its signature and its profile assignment, commit, and
-/// untrust its key on this machine. Returns true when this machine trusted the key.
-/// The caller holds the sync lock and pushes.
-pub fn remove_record(name: &str) -> Result<bool> {
+/// untrust its key on this machine, when the record still has the SHA-256 `digest` the user
+/// confirmed. Returns true when this machine trusted the key. The caller holds the sync lock
+/// and pushes.
+pub fn remove_record(name: &str, digest: &str) -> Result<bool> {
     // The id names files to delete, so a path such as `../../state` never reaches a join
     if !valid_machine_id(name) {
         anyhow::bail!("Invalid machine id '{}'", name);
@@ -335,6 +337,12 @@ pub fn remove_record(name: &str) -> Result<bool> {
         anyhow::bail!("Cannot remove the current machine");
     }
     let sync_path = SyncEngine::sync_path()?;
+    if record_digest(&sync_path, name)? != digest {
+        anyhow::bail!(
+            "machines/{}.json changed since you confirmed. Review it again",
+            name
+        );
+    }
     let paths = record_paths(&sync_path, name)?;
     GitBackend::open(&sync_path)?.remove_and_commit(
         &paths,
@@ -393,6 +401,13 @@ fn record_paths(sync_path: &Path, name: &str) -> Result<Vec<String>> {
         paths.push(path);
     }
     Ok(paths)
+}
+
+/// SHA-256 of `name`'s record, after the checks of [`record_paths`].
+fn record_digest(sync_path: &Path, name: &str) -> Result<String> {
+    record_paths(sync_path, name)?;
+    let bytes = std::fs::read(sync_path.join("machines").join(format!("{}.json", name)))?;
+    Ok(crate::sha256_hex(&bytes))
 }
 
 /// Trust only a key whose fingerprint the user gave or was shown and accepted.
@@ -731,7 +746,7 @@ mod tests {
     #[test]
     fn remove_record_refuses_ids_that_leave_the_machines_dir() {
         for id in ["../../state", "../config", "a/b", ".git"] {
-            let err = remove_record(id).unwrap_err().to_string();
+            let err = remove_record(id, "").unwrap_err().to_string();
             assert!(err.contains("Invalid machine id"), "{}: {}", id, err);
         }
     }
@@ -757,6 +772,10 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("not found"));
+        let shown = record_digest(&repo, "a").unwrap();
+        assert_eq!(shown, crate::sha256_hex(b"{}"));
+        std::fs::write(machines.join("a.json"), "{\"generation\":2}").unwrap();
+        assert_ne!(record_digest(&repo, "a").unwrap(), shown);
         // On a case-insensitive file system `A` opens `a.json`, but it is not that machine
         let err = record_paths(&repo, "A").unwrap_err().to_string();
         assert!(err.contains("Did you mean 'a'"), "{err}");
