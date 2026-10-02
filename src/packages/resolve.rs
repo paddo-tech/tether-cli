@@ -24,6 +24,7 @@ pub async fn resolve_version(
         Ecosystem::Python => pick_pypi(
             &get(&format!("https://pypi.org/pypi/{}/json", name)).await?,
             cutoff,
+            &uv_python().await?,
         ),
         // gem cannot hold to a release age, so the newest release is what it installs
         Ecosystem::Gem => get(&format!(
@@ -187,10 +188,25 @@ fn pick_npm(packument: &Value, cutoff: Option<DateTime<Utc>>) -> Option<String> 
         .cloned()
 }
 
+/// The version of the Python that `uv tool install` would use, as `uv python find` reports it.
+async fn uv_python() -> Result<String> {
+    let output = super::command("uv")?
+        .args(["python", "find", "--show-version"])
+        .output()
+        .await?;
+    if !output.status.success() {
+        bail!("uv python find failed");
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    normalize_pep440(&version).ok_or_else(|| anyhow!("uv reported Python {:?}", version))
+}
+
 /// From PyPI's JSON: the newest stable, unyanked release with a file uploaded before the
-/// cutoff, as uv picks with `--exclude-newer`. Release keys are normalized first, as uv reads
-/// them, so `1.0-post1` counts as `1.0.post1`.
-fn pick_pypi(project: &Value, cutoff: Option<DateTime<Utc>>) -> Option<String> {
+/// cutoff whose `requires_python` admits `python`, as uv picks with `--exclude-newer`.
+/// Release keys are normalized first, as uv reads them, so `1.0-post1` counts as
+/// `1.0.post1`. Wheel platform tags are not checked: a release with only wheels for other
+/// platforms is still picked, and its install fails rather than installing another release.
+fn pick_pypi(project: &Value, cutoff: Option<DateTime<Utc>>, python: &str) -> Option<String> {
     project
         .get("releases")?
         .as_object()?
@@ -205,11 +221,66 @@ fn pick_pypi(project: &Value, cutoff: Option<DateTime<Utc>>) -> Option<String> {
                             f.get("upload_time_iso_8601").and_then(Value::as_str),
                             cutoff,
                         )
+                        && f.get("requires_python")
+                            .and_then(Value::as_str)
+                            .is_none_or(|spec| python_admits(spec, python))
                 })
             })
         })
         .map(|(v, _)| v)
         .max_by(|a, b| compare_versions(Ecosystem::Python, a, b))
+}
+
+/// Whether a `requires_python` specifier such as `>=3.8,!=3.9.*` admits `python`. An
+/// unreadable specifier admits nothing, so its release is skipped.
+fn python_admits(spec: &str, python: &str) -> bool {
+    let cmp = |v: &str| compare_versions(Ecosystem::Python, python, v);
+    // `3.9.*` matches 3.9 and every 3.9.x
+    let prefix = |v: &str| {
+        let release = |s: &str| -> Vec<u64> {
+            s.split('.')
+                .map_while(|p| p.parse().ok())
+                .collect::<Vec<_>>()
+        };
+        let want = release(v);
+        let have = release(python.split(['a', 'b', 'r', '+']).next().unwrap_or(python));
+        (0..want.len()).all(|i| have.get(i).copied().unwrap_or(0) == want[i])
+    };
+    spec.split(',')
+        .map(str::trim)
+        .filter(|clause| !clause.is_empty())
+        .all(|clause| {
+            let ops = ["===", "~=", "==", "!=", ">=", "<=", ">", "<"];
+            let Some(op) = ops.iter().find(|op| clause.starts_with(**op)) else {
+                return false;
+            };
+            let raw = clause[op.len()..].trim();
+            if let Some(base) = raw.strip_suffix(".*") {
+                return match *op {
+                    "==" => prefix(base),
+                    "!=" => !prefix(base),
+                    _ => false,
+                };
+            }
+            let Some(v) = normalize_pep440(raw) else {
+                return false;
+            };
+            match *op {
+                "===" | "==" => cmp(&v).is_eq(),
+                "!=" => cmp(&v).is_ne(),
+                ">=" => cmp(&v).is_ge(),
+                "<=" => cmp(&v).is_le(),
+                ">" => cmp(&v).is_gt(),
+                "<" => cmp(&v).is_lt(),
+                // `~=3.8` is `>=3.8, ==3.*`
+                _ => {
+                    let parts: Vec<&str> = v.split('.').collect();
+                    parts.len() >= 2
+                        && cmp(&v).is_ge()
+                        && prefix(&parts[..parts.len() - 1].join("."))
+                }
+            }
+        })
 }
 
 /// A PEP 440 version in its normalized form: `1.0-post1`, `1.0-1` and `1.0.r1` become
@@ -403,13 +474,16 @@ mod tests {
                 "0.12.0": []
             }
         });
-        assert_eq!(pick_pypi(&project, None).as_deref(), Some("0.11.0"));
         assert_eq!(
-            pick_pypi(&project, at("2026-09-25T00:00:00Z")).as_deref(),
+            pick_pypi(&project, None, "3.12.1").as_deref(),
+            Some("0.11.0")
+        );
+        assert_eq!(
+            pick_pypi(&project, at("2026-09-25T00:00:00Z"), "3.12.1").as_deref(),
             Some("0.10.1.post1")
         );
         assert_eq!(
-            pick_pypi(&project, at("2025-06-01T12:00:00Z")).as_deref(),
+            pick_pypi(&project, at("2025-06-01T12:00:00Z"), "3.12.1").as_deref(),
             Some("0.9.9")
         );
 
@@ -421,7 +495,34 @@ mod tests {
                 "1.1-RC1": [file("2025-01-03T00:00:00Z", false)]
             }
         });
-        assert_eq!(pick_pypi(&project, None).as_deref(), Some("1.0.post1"));
+        assert_eq!(
+            pick_pypi(&project, None, "3.12.1").as_deref(),
+            Some("1.0.post1")
+        );
+    }
+
+    #[test]
+    fn pypi_skips_releases_whose_requires_python_excludes_uv_python() {
+        let file = |requires: &str| serde_json::json!({ "upload_time_iso_8601": "2025-01-01T00:00:00Z", "requires_python": requires });
+        let project = serde_json::json!({
+            "releases": {
+                "1.0": [file(">=3.8")],
+                "2.0": [file(">=3.13")],
+                "3.0": [file(">=3.15,<4")]
+            }
+        });
+        assert_eq!(pick_pypi(&project, None, "3.12.4").as_deref(), Some("1.0"));
+        assert_eq!(pick_pypi(&project, None, "3.14.8").as_deref(), Some("2.0"));
+        assert_eq!(pick_pypi(&project, None, "3.7.0"), None);
+
+        assert!(python_admits(">=3.8, !=3.9.*, <4", "3.12.4"));
+        assert!(!python_admits(">=3.8,!=3.9.*", "3.9.18"));
+        assert!(python_admits("==3.12.*", "3.12.4"));
+        assert!(python_admits("~=3.10", "3.14.8"));
+        assert!(!python_admits("~=3.10.2", "3.11.0"));
+        assert!(python_admits(">3.6", "3.12.4"));
+        assert!(python_admits("", "3.12.4"));
+        assert!(!python_admits("bogus", "3.12.4"));
     }
 
     #[test]
