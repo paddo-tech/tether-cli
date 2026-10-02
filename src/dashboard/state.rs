@@ -14,7 +14,7 @@ pub struct DashboardState {
     pub inbox: Inbox,
     pub trusted: Vec<TrustedMachine>,
     /// Records that are likely an earlier id of this machine.
-    pub old_ids: Vec<String>,
+    pub old_ids: Vec<signing::OldId>,
 }
 
 impl DashboardState {

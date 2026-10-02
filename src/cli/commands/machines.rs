@@ -60,7 +60,7 @@ pub async fn list() -> Result<()> {
         let is_current = &machine.machine_id == current_machine;
         let marker = if is_current {
             Cell::new("(this machine)").fg(Color::Green)
-        } else if old_ids.contains(&machine.machine_id) {
+        } else if old_ids.iter().any(|o| o.machine_id == machine.machine_id) {
             Cell::new("(may be an old id of this machine)").fg(Color::Yellow)
         } else {
             Cell::new("")
@@ -121,8 +121,8 @@ pub async fn list() -> Result<()> {
 
 /// One line per record that looks like an earlier id of this machine, with the command
 /// that removes it.
-pub fn print_old_id_hints(old_ids: &[String]) {
-    for id in old_ids {
+pub fn print_old_id_hints(old_ids: &[signing::OldId]) {
+    for id in old_ids.iter().map(|o| &o.machine_id) {
         Output::info(&format!(
             "{} may be an old id of this machine, a guess from its hostname, age and build. \
              If no other machine uses this hostname, remove it: tether machines remove {}",
@@ -290,6 +290,25 @@ pub async fn remove(name: &str) -> Result<()> {
 
     Output::success(&format!("Removed machine '{}'", name));
     Ok(())
+}
+
+/// Remove a record the dashboard showed as an old id of this machine, only while it still is
+/// one with the same bytes. A pull may have replaced it with another machine's record since.
+/// The caller holds the sync lock and pushes.
+pub fn remove_old_record(machine_id: &str, digest: &str) -> Result<()> {
+    let sync_path = SyncEngine::sync_path()?;
+    let machines = MachineState::list_all(&sync_path)?;
+    let this_id = SyncState::load()?.machine_id;
+    if !signing::old_ids_of_this_machine(&sync_path, &machines, &this_id)
+        .iter()
+        .any(|o| o.machine_id == machine_id && o.digest == digest)
+    {
+        anyhow::bail!(
+            "machines/{}.json changed since you confirmed. Review it again",
+            machine_id
+        );
+    }
+    remove_record(machine_id)
 }
 
 /// Remove another machine's record, its signature and its profile assignment, and commit.

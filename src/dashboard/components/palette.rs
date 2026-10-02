@@ -165,7 +165,7 @@ pub fn entries(app: &App) -> Vec<Entry> {
             target: Target::Action(action),
         });
     }
-    for id in &app.state.old_ids {
+    for id in app.state.old_ids.iter().map(|o| &o.machine_id) {
         out.push(Entry {
             label: format!("Remove old record {}", id),
             kind: "action".into(),

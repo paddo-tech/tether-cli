@@ -1355,7 +1355,10 @@ mod tests {
             crate::sync::MachineState::new("mac.local"),
             crate::sync::MachineState::new("studio"),
         ];
-        app.state.old_ids = vec!["mac.local".into()];
+        app.state.old_ids = vec![crate::sync::signing::OldId {
+            machine_id: "mac.local".into(),
+            digest: "d1".into(),
+        }];
         app.active_tab = Tab::Machines;
 
         // This machine's record and another machine's record never get the question
@@ -1378,10 +1381,12 @@ mod tests {
         assert!(key(&mut app, KeyCode::Enter).is_none());
         assert!(app.overlays.is_empty());
         key(&mut app, KeyCode::Char('D'));
-        let Some(Cmd::RemoveMachine(id)) = key(&mut app, KeyCode::Char('y')) else {
+        // The command carries the record as shown, so the runtime can refuse a changed one
+        let Some(Cmd::RemoveMachine { machine_id, digest }) = key(&mut app, KeyCode::Char('y'))
+        else {
             panic!("expected a remove command");
         };
-        assert_eq!(id, "mac.local");
+        assert_eq!((machine_id.as_str(), digest.as_str()), ("mac.local", "d1"));
 
         let palette = palette::entries(&app);
         assert!(palette

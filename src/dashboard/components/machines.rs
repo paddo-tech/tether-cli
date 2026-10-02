@@ -121,13 +121,19 @@ pub fn confirm_remove(app: &mut App, machine_id: &str) {
         app.flash_error("Cannot remove this machine's current record");
         return;
     }
-    if !is_old_id(app, machine_id) {
+    let Some(digest) = app
+        .state
+        .old_ids
+        .iter()
+        .find(|o| o.machine_id == machine_id)
+        .map(|o| o.digest.clone())
+    else {
         app.flash_info(format!(
             "{} does not look like an old id of this machine. Remove it with 'tether machines remove {}'",
             machine_id, machine_id
         ));
         return;
-    }
+    };
     let Some(m) = app
         .state
         .machines
@@ -141,12 +147,13 @@ pub fn confirm_remove(app: &mut App, machine_id: &str) {
         hostname: m.hostname.clone(),
         last_sync: m.last_sync,
         packages: m.packages.values().map(|v| v.len()).sum(),
+        digest,
     };
     app.overlays.push(Overlay::Confirm(confirm));
 }
 
 pub fn is_old_id(app: &App, machine_id: &str) -> bool {
-    app.state.old_ids.iter().any(|id| id == machine_id)
+    app.state.old_ids.iter().any(|o| o.machine_id == machine_id)
 }
 
 pub fn display_name(m: &MachineState) -> String {

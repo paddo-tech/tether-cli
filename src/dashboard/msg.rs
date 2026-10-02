@@ -84,7 +84,11 @@ pub enum Cmd {
     /// Reject an inbox item.
     Reject(Box<InboxItem>),
     /// Remove another machine's record as `tether machines remove` does, without the push.
-    RemoveMachine(String),
+    /// Only while the record is still an old id with this SHA-256, as the confirm showed it.
+    RemoveMachine {
+        machine_id: String,
+        digest: String,
+    },
     /// Count sync commits per day; `git log` over the sync repo is too slow for the UI thread.
     LoadActivity,
     CollectPackages {

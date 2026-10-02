@@ -386,14 +386,20 @@ pub fn record_signers(sync_path: &Path) -> Vec<(String, PublicKey)> {
         .collect()
 }
 
-/// Ids of the records in `machines` that are likely an earlier id of this machine. Reading
-/// them must not create a signing key, so without one every signed record counts as another
-/// machine's.
+/// A record that may be an earlier id of this machine, and the SHA-256 of its file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OldId {
+    pub machine_id: String,
+    pub digest: String,
+}
+
+/// The records in `machines` that may be an earlier id of this machine. Reading them must
+/// not create a signing key, so without one every signed record counts as another machine's.
 pub fn old_ids_of_this_machine(
     sync_path: &Path,
     machines: &[MachineState],
     this_id: &str,
-) -> Vec<String> {
+) -> Vec<OldId> {
     let own = key_path()
         .ok()
         .and_then(|p| std::fs::read(p).ok())
@@ -416,7 +422,7 @@ fn old_ids_at(
     host: &str,
     own: Option<&PublicKey>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Vec<String> {
+) -> Vec<OldId> {
     // Who signed the bytes decides, not whether validation keeps the signer: a record that
     // another key signed belongs to that machine even when it has entries Tether drops.
     let signed_by_other_keys: Vec<String> =
@@ -428,9 +434,19 @@ fn old_ids_at(
             })
             .map(|m| m.machine_id.clone())
             .collect();
+    // The digest must cover the record as `machines` shows it, so a file that changed since
+    // the list was read is left out rather than vouched for
     MachineState::old_ids_of_this_machine(machines, this_id, host, &signed_by_other_keys, now)
         .into_iter()
-        .map(|m| m.machine_id.clone())
+        .filter_map(|m| {
+            let bytes = std::fs::read(record_path(sync_path, &m.machine_id)).ok()?;
+            let mut on_disk: MachineState = serde_json::from_slice(&bytes).ok()?;
+            on_disk.validate().ok()?;
+            (serde_json::to_value(&on_disk).ok()? == serde_json::to_value(m).ok()?).then(|| OldId {
+                machine_id: m.machine_id.clone(),
+                digest: crate::sha256_hex(&bytes),
+            })
+        })
         .collect()
 }
 
@@ -868,12 +884,52 @@ mod tests {
             )
         };
 
-        assert_eq!(found(&own), ["mac.local"]);
+        let ids = |own: &PrivateKey| -> Vec<String> {
+            found(own).into_iter().map(|o| o.machine_id).collect()
+        };
+        assert_eq!(ids(&own), ["mac.local"]);
         sign_record(tmp.path(), "mac.local", &own).unwrap();
-        assert_eq!(found(&own), ["mac.local"]);
+        assert_eq!(ids(&own), ["mac.local"]);
         sign_record(tmp.path(), "mac.local", &key()).unwrap();
         assert!(signer_of(tmp.path(), "mac.local").is_none());
         assert!(found(&own).is_empty());
+    }
+
+    #[test]
+    fn old_id_digest_covers_the_record_as_listed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let now = chrono::Utc::now();
+        let mut this = MachineState::new("7d184e5919ef");
+        this.hostname = "mac.local".to_string();
+        let mut old = MachineState::new("mac.local");
+        old.hostname = "mac.local".to_string();
+        old.cli_version = "1.11.10".to_string();
+        old.last_sync = now - chrono::Duration::days(30);
+        write_record(tmp.path(), "mac.local", &old);
+        let found = |machines: &[MachineState]| {
+            old_ids_at(tmp.path(), machines, "7d184e5919ef", "mac.local", None, now)
+        };
+
+        let listed = [this.clone(), old.clone()];
+        let shown = found(&listed);
+        assert_eq!(
+            shown,
+            [OldId {
+                machine_id: "mac.local".to_string(),
+                digest: crate::sha256_hex(
+                    &std::fs::read(record_path(tmp.path(), "mac.local")).unwrap()
+                ),
+            }]
+        );
+
+        // A pull rewrites the record: a list read before it no longer matches the file
+        old.packages
+            .insert("npm".to_string(), vec!["widget".to_string()]);
+        write_record(tmp.path(), "mac.local", &old);
+        assert!(found(&listed).is_empty());
+        let fresh = found(&[this, old]);
+        assert_eq!(fresh.len(), 1);
+        assert_ne!(fresh[0].digest, shown[0].digest);
     }
 
     #[test]

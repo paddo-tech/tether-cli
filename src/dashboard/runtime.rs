@@ -138,13 +138,16 @@ impl Runtime {
                     |e| Some(Msg::InboxDone(Err(e))),
                 );
             }
-            Cmd::RemoveMachine(machine_id) => {
+            Cmd::RemoveMachine { machine_id, digest } => {
                 let failed_id = machine_id.clone();
                 self.spawn(
                     async move {
                         let result = crate::sync::acquire_sync_lock(false)
                             .and_then(|_lock| {
-                                crate::cli::commands::machines::remove_record(&machine_id)
+                                crate::cli::commands::machines::remove_old_record(
+                                    &machine_id,
+                                    &digest,
+                                )
                             })
                             .map_err(|e| e.to_string());
                         Msg::MachineRemoved { machine_id, result }

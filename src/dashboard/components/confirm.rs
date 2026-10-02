@@ -40,6 +40,8 @@ pub enum Confirm {
         hostname: String,
         last_sync: chrono::DateTime<chrono::Utc>,
         packages: usize,
+        /// SHA-256 of the record file shown
+        digest: String,
     },
     /// Approve and install these inbox items, as displayed when the confirm opened. It lists
     /// every one of them, because `y` approves exactly this list.
@@ -157,12 +159,14 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             clamp_cursor(&mut app.files.cursor, len);
             app.follow_up_sync()
         }
-        Confirm::RemoveMachine { machine_id, .. } => {
+        Confirm::RemoveMachine {
+            machine_id, digest, ..
+        } => {
             if machine_id == app.machine_id() {
                 app.flash_error("Cannot remove this machine's current record");
                 return None;
             }
-            Some(Cmd::RemoveMachine(machine_id))
+            Some(Cmd::RemoveMachine { machine_id, digest })
         }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveWithoutOsv { items, .. } => security::approve_all(app, items, false),
@@ -249,6 +253,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             hostname,
             last_sync,
             packages,
+            ..
         } => {
             let lines = [
                 format!("id         {}", machine_id),
