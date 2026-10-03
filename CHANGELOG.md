@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Linux release binaries for x86_64 and aarch64; Homebrew on Linux supported. Each release has `tether-x86_64-unknown-linux-musl.tar.gz` and `tether-aarch64-unknown-linux-musl.tar.gz`, with SHA-256 checksums. The binaries are static, so they run on any distribution. `brew install tether` now works on Homebrew on Linux
 - On Linux, `tether daemon install` now installs a systemd user service in `~/.config/systemd/user/tether.service` and enables it. The service gets your shell's `PATH`, `GEM_HOME` and `GEM_PATH`, as on macOS. `tether daemon uninstall` removes it. Without a systemd user session, Tether asks you to use `tether daemon start`. Paths with spaces, `$` or `%` work. systemd cannot run a program whose path has a quote, a backslash or a control character, and a unit cannot hold a newline in the log path, `PATH`, `GEM_HOME` or `GEM_PATH`. In these cases `tether daemon install` stops with an error and writes no unit
 - New file `~/.tether/local.toml` for settings on this machine only. Tether never syncs it. Set `[packages] min_release_age_days` or `[merge] command` and `args` there to override config.toml on this machine. Without `args`, the merge tool gets `{local} {remote} {merged}`
 
