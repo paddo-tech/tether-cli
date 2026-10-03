@@ -179,31 +179,49 @@ pub struct BrewConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NpmConfig {
     pub enabled: bool,
+    // 1.x builds require this field when they read a synced config; remove in 3.0
+    #[serde(default)]
+    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PnpmConfig {
     pub enabled: bool,
+    // 1.x builds require this field when they read a synced config; remove in 3.0
+    #[serde(default)]
+    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BunConfig {
     pub enabled: bool,
+    // 1.x builds require this field when they read a synced config; remove in 3.0
+    #[serde(default)]
+    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GemConfig {
     pub enabled: bool,
+    // 1.x builds require this field when they read a synced config; remove in 3.0
+    #[serde(default)]
+    pub sync_versions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UvConfig {
     pub enabled: bool,
+    // 1.x builds require this field when they read a synced config; remove in 3.0
+    #[serde(default)]
+    pub sync_versions: bool,
 }
 
 impl Default for UvConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            sync_versions: false,
+        }
     }
 }
 
@@ -221,19 +239,31 @@ fn default_brew_config() -> BrewConfig {
 }
 
 fn default_npm_config() -> NpmConfig {
-    NpmConfig { enabled: true }
+    NpmConfig {
+        enabled: true,
+        sync_versions: false,
+    }
 }
 
 fn default_pnpm_config() -> PnpmConfig {
-    PnpmConfig { enabled: true }
+    PnpmConfig {
+        enabled: true,
+        sync_versions: false,
+    }
 }
 
 fn default_bun_config() -> BunConfig {
-    BunConfig { enabled: true }
+    BunConfig {
+        enabled: true,
+        sync_versions: false,
+    }
 }
 
 fn default_gem_config() -> GemConfig {
-    GemConfig { enabled: true }
+    GemConfig {
+        enabled: true,
+        sync_versions: false,
+    }
 }
 
 impl Default for SecurityConfig {
@@ -1089,10 +1119,10 @@ impl Default for Config {
                 allow_scripts: Vec::new(),
                 auto_install_from_trusted: true,
                 brew: default_brew_config(),
-                npm: NpmConfig { enabled: true },
-                pnpm: PnpmConfig { enabled: true },
-                bun: BunConfig { enabled: true },
-                gem: GemConfig { enabled: true },
+                npm: default_npm_config(),
+                pnpm: default_pnpm_config(),
+                bun: default_bun_config(),
+                gem: default_gem_config(),
                 uv: UvConfig::default(),
             },
             dotfiles: DotfilesConfig {
@@ -1152,6 +1182,38 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_saved_config_parses_with_1_13_package_shape() {
+        // 1.13.1 manager tables, where sync_versions has no serde default
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldManager {
+            enabled: bool,
+            sync_versions: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldPackages {
+            npm: OldManager,
+            pnpm: OldManager,
+            bun: OldManager,
+            gem: OldManager,
+            uv: OldManager,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldConfig {
+            packages: OldPackages,
+        }
+
+        let saved = toml::to_string_pretty(&Config::default()).unwrap();
+        toml::from_str::<OldConfig>(&saved).unwrap();
+
+        let without_field = saved.replace("sync_versions = false\n", "");
+        let config: Config = toml::from_str(&without_field).unwrap();
+        assert!(!config.packages.npm.sync_versions);
+    }
 
     // Path safety tests
     #[test]
