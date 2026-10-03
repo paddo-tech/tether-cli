@@ -35,6 +35,14 @@ pub fn load_or_create(machine_id: &str) -> Result<PrivateKey> {
     Ok(key)
 }
 
+fn existing_public_key() -> Option<PublicKey> {
+    key_path()
+        .ok()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| PrivateKey::from_openssh(b).ok())
+        .map(|k| k.public_key().clone())
+}
+
 pub fn fingerprint(key: &PublicKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
@@ -436,7 +444,8 @@ pub fn record_statuses(
     sync_path: &Path,
     this_machine: &str,
 ) -> Result<Vec<(String, RecordStatus, Option<String>)>> {
-    let own_key = load_or_create(this_machine)?;
+    // Listing must not create a key; a machine without one has no signed record yet
+    let own_key = existing_public_key();
     let store = TrustStore::load()?;
     let generations = Generations::load()?;
     Ok(records(sync_path)
@@ -444,7 +453,7 @@ pub fn record_statuses(
         .map(|r| {
             (
                 r.record.machine_id.clone(),
-                record_status(r, this_machine, own_key.public_key(), &store, &generations),
+                record_status(r, this_machine, own_key.as_ref(), &store, &generations),
                 r.signer.as_ref().map(fingerprint),
             )
         })
@@ -455,13 +464,16 @@ pub fn record_statuses(
 pub fn record_status(
     record: &SignedRecord,
     this_machine: &str,
-    own_key: &PublicKey,
+    own_key: Option<&PublicKey>,
     store: &TrustStore,
     generations: &Generations,
 ) -> RecordStatus {
     let id = &record.record.machine_id;
     let trusted = if id == this_machine {
-        own_key
+        match own_key {
+            Some(key) => key,
+            None => return RecordStatus::Untrusted,
+        }
     } else {
         match store.key_for(id) {
             Some(key) => key,
@@ -502,11 +514,7 @@ pub fn old_ids_of_this_machine(
     machines: &[MachineState],
     this_id: &str,
 ) -> Vec<OldId> {
-    let own = key_path()
-        .ok()
-        .and_then(|p| std::fs::read(p).ok())
-        .and_then(|b| PrivateKey::from_openssh(b).ok())
-        .map(|k| k.public_key().clone());
+    let own = existing_public_key();
     old_ids_at(
         sync_path,
         machines,
@@ -783,7 +791,7 @@ mod tests {
                 .into_iter()
                 .find(|r| r.record.machine_id == id)
                 .unwrap();
-            record_status(&r, "me", me.public_key(), &store, generations)
+            record_status(&r, "me", Some(me.public_key()), &store, generations)
         };
         let mut generations = Generations::default();
         signed("me", 1, &me);

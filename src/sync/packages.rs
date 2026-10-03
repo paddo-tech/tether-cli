@@ -462,7 +462,7 @@ impl Provenance {
         let mut failed = Vec::new();
         for r in &records {
             let id = &r.record.machine_id;
-            let status = signing::record_status(r, this_machine, own_key, store, generations);
+            let status = signing::record_status(r, this_machine, Some(own_key), store, generations);
             match status {
                 // A record that grants trust must be the newest its key has signed
                 RecordStatus::Replayed => {
