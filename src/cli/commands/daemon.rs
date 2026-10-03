@@ -218,23 +218,29 @@ fn launchd_plist_path() -> Result<PathBuf> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
+/// launchd and systemd start services with a minimal PATH, which hides Homebrew and
+/// version-managed tools, so the installing shell's environment is baked in.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn service_env() -> Vec<(&'static str, String)> {
+    ["PATH", "GEM_HOME", "GEM_PATH"]
+        .into_iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| (key, value)))
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn generate_plist(exe: &std::path::Path) -> Result<String> {
     let paths = DaemonPaths::new()?;
 
-    // launchd starts agents with PATH=/usr/bin:/bin:/usr/sbin:/sbin, which hides Homebrew
-    // and version-managed tools, so the installing shell's environment is baked in
     let mut env = String::new();
-    for key in ["PATH", "GEM_HOME", "GEM_PATH"] {
-        if let Ok(value) = std::env::var(key) {
-            let value = value
-                .replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;");
-            env.push_str(&format!(
-                "        <key>{key}</key>\n        <string>{value}</string>\n"
-            ));
-        }
+    for (key, value) in service_env() {
+        let value = value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        env.push_str(&format!(
+            "        <key>{key}</key>\n        <string>{value}</string>\n"
+        ));
     }
 
     Ok(format!(
@@ -272,11 +278,127 @@ fn generate_plist(exe: &std::path::Path) -> Result<String> {
     ))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn install() -> Result<()> {
     Err(anyhow::anyhow!(
         "Launchd is only available on macOS. Use 'tether daemon start' instead."
     ))
+}
+
+#[cfg(target_os = "linux")]
+const SYSTEMD_UNIT: &str = "tether.service";
+
+#[cfg(target_os = "linux")]
+fn systemd_unit_path() -> Result<PathBuf> {
+    let config = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => crate::home_dir()?.join(".config"),
+    };
+    Ok(config.join("systemd").join("user").join(SYSTEMD_UNIT))
+}
+
+/// systemd expands `%` specifiers in every value. ExecStart also expands `$` variables,
+/// so its caller escapes those.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_quote(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('%', "%%");
+    format!("\"{escaped}\"")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn generate_unit(exe: &std::path::Path, log: &std::path::Path, env: &[(&str, String)]) -> String {
+    let environment: String = env
+        .iter()
+        .map(|(key, value)| {
+            let pair = systemd_quote(&format!("{key}={value}"));
+            format!("Environment={pair}\n")
+        })
+        .collect();
+    let log = log.display().to_string().replace('%', "%%");
+    format!(
+        "[Unit]\n\
+         Description=Tether dotfile and package sync\n\
+         \n\
+         [Service]\n\
+         ExecStart={} daemon run\n\
+         {environment}\
+         Restart=always\n\
+         RestartSec=10\n\
+         StandardOutput=append:{log}\n\
+         StandardError=append:{log}\n\
+         \n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        systemd_quote(&exe.display().to_string().replace('$', "$$")),
+    )
+}
+
+/// The user's systemd manager answers only when systemd runs this login session.
+#[cfg(target_os = "linux")]
+fn systemd_user_available() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_user(args: &[&str]) -> Result<()> {
+    let output = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "systemctl --user {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub async fn install() -> Result<()> {
+    if !systemd_user_available() {
+        return Err(anyhow::anyhow!(
+            "No systemd user session found. Use 'tether daemon start' instead."
+        ));
+    }
+    let unit_path = systemd_unit_path()?;
+
+    // Stop existing daemon if running via manual start
+    if let Some(pid) = read_daemon_pid()? {
+        if is_process_running(pid) {
+            Output::info("Stopping existing daemon...");
+            stop().await?;
+        }
+    }
+
+    if let Some(parent) = unit_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let unit = generate_unit(
+        &std::env::current_exe()?,
+        &DaemonPaths::new()?.log,
+        &service_env(),
+    );
+    fs::write(&unit_path, unit)?;
+
+    systemctl_user(&["daemon-reload"])?;
+    systemctl_user(&["enable", SYSTEMD_UNIT])?;
+    // restart also starts it, and picks up a changed unit on reinstall
+    systemctl_user(&["restart", SYSTEMD_UNIT])?;
+
+    Output::success("systemd user service installed");
+    Output::info("Daemon will now start automatically on login and restart if it exits");
+    Output::dim("  To keep it running after you log out, run 'loginctl enable-linger'");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -384,9 +506,29 @@ pub async fn refresh_stale_launchd_service() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub async fn uninstall() -> Result<()> {
     Err(anyhow::anyhow!("Launchd is only available on macOS"))
+}
+
+#[cfg(target_os = "linux")]
+pub async fn uninstall() -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    if !unit_path.exists() {
+        Output::info("systemd user service is not installed");
+        return Ok(());
+    }
+
+    if let Err(e) = systemctl_user(&["disable", "--now", SYSTEMD_UNIT]) {
+        Output::warning(&e.to_string());
+    }
+    fs::remove_file(&unit_path)?;
+    if let Err(e) = systemctl_user(&["daemon-reload"]) {
+        Output::warning(&e.to_string());
+    }
+
+    Output::success("systemd user service uninstalled");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -414,4 +556,51 @@ pub async fn uninstall() -> Result<()> {
 
     Output::success("Launchd service uninstalled");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn systemd_unit_runs_the_daemon_with_the_shell_environment() {
+        let unit = generate_unit(
+            Path::new("/home/me/.cargo/bin/tether"),
+            Path::new("/home/me/.tether/daemon.log"),
+            &[
+                ("PATH", "/home/me/.local/bin:/usr/bin".to_string()),
+                ("GEM_HOME", "/home/me/.gem".to_string()),
+            ],
+        );
+        assert_eq!(
+            unit,
+            "[Unit]\n\
+             Description=Tether dotfile and package sync\n\
+             \n\
+             [Service]\n\
+             ExecStart=\"/home/me/.cargo/bin/tether\" daemon run\n\
+             Environment=\"PATH=/home/me/.local/bin:/usr/bin\"\n\
+             Environment=\"GEM_HOME=/home/me/.gem\"\n\
+             Restart=always\n\
+             RestartSec=10\n\
+             StandardOutput=append:/home/me/.tether/daemon.log\n\
+             StandardError=append:/home/me/.tether/daemon.log\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n"
+        );
+    }
+
+    #[test]
+    fn systemd_unit_escapes_specifiers_and_quotes() {
+        let unit = generate_unit(
+            Path::new("/opt/$X/100%/te\"ther"),
+            Path::new("/home/a%b/daemon.log"),
+            &[("PATH", "/x$HOME:/y\\z".to_string())],
+        );
+        assert!(unit.contains("ExecStart=\"/opt/$$X/100%%/te\\\"ther\" daemon run\n"));
+        assert!(unit.contains("Environment=\"PATH=/x$HOME:/y\\\\z\"\n"));
+        assert!(unit.contains("StandardOutput=append:/home/a%%b/daemon.log\n"));
+    }
 }

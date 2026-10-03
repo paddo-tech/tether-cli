@@ -94,6 +94,30 @@ impl DashboardState {
             }
         }
 
+        // Fallback: check the systemd user service
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = std::process::Command::new("systemctl")
+                .args([
+                    "--user",
+                    "show",
+                    "-p",
+                    "MainPID",
+                    "--value",
+                    "tether.service",
+                ])
+                .output()
+            {
+                // MainPID is 0 when the service is not running
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(pid) = stdout.trim().parse::<u32>() {
+                    if pid > 0 {
+                        return (Some(pid), true);
+                    }
+                }
+            }
+        }
+
         (None, false)
     }
 

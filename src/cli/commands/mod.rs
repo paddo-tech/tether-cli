@@ -208,9 +208,9 @@ pub enum DaemonAction {
     Restart,
     /// View daemon logs
     Logs,
-    /// Install launchd service (auto-start on login)
+    /// Install the login service (launchd on macOS, systemd on Linux)
     Install,
-    /// Uninstall launchd service
+    /// Uninstall the login service
     Uninstall,
     /// Internal daemon runner
     #[command(hide = true)]
