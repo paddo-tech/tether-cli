@@ -76,7 +76,11 @@ fn toggle_row(app: &mut App) {
             clamp_cursor(&mut app.packages.cursor, len);
         }
         Some(PkgRow::Package { manager_key, name }) => {
-            if app.uninstalling.is_none() && app.running.is_none() && manager_key != "brew_taps" {
+            if app.uninstalling.is_none()
+                && app.installing.is_none()
+                && app.running.is_none()
+                && manager_key != "brew_taps"
+            {
                 app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
                     manager_key: manager_key.clone(),
                     name: name.clone(),

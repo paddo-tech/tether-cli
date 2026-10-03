@@ -48,12 +48,11 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             None
         }
         Msg::JobSpawnFailed(job) => {
-            if matches!(job, Job::Rollback { .. }) {
-                app.flash_error("Could not start tether");
-            }
             // A follow-up sync sent before the running job's start was seen; retry when it exits.
             if matches!(job, Job::Sync) && app.running.is_some() {
                 app.sync_pending = true;
+            } else if matches!(job, Job::Rollback { .. } | Job::Sync) {
+                app.flash_error("Could not start tether");
             }
             None
         }
