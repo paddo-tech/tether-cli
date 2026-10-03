@@ -46,13 +46,23 @@ impl GemManager {
     }
 }
 
-// Default gems ship with each Ruby and dependencies follow their parents, so only
-// top-level gems are recorded, matching brew's --installed-on-request. Dependencies of
-// default gems are ignored so a user-installed newer copy (e.g. stringio) still counts.
+// Default gems ship with each Ruby, and so do bundled gems (rake, minitest) and distro
+// gems such as Debian's rubygems-integration. Those live outside the dirs that
+// `gem install` writes to, and Homebrew copies them into its default dir, so a gem is
+// dropped when its newest version is one found outside those dirs. A newer copy the user
+// installed still counts. Dependencies follow their parents, so only top-level gems are
+// recorded, matching brew's --installed-on-request; dependencies of shipped gems are
+// ignored so a newer user copy (e.g. stringio) still counts. A Ruby whose own gem dir is
+// also its install dir (ruby-build, rbenv) shows no difference, so its bundled gems stay.
 // Each line is "name version" with the newest installed version
-const TOP_LEVEL_GEMS: &str = "specs = Gem::Specification.reject(&:default_gem?)
-deps = specs.flat_map { |s| s.runtime_dependencies.map(&:name) }
+const TOP_LEVEL_GEMS: &str = "dirs = [Gem.dir, Gem.user_dir, Gem.default_dir, *ENV.fetch('GEM_PATH', '').split(File::PATH_SEPARATOR)]
+dirs = dirs.reject(&:empty?).map { |d| File.expand_path(d) }
+specs = Gem::Specification.reject(&:default_gem?)
+shipped = specs.reject { |s| dirs.include?(File.expand_path(s.base_dir)) }.map { |s| [s.name, s.version] }
+own = specs.reject { |s| shipped.include?([s.name, s.version]) }
+deps = own.flat_map { |s| s.runtime_dependencies.map(&:name) }
 latest = specs.group_by(&:name).transform_values { |v| v.map(&:version).max }
+latest.reject! { |n, v| shipped.include?([n, v]) }
 (latest.keys - deps).each { |n| puts \"#{n} #{latest[n]}\" }";
 
 impl Default for GemManager {

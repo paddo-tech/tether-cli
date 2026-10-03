@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed `brew bundle` no longer counts as a Homebrew install
 - Machine records now name their OS family (`os`, such as `macos` or `linux`), and the signature covers it. When only machines on another OS list the newest trusted version of a package, Tether tries that version first. If it fails, Tether installs the newest release that suits this machine, after the release-age, rejection and OSV checks of an unpinned line, and logs the version it installed. For example, a uv tool from a Mac that needs a newer Python now installs on Linux
 - gem now picks the newest release whose `required_ruby_version` admits the local Ruby (`ruby -e 'print RUBY_VERSION'`). Before, it picked the newest release, which could fail to install
+- The gem list no longer records gems that ship with Ruby, such as `rake`, `minitest` and `net-imap`, or Debian's packaged gems. A newer version that you installed still counts. On a Ruby built by ruby-build or rbenv, Tether cannot tell these gems apart and still lists them
 - A machine without `opendiff`, such as a Linux machine, now uses `vimdiff` when the synced merge tool is `opendiff`. Before, the merge failed
 - On Linux, desktop notifications now use `notify-send`. Without it, Tether logs this once and shows no notifications
 - The daemon now writes info lines, such as each sync, to `daemon.log`. Before, it wrote only errors unless `RUST_LOG` was set
