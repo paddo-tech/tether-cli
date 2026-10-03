@@ -3,8 +3,8 @@ import BaseLayout from './BaseLayout.astro';
 interface Props { title: string; description?: string; }
 const { title, description } = Astro.props;
 const docSections = [
-  { title: 'Get started', pages: [ ['Introduction', 'introduction'], ['Installation', 'installation'], ['Quick start', 'quick-start'] ] },
-  { title: 'Understand Tether', pages: [ ['How it works', 'how-it-works'], ['Encryption', 'encryption'], ['Machine profiles', 'machine-profiles'] ] },
+  { title: 'Get started', pages: [ ['Introduction', 'introduction'], ['Installation', 'installation'], ['Quick start', 'quick-start'], ['Upgrade to 2.0', 'upgrade'], ['Linux', 'linux'] ] },
+  { title: 'Understand Tether', pages: [ ['How it works', 'how-it-works'], ['Encryption', 'encryption'], ['Package security', 'package-security'], ['Machine trust', 'machine-trust'], ['Machine profiles', 'machine-profiles'] ] },
   { title: 'Use Tether', pages: [ ['Dashboard', 'dashboard'], ['Commands', 'commands'], ['Configuration', 'configuration'], ['Feature toggles', 'feature-toggles'] ] },
   { title: 'Connect your tools', pages: [ ['Package managers', 'package-managers'], ['Team sync', 'team-sync'], ['Troubleshooting', 'troubleshooting'] ] },
 ];
