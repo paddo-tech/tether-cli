@@ -315,6 +315,7 @@ impl ConflictState {
 }
 
 /// Escape a string for safe use in AppleScript
+#[cfg(any(target_os = "macos", test))]
 fn escape_applescript(s: &str) -> String {
     // Remove any control characters and limit length for safety
     let sanitized: String = s.chars().filter(|c| !c.is_control()).take(100).collect();
@@ -322,59 +323,84 @@ fn escape_applescript(s: &str) -> String {
     sanitized.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Send macOS notification naming the newly conflicted files
-pub fn notify_conflicts(files: &[&str]) -> Result<()> {
-    use std::process::Command;
+/// The program and arguments that show a desktop notification on this OS.
+#[cfg(target_os = "macos")]
+fn notification_command(message: &str, subtitle: &str) -> (&'static str, Vec<String>) {
+    let script = format!(
+        r#"display notification "{}" with title "Tether" subtitle "{}""#,
+        escape_applescript(message),
+        escape_applescript(subtitle)
+    );
+    ("osascript", vec!["-e".to_string(), script])
+}
 
+/// notify-send takes its arguments as plain text, so nothing needs escaping.
+#[cfg(not(target_os = "macos"))]
+fn notification_command(message: &str, subtitle: &str) -> (&'static str, Vec<String>) {
+    (
+        "notify-send",
+        vec![
+            "--app-name=Tether".to_string(),
+            "Tether".to_string(),
+            format!("{}\n{}", message, subtitle),
+        ],
+    )
+}
+
+/// Show a desktop notification. Without the notifier, for example a Linux machine without
+/// notify-send, Tether logs that once and skips notifications.
+fn notify(message: &str, subtitle: &str) -> Result<()> {
+    static MISSING_LOGGED: std::sync::Once = std::sync::Once::new();
+    let (program, args) = notification_command(message, subtitle);
+    if which::which(program).is_err() {
+        MISSING_LOGGED.call_once(|| {
+            log::info!(
+                "{} not found, so Tether shows no desktop notifications",
+                program
+            )
+        });
+        return Ok(());
+    }
+    std::process::Command::new(program).args(args).output()?;
+    Ok(())
+}
+
+/// Notify naming the newly conflicted files
+pub fn notify_conflicts(files: &[&str]) -> Result<()> {
     let message = match files {
         [file] => format!("Conflict in {}", file),
         _ => format!("{} file conflicts: {}", files.len(), files.join(", ")),
     };
-    let script = format!(
-        r#"display notification "{}" with title "Tether" subtitle "Run 'tether resolve' to fix""#,
-        escape_applescript(&message)
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
-    Ok(())
+    notify(&message, "Run 'tether resolve' to fix")
 }
 
-/// Send macOS notification that local commits were moved to a branch
+/// Notify that local commits were moved to a branch
 pub fn notify_discarded_commits(branch: &str) -> Result<()> {
-    use std::process::Command;
-
-    let script = format!(
-        r#"display notification "Local commits conflicted and were kept on branch {}" with title "Tether" subtitle "Check the sync logs to recover them""#,
-        escape_applescript(branch)
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
-    Ok(())
+    notify(
+        &format!(
+            "Local commits conflicted and were kept on branch {}",
+            branch
+        ),
+        "Check the sync logs to recover them",
+    )
 }
 
-/// Send macOS notification about deferred casks
+/// Notify about deferred casks
 pub fn notify_deferred_casks(casks: &[String]) -> Result<()> {
-    use std::process::Command;
-
     let count = casks.len();
-    let script = format!(
-        r#"display notification "{} cask{} need{} password" with title "Tether" subtitle "Run 'tether sync' to install""#,
-        count,
-        if count == 1 { "" } else { "s" },
-        if count == 1 { "s" } else { "" }
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
-    Ok(())
+    notify(
+        &format!(
+            "{} cask{} need{} password",
+            count,
+            if count == 1 { "" } else { "s" },
+            if count == 1 { "s" } else { "" }
+        ),
+        "Run 'tether sync' to install",
+    )
 }
 
-/// Send macOS notification that synced packages wait for approval
+/// Notify that synced packages wait for approval
 pub fn notify_inbox(names: &[&str]) -> Result<()> {
-    use std::process::Command;
-
     let message = match names {
         [name] => format!("{} waits for approval", name),
         _ => format!(
@@ -383,19 +409,34 @@ pub fn notify_inbox(names: &[&str]) -> Result<()> {
             names.join(", ")
         ),
     };
-    let script = format!(
-        r#"display notification "{}" with title "Tether" subtitle "Run 'tether packages inbox' to review""#,
-        escape_applescript(&message)
-    );
-
-    Command::new("osascript").args(["-e", &script]).output()?;
-
-    Ok(())
+    notify(&message, "Run 'tether packages inbox' to review")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notification_uses_osascript_on_macos() {
+        let (program, args) = notification_command("a \"b\"", "Run 'x'");
+        assert_eq!(program, "osascript");
+        assert_eq!(
+            args,
+            [
+                "-e",
+                r#"display notification "a \"b\"" with title "Tether" subtitle "Run 'x'""#
+            ]
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn notification_uses_notify_send_elsewhere() {
+        let (program, args) = notification_command("a \"b\"", "Run 'x'");
+        assert_eq!(program, "notify-send");
+        assert_eq!(args, ["--app-name=Tether", "Tether", "a \"b\"\nRun 'x'"]);
+    }
 
     // is_true_conflict tests
     #[test]

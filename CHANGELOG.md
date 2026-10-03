@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tether machines remove` and the dashboard removal now keep the record when the commit fails, for example on a stale index lock. Before, the files stayed deleted and a retry reported that the machine was not found
 - A uv tool that Tether installed at a pinned version now upgrades again. uv saves `name==version` in the tool receipt, so Tether installs the bare name a second time to drop that pin and keep the installed version. The second install runs offline, so uv cannot fetch a release other than the one OSV checked
 - A pnpm package that Tether installed at a pinned version now upgrades again. pnpm saves the exact version as the range, so upgrades now run `pnpm update -g --latest`, which ignores the saved range and still applies the release-age limit. pnpm upgrades can now cross major versions, like npm upgrades of global packages
+- On Linux, desktop notifications now use `notify-send`. Without it, Tether logs this once and shows no notifications
 
 ### Changed
 
