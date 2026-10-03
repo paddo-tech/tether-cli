@@ -395,8 +395,8 @@ fn record_entries(record: &MachineState) -> impl Iterator<Item = Entry> + '_ {
 }
 
 /// The packages machine records vouch for. A record counts only when its signature verifies
-/// against the key trusted for that record's machine id. Manifests are the union of every
-/// record, trusted or not, and commits can come from anyone who can push, so neither counts.
+/// against the key trusted for that record's machine id. Anyone who can push can write the
+/// manifests and commits, so neither counts.
 /// Each sync works this out again from the repo, so nothing carries over between syncs.
 struct Provenance {
     records: Vec<SignedRecord>,
@@ -1265,7 +1265,53 @@ async fn gate_simple(
     allowed
 }
 
-/// Export package manifests using union of all machine states
+/// The records a manifest export reads: this machine's current record, and each other
+/// record whose signature verifies against the key trusted for its machine id and is the
+/// newest that key signed. Anything else could put untrusted lines in this machine's commit.
+fn export_records(
+    records: Vec<SignedRecord>,
+    this: &MachineState,
+    store: &TrustStore,
+    generations: &Generations,
+) -> Vec<MachineState> {
+    let mut machines: Vec<MachineState> = records
+        .into_iter()
+        .filter(|r| {
+            r.record.machine_id != this.machine_id
+                && r.signer.as_ref().is_some_and(|signer| {
+                    store.trusts(&r.record.machine_id, signer)
+                        && generations.current(signer, r.record.generation, &r.digest)
+                })
+        })
+        .map(|r| r.record)
+        .collect();
+    machines.push(this.clone());
+    machines
+}
+
+/// Whether an export writes its manifest. Machines that trust different records compute
+/// different manifests. Each writes when its own result changed since it last wrote, or
+/// when the file lacks a package its result lists, but not only because another machine's
+/// write differs. Otherwise they would undo each other's manifest on every sync. Lines
+/// compare by `name`, so a different pin alone does not count: imports pin from records.
+fn manifest_needs_write(
+    written: Option<&str>,
+    file: Option<&str>,
+    computed: &str,
+    name: impl Fn(&str) -> String,
+) -> bool {
+    let Some(file) = file else {
+        return true;
+    };
+    if file == computed {
+        return false;
+    }
+    let listed: HashSet<String> = file.lines().map(&name).collect();
+    written != Some(crate::sha256_hex(computed.as_bytes()).as_str())
+        || computed.lines().any(|line| !listed.contains(&name(line)))
+}
+
+/// Export package manifests from the records this machine trusts
 pub async fn sync_packages(
     config: &Config,
     state: &mut SyncState,
@@ -1276,19 +1322,12 @@ pub async fn sync_packages(
     let manifests_dir = sync_path.join("manifests");
     std::fs::create_dir_all(&manifests_dir)?;
 
-    // Load all machine states and compute union of packages
-    let mut machines = MachineState::list_all(sync_path)?;
-
-    // Update/add current machine's state in the list for union computation
-    if let Some(pos) = machines
-        .iter()
-        .position(|m| m.machine_id == machine_state.machine_id)
-    {
-        machines[pos] = machine_state.clone();
-    } else {
-        machines.push(machine_state.clone());
-    }
-
+    let machines = export_records(
+        signing::records(sync_path),
+        machine_state,
+        &TrustStore::load()?,
+        &Generations::load()?,
+    );
     let union_packages = MachineState::compute_union_packages(&machines);
     let union_versions = MachineState::compute_union_versions(&machines);
 
@@ -1323,7 +1362,7 @@ pub async fn sync_packages(
     Ok(())
 }
 
-/// Sync brew manifest from union
+/// Sync brew manifest from the trusted union
 fn sync_brew(
     union_packages: &HashMap<String, Vec<String>>,
     state: &mut SyncState,
@@ -1346,14 +1385,17 @@ fn sync_brew(
     let hash = crate::sha256_hex(manifest.as_bytes());
     let manifest_path = manifests_dir.join("Brewfile");
 
-    let file_hash = std::fs::read(&manifest_path)
-        .ok()
-        .map(|c| crate::sha256_hex(&c));
-    let changed = file_hash.as_ref() != Some(&hash);
+    let file = std::fs::read_to_string(&manifest_path).ok();
 
     if !dry_run {
         let now = chrono::Utc::now();
         let existing = state.packages.get("brew");
+        let changed = manifest_needs_write(
+            existing.map(|e| e.hash.as_str()),
+            file.as_deref(),
+            &manifest,
+            str::to_string,
+        );
 
         if changed {
             std::fs::write(&manifest_path, &manifest)?;
@@ -1377,7 +1419,7 @@ fn sync_brew(
     Ok(())
 }
 
-/// Sync a simple package manager manifest from union
+/// Sync a simple package manager manifest from the trusted union
 fn sync_simple_manager(
     def: &PackageManagerDef,
     union_packages: &HashMap<String, Vec<String>>,
@@ -1394,14 +1436,17 @@ fn sync_simple_manager(
     let hash = crate::sha256_hex(manifest.as_bytes());
     let manifest_path = manifests_dir.join(def.manifest_file);
 
-    let file_hash = std::fs::read(&manifest_path)
-        .ok()
-        .map(|c| crate::sha256_hex(&c));
-    let changed = file_hash.as_ref() != Some(&hash);
+    let file = std::fs::read_to_string(&manifest_path).ok();
 
     if !dry_run {
         let now = chrono::Utc::now();
         let existing = state.packages.get(def.state_key);
+        let changed = manifest_needs_write(
+            existing.map(|e| e.hash.as_str()),
+            file.as_deref(),
+            &manifest,
+            |line| parse_pin(def.ecosystem, line).0,
+        );
 
         if changed {
             std::fs::write(&manifest_path, &manifest)?;
@@ -1524,9 +1569,14 @@ mod tests {
         }
     }
 
-    /// The npm lines an export from these records writes.
-    fn exported_npm(dir: &Path) -> Vec<(String, Option<String>)> {
-        let machines = MachineState::list_all(dir).unwrap();
+    /// The npm lines `me` exports from these records.
+    fn exported_npm(dir: &Path, me: &str, store: &TrustStore) -> Vec<(String, Option<String>)> {
+        let this = MachineState::list_all(dir)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.machine_id == me)
+            .unwrap_or_else(|| MachineState::new(me));
+        let machines = export_records(signing::records(dir), &this, store, &Generations::default());
         manifest_lines(
             Ecosystem::Npm,
             MachineState::compute_union_packages(&machines).get("npm"),
@@ -1578,8 +1628,16 @@ mod tests {
         record(path, "me", &[("left-pad", "1.0.0")], Some(&me));
         record(path, "t", &[("good", "1.0.0")], Some(&t));
         record(path, "phantom", &[("evilpkg", "6.6.6")], None);
-        assert!(exported_npm(path).contains(&("evilpkg".to_string(), Some("6.6.6".to_string()))));
-        // The exporting machine signs the commit that carries the union
+        assert!(!exported_npm(path, "me", &store)
+            .iter()
+            .any(|(name, _)| name == "evilpkg"));
+        // An older build's union, or anyone who can push, can still put it in the manifest
+        std::fs::write(
+            path.join("manifests/npm.txt"),
+            "evilpkg@6.6.6\ngood@1.0.0\nleft-pad@1.0.0\n",
+        )
+        .unwrap();
+        // The exporting machine signs the commit that carries the manifest
         GitBackend::new(path.to_path_buf())
             .commit_with_key("sync", "test", Some(&me))
             .unwrap();
@@ -1608,9 +1666,11 @@ mod tests {
         record(path, "t", &[("example", "1.0.0")], Some(&t));
         record(path, "u", &[("example", "1.5.0")], Some(&u));
         record(path, "x", &[("example", "2.0.0")], None);
+        // The unsigned record's version never reaches this machine's manifest, so every
+        // machine that trusts t and u holds the same version
         assert_eq!(
-            exported_npm(path),
-            vec![("example".to_string(), Some("2.0.0".to_string()))]
+            exported_npm(path, "me", &store),
+            vec![("example".to_string(), Some("1.5.0".to_string()))]
         );
 
         let trust = trust_as(path, "me", &me, &store);
@@ -1621,6 +1681,65 @@ mod tests {
         assert_eq!(held(&trust, "example", None), vec![Reason::Unsigned]);
         assert!(held(&trust, "example", Some("1.0.0")).is_empty());
         assert!(held(&trust, "example", Some("1.5.0")).is_empty());
+    }
+
+    #[test]
+    fn manifest_export_reads_only_trusted_current_records() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        let stranger = new_key();
+        record(path, "me", &[("stale-own", "1.0.0")], Some(&me));
+        record(path, "t", &[("good", "1.0.0")], Some(&t));
+        record(path, "unsigned", &[("a", "1.0.0")], None);
+        record(path, "other-key", &[("b", "1.0.0")], Some(&stranger));
+        let mut this = MachineState::new("me");
+        this.packages
+            .insert("npm".to_string(), vec!["mine".to_string()]);
+
+        let ids = |generations: &Generations| {
+            let mut ids: Vec<String> =
+                export_records(signing::records(path), &this, &store, generations)
+                    .into_iter()
+                    .map(|m| m.machine_id)
+                    .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(ids(&Generations::default()), ["me", "t"]);
+        let me_record = export_records(
+            signing::records(path),
+            &this,
+            &store,
+            &Generations::default(),
+        )
+        .into_iter()
+        .find(|m| m.machine_id == "me")
+        .unwrap();
+        assert_eq!(me_record.packages["npm"], ["mine"]);
+
+        // A replayed record of t no longer feeds the manifest
+        let mut generations = Generations::default();
+        assert!(generations.accept(t.public_key(), 5, "newer"));
+        assert_eq!(ids(&generations), ["me"]);
+    }
+
+    #[test]
+    fn machines_with_different_trust_do_not_undo_each_others_manifest() {
+        let name = |line: &str| parse_pin(Ecosystem::Npm, line).0;
+        let hash = |s: &str| crate::sha256_hex(s.as_bytes());
+        // a trusts b; b does not trust a yet
+        let a = "a-pkg@1.0.0\nb-pkg@2.0.0\n";
+        let b = "b-pkg@1.0.0\n";
+        // b changed its result and writes; a's packages leave the file
+        assert!(manifest_needs_write(None, Some(a), b, name));
+        // a's result did not change, but the file lacks a-pkg, so a writes again
+        assert!(manifest_needs_write(Some(&hash(a)), Some(b), a, name));
+        // b's result did not change and the file lists b-pkg: b leaves a's file alone,
+        // although a pins another version
+        assert!(!manifest_needs_write(Some(&hash(b)), Some(a), b, name));
+        // A missing file is always written; an equal file never is
+        assert!(manifest_needs_write(Some(&hash(a)), None, a, name));
+        assert!(!manifest_needs_write(None, Some(a), a, name));
     }
 
     /// Write `id`'s signed record from a machine on `os`, listing one npm package.
