@@ -121,7 +121,7 @@ The `build` job (self-hosted macOS) signs and notarizes the macOS binaries, crea
 Users install via:
 ```bash
 brew tap paddo-tech/tap
-brew install tether
+brew install tether-cli
 ```
 
 Homebrew on Linux uses the same commands. Without Homebrew, Linux users download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` from the GitHub release and put `tether` on `PATH`. The binaries are static and need no particular glibc.
