@@ -96,6 +96,9 @@ pub async fn import_packages(
     previously_deferred: &[String],
 ) -> Result<ImportOutcome> {
     let mut outcome = ImportOutcome::default();
+    // A record trusted since the last sync adds its packages to the manifests before this
+    // import reads them, so one sync after approval installs them
+    sync_packages(config, state, sync_path, machine_state, false).await?;
     let manifests_dir = sync_path.join("manifests");
     if !manifests_dir.exists() {
         return Ok(outcome);
