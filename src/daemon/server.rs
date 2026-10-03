@@ -398,6 +398,15 @@ impl DaemonServer {
             .await?;
             let deferred_casks = outcome.deferred_casks;
 
+            if !outcome.signature_failed.is_empty() {
+                log::warn!(
+                    "Record for {} fails its signature; Tether ignores it. Someone may have \
+                     edited it in the repo",
+                    outcome.signature_failed.join(", ")
+                );
+                crate::sync::notify_signature_failed(&outcome.signature_failed).ok();
+            }
+
             // One notification per batch of newly held packages
             if !outcome.queued.is_empty() {
                 let names: Vec<&str> = outcome.queued.iter().map(|i| i.name.as_str()).collect();

@@ -8,7 +8,7 @@ use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageInfo,
     PackageManager, PackagePolicy,
 };
-use crate::sync::signing::{self, Generations, SignedRecord, TrustStore};
+use crate::sync::signing::{self, Generations, RecordStatus, SignedRecord, TrustStore};
 use crate::sync::state::{InstallFailure, PackageState};
 use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::Result;
@@ -80,6 +80,8 @@ pub struct ImportOutcome {
     pub deferred_casks: Vec<String>,
     /// Packages newly held in the approval inbox
     pub queued: Vec<InboxItem>,
+    /// Trusted machines whose record newly fails its signature
+    pub signature_failed: Vec<String>,
 }
 
 /// Import packages from manifests, installing only missing packages that pass the
@@ -104,6 +106,15 @@ pub async fn import_packages(
     prune_failures(&mut state.install_failures, machine_state);
     let held_machines = inbox::queue_machine_keys(sync_path, mid)?;
     let trust = Trust::load(config, sync_path, mid)?;
+    outcome.signature_failed =
+        new_signature_failures(&trust.provenance.failed, &mut state.warned_signatures);
+    for id in &outcome.signature_failed {
+        Output::warning(&format!(
+            "Record for {} fails its signature; Tether ignores it. Someone may have edited it \
+             in the repo",
+            id
+        ));
+    }
     let mut gated = Gated::default();
 
     // Homebrew - special handling for formulae/casks/taps
@@ -160,6 +171,20 @@ pub async fn import_packages(
     outcome.queued.splice(0..0, held_machines);
 
     Ok(outcome)
+}
+
+/// The ids of failing records not reported before. `warned` keeps only records that still
+/// fail, so a record that fails again later is reported again.
+fn new_signature_failures(
+    failed: &[(String, String)],
+    warned: &mut HashSet<String>,
+) -> Vec<String> {
+    warned.retain(|digest| failed.iter().any(|(_, d)| d == digest));
+    failed
+        .iter()
+        .filter(|(_, digest)| warned.insert(digest.clone()))
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// What the checks decided for the packages one import or rollback checked. Every sync
@@ -408,6 +433,9 @@ struct Provenance {
     untrusted: HashSet<Entry>,
     /// Listed by this machine's record or a trusted record from a machine on this OS
     native: HashSet<Entry>,
+    /// Id and SHA-256 of each other machine's record whose id has a trusted key, but no
+    /// signature by that key verifies
+    failed: Vec<(String, String)>,
     this_machine: String,
     sync_path: std::path::PathBuf,
 }
@@ -427,23 +455,33 @@ impl Provenance {
             HashSet::new(),
             HashSet::new(),
         );
+        let mut failed = Vec::new();
         for r in &records {
+            let id = &r.record.machine_id;
+            let status = signing::record_status(r, this_machine, own_key, store, generations);
+            match status {
+                // A record that grants trust must be the newest its key has signed
+                RecordStatus::Replayed => {
+                    Output::warning(&format!(
+                        "Ignoring machines/{}.json: its key signed a newer or different record \
+                         at generation {} before. Someone may be replaying an old record",
+                        id, r.record.generation
+                    ));
+                    continue;
+                }
+                // This machine signs its own record again on its next save
+                RecordStatus::SignatureFailed if id != this_machine => {
+                    failed.push((id.clone(), r.digest.clone()));
+                }
+                _ => {}
+            }
             let Some(signer) = &r.signer else {
                 continue;
             };
-            let id = &r.record.machine_id;
-            let own_record = id == this_machine && signer.key_data() == own_key.key_data();
-            let trusted_record = id != this_machine && store.trusts(id, signer);
-            // A record that grants trust must be the newest its key has signed
-            if (own_record || trusted_record)
-                && !generations.accept(signer, r.record.generation, &r.digest)
-            {
-                Output::warning(&format!(
-                    "Ignoring machines/{}.json: its key signed a newer or different record \
-                     at generation {} before. Someone may be replaying an old record",
-                    id, r.record.generation
-                ));
-                continue;
+            let own_record = id == this_machine && status == RecordStatus::Trusted;
+            let trusted_record = id != this_machine && status == RecordStatus::Trusted;
+            if own_record || trusted_record {
+                generations.accept(signer, r.record.generation, &r.digest);
             }
             if own_record || (trusted_record && same_os(&r.record)) {
                 native.extend(record_entries(&r.record));
@@ -463,6 +501,7 @@ impl Provenance {
             trusted,
             untrusted,
             native,
+            failed,
             this_machine: this_machine.to_string(),
             sync_path: sync_path.to_path_buf(),
         }
@@ -1979,6 +2018,50 @@ mod tests {
     }
 
     #[test]
+    fn trusted_records_that_fail_their_signature_are_reported() {
+        let (tmp, me, t, mut store) = two_machines();
+        let path = tmp.path();
+        let other = new_key();
+        store.trust("u", other.public_key()).unwrap();
+        store.trust("v", new_key().public_key()).unwrap();
+        // Tampered after signing
+        record(path, "t", &[("a", "1.0.0")], Some(&t));
+        let file = path.join("machines/t.json");
+        let tampered = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("1.0.0", "0.9.0");
+        std::fs::write(&file, tampered).unwrap();
+        // No signature, and signed by a key not trusted for the id
+        record(path, "u", &[("b", "1.0.0")], None);
+        record(path, "v", &[("c", "1.0.0")], Some(&other));
+        // Not trusted at all, and this machine's own record: neither is reported
+        record(path, "stranger", &[("d", "1.0.0")], None);
+        record(path, "me", &[("e", "1.0.0")], None);
+
+        let trust = trust_as(path, "me", &me, &store);
+        let ids: Vec<&str> = trust
+            .provenance
+            .failed
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, ["t", "u", "v"]);
+    }
+
+    #[test]
+    fn a_failing_record_is_reported_once_until_it_changes() {
+        let failed = vec![("t".to_string(), "d1".to_string())];
+        let mut warned = HashSet::from(["gone".to_string()]);
+        assert_eq!(new_signature_failures(&failed, &mut warned), ["t"]);
+        assert_eq!(warned, HashSet::from(["d1".to_string()]));
+        assert!(new_signature_failures(&failed, &mut warned).is_empty());
+        let changed = vec![("t".to_string(), "d2".to_string())];
+        assert_eq!(new_signature_failures(&changed, &mut warned), ["t"]);
+        assert!(new_signature_failures(&[], &mut warned).is_empty());
+        assert!(warned.is_empty());
+    }
+
+    #[test]
     fn test_record_signed_with_another_machines_key_is_untrusted() {
         let (tmp, me, t, store) = two_machines();
         let path = tmp.path();
@@ -2131,6 +2214,7 @@ mod tests {
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
+            warned_signatures: Default::default(),
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -2158,6 +2242,7 @@ mod tests {
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
+            warned_signatures: Default::default(),
         };
 
         state.packages.insert(

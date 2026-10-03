@@ -406,6 +406,48 @@ pub fn records(sync_path: &Path) -> Vec<SignedRecord> {
     records
 }
 
+/// How this machine reads a machine record from the sync repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordStatus {
+    /// Signed by the key trusted for its machine id, and the newest record that key signed
+    Trusted,
+    /// Its machine id has no trusted key
+    Untrusted,
+    /// Signed by the trusted key, but that key signed a newer or different record before
+    Replayed,
+    /// Its machine id has a trusted key, and no signature by that key verifies
+    SignatureFailed,
+}
+
+/// The status of `record`. This machine's own id is trusted with `own_key` only.
+pub fn record_status(
+    record: &SignedRecord,
+    this_machine: &str,
+    own_key: &PublicKey,
+    store: &TrustStore,
+    generations: &Generations,
+) -> RecordStatus {
+    let id = &record.record.machine_id;
+    let trusted = if id == this_machine {
+        own_key
+    } else {
+        match store.key_for(id) {
+            Some(key) => key,
+            None => return RecordStatus::Untrusted,
+        }
+    };
+    match &record.signer {
+        Some(signer) if signer.key_data() == trusted.key_data() => {
+            if generations.current(signer, record.record.generation, &record.digest) {
+                RecordStatus::Trusted
+            } else {
+                RecordStatus::Replayed
+            }
+        }
+        _ => RecordStatus::SignatureFailed,
+    }
+}
+
 /// The keys that validly signed each machine record, trusted or not.
 pub fn record_signers(sync_path: &Path) -> Vec<(String, PublicKey)> {
     records(sync_path)

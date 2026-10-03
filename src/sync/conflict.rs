@@ -412,6 +412,14 @@ pub fn notify_inbox(names: &[&str]) -> Result<()> {
     notify(&message, "Run 'tether packages inbox' to review")
 }
 
+/// Notify that trusted machines' records fail their signature
+pub fn notify_signature_failed(ids: &[String]) -> Result<()> {
+    notify(
+        &format!("Record for {} fails its signature", ids.join(", ")),
+        "Tether ignores it. Someone may have edited it in the repo",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

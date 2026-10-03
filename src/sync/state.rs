@@ -26,6 +26,10 @@ pub struct SyncState {
     /// Synced packages that failed to install on this machine, by `manager:name`
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub install_failures: HashMap<String, InstallFailure>,
+    /// SHA-256 of each failing machine record Tether already warned about, so the daemon
+    /// warns once per record
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub warned_signatures: std::collections::HashSet<String>,
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -494,6 +498,7 @@ impl SyncState {
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
+            warned_signatures: Default::default(),
         }
     }
 
