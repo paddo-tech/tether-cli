@@ -376,6 +376,10 @@ impl Trust {
 /// Manager key, name and reported version of one package.
 type Entry = (String, String, Option<String>);
 
+fn same_os(record: &MachineState) -> bool {
+    record.os_family() == std::env::consts::OS
+}
+
 /// Every package a machine record lists, at the version the record reports.
 fn record_entries(record: &MachineState) -> impl Iterator<Item = Entry> + '_ {
     record.packages.iter().flat_map(move |(manager, names)| {
@@ -402,6 +406,8 @@ struct Provenance {
     trusted: HashSet<Entry>,
     /// Listed by a validly signed record whose key is not trusted for its machine
     untrusted: HashSet<Entry>,
+    /// Listed by this machine's record or a trusted record from a machine on this OS
+    native: HashSet<Entry>,
     this_machine: String,
     sync_path: std::path::PathBuf,
 }
@@ -415,8 +421,12 @@ impl Provenance {
         generations: &mut Generations,
     ) -> Self {
         let records = signing::records(sync_path);
-        let (mut own, mut trusted, mut untrusted) =
-            (HashSet::new(), HashSet::new(), HashSet::new());
+        let (mut own, mut trusted, mut untrusted, mut native) = (
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+        );
         for r in &records {
             let Some(signer) = &r.signer else {
                 continue;
@@ -435,6 +445,9 @@ impl Provenance {
                 ));
                 continue;
             }
+            if own_record || (trusted_record && same_os(&r.record)) {
+                native.extend(record_entries(&r.record));
+            }
             let set = if own_record {
                 &mut own
             } else if trusted_record {
@@ -449,6 +462,7 @@ impl Provenance {
             own,
             trusted,
             untrusted,
+            native,
             this_machine: this_machine.to_string(),
             sync_path: sync_path.to_path_buf(),
         }
@@ -468,6 +482,17 @@ impl Provenance {
             .filter(|(m, n, _)| m == manager && n == name)
             .filter_map(|(_, _, version)| version.clone())
             .max_by(|a, b| crate::packages::pin::compare_versions(ecosystem, a, b))
+    }
+
+    /// Whether only machines on another OS list the newest trusted version. That version
+    /// may not install here, for example a uv tool that needs a newer Python.
+    fn foreign_pin(&self, ecosystem: Ecosystem, manager: &str, name: &str) -> bool {
+        self.newest_trusted_version(ecosystem, manager, name)
+            .is_some_and(|v| {
+                !self
+                    .native
+                    .contains(&(manager.to_string(), name.to_string(), Some(v)))
+            })
     }
 
     fn signer(&self, entry: &Entry) -> Signer {
@@ -904,6 +929,15 @@ async fn import_simple_manager(
         .iter()
         .map(|(name, version, _)| (name.clone(), version.clone()))
         .collect();
+    let foreign: HashSet<String> = missing
+        .iter()
+        .filter(|(name, _, _)| {
+            trust
+                .provenance
+                .foreign_pin(def.ecosystem, def.state_key, name)
+        })
+        .map(|(name, _, _)| name.clone())
+        .collect();
 
     let allowed = gate_simple(
         def,
@@ -941,6 +975,30 @@ async fn import_simple_manager(
                 installed_any = true;
                 failures.remove(&InstallFailure::key(def.state_key, &name));
             }
+            Err(e) if foreign.contains(&name) => {
+                match install_fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await
+                {
+                    Ok(version) => {
+                        installed_any = true;
+                        failures.remove(&InstallFailure::key(def.state_key, &name));
+                        Output::info(&format!(
+                            "Installed {} {} instead of {}, which a machine on another OS \
+                             lists and which failed here: {}",
+                            name,
+                            version,
+                            asked.as_deref().unwrap_or("the pinned version"),
+                            e.to_string().lines().next().unwrap_or_default()
+                        ));
+                    }
+                    Err(fallback) => record_failure(
+                        failures,
+                        def.state_key,
+                        &name,
+                        asked.as_deref(),
+                        &format!("{}; no fallback release: {}", e, fallback),
+                    ),
+                }
+            }
             Err(e) => record_failure(
                 failures,
                 def.state_key,
@@ -951,6 +1009,57 @@ async fn import_simple_manager(
         }
     }
     installed_any
+}
+
+/// Install the release an unpinned line would get on this machine, after a version that
+/// only machines on another OS list failed. A trusted record lists the package, so this
+/// release gets the checks of an unpinned line: the release-age limit, rejections and OSV.
+async fn install_fallback(
+    def: &PackageManagerDef,
+    manager: &dyn PackageManager,
+    trust: &Trust,
+    name: &str,
+    failed: Option<&str>,
+) -> Result<String> {
+    let min_age = PackagePolicy::load().min_release_age_days;
+    let version = resolve_version(def.state_key, def.ecosystem, name, min_age).await?;
+    if failed == Some(version.as_str()) {
+        anyhow::bail!("it is the newest release that suits this machine");
+    }
+    if trust
+        .inbox
+        .is_rejected(def.state_key, name, Some(&version), None)
+    {
+        anyhow::bail!("you rejected {} {}", name, version);
+    }
+    let advisories = osv::advisories(def.ecosystem, &[(name.to_string(), Some(version.clone()))])
+        .await
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    if advisories.iter().any(|id| osv::is_malicious(id)) {
+        anyhow::bail!(
+            "OSV lists {} {} as MALICIOUS ({})",
+            name,
+            version,
+            advisories.join(", ")
+        );
+    }
+    if !advisories.is_empty() {
+        Output::warning(&format!(
+            "{} {} has known vulnerabilities: {}",
+            name,
+            version,
+            advisories.join(", ")
+        ));
+    }
+    manager
+        .install(&PackageInfo {
+            name: name.to_string(),
+            version: Some(version.clone()),
+        })
+        .await?;
+    Ok(version)
 }
 
 /// A package a rollback would install, at the version its snapshot pins.
@@ -1512,6 +1621,58 @@ mod tests {
         assert_eq!(held(&trust, "example", None), vec![Reason::Unsigned]);
         assert!(held(&trust, "example", Some("1.0.0")).is_empty());
         assert!(held(&trust, "example", Some("1.5.0")).is_empty());
+    }
+
+    /// Write `id`'s signed record from a machine on `os`, listing one npm package.
+    fn record_on(dir: &Path, id: &str, os: &str, npm: (&str, &str), key: &ssh_key::PrivateKey) {
+        let mut machine = MachineState::new(id);
+        machine.os = os.to_string();
+        machine
+            .packages
+            .insert("npm".to_string(), vec![npm.0.to_string()]);
+        machine.package_versions.insert(
+            "npm".to_string(),
+            HashMap::from([(npm.0.to_string(), npm.1.to_string())]),
+        );
+        machine.save_to_repo(dir).unwrap();
+        signing::sign_record(dir, id, key).unwrap();
+    }
+
+    #[test]
+    fn a_pin_only_another_os_lists_is_only_preferred() {
+        let (tmp, me, t, mut store) = two_machines();
+        let path = tmp.path();
+        let u = new_key();
+        store.trust("u", u.public_key()).unwrap();
+        let here = std::env::consts::OS;
+        record_on(path, "t", "otheros", ("example", "2.0.0"), &t);
+        record_on(path, "u", here, ("example", "1.0.0"), &u);
+        let trust = trust_as(path, "me", &me, &store);
+        assert!(trust
+            .provenance
+            .foreign_pin(Ecosystem::Npm, "npm", "example"));
+
+        // Once a machine on this OS lists the newest version, it must install as pinned
+        record_on(path, "u", here, ("example", "2.0.0"), &u);
+        let trust = trust_as(path, "me", &me, &store);
+        assert!(!trust
+            .provenance
+            .foreign_pin(Ecosystem::Npm, "npm", "example"));
+
+        // A package no trusted record lists has no trusted pin to fall back from
+        assert!(!trust.provenance.foreign_pin(Ecosystem::Npm, "npm", "other"));
+    }
+
+    #[test]
+    fn records_without_an_os_field_read_macos_from_the_os_version() {
+        let mut machine = MachineState::new("m");
+        machine.os = String::new();
+        machine.os_version = "macOS 15.5".to_string();
+        assert_eq!(machine.os_family(), "macos");
+        machine.os_version = "Ubuntu 24.04 LTS".to_string();
+        assert_eq!(machine.os_family(), "");
+        machine.os = "linux".to_string();
+        assert_eq!(machine.os_family(), "linux");
     }
 
     #[test]

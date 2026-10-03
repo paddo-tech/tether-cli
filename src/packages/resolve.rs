@@ -27,14 +27,14 @@ pub async fn resolve_version(
             &uv_python().await?,
         ),
         // gem cannot hold to a release age, so the newest release is what it installs
-        Ecosystem::Gem => get(&format!(
-            "https://rubygems.org/api/v1/versions/{}/latest.json",
-            name
-        ))
-        .await?
-        .get("version")
-        .and_then(Value::as_str)
-        .map(str::to_string),
+        Ecosystem::Gem => pick_gem(
+            &get(&format!(
+                "https://rubygems.org/api/v1/versions/{}.json",
+                name
+            ))
+            .await?,
+            &ruby_version().await?,
+        ),
         Ecosystem::Brew | Ecosystem::BrewTap => None,
     };
     picked
@@ -186,6 +186,89 @@ fn pick_npm(packument: &Value, cutoff: Option<DateTime<Utc>>) -> Option<String> 
         .filter(|v| released_before(time(v), cutoff))
         .max_by(|a, b| compare_versions(Ecosystem::Npm, a, b))
         .cloned()
+}
+
+/// The version of the Ruby that `gem install` runs under.
+async fn ruby_version() -> Result<String> {
+    let output = super::command("ruby")?
+        .args(["-e", "print RUBY_VERSION"])
+        .output()
+        .await?;
+    if !output.status.success() {
+        bail!("ruby -e 'print RUBY_VERSION' failed");
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    validate_version(Ecosystem::Gem, &version)?;
+    Ok(version)
+}
+
+/// From RubyGems' version list: the newest stable release whose `ruby_version` admits
+/// `ruby`. A gem built for another Ruby fails to install rather than installing another
+/// release, so the release must suit this machine's Ruby.
+fn pick_gem(versions: &Value, ruby: &str) -> Option<String> {
+    versions
+        .as_array()?
+        .iter()
+        .filter(|v| {
+            !v.get("prerelease")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter(|v| {
+            v.get("ruby_version")
+                .and_then(Value::as_str)
+                .is_none_or(|spec| ruby_admits(spec, ruby))
+        })
+        .filter_map(|v| v.get("number").and_then(Value::as_str))
+        .filter(|v| validate_version(Ecosystem::Gem, v).is_ok())
+        .max_by(|a, b| compare_versions(Ecosystem::Gem, a, b))
+        .map(str::to_string)
+}
+
+/// Whether a RubyGems requirement such as `>= 2.7, < 4` admits `ruby`. An unreadable
+/// requirement admits nothing, so its release is skipped.
+fn ruby_admits(spec: &str, ruby: &str) -> bool {
+    let cmp = |v: &str| compare_versions(Ecosystem::Gem, ruby, v);
+    spec.split(',')
+        .map(str::trim)
+        .filter(|clause| !clause.is_empty())
+        .all(|clause| {
+            let ops = ["~>", ">=", "<=", "!=", "=", ">", "<"];
+            // A bare version means `=`
+            let (op, raw) = match ops.iter().find(|op| clause.starts_with(**op)) {
+                Some(op) => (*op, clause[op.len()..].trim()),
+                None => ("=", clause),
+            };
+            if validate_version(Ecosystem::Gem, raw).is_err() {
+                return false;
+            }
+            match op {
+                // `~> 2.7.1` admits 2.7.1 up to 2.8, and `~> 3` admits 3 up to 4
+                "~>" => {
+                    let mut upper: Vec<u64> =
+                        raw.split('.').map_while(|p| p.parse().ok()).collect();
+                    if upper.len() > 1 {
+                        upper.pop();
+                    }
+                    let Some(last) = upper.last_mut() else {
+                        return false;
+                    };
+                    *last += 1;
+                    let upper = upper
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    cmp(raw).is_ge() && cmp(&upper).is_lt()
+                }
+                ">=" => cmp(raw).is_ge(),
+                "<=" => cmp(raw).is_le(),
+                "!=" => cmp(raw).is_ne(),
+                ">" => cmp(raw).is_gt(),
+                "<" => cmp(raw).is_lt(),
+                _ => cmp(raw).is_eq(),
+            }
+        })
 }
 
 /// The version of the Python that `uv tool install` would use, as `uv python find` reports it.
@@ -400,6 +483,34 @@ mod tests {
 
     fn at(s: &str) -> Option<DateTime<Utc>> {
         Some(DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc))
+    }
+
+    #[test]
+    fn gem_picks_the_newest_stable_release_this_ruby_can_install() {
+        let versions = serde_json::json!([
+            { "number": "3.0.0.pre1", "prerelease": true, "ruby_version": ">= 2.6" },
+            { "number": "2.1.0", "prerelease": false, "ruby_version": ">= 3.3.0" },
+            { "number": "2.0.1", "prerelease": false, "ruby_version": ">= 2.7, < 4" },
+            { "number": "1.9.0", "prerelease": false, "ruby_version": null },
+        ]);
+        assert_eq!(pick_gem(&versions, "3.2.2").as_deref(), Some("2.0.1"));
+        assert_eq!(pick_gem(&versions, "3.4.1").as_deref(), Some("2.1.0"));
+        assert_eq!(pick_gem(&versions, "2.6.10").as_deref(), Some("1.9.0"));
+    }
+
+    #[test]
+    fn ruby_requirements_read_as_rubygems_does() {
+        assert!(ruby_admits(">= 2.7.0", "3.3.0"));
+        assert!(!ruby_admits(">= 3.4", "3.3.6"));
+        assert!(ruby_admits("~> 3.1", "3.9.0"));
+        assert!(!ruby_admits("~> 3.1", "4.0.0"));
+        assert!(ruby_admits("~> 2.7.1", "2.7.8"));
+        assert!(!ruby_admits("~> 2.7.1", "2.8.0"));
+        assert!(ruby_admits("~> 3", "3.4.1"));
+        assert!(ruby_admits("3.3.0", "3.3.0"));
+        assert!(!ruby_admits("!= 3.3.0", "3.3.0"));
+        assert!(ruby_admits(">= 0", "2.6.10"));
+        assert!(!ruby_admits("bogus", "3.3.0"));
     }
 
     #[test]

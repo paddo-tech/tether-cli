@@ -91,6 +91,10 @@ pub struct MachineState {
     pub last_sync: DateTime<Utc>,
     #[serde(default)]
     pub os_version: String,
+    /// OS family as Rust names it, such as `macos` or `linux`. A version that a machine on
+    /// another OS lists may not install here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub os: String,
     #[serde(default)]
     pub cli_version: String,
     /// File paths and their hashes
@@ -175,12 +179,25 @@ pub fn local_os_version() -> String {
 }
 
 impl MachineState {
+    /// The OS family of the machine that wrote this record. Records from before the `os`
+    /// field name only an OS version, which tells macOS apart.
+    pub fn os_family(&self) -> &str {
+        if !self.os.is_empty() {
+            &self.os
+        } else if self.os_version.starts_with("macOS") {
+            "macos"
+        } else {
+            ""
+        }
+    }
+
     pub fn new(machine_id: &str) -> Self {
         Self {
             machine_id: machine_id.to_string(),
             hostname: local_hostname(),
             last_sync: Utc::now(),
             os_version: local_os_version(),
+            os: std::env::consts::OS.to_string(),
             cli_version: env!("CARGO_PKG_VERSION").to_string(),
             files: HashMap::new(),
             packages: HashMap::new(),

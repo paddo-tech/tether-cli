@@ -1797,6 +1797,7 @@ pub async fn build_machine_state(
     machine_state.hostname = crate::sync::local_hostname();
     machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
     machine_state.os_version = crate::sync::state::local_os_version();
+    machine_state.os = std::env::consts::OS.to_string();
     machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
 
     // Collect file hashes
