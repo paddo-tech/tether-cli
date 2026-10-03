@@ -6,6 +6,7 @@ import ProfileDiagram from '../components/ProfileDiagram.astro';
 import RestoreDiagram from '../components/RestoreDiagram.astro';
 import InstallSection from '../components/InstallSection.astro';
 import Code from '../components/Code.astro';
+import FlowDiagram from '../components/FlowDiagram.astro';
 const packages = ['Homebrew', 'npm', 'pnpm', 'bun', 'gem', 'uv'];
 const features = [
   { icon: 'git' as const, title: 'Your repo. Your history.', description: 'Use your own Git repository. Track changes and restore earlier versions when you need them.', label: 'Explore the workflow', href: '/docs#how-it-works' },
@@ -35,21 +36,28 @@ const features = [
       <div class="section-copy"><p class="eyebrow">THE RIGHT SETUP FOR EACH MACHINE</p><h2>Connected.<br /><em>Not identical.</em></h2><p>Your work laptop and your server do different jobs. Use profiles to choose the files and packages each machine receives.</p><p>Keep your shell consistent. Leave the desktop apps on your desktop.</p><a class="text-link" href="/docs#machine-profiles">Explore machine profiles <Icon name="arrow" size={17} /></a></div>
       <ProfileDiagram />
     </section>
+    <section class="split-section wrap" id="supply-chain"><FlowDiagram label="BEFORE A SYNCED PACKAGE INSTALLS" caption="A package that fails a check waits for your approval." steps={[
+      { icon: 'key', title: 'Signed by a machine you trust', detail: 'Its record lists this exact version' },
+      { icon: 'shield', title: 'Old enough. Not known malware.', detail: '7-day release age · OSV check' },
+      { icon: 'check', title: 'Installed with scripts off', detail: 'npm · pnpm · bun' },
+    ]} /><div class="section-copy"><p class="eyebrow">SUPPLY-CHAIN CHECKS</p><h2>Synced packages.<br /><em>Checked first.</em></h2><p>A line in a manifest does not install on its own. Each machine signs a record of its packages. Your machine installs a package on its own only when a machine you trust lists it.</p><p>Tether skips releases newer than 7 days. It checks npm, pnpm, bun, uv and gem packages against OSV for known malware. It installs npm, pnpm and bun packages with scripts off. A package that fails a check waits in an approval inbox.</p><a class="text-link" href="/security#supply-chain">See how the checks work <Icon name="arrow" size={17} /></a></div></section>
     <section class="setup-section wrap">
       <div class="section-heading"><p class="eyebrow">FROM ONE MACHINE TO THE NEXT</p><h2>A familiar setup.<br />A few simple steps.</h2></div>
       <ol class="setup-steps">
         <li><span class="step-number">1</span><h3>Connect your repo.</h3><p>Install Tether. Select your Git repository and set an encryption passphrase.</p><Code code="tether init" /></li>
-        <li><span class="step-number">2</span><h3>Add another machine.</h3><p>Run setup on your next machine. Select the same repo and enter your passphrase.</p><Code code="tether init" /></li>
+        <li><span class="step-number">2</span><h3>Add another machine.</h3><p>Run setup on your next machine. Select the same repo and enter your passphrase. Then trust each machine’s key once.</p><Code code="tether init" /></li>
         <li><span class="step-number">3</span><h3>Get back to work.</h3><p>The daemon syncs every five minutes. Run a sync yourself whenever you need one.</p><Code code="tether sync" /></li>
       </ol>
     </section>
-    <section class="split-section wrap"><RestoreDiagram /><div class="section-copy"><p class="eyebrow">MACHINE STATE BACKUP</p><h2>New machine.<br /><em>Nothing lost.</em></h2><p>Tether keeps a record of your dotfiles and global packages in Git. Replace or reformat a machine, then run setup.</p><p>Tether restores your files and installs your packages. Your new machine starts where the old one stopped.</p><a class="text-link" href="/docs#cmd-init">See how setup works <Icon name="arrow" size={17} /></a></div></section>
+    <section class="split-section wrap"><RestoreDiagram /><div class="section-copy"><p class="eyebrow">MACHINE STATE BACKUP</p><h2>New machine.<br /><em>Nothing lost.</em></h2><p>Tether keeps a record of your dotfiles and global packages in Git. Replace or reformat a machine, then run setup.</p><p>Tether restores your files and installs your packages at the versions your machines use. It asks before it installs packages from a machine you do not trust yet.</p><a class="text-link" href="/docs#cmd-init">See how setup works <Icon name="arrow" size={17} /></a></div></section>
     <section class="team-callout wrap"><div class="feature-symbol"><Icon name="users" size={31} /></div><div><p class="eyebrow">BETTER TOGETHER</p><h2>Share the setup.<br />Keep your own keys.</h2><p>Sync team dotfiles and encrypted project secrets. Give each teammate access through their own age key.</p></div><a class="button secondary" href="/teams">Explore team sync <Icon name="arrow" size={18} /></a></section>
     <section class="faq-section wrap"><div class="section-heading"><p class="eyebrow">A FEW THINGS TO KNOW</p><h2>Your setup.<br />Your decisions.</h2></div><div class="faq-list">
       <details><summary>Do I need a Tether account?</summary><p>No. Tether uses your existing Git repository and Git authentication. You do not need a separate Tether account.</p></details>
       <details><summary>What gets encrypted?</summary><p>Tether encrypts personal dotfiles by default. Package manifests remain readable in Git. Team secrets use age public-key encryption.</p><a href="/security">Read the security model ↗</a></details>
       <details><summary>Can I choose what syncs?</summary><p>Yes. Select your dotfiles and package managers. Use machine profiles and feature toggles to control each machine.</p><a href="/docs#configuration">See configuration options ↗</a></details>
       <details><summary>What if I replace my machine?</summary><p>Run <code>tether init</code> on the new machine. Select the same repo and enter your passphrase. Tether restores your dotfiles and reinstalls your packages.</p><a href="/docs#cmd-init">See how setup works ↗</a></details>
+      <details><summary>Can someone with repo access install packages on my machines?</summary><p>Not with a manifest change alone. A synced package installs only when a signed record from a machine you trust lists it. Other packages wait for your approval in <code>tether packages inbox</code>.</p><a href="/security#machine-trust">Read how trust works ↗</a></details>
+      <details><summary>Does Tether run on Linux?</summary><p>Yes, in beta. <code>tether daemon install</code> sets up a systemd user service. Tether skips Homebrew casks on Linux.</p><a href="/docs#linux">Read the Linux notes ↗</a></details>
       <details><summary>What happens when files conflict?</summary><p>Tether lets you keep the local version, use the remote version, merge the files, or skip the conflict.</p><a href="/docs#cmd-resolve">Learn about conflict resolution ↗</a></details>
     </div></section>
     <InstallSection />
