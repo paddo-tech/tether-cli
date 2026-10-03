@@ -36,12 +36,17 @@ import ProfileDiagram from '../../components/ProfileDiagram.astro';
   <!-- Installation -->
   <section id="installation">
     <h2>Installation</h2>
-    <h3>Homebrew (macOS)</h3>
+    <h3>Homebrew (macOS and Linux)</h3>
     <Code code={`brew tap paddo-tech/tap
 brew install tether-cli`} />
+    <h3>Release download (Linux)</h3>
+    <p>Download the <code>tether-&lt;version&gt;-&lt;target&gt;.tar.gz</code> file for your CPU (x86_64 or aarch64) from the <a href="https://github.com/paddo-tech/tether-cli/releases">GitHub releases page</a>. Extract it, and put the <code>tether</code> binary in a directory on your <code>PATH</code>.</p>
+    <h3>From source</h3>
+    <p>You need Rust 1.91 or later.</p>
+    <Code code="cargo install --locked --git https://github.com/paddo-tech/tether-cli" />
     <h3>Requirements</h3>
     <ul>
-      <li><strong>Platform:</strong> macOS; Linux support is in beta (see <a href="#linux">Linux</a>)</li>
+      <li><strong>Platform:</strong> macOS or Linux (see <a href="#linux">Linux</a>)</li>
       <li><strong>curl:</strong> Used for OSV malware checks</li>
       <li><strong>Shell:</strong> zsh or bash</li>
       <li><strong>Git:</strong> Configured with GitHub, GitLab, or self-hosted Git server</li>
@@ -82,7 +87,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
 
     <h3>1. Upgrade a machine</h3>
     <Code code="brew upgrade tether-cli" />
-    <p>On Linux, build from source again. See <a href="#linux">Linux</a>.</p>
+    <p>If you installed a release download or built from source, install the new version the same way. See <a href="#installation">Installation</a>.</p>
 
     <h3>2. Sync it once</h3>
     <Code code="tether sync" />
@@ -123,8 +128,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
   <!-- Linux -->
   <section id="linux">
     <h2>Linux</h2>
-    <p>Linux support is in beta. The Homebrew formula has macOS builds only. On Linux, build Tether from source with Rust 1.91 or later, then run <code>tether init</code>.</p>
-    <Code code="cargo install --locked --git https://github.com/paddo-tech/tether-cli" />
+    <p>Tether runs on x86_64 and aarch64 Linux. Install it with Homebrew, a release download, or from source. See <a href="#installation">Installation</a>. Then run <code>tether init</code>.</p>
 
     <h3>Daemon</h3>
     <Code code="tether daemon install" />
@@ -791,7 +795,7 @@ mypy`} />
   <!-- Package Security -->
   <section id="package-security">
     <h2>Package Security</h2>
-    <p>Anyone who can push to your sync repo can edit a manifest. Tether checks each synced package before a package manager runs. A package that fails a check waits in the <a href="#approval-inbox">approval inbox</a>.</p>
+    <p>Anyone who can push to your sync repo can edit a manifest. Tether checks each synced package before a package manager runs. A package that fails a check waits in the <a href="#approval-inbox">approval inbox</a>. For the threats and limits, see <a href="/supply-chain">Supply-chain security</a>.</p>
     <FlowDiagram label="BEFORE A SYNCED PACKAGE INSTALLS" caption="Tether runs these checks again on every sync, for new and held packages." steps={[
       { icon: 'key', title: 'Trusted record', detail: 'A trusted machine lists this version' },
       { icon: 'shield', title: 'Policy checks', detail: 'Name · Tap · Release age · OSV' },

@@ -29,7 +29,8 @@ Astro writes the static site to `dist/`.
 | `/` | Product overview, supply-chain checks, machine profiles, setup, and installation |
 | `/docs` | Upgrade guide, Linux, commands, configuration, package security, machine trust, and troubleshooting |
 | `/teams` | Team repositories, recipient keys, and project sharing |
-| `/security` | Encryption, key management, package checks, machine trust, scanning, and security boundaries |
+| `/supply-chain` | Supply-chain threats, package checks, machine trust, approval inbox, and limits |
+| `/security` | Encryption, key management, scanning, and security boundaries |
 | `/designs` | Original design comparison, excluded from search indexing |
 
 ## Design

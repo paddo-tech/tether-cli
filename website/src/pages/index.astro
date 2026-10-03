@@ -23,7 +23,7 @@ const features = [
         <h1>Different machines.<br /><em>Same setup.</em></h1>
         <p class="lede">Your shell, your packages, your familiar shortcuts. Tether keeps them in sync through a Git repo you control.</p>
         <div class="hero-actions"><a class="button primary" href="#install">Get Tether <Icon name="arrow" size={19} /></a><a class="text-link" href="/docs">Read the docs <span>↗</span></a></div>
-        <p class="availability">Open source · macOS · Linux beta</p>
+        <p class="availability">Open source · macOS · Linux</p>
       </div>
       <NetworkDiagram />
     </section>
@@ -40,7 +40,7 @@ const features = [
       { icon: 'key', title: 'Signed by a machine you trust', detail: 'Its record lists this exact version' },
       { icon: 'shield', title: 'Old enough. Not known malware.', detail: '7-day release age · OSV check' },
       { icon: 'check', title: 'Installed with scripts off', detail: 'npm · pnpm · bun' },
-    ]} /><div class="section-copy"><p class="eyebrow">SUPPLY-CHAIN CHECKS</p><h2>Synced packages.<br /><em>Checked first.</em></h2><p>A line in a manifest does not install on its own. Each machine signs a record of its packages. Your machine installs a package on its own only when a machine you trust lists it.</p><p>Tether skips releases newer than 7 days. It checks npm, pnpm, bun, uv and gem packages against OSV for known malware. It installs npm, pnpm and bun packages with scripts off. A package that fails a check waits in an approval inbox.</p><a class="text-link" href="/security#supply-chain">See how the checks work <Icon name="arrow" size={17} /></a></div></section>
+    ]} /><div class="section-copy"><p class="eyebrow">SUPPLY-CHAIN CHECKS</p><h2>Synced packages.<br /><em>Checked first.</em></h2><p>A line in a manifest does not install on its own. Each machine signs a record of its packages. Your machine installs a package on its own only when a machine you trust lists it.</p><p>Tether skips releases newer than 7 days. It checks npm, pnpm, bun, uv and gem packages against OSV for known malware. It installs npm, pnpm and bun packages with scripts off. A package that fails a check waits in an approval inbox.</p><a class="text-link" href="/supply-chain">See how the checks work <Icon name="arrow" size={17} /></a></div></section>
     <section class="setup-section wrap">
       <div class="section-heading"><p class="eyebrow">FROM ONE MACHINE TO THE NEXT</p><h2>A familiar setup.<br />A few simple steps.</h2></div>
       <ol class="setup-steps">
@@ -56,8 +56,8 @@ const features = [
       <details><summary>What gets encrypted?</summary><p>Tether encrypts personal dotfiles by default. Package manifests remain readable in Git. Team secrets use age public-key encryption.</p><a href="/security">Read the security model ↗</a></details>
       <details><summary>Can I choose what syncs?</summary><p>Yes. Select your dotfiles and package managers. Use machine profiles and feature toggles to control each machine.</p><a href="/docs#configuration">See configuration options ↗</a></details>
       <details><summary>What if I replace my machine?</summary><p>Run <code>tether init</code> on the new machine. Select the same repo and enter your passphrase. Tether restores your dotfiles and reinstalls your packages.</p><a href="/docs#cmd-init">See how setup works ↗</a></details>
-      <details><summary>Can someone with repo access install packages on my machines?</summary><p>Not with a manifest change alone. A synced package installs only when a signed record from a machine you trust lists it. Other packages wait for your approval in <code>tether packages inbox</code>.</p><a href="/security#machine-trust">Read how trust works ↗</a></details>
-      <details><summary>Does Tether run on Linux?</summary><p>Yes, in beta. <code>tether daemon install</code> sets up a systemd user service. Tether skips Homebrew casks on Linux.</p><a href="/docs#linux">Read the Linux notes ↗</a></details>
+      <details><summary>Can someone with repo access install packages on my machines?</summary><p>Not with a manifest change alone. A synced package installs only when a signed record from a machine you trust lists it. Other packages wait for your approval in <code>tether packages inbox</code>.</p><a href="/supply-chain#machine-trust">Read how trust works ↗</a></details>
+      <details><summary>Does Tether run on Linux?</summary><p>Yes. Install it with Homebrew or a release download. <code>tether daemon install</code> sets up a systemd user service. Tether skips Homebrew casks on Linux.</p><a href="/docs#linux">Read the Linux notes ↗</a></details>
       <details><summary>What happens when files conflict?</summary><p>Tether lets you keep the local version, use the remote version, merge the files, or skip the conflict.</p><a href="/docs#cmd-resolve">Learn about conflict resolution ↗</a></details>
     </div></section>
     <InstallSection />
