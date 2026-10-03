@@ -74,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The dashboard has a new look. It uses Catppuccin Mocha or Latte colors when the terminal supports true color, and it picks one from the terminal background. Set `dashboard.theme` to `mocha`, `latte`, `ansi` or `auto` to choose. Terminals without true color keep the 16-color theme
+- The dashboard has a new look. It uses Catppuccin Mocha or Latte colors when the terminal supports true color, and it picks one from the terminal background. Set `dashboard.theme` to `mocha`, `latte`, `ansi` or `auto` to choose, for example with `tether config set dashboard.theme mocha`. Terminals without true color keep the 16-color theme
 - The dashboard header shows the machine, the daemon state and a spinner while a sync runs. The Overview tab shows a chart of sync commits per day
 - The Machines tab shows a card for each machine with its last sync, online/idle/stale state, OS and tether version. A machine is online when its record is at most 90 minutes old, because an idle machine updates its record once an hour
 - File and manifest diffs in the dashboard show line numbers and colored added and removed lines

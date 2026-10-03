@@ -46,34 +46,7 @@ pub async fn get(key: &str) -> Result<()> {
 }
 
 pub async fn set(key: &str, value: &str) -> Result<()> {
-    let mut config = Config::load()?;
-    let config_toml = toml::to_string_pretty(&config)?;
-    let mut toml_value = toml::from_str::<toml::Value>(&config_toml)?;
-
-    // Parse nested key (e.g., "project_configs.enabled")
-    let keys: Vec<&str> = key.split('.').collect();
-
-    // Navigate to the parent of the target key
-    let mut current = &mut toml_value;
-    for k in &keys[..keys.len() - 1] {
-        match current.get_mut(k) {
-            Some(v) => current = v,
-            None => {
-                Output::error(&format!("Key path '{}' not found in config", key));
-                return Ok(());
-            }
-        }
-    }
-
-    // Set the value
-    let last_key = keys[keys.len() - 1];
-    let table = match current.as_table_mut() {
-        Some(t) => t,
-        None => {
-            Output::error(&format!("Cannot set value at '{}'", key));
-            return Ok(());
-        }
-    };
+    let config = Config::load()?;
 
     // Parse the value string into appropriate TOML type
     let new_value: toml::Value = if value == "true" {
@@ -97,15 +70,46 @@ pub async fn set(key: &str, value: &str) -> Result<()> {
         toml::Value::String(value.to_string())
     };
 
-    table.insert(last_key.to_string(), new_value);
-
-    // Convert back to config and save
-    let config_toml = toml::to_string_pretty(&toml_value)?;
-    config = toml::from_str(&config_toml)?;
-    config.save()?;
+    match set_key(&config, key, new_value) {
+        Ok(config) => config.save()?,
+        Err(e) => {
+            Output::error(&e.to_string());
+            return Ok(());
+        }
+    }
 
     Output::success(&format!("Set {} = {}", key, value));
     Ok(())
+}
+
+/// Tables at their defaults are not serialized, so missing tables on the path are created.
+/// A key under a created table that does not survive the round trip through `Config` is unknown.
+fn set_key(config: &Config, key: &str, new_value: toml::Value) -> Result<Config> {
+    let mut toml_value = toml::Value::try_from(config)?;
+    let keys: Vec<&str> = key.split('.').collect();
+
+    let mut created = false;
+    let mut current = &mut toml_value;
+    for k in &keys[..keys.len() - 1] {
+        let Some(table) = current.as_table_mut() else {
+            anyhow::bail!("Cannot set value at '{}'", key);
+        };
+        current = table.entry(k.to_string()).or_insert_with(|| {
+            created = true;
+            toml::Value::Table(toml::map::Map::new())
+        });
+    }
+    let Some(table) = current.as_table_mut() else {
+        anyhow::bail!("Cannot set value at '{}'", key);
+    };
+    table.insert(keys[keys.len() - 1].to_string(), new_value.clone());
+
+    let updated: Config = toml_value.try_into()?;
+    let check = toml::Value::try_from(&updated)?;
+    if created && keys.iter().try_fold(&check, |v, k| v.get(k)) != Some(&new_value) {
+        anyhow::bail!("Key path '{}' not found in config", key);
+    }
+    Ok(updated)
 }
 
 pub async fn edit() -> Result<()> {
@@ -593,5 +597,35 @@ fn show_feature_guidance(feature: &str, enabled: bool) {
             println!("  tether init");
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_key_creates_default_dashboard_table() {
+        let config = set_key(
+            &Config::default(),
+            "dashboard.theme",
+            toml::Value::String("mocha".into()),
+        )
+        .unwrap();
+        assert_eq!(config.dashboard.theme.as_deref(), Some("mocha"));
+    }
+
+    #[test]
+    fn test_set_key_rejects_unknown_key() {
+        let value = toml::Value::Boolean(true);
+        assert!(set_key(&Config::default(), "nope.enabled", value.clone()).is_err());
+        assert!(set_key(&Config::default(), "dashboard.nope", value).is_err());
+    }
+
+    #[test]
+    fn test_set_key_accepts_existing_key_at_skipped_default() {
+        let empty = toml::Value::Array(Vec::new());
+        let config = set_key(&Config::default(), "packages.allow_scripts", empty).unwrap();
+        assert!(config.packages.allow_scripts.is_empty());
     }
 }
