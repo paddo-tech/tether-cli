@@ -223,7 +223,8 @@ pub enum MachineAction {
     List,
     /// Rename this machine
     Rename { old: String, new: String },
-    /// Remove a machine from sync
+    /// Remove a machine from sync. With -y, Tether removes it without asking and prints
+    /// what it removed
     Remove { name: String },
     /// Trust the signing key a machine published, so its package changes install on their own.
     /// Without a fingerprint, Tether shows the current one and asks
@@ -620,7 +621,7 @@ impl Cli {
             Commands::Machines { action } => match action {
                 MachineAction::List => machines::list().await,
                 MachineAction::Rename { old, new } => machines::rename(old, new).await,
-                MachineAction::Remove { name } => machines::remove(name).await,
+                MachineAction::Remove { name } => machines::remove(name, self.yes).await,
                 MachineAction::Trust { name, fingerprint } => {
                     machines::trust(name, fingerprint.as_deref()).await
                 }

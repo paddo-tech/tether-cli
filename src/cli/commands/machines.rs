@@ -267,7 +267,7 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn remove(name: &str) -> Result<()> {
+pub async fn remove(name: &str, yes: bool) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
         Output::warning("Machine management not available in team-only mode");
@@ -298,7 +298,10 @@ pub async fn remove(name: &str) -> Result<()> {
         }
     };
 
-    if !Prompt::confirm(&format!("Remove machine '{}'?", name), false)? {
+    let record = MachineState::list_all(&sync_path)?
+        .into_iter()
+        .find(|m| m.machine_id == name);
+    if !yes && !Prompt::confirm(&format!("Remove machine '{}'?", name), false)? {
         return Ok(());
     }
 
@@ -307,6 +310,9 @@ pub async fn remove(name: &str) -> Result<()> {
     GitBackend::open(&sync_path)?.push()?;
 
     Output::success(&format!("Removed machine '{}'", name));
+    if let Some(record) = record {
+        Output::info(&removed_summary(&record));
+    }
     if untrusted {
         Output::info(&format!(
             "This machine no longer trusts the key of '{}'. Other machines still trust it",
@@ -314,6 +320,20 @@ pub async fn remove(name: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// What a removal deleted, so a removal that `-y` did not ask about is on record.
+fn removed_summary(record: &MachineState) -> String {
+    format!(
+        "Removed record machines/{}.json: hostname {}, last sync {}, {} packages",
+        record.machine_id,
+        record.hostname,
+        record
+            .last_sync
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S"),
+        record.packages.values().map(Vec::len).sum::<usize>()
+    )
 }
 
 /// Remove a record the dashboard showed as an old id of this machine, only while it still is
@@ -752,6 +772,18 @@ pub async fn profile_list() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn removal_summary_names_the_record_it_removed() {
+        let mut record = crate::sync::MachineState::new("old-mac");
+        record.hostname = "mac".to_string();
+        record
+            .packages
+            .insert("npm".to_string(), vec!["a".to_string(), "b".to_string()]);
+        let summary = super::removed_summary(&record);
+        assert!(summary.starts_with("Removed record machines/old-mac.json: hostname mac"));
+        assert!(summary.ends_with(", 2 packages"));
+    }
+
     #[test]
     fn key_column_shows_records_a_sync_ignores() {
         use crate::sync::signing::RecordStatus;
