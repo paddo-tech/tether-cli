@@ -31,10 +31,11 @@ pub enum Presence {
     Stale,
 }
 
-/// Daemons sync every few minutes, so 15 quiet minutes means the machine is away,
-/// and a day means it is likely off or uninstalled.
+/// A running daemon rewrites an unchanged record only every hour (the heartbeat), so a
+/// record up to 90 minutes old (heartbeat, one 5-minute tick and push delay) is online,
+/// and a day without one means the machine is likely off or uninstalled.
 pub fn presence(age: chrono::Duration) -> Presence {
-    if age <= chrono::Duration::minutes(15) {
+    if age <= chrono::Duration::minutes(crate::sync::state::RECORD_HEARTBEAT_MINUTES + 30) {
         Presence::Online
     } else if age <= chrono::Duration::hours(24) {
         Presence::Idle
@@ -568,7 +569,8 @@ mod tests {
     #[test]
     fn presence_thresholds() {
         assert_eq!(presence(chrono::Duration::minutes(3)), Presence::Online);
-        assert_eq!(presence(chrono::Duration::minutes(16)), Presence::Idle);
+        assert_eq!(presence(chrono::Duration::minutes(75)), Presence::Online);
+        assert_eq!(presence(chrono::Duration::minutes(91)), Presence::Idle);
         assert_eq!(presence(chrono::Duration::days(2)), Presence::Stale);
     }
 

@@ -295,7 +295,8 @@ impl MachineState {
     pub fn save_to_repo(&self, sync_path: &std::path::Path) -> Result<()> {
         let machines_dir = sync_path.join("machines");
         let path = machines_dir.join(format!("{}.json", self.machine_id));
-        let content = serde_json::to_string_pretty(self)?;
+        // Through a Value, whose maps sort their keys, so equal records write equal bytes
+        let content = serde_json::to_string_pretty(&serde_json::to_value(self)?)?;
         crate::sync::atomic_write(&path, content.as_bytes())
     }
 
@@ -435,9 +436,14 @@ impl MachineState {
     }
 }
 
-/// Two machines can share a hostname. A daemon syncs every 5 minutes, so a week without a
-/// sync separates a record nothing writes from a twin that is only switched off for a day.
+/// Two machines can share a hostname. A running machine updates its record at least every
+/// [`RECORD_HEARTBEAT_MINUTES`], so a week without one separates a record nothing writes
+/// from a twin that is only switched off for a day.
 pub const OLD_ID_SILENT_DAYS: i64 = 7;
+
+/// A record whose only change is `last_sync` is saved again after this long, so other
+/// machines still see that the machine runs.
+pub const RECORD_HEARTBEAT_MINUTES: i64 = 60;
 
 /// The format of ids that [`crate::security::random_hex_id`] makes.
 fn is_random_id(id: &str) -> bool {
@@ -470,7 +476,8 @@ impl SyncState {
 
     pub fn save(&self) -> Result<()> {
         let path = Self::state_path()?;
-        let content = serde_json::to_string_pretty(self)?;
+        // Through a Value, whose maps sort their keys, so equal records write equal bytes
+        let content = serde_json::to_string_pretty(&serde_json::to_value(self)?)?;
         crate::sync::atomic_write(&path, content.as_bytes())
     }
 

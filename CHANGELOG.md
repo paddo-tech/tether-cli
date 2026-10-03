@@ -70,12 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A machine without `opendiff`, such as a Linux machine, now uses `vimdiff` when the synced merge tool is `opendiff`. Before, the merge failed
 - On Linux, desktop notifications now use `notify-send`. Without it, Tether logs this once and shows no notifications
 - The daemon now writes info lines, such as each sync, to `daemon.log`. Before, it wrote only errors unless `RUST_LOG` was set
+- An idle machine no longer makes a commit on every daemon sync. Tether saves and signs this machine's record only when something other than its last sync time changed, or once an hour so other machines see that it runs. Records now list their keys in a fixed order
 
 ### Changed
 
 - The dashboard has a new look. It uses Catppuccin Mocha or Latte colors when the terminal supports true color, and it picks one from the terminal background. Set `dashboard.theme` to `mocha`, `latte`, `ansi` or `auto` to choose. Terminals without true color keep the 16-color theme
 - The dashboard header shows the machine, the daemon state and a spinner while a sync runs. The Overview tab shows a chart of sync commits per day
-- The Machines tab shows a card for each machine with its last sync, online/idle/stale state, OS and tether version
+- The Machines tab shows a card for each machine with its last sync, online/idle/stale state, OS and tether version. A machine is online when its record is at most 90 minutes old, because an idle machine updates its record once an hour
 - File and manifest diffs in the dashboard show line numbers and colored added and removed lines
 - Dashboard messages appear as notices in the top-right corner and disappear after a few seconds. Package warnings from background work, such as an incomplete OSV check, appear there too and go to the log, instead of printing over the screen
 - The dashboard supports the mouse: click a tab, a row or a key hint, and scroll lists with the wheel

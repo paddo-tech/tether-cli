@@ -161,11 +161,22 @@ fn save_record_at(
     // Other machines distrust a record that validation would change
     let mut record = record.clone();
     record.validate()?;
+    let local_bytes = std::fs::read(local).ok();
+    let previous = local_bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<MachineState>(bytes).ok());
+    if let (Some(bytes), Some(previous)) = (&local_bytes, &previous) {
+        let published = std::fs::read(record_path(sync_path, &record.machine_id)).ok();
+        if published.as_ref() == Some(bytes)
+            && file_signer(sync_path, &record.machine_id)
+                .is_some_and(|k| k.key_data() == key.public_key().key_data())
+            && !record_due(previous, &record)
+        {
+            return Ok(());
+        }
+    }
     // Count from the newest saved generation, not the caller's copy, which can be older
-    let saved = std::fs::read(local)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<MachineState>(&bytes).ok())
-        .map_or(0, |r| r.generation);
+    let saved = previous.map_or(0, |r| r.generation);
     record.generation = record
         .generation
         .max(saved)
@@ -180,6 +191,23 @@ fn save_record_at(
         &crate::sha256_hex(&bytes),
     );
     crate::sync::atomic_write(local, &bytes)
+}
+
+/// Whether `record` must replace the published `previous` one: something besides
+/// `last_sync` changed, or the heartbeat is due. Saving only then keeps an idle machine
+/// from committing and signing a new record on every daemon tick.
+fn record_due(previous: &MachineState, record: &MachineState) -> bool {
+    let content = |r: &MachineState| {
+        let mut value = serde_json::to_value(r).ok();
+        if let Some(serde_json::Value::Object(map)) = &mut value {
+            map.remove("last_sync");
+            map.remove("generation");
+        }
+        value
+    };
+    content(previous) != content(record)
+        || record.last_sync.signed_duration_since(previous.last_sync)
+            >= chrono::Duration::minutes(crate::sync::state::RECORD_HEARTBEAT_MINUTES)
 }
 
 /// The newest record generation this machine has accepted from each machine key, in
@@ -621,6 +649,7 @@ impl TrustStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::state::RECORD_HEARTBEAT_MINUTES;
 
     fn key() -> PrivateKey {
         PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap()
@@ -725,6 +754,67 @@ mod tests {
     }
 
     #[test]
+    fn a_record_that_only_synced_again_waits_for_the_heartbeat() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (dir, local) = (tmp.path(), tmp.path().join("machine.json"));
+        std::fs::create_dir_all(dir.join("machines")).unwrap();
+        let me = key();
+        let mut seen = Generations::default();
+        let mut record = MachineState::new("me");
+        record
+            .packages
+            .insert("npm".to_string(), vec!["a".to_string()]);
+        record
+            .packages
+            .insert("brew_formulae".to_string(), vec!["b".to_string()]);
+        let mut save = |record: &MachineState| {
+            save_record_at(dir, record, &local, &me, &mut seen).unwrap();
+            let r = &records(dir)[0];
+            (r.record.generation, r.record.last_sync, r.digest.clone())
+        };
+        let first = save(&record);
+        assert_eq!(first.0, 1);
+
+        // A daemon tick: only last_sync moved, so nothing is written or signed again
+        let mut tick = record.clone();
+        tick.last_sync += chrono::Duration::minutes(5);
+        assert_eq!(save(&tick), first);
+
+        // The same content built in another map order writes the same bytes
+        let mut reordered = MachineState::new("me");
+        reordered.last_sync = record.last_sync;
+        reordered
+            .packages
+            .insert("brew_formulae".to_string(), vec!["b".to_string()]);
+        reordered
+            .packages
+            .insert("npm".to_string(), vec!["a".to_string()]);
+        assert_eq!(save(&reordered), first);
+
+        // A real change saves at once
+        let mut changed = tick.clone();
+        changed
+            .packages
+            .get_mut("npm")
+            .unwrap()
+            .push("c".to_string());
+        let second = save(&changed);
+        assert_eq!((second.0, second.1), (2, changed.last_sync));
+
+        // The heartbeat saves an unchanged record once an hour
+        let mut hour = changed.clone();
+        hour.last_sync += chrono::Duration::minutes(RECORD_HEARTBEAT_MINUTES);
+        assert_eq!(save(&hour).0, 3);
+
+        // A published copy that no longer matches is written and signed again
+        std::fs::remove_file(record_sig_path(dir, "me")).unwrap();
+        let mut tick = hour.clone();
+        tick.last_sync += chrono::Duration::minutes(5);
+        assert_eq!(save(&tick).0, 4);
+        assert!(records(dir)[0].signer.is_some());
+    }
+
+    #[test]
     fn own_record_comes_from_the_local_copy() {
         let tmp = tempfile::TempDir::new().unwrap();
         let (dir, local) = (tmp.path(), tmp.path().join("machine.json"));
@@ -781,7 +871,9 @@ mod tests {
         save_record_at(dir, &record, &local, &me, &mut seen).unwrap();
         let old = std::fs::read(record_path(dir, "me")).unwrap();
         let old_sig = std::fs::read(record_sig_path(dir, "me")).unwrap();
-        save_record_at(dir, &record, &local, &me, &mut seen).unwrap();
+        let mut later = record.clone();
+        later.last_sync += chrono::Duration::hours(2);
+        save_record_at(dir, &later, &local, &me, &mut seen).unwrap();
         let recover = |seen: &Generations| {
             own_record_from(&none, dir, "me", me.public_key(), seen)
                 .unwrap()
