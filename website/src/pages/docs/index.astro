@@ -40,7 +40,20 @@ import ProfileDiagram from '../../components/ProfileDiagram.astro';
     <Code code={`brew tap paddo-tech/tap
 brew install tether-cli`} />
     <h3>Release download (Linux)</h3>
-    <p>Download the <code>tether-&lt;version&gt;-&lt;target&gt;.tar.gz</code> file for your CPU (x86_64 or aarch64) from the <a href="https://github.com/paddo-tech/tether-cli/releases">GitHub releases page</a>. Extract it, and put the <code>tether</code> binary in a directory on your <code>PATH</code>.</p>
+    <p>Each <a href="https://github.com/paddo-tech/tether-cli/releases">GitHub release</a> has a static Linux build for each CPU. These builds do not need a specific glibc, so they run on any distribution.</p>
+    <ul>
+      <li><strong>x86_64:</strong> <code>tether-x86_64-unknown-linux-musl.tar.gz</code></li>
+      <li><strong>aarch64:</strong> <code>tether-aarch64-unknown-linux-musl.tar.gz</code></li>
+    </ul>
+    <p>Download the tarball and its <code>.sha256</code> file. Check the checksum, then extract the <code>tether</code> binary to a directory on your <code>PATH</code>:</p>
+    <Code code={`target=x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl
+base=https://github.com/paddo-tech/tether-cli/releases/latest/download
+curl -fLO "$base/tether-$target.tar.gz"
+curl -fLO "$base/tether-$target.tar.gz.sha256"
+sha256sum -c "tether-$target.tar.gz.sha256"
+tar -xzf "tether-$target.tar.gz"
+install -D -m 755 tether ~/.local/bin/tether`} />
+    <p>Each tarball holds only the <code>tether</code> binary. The <code>latest</code> URL gets the newest stable release. For a specific release, use <code>releases/download/v&lt;version&gt;</code> instead.</p>
     <h3>From source</h3>
     <p>You need Rust 1.91 or later.</p>
     <Code code="cargo install --locked --git https://github.com/paddo-tech/tether-cli" />
