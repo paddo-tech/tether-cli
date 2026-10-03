@@ -226,6 +226,9 @@ fn describe(item: &InboxItem) -> String {
     if let Some(version) = &item.version {
         text.push_str(&format!(" {}", version));
     }
+    if let Some(tap) = &item.tap {
+        text.push_str(&format!(" tap {}", tap));
+    }
     if let Some(machine) = &item.source_machine {
         text.push_str(&format!(" from {}", machine));
     }

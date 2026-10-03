@@ -200,6 +200,7 @@ fn badge(reason: Reason) -> &'static str {
         Reason::NewMachine => "new machine",
         Reason::KeyChanged => "KEY CHANGED",
         Reason::SignatureFailed => "SIGNATURE FAILED",
+        Reason::OtherOsVersion => "other OS pin",
     }
 }
 
@@ -215,6 +216,7 @@ fn reason_color(reason: Reason, t: &Theme) -> Color {
         | Reason::SignatureFailed => t.error,
         Reason::UntrustedSigner => t.key,
         Reason::NewMachine => t.info,
+        Reason::OtherOsVersion => t.warn,
     }
 }
 
@@ -249,6 +251,9 @@ fn explain(reason: Reason) -> &'static str {
         }
         Reason::KeyChanged => {
             "SIGNING KEY CHANGED. This machine was trusted with a different key. If you did not set it up again, someone may be signing as it. Run `tether machines` on that machine and compare the fingerprint before you trust it."
+        }
+        Reason::OtherOsVersion => {
+            "Only machines on another OS list the newest trusted version, and it failed to install here. This is the newest release that suits this machine. No trusted machine lists it, so it installs only when you approve it."
         }
     }
 }

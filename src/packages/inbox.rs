@@ -38,6 +38,9 @@ pub enum Reason {
     /// The machine it came from is trusted, but its record fails its signature, so someone
     /// may have edited the record in the repo.
     SignatureFailed,
+    /// The version that only machines on another OS list failed to install here. The item
+    /// holds the release that suits this machine, which no trusted record lists.
+    OtherOsVersion,
 }
 
 impl Reason {
@@ -53,6 +56,7 @@ impl Reason {
             Reason::NewMachine => "new machine key",
             Reason::KeyChanged => "machine key changed",
             Reason::SignatureFailed => "signature failed",
+            Reason::OtherOsVersion => "another OS pins a version that fails here",
         }
     }
 }

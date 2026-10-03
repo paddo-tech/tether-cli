@@ -405,8 +405,9 @@ impl Trust {
 /// Manager key, name and reported version of one package.
 type Entry = (String, String, Option<String>);
 
+/// A record with no OS data counts as this OS, so missing data never makes a pin foreign.
 fn same_os(record: &MachineState) -> bool {
-    record.os_family() == std::env::consts::OS
+    record.os_family() == "unknown" || record.os_family() == std::env::consts::OS
 }
 
 /// Every package a machine record lists, at the version the record reports.
@@ -1031,26 +1032,45 @@ async fn import_simple_manager(
                 failures.remove(&InstallFailure::key(def.state_key, &name));
             }
             Err(e) if foreign.contains(&name) => {
-                match install_fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await
-                {
-                    Ok(version) => {
+                let error = e.to_string();
+                let first_line = error.lines().next().unwrap_or_default();
+                match fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await {
+                    Ok(Fallback::Installed(version)) => {
                         installed_any = true;
                         failures.remove(&InstallFailure::key(def.state_key, &name));
                         Output::info(&format!(
-                            "Installed {} {} instead of {}, which a machine on another OS \
-                             lists and which failed here: {}",
+                            "Installed {} {} as approved, instead of {}, which a machine on \
+                             another OS lists and which failed here: {}",
                             name,
                             version,
                             asked.as_deref().unwrap_or("the pinned version"),
-                            e.to_string().lines().next().unwrap_or_default()
+                            first_line
                         ));
+                    }
+                    Ok(Fallback::Held(item)) => {
+                        record_failure(
+                            failures,
+                            def.state_key,
+                            &name,
+                            asked.as_deref(),
+                            &format!(
+                                "{}; holding {} for approval",
+                                first_line,
+                                item.version.as_deref().unwrap_or_default()
+                            ),
+                        );
+                        // The held item replaces the pass the failed version got
+                        gated
+                            .passed
+                            .retain(|(m, n)| m != def.state_key || *n != name);
+                        gated.held.push(*item);
                     }
                     Err(fallback) => record_failure(
                         failures,
                         def.state_key,
                         &name,
                         asked.as_deref(),
-                        &format!("{}; no fallback release: {}", e, fallback),
+                        &format!("{}; no fallback release: {}", error, fallback),
                     ),
                 }
             }
@@ -1066,55 +1086,83 @@ async fn import_simple_manager(
     installed_any
 }
 
-/// Install the release an unpinned line would get on this machine, after a version that
-/// only machines on another OS list failed. A trusted record lists the package, so this
-/// release gets the checks of an unpinned line: the release-age limit, rejections and OSV.
-async fn install_fallback(
+/// What happened to the release that suits this machine.
+#[derive(Debug)]
+enum Fallback {
+    /// The user approved that release before, so it installed
+    Installed(String),
+    /// No trusted record lists that release, so it waits for approval
+    Held(Box<InboxItem>),
+}
+
+/// Find the release an unpinned line would get on this machine, after a version that only
+/// machines on another OS list failed. That release gets the release-age limit, rejections
+/// and OSV, and installs only when the user approved it.
+async fn fallback(
     def: &PackageManagerDef,
     manager: &dyn PackageManager,
     trust: &Trust,
     name: &str,
     failed: Option<&str>,
-) -> Result<String> {
+) -> Result<Fallback> {
     let min_age = PackagePolicy::load().min_release_age_days;
     let version = resolve_version(def.state_key, def.ecosystem, name, min_age).await?;
     if failed == Some(version.as_str()) {
         anyhow::bail!("it is the newest release that suits this machine");
-    }
-    if trust
-        .inbox
-        .is_rejected(def.state_key, name, Some(&version), None)
-    {
-        anyhow::bail!("you rejected {} {}", name, version);
     }
     let advisories = osv::advisories(def.ecosystem, &[(name.to_string(), Some(version.clone()))])
         .await
         .into_iter()
         .next()
         .unwrap_or_default();
-    if advisories.iter().any(|id| osv::is_malicious(id)) {
-        anyhow::bail!(
-            "OSV lists {} {} as MALICIOUS ({})",
-            name,
-            version,
-            advisories.join(", ")
-        );
+    let decided = fallback_decision(def, trust, name, version, advisories)?;
+    if let Fallback::Installed(version) = &decided {
+        manager
+            .install(&PackageInfo {
+                name: name.to_string(),
+                version: Some(version.clone()),
+            })
+            .await?;
     }
-    if !advisories.is_empty() {
-        Output::warning(&format!(
-            "{} {} has known vulnerabilities: {}",
-            name,
-            version,
-            advisories.join(", ")
-        ));
+    Ok(decided)
+}
+
+/// Never install a release no trusted record lists without the user's approval of that
+/// exact release. A malicious release is held, and approval cannot install it.
+fn fallback_decision(
+    def: &PackageManagerDef,
+    trust: &Trust,
+    name: &str,
+    version: String,
+    advisories: Vec<String>,
+) -> Result<Fallback> {
+    let key = def.state_key;
+    if trust.inbox.is_rejected(key, name, Some(&version), None) {
+        anyhow::bail!("you rejected {} {}", name, version);
     }
-    manager
-        .install(&PackageInfo {
-            name: name.to_string(),
-            version: Some(version.clone()),
-        })
-        .await?;
-    Ok(version)
+    if trust.inbox.holds_malicious(key, name, Some(&version)) {
+        anyhow::bail!("the inbox holds {} {} as malicious", name, version);
+    }
+    let malicious = advisories.iter().any(|id| osv::is_malicious(id));
+    if !malicious && trust.inbox.is_approved(key, name, Some(&version), None) {
+        if !advisories.is_empty() {
+            Output::warning(&format!(
+                "{} {} has known vulnerabilities: {}",
+                name,
+                version,
+                advisories.join(", ")
+            ));
+        }
+        return Ok(Fallback::Installed(version));
+    }
+    let reason = if malicious {
+        Reason::Malicious
+    } else {
+        Reason::OtherOsVersion
+    };
+    let mut item = trust.item(key, name, Some(version), None, vec![reason]);
+    item.advisories = advisories;
+    Ok(Fallback::Held(Box::new(item)))
 }
 
 /// A package a rollback would install, at the version its snapshot pins.
@@ -1344,29 +1392,116 @@ fn export_records(
     machines
 }
 
-/// Whether an export writes its manifest. Machines that trust different records compute
-/// different manifests. Each writes when its own result changed since it last wrote, or
-/// when the file lacks a package its result lists, but not only because another machine's
-/// write differs. Otherwise they would undo each other's manifest on every sync. Lines
-/// compare by `name`, so a different pin alone does not count: imports pin from records.
-fn manifest_needs_write(
-    written: Option<&str>,
-    file: Option<&str>,
-    computed: &str,
-    name: impl Fn(&str) -> String,
-) -> bool {
-    let Some(file) = file else {
-        return true;
-    };
-    if file == computed {
-        return false;
-    }
-    let listed: HashSet<String> = file.lines().map(&name).collect();
-    written != Some(crate::sha256_hex(computed.as_bytes()).as_str())
-        || computed.lines().any(|line| !listed.contains(&name(line)))
+/// The packages that some machine record in the repo lists, trusted or not, with the
+/// versions they list. A manifest keeps a line while any record lists its package.
+#[derive(Default)]
+struct Listed {
+    names: HashSet<(String, String)>,
+    versions: HashSet<Entry>,
 }
 
-/// Export package manifests from the records this machine trusts
+impl Listed {
+    /// This machine's current record replaces its copy in the repo, which may still list
+    /// a package it removed since.
+    fn new(records: &[SignedRecord], this: &MachineState) -> Self {
+        let mut listed = Self::default();
+        for record in records
+            .iter()
+            .map(|r| &r.record)
+            .filter(|r| r.machine_id != this.machine_id)
+            .chain([this])
+        {
+            for (manager, name, version) in record_entries(record) {
+                listed.names.insert((manager.clone(), name.clone()));
+                listed.versions.insert((manager, name, version));
+            }
+        }
+        listed
+    }
+
+    fn lists(&self, manager: &str, name: &str) -> bool {
+        self.names
+            .contains(&(manager.to_string(), name.to_string()))
+    }
+
+    fn lists_version(&self, manager: &str, name: &str, version: &str) -> bool {
+        self.versions.contains(&(
+            manager.to_string(),
+            name.to_string(),
+            Some(version.to_string()),
+        ))
+    }
+}
+
+/// Merge this machine's trusted packages into a manifest. Machines trust different
+/// records, so none replaces the file: each adds the packages its trusted records list,
+/// and keeps lines it does not trust, because a line grants no trust. A line goes only
+/// when no record lists its package. A pin moves only up, or off a version that no record
+/// lists, so machines that trust different versions do not undo each other.
+fn merge_manifest(
+    ecosystem: Ecosystem,
+    manager: &str,
+    file: Option<&str>,
+    trusted: Option<&Vec<String>>,
+    trusted_versions: Option<&HashMap<String, String>>,
+    listed: &Listed,
+) -> String {
+    let mut lines: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for line in file.unwrap_or_default().lines().map(str::trim) {
+        let (name, _) = parse_pin(ecosystem, line);
+        if !line.is_empty() && listed.lists(manager, &name) {
+            lines.entry(name).or_insert_with(|| line.to_string());
+        }
+    }
+    for name in trusted.into_iter().flatten() {
+        let newest = trusted_versions.and_then(|v| v.get(name));
+        let replace = match (lines.get(name), newest) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(line), Some(newest)) => match parse_pin(ecosystem, line).1 {
+                Some(current) => {
+                    !listed.lists_version(manager, name, &current)
+                        || crate::packages::pin::compare_versions(ecosystem, newest, &current)
+                            .is_gt()
+                }
+                None => true,
+            },
+        };
+        if replace {
+            lines.insert(
+                name.clone(),
+                format_pin(ecosystem, name, newest.map(String::as_str)),
+            );
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        lines.into_values().collect::<Vec<_>>().join("\n") + "\n"
+    }
+}
+
+/// The Brewfile merges like the other manifests, without versions.
+fn merge_brewfile(
+    file: Option<&str>,
+    trusted: &HashMap<String, Vec<String>>,
+    listed: &Listed,
+) -> String {
+    let mut packages = BrewfilePackages::parse(file.unwrap_or_default());
+    for (manager, names) in [
+        ("brew_taps", &mut packages.taps),
+        ("brew_formulae", &mut packages.formulae),
+        ("brew_casks", &mut packages.casks),
+    ] {
+        names.retain(|name| listed.lists(manager, name));
+        names.extend(trusted.get(manager).into_iter().flatten().cloned());
+        names.sort();
+        names.dedup();
+    }
+    packages.generate()
+}
+
+/// Merge package manifests with the records this machine trusts
 pub async fn sync_packages(
     config: &Config,
     state: &mut SyncState,
@@ -1377,8 +1512,10 @@ pub async fn sync_packages(
     let manifests_dir = sync_path.join("manifests");
     std::fs::create_dir_all(&manifests_dir)?;
 
+    let records = signing::records(sync_path);
+    let listed = Listed::new(&records, machine_state);
     let machines = export_records(
-        signing::records(sync_path),
+        records,
         machine_state,
         &TrustStore::load()?,
         &Generations::load()?,
@@ -1386,12 +1523,13 @@ pub async fn sync_packages(
     let union_packages = MachineState::compute_union_packages(&machines);
     let union_versions = MachineState::compute_union_versions(&machines);
 
-    // Homebrew - generate manifest from union
     if config.packages.brew.enabled {
-        sync_brew(&union_packages, state, &manifests_dir, dry_run)?;
+        let path = manifests_dir.join("Brewfile");
+        let file = std::fs::read_to_string(&path).ok();
+        let manifest = merge_brewfile(file.as_deref(), &union_packages, &listed);
+        write_manifest(state, "brew", &path, file, manifest, dry_run)?;
     }
 
-    // Simple package managers
     for def in SIMPLE_MANAGERS {
         let enabled = match def.state_key {
             "npm" => config.packages.npm.enabled,
@@ -1401,149 +1539,56 @@ pub async fn sync_packages(
             "uv" => config.packages.uv.enabled,
             _ => false,
         };
-
         if enabled {
-            sync_simple_manager(
-                def,
-                &union_packages,
-                &union_versions,
-                state,
-                &manifests_dir,
-                dry_run,
-            )?;
+            let path = manifests_dir.join(def.manifest_file);
+            let file = std::fs::read_to_string(&path).ok();
+            let manifest = merge_manifest(
+                def.ecosystem,
+                def.state_key,
+                file.as_deref(),
+                union_packages.get(def.state_key),
+                union_versions.get(def.state_key),
+                &listed,
+            );
+            write_manifest(state, def.state_key, &path, file, manifest, dry_run)?;
         }
     }
 
     Ok(())
 }
 
-/// Sync brew manifest from the trusted union
-fn sync_brew(
-    union_packages: &HashMap<String, Vec<String>>,
+/// Write the manifest when the merge changed it, and record when it last changed.
+fn write_manifest(
     state: &mut SyncState,
-    manifests_dir: &Path,
+    key: &str,
+    path: &Path,
+    file: Option<String>,
+    manifest: String,
     dry_run: bool,
 ) -> Result<()> {
-    let brew_packages = BrewfilePackages {
-        taps: union_packages.get("brew_taps").cloned().unwrap_or_default(),
-        formulae: union_packages
-            .get("brew_formulae")
-            .cloned()
-            .unwrap_or_default(),
-        casks: union_packages
-            .get("brew_casks")
-            .cloned()
-            .unwrap_or_default(),
-    };
-
-    let manifest = brew_packages.generate();
-    let hash = crate::sha256_hex(manifest.as_bytes());
-    let manifest_path = manifests_dir.join("Brewfile");
-
-    let file = std::fs::read_to_string(&manifest_path).ok();
-
-    if !dry_run {
-        let now = chrono::Utc::now();
-        let existing = state.packages.get("brew");
-        let changed = manifest_needs_write(
-            existing.map(|e| e.hash.as_str()),
-            file.as_deref(),
-            &manifest,
-            str::to_string,
-        );
-
-        if changed {
-            std::fs::write(&manifest_path, &manifest)?;
-        }
-
-        state.packages.insert(
-            "brew".to_string(),
-            PackageState {
-                last_sync: now,
-                last_modified: if changed {
-                    Some(now)
-                } else {
-                    existing.and_then(|e| e.last_modified)
-                },
-                last_upgrade: existing.and_then(|e| e.last_upgrade),
-                hash,
+    if dry_run {
+        return Ok(());
+    }
+    let now = chrono::Utc::now();
+    let changed = file.as_deref() != Some(manifest.as_str());
+    if changed {
+        std::fs::write(path, &manifest)?;
+    }
+    let existing = state.packages.get(key);
+    state.packages.insert(
+        key.to_string(),
+        PackageState {
+            last_sync: now,
+            last_modified: if changed {
+                Some(now)
+            } else {
+                existing.and_then(|e| e.last_modified)
             },
-        );
-    }
-
-    Ok(())
-}
-
-/// Sync a simple package manager manifest from the trusted union
-fn sync_simple_manager(
-    def: &PackageManagerDef,
-    union_packages: &HashMap<String, Vec<String>>,
-    union_versions: &HashMap<String, HashMap<String, String>>,
-    state: &mut SyncState,
-    manifests_dir: &Path,
-    dry_run: bool,
-) -> Result<()> {
-    let manifest = manifest_lines(
-        def.ecosystem,
-        union_packages.get(def.state_key),
-        union_versions.get(def.state_key),
+            last_upgrade: existing.and_then(|e| e.last_upgrade),
+            hash: crate::sha256_hex(manifest.as_bytes()),
+        },
     );
-    let hash = crate::sha256_hex(manifest.as_bytes());
-    let manifest_path = manifests_dir.join(def.manifest_file);
-
-    let file = std::fs::read_to_string(&manifest_path).ok();
-
-    if !dry_run {
-        let now = chrono::Utc::now();
-        let existing = state.packages.get(def.state_key);
-        let changed = manifest_needs_write(
-            existing.map(|e| e.hash.as_str()),
-            file.as_deref(),
-            &manifest,
-            |line| parse_pin(def.ecosystem, line).0,
-        );
-
-        if changed {
-            std::fs::write(&manifest_path, &manifest)?;
-        }
-
-        state.packages.insert(
-            def.state_key.to_string(),
-            PackageState {
-                last_sync: now,
-                last_modified: if changed {
-                    Some(now)
-                } else {
-                    existing.and_then(|e| e.last_modified)
-                },
-                last_upgrade: existing.and_then(|e| e.last_upgrade),
-                hash,
-            },
-        );
-    }
-
     Ok(())
-}
-
-/// One pinned line per package; packages no machine reports a version for stay unpinned.
-fn manifest_lines(
-    ecosystem: Ecosystem,
-    packages: Option<&Vec<String>>,
-    versions: Option<&HashMap<String, String>>,
-) -> String {
-    let lines: Vec<String> = packages
-        .into_iter()
-        .flatten()
-        .map(|name| {
-            let version = versions.and_then(|v| v.get(name)).map(String::as_str);
-            format_pin(ecosystem, name, version)
-        })
-        .collect();
-    if lines.is_empty() {
-        String::new()
-    } else {
-        lines.join("\n") + "\n"
-    }
 }
 
 #[cfg(test)]
@@ -1554,11 +1599,22 @@ mod tests {
     fn test_manifest_lines_pin_known_versions() {
         let packages = vec!["@types/node".to_string(), "left-pad".to_string()];
         let versions = HashMap::from([("@types/node".to_string(), "24.1.0".to_string())]);
+        let listed = Listed::default();
         assert_eq!(
-            manifest_lines(Ecosystem::Npm, Some(&packages), Some(&versions)),
+            merge_manifest(
+                Ecosystem::Npm,
+                "npm",
+                None,
+                Some(&packages),
+                Some(&versions),
+                &listed
+            ),
             "@types/node@24.1.0\nleft-pad\n"
         );
-        assert_eq!(manifest_lines(Ecosystem::Npm, None, None), "");
+        assert_eq!(
+            merge_manifest(Ecosystem::Npm, "npm", None, None, None, &listed),
+            ""
+        );
     }
 
     #[test]
@@ -1624,18 +1680,23 @@ mod tests {
         }
     }
 
-    /// The npm lines `me` exports from these records.
+    /// The npm lines `me` writes from these records into an empty manifest.
     fn exported_npm(dir: &Path, me: &str, store: &TrustStore) -> Vec<(String, Option<String>)> {
         let this = MachineState::list_all(dir)
             .unwrap()
             .into_iter()
             .find(|m| m.machine_id == me)
             .unwrap_or_else(|| MachineState::new(me));
-        let machines = export_records(signing::records(dir), &this, store, &Generations::default());
-        manifest_lines(
+        let records = signing::records(dir);
+        let listed = Listed::new(&records, &this);
+        let machines = export_records(records, &this, store, &Generations::default());
+        merge_manifest(
             Ecosystem::Npm,
+            "npm",
+            None,
             MachineState::compute_union_packages(&machines).get("npm"),
             MachineState::compute_union_versions(&machines).get("npm"),
+            &listed,
         )
         .lines()
         .map(|line| parse_pin(Ecosystem::Npm, line))
@@ -1780,21 +1841,93 @@ mod tests {
 
     #[test]
     fn machines_with_different_trust_do_not_undo_each_others_manifest() {
-        let name = |line: &str| parse_pin(Ecosystem::Npm, line).0;
-        let hash = |s: &str| crate::sha256_hex(s.as_bytes());
-        // a trusts b; b does not trust a yet
-        let a = "a-pkg@1.0.0\nb-pkg@2.0.0\n";
-        let b = "b-pkg@1.0.0\n";
-        // b changed its result and writes; a's packages leave the file
-        assert!(manifest_needs_write(None, Some(a), b, name));
-        // a's result did not change, but the file lacks a-pkg, so a writes again
-        assert!(manifest_needs_write(Some(&hash(a)), Some(b), a, name));
-        // b's result did not change and the file lists b-pkg: b leaves a's file alone,
-        // although a pins another version
-        assert!(!manifest_needs_write(Some(&hash(b)), Some(a), b, name));
-        // A missing file is always written; an equal file never is
-        assert!(manifest_needs_write(Some(&hash(a)), None, a, name));
-        assert!(!manifest_needs_write(None, Some(a), a, name));
+        // Each machine trusts only its own record
+        let a = [("foo", "1.0.0"), ("baz", "1.0.0")];
+        let b = [("bar", "1.0.0"), ("baz", "2.0.0")];
+        let listed = listed_npm(&[&a, &b]);
+        for (a, b, expected) in [
+            (&a[..1], &b[..1], "bar@1.0.0\nfoo@1.0.0\n"),
+            (&a[..], &b[..], "bar@1.0.0\nbaz@2.0.0\nfoo@1.0.0\n"),
+        ] {
+            let mut file: Option<String> = None;
+            let mut round = || {
+                let mut writes = 0;
+                for trusted in [a, b] {
+                    let merged = merge_npm(file.as_deref(), trusted, &listed);
+                    if file.as_deref() != Some(merged.as_str()) {
+                        writes += 1;
+                        file = Some(merged);
+                    }
+                }
+                writes
+            };
+            assert_eq!(round(), 2);
+            assert_eq!(round(), 0, "a second round without changes writes nothing");
+            assert_eq!(file.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn an_unpinned_manifest_keeps_every_package_some_record_lists() {
+        // A 1.13.1 manifest. This machine trusts only its own record; an untrusted or
+        // offline machine still lists bar and baz, and no record lists gone.
+        let mine = [("foo", "1.0.0")];
+        let listed = listed_npm(&[&mine, &[("bar", "2.0.0"), ("baz", "3.0.0")]]);
+        let merged = merge_npm(Some("bar\nbaz\nfoo\ngone\n"), &mine, &listed);
+        assert_eq!(merged, "bar\nbaz\nfoo@1.0.0\n");
+        // A pin no record lists moves to the trusted version, and pins never move down
+        let merged = merge_npm(Some("foo@9.9.9\n"), &mine, &listed);
+        assert_eq!(merged, "foo@1.0.0\n");
+        let listed = listed_npm(&[&mine, &[("foo", "2.0.0")]]);
+        assert_eq!(
+            merge_npm(Some("foo@2.0.0\n"), &mine, &listed),
+            "foo@2.0.0\n"
+        );
+    }
+
+    #[test]
+    fn brewfile_keeps_entries_some_record_lists() {
+        let mut listed = Listed::default();
+        for (manager, name) in [("brew_formulae", "wget"), ("brew_casks", "zed")] {
+            listed.names.insert((manager.to_string(), name.to_string()));
+        }
+        let trusted = HashMap::from([("brew_formulae".to_string(), vec!["jq".to_string()])]);
+        let file = "tap \"old/tap\"\nbrew \"wget\"\nbrew \"gone\"\ncask \"zed\"\n";
+        assert_eq!(
+            merge_brewfile(Some(file), &trusted, &listed),
+            "brew \"jq\"\nbrew \"wget\"\ncask \"zed\"\n"
+        );
+    }
+
+    /// The packages a set of npm records list.
+    fn listed_npm(records: &[&[(&str, &str)]]) -> Listed {
+        let mut listed = Listed::default();
+        for (name, version) in records.iter().copied().flatten() {
+            listed.names.insert(("npm".to_string(), name.to_string()));
+            listed.versions.insert((
+                "npm".to_string(),
+                name.to_string(),
+                Some(version.to_string()),
+            ));
+        }
+        listed
+    }
+
+    /// The npm manifest a machine writes when its trusted records list `trusted`.
+    fn merge_npm(file: Option<&str>, trusted: &[(&str, &str)], listed: &Listed) -> String {
+        let names = trusted.iter().map(|(n, _)| n.to_string()).collect();
+        let versions = trusted
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        merge_manifest(
+            Ecosystem::Npm,
+            "npm",
+            file,
+            Some(&names),
+            Some(&versions),
+            listed,
+        )
     }
 
     /// Write `id`'s signed record from a machine on `os`, listing one npm package.
@@ -1810,6 +1943,61 @@ mod tests {
         );
         machine.save_to_repo(dir).unwrap();
         signing::sign_record(dir, id, key).unwrap();
+    }
+
+    #[test]
+    fn a_release_for_this_os_waits_for_approval_of_that_release() {
+        let (tmp, me, _, store) = two_machines();
+        let mut trust = trust_as(tmp.path(), "me", &me, &store);
+        let npm = &SIMPLE_MANAGERS[0];
+        let decide = |trust: &Trust, advisories: &[&str]| {
+            let advisories = advisories.iter().map(|a| a.to_string()).collect();
+            fallback_decision(npm, trust, "example", "1.5.0".to_string(), advisories)
+        };
+        let held = |decision: Result<Fallback>| match decision.unwrap() {
+            Fallback::Held(item) => (item.version.unwrap(), item.reasons),
+            other => panic!("installed without approval: {other:?}"),
+        };
+
+        assert_eq!(
+            held(decide(&trust, &["GHSA-x"])),
+            ("1.5.0".to_string(), vec![Reason::OtherOsVersion])
+        );
+        assert_eq!(
+            held(decide(&trust, &["MAL-2026-1"])).1,
+            vec![Reason::Malicious]
+        );
+
+        let decision = |version: &str| inbox::Decision {
+            manager: "npm".to_string(),
+            name: "example".to_string(),
+            version: Some(version.to_string()),
+            tap: None,
+            fingerprint: None,
+            at: chrono::Utc::now(),
+        };
+        // An approval covers only the release it named
+        trust.inbox.approved.push(decision("1.4.0"));
+        assert!(matches!(decide(&trust, &[]).unwrap(), Fallback::Held(_)));
+        trust.inbox.approved.push(decision("1.5.0"));
+        assert!(matches!(
+            decide(&trust, &[]).unwrap(),
+            Fallback::Installed(v) if v == "1.5.0"
+        ));
+        // Approval never installs a malicious release
+        assert_eq!(
+            held(decide(&trust, &["MAL-2026-1"])).1,
+            vec![Reason::Malicious]
+        );
+
+        trust.inbox.items.push(InboxItem {
+            reasons: vec![Reason::Malicious],
+            ..trust.item("npm", "example", Some("1.5.0".to_string()), None, vec![])
+        });
+        assert!(decide(&trust, &[]).is_err());
+        trust.inbox.items.clear();
+        trust.inbox.rejected.push(decision("1.5.0"));
+        assert!(decide(&trust, &[]).is_err());
     }
 
     #[test]
@@ -1838,13 +2026,17 @@ mod tests {
     }
 
     #[test]
-    fn records_without_an_os_field_read_macos_from_the_os_version() {
+    fn records_without_an_os_field_read_the_family_from_the_os_version() {
         let mut machine = MachineState::new("m");
         machine.os = String::new();
         machine.os_version = "macOS 15.5".to_string();
         assert_eq!(machine.os_family(), "macos");
         machine.os_version = "Ubuntu 24.04 LTS".to_string();
-        assert_eq!(machine.os_family(), "");
+        assert_eq!(machine.os_family(), "linux");
+        assert_eq!(same_os(&machine), std::env::consts::OS == "linux");
+        machine.os_version = String::new();
+        assert_eq!(machine.os_family(), "unknown");
+        assert!(same_os(&machine));
         machine.os = "linux".to_string();
         assert_eq!(machine.os_family(), "linux");
     }
