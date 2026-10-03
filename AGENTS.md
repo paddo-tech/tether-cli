@@ -64,6 +64,7 @@ Managed via `tether config features`. Available toggles:
 
 **~/.tether/**
 - `config.toml` - Main config (versioned)
+- `local.toml` - Settings for this machine only (never synced). `[packages] min_release_age_days` and `[merge] command`/`args` override config.toml on this machine
 - `state.json` - Sync state
 - `sync/` - Personal sync repo
 - `teams/<name>/` - Team sync repos

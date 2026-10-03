@@ -452,11 +452,7 @@ fn default_merge_args() -> Vec<String> {
             "{merged}".to_string(),
         ]
     } else {
-        vec![
-            "{local}".to_string(),
-            "{remote}".to_string(),
-            "{merged}".to_string(),
-        ]
+        three_way_args()
     }
 }
 
@@ -516,6 +512,77 @@ impl Default for MergeConfig {
             args: default_merge_args(),
         }
     }
+}
+
+/// Settings for this machine only, in `~/.tether/local.toml`. Tether never syncs this file,
+/// so it overrides the synced config.toml on this machine alone.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalConfig {
+    #[serde(default)]
+    pub packages: LocalPackagesConfig,
+    #[serde(default)]
+    pub merge: LocalMergeConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalPackagesConfig {
+    pub min_release_age_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalMergeConfig {
+    pub command: Option<String>,
+    /// Defaults to `{local} {remote} {merged}` when only the command is set
+    pub args: Option<Vec<String>>,
+}
+
+impl LocalConfig {
+    pub fn path() -> Result<PathBuf> {
+        Ok(Config::config_dir()?.join("local.toml"))
+    }
+
+    /// A missing file means no overrides.
+    pub fn load() -> Result<Self> {
+        match std::fs::read_to_string(Self::path()?) {
+            Ok(content) => Ok(toml::from_str(&content)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+fn three_way_args() -> Vec<String> {
+    vec![
+        "{local}".to_string(),
+        "{remote}".to_string(),
+        "{merged}".to_string(),
+    ]
+}
+
+/// The merge tool for this machine: local.toml overrides the synced tool. The synced
+/// default is opendiff, which only macOS has, so a machine without it uses vimdiff.
+fn effective_merge(
+    synced: &MergeConfig,
+    local: &LocalMergeConfig,
+    installed: impl Fn(&str) -> bool,
+) -> MergeConfig {
+    let mut merge = match &local.command {
+        Some(command) => MergeConfig {
+            command: command.clone(),
+            args: local.args.clone().unwrap_or_else(three_way_args),
+        },
+        None => synced.clone(),
+    };
+    if merge.command == "opendiff" && !installed("opendiff") {
+        merge = MergeConfig {
+            command: "vimdiff".to_string(),
+            args: three_way_args(),
+        };
+    }
+    merge
 }
 
 /// Team sync configuration.
@@ -677,6 +744,14 @@ impl Config {
 
     pub fn config_path() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("config.toml"))
+    }
+
+    /// The merge tool this machine launches.
+    pub fn merge_tool(&self) -> Result<MergeConfig> {
+        let local = LocalConfig::load()?;
+        Ok(effective_merge(&self.merge, &local.merge, |tool| {
+            which::which(tool).is_ok()
+        }))
     }
 
     /// Get team sync directory for a specific team (or legacy single team)
@@ -2138,5 +2213,52 @@ files = [".zshrc"]
         assert!(Config::is_safe_profile_name("dev"));
         assert!(Config::is_safe_profile_name("my-server"));
         assert!(Config::is_safe_profile_name("workstation_01"));
+    }
+
+    fn opendiff() -> MergeConfig {
+        MergeConfig {
+            command: "opendiff".to_string(),
+            args: ["{local}", "{remote}", "-merge", "{merged}"]
+                .map(String::from)
+                .to_vec(),
+        }
+    }
+
+    #[test]
+    fn synced_opendiff_falls_back_to_vimdiff_where_missing() {
+        let local = LocalMergeConfig::default();
+        let merge = effective_merge(&opendiff(), &local, |_| false);
+        assert_eq!(merge.command, "vimdiff");
+        assert_eq!(merge.args, three_way_args());
+
+        let merge = effective_merge(&opendiff(), &local, |_| true);
+        assert_eq!(merge.command, "opendiff");
+        assert_eq!(merge.args, opendiff().args);
+    }
+
+    #[test]
+    fn local_merge_tool_overrides_the_synced_one() {
+        let local: LocalConfig = toml::from_str("[merge]\ncommand = \"meld\"\n").unwrap();
+        let merge = effective_merge(&opendiff(), &local.merge, |_| false);
+        assert_eq!(merge.command, "meld");
+        assert_eq!(merge.args, three_way_args());
+
+        let local: LocalConfig =
+            toml::from_str("[merge]\ncommand = \"code\"\nargs = [\"--wait\", \"{merged}\"]\n")
+                .unwrap();
+        let merge = effective_merge(&opendiff(), &local.merge, |_| false);
+        assert_eq!(merge.args, ["--wait", "{merged}"]);
+    }
+
+    #[test]
+    fn local_config_reads_min_release_age_and_rejects_typos() {
+        let local: LocalConfig = toml::from_str("[packages]\nmin_release_age_days = 0\n").unwrap();
+        assert_eq!(local.packages.min_release_age_days, Some(0));
+        assert!(toml::from_str::<LocalConfig>("[packages]\nmin_release_age = 0\n").is_err());
+        assert!(toml::from_str::<LocalConfig>("")
+            .unwrap()
+            .merge
+            .command
+            .is_none());
     }
 }

@@ -860,7 +860,8 @@ pub fn decrypt_from_repo(
                                             )?;
                                         }
                                         ConflictResolution::Merged => {
-                                            conflict.launch_merge_tool(&config.merge, home)?;
+                                            conflict
+                                                .launch_merge_tool(&config.merge_tool()?, home)?;
                                         }
                                         ConflictResolution::KeepLocal => {}
                                     }

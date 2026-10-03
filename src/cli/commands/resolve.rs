@@ -119,7 +119,7 @@ pub async fn run(file: Option<&str>) -> Result<()> {
                 conflict_state.remove_conflict(&pending.file_path);
             }
             ConflictResolution::Merged => {
-                conflict.launch_merge_tool(&config.merge, &home)?;
+                conflict.launch_merge_tool(&config.merge_tool()?, &home)?;
                 conflict_state.remove_conflict(&pending.file_path);
             }
             ConflictResolution::Skip => {

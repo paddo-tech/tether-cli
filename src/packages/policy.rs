@@ -37,6 +37,19 @@ impl PackagePolicy {
         let mut policy = Config::load()
             .map(|c| Self::from_config(&c.packages))
             .unwrap_or_default();
+        match crate::config::LocalConfig::load() {
+            Ok(local) => {
+                if let Some(days) = local.packages.min_release_age_days {
+                    policy.min_release_age_days = days;
+                }
+            }
+            Err(e) => {
+                let message = format!("Ignoring ~/.tether/local.toml: {}", e);
+                if first_warning(&message) {
+                    crate::cli::Output::warning(&message);
+                }
+            }
+        }
         if let Ok(inbox) = super::inbox::Inbox::load() {
             policy
                 .trusted_taps

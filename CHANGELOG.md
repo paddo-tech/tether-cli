@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - On Linux, `tether daemon install` now installs a systemd user service in `~/.config/systemd/user/tether.service` and enables it. The service gets your shell's `PATH`, `GEM_HOME` and `GEM_PATH`, as on macOS. `tether daemon uninstall` removes it. Without a systemd user session, Tether asks you to use `tether daemon start`
+- New file `~/.tether/local.toml` for settings on this machine only. Tether never syncs it. Set `[packages] min_release_age_days` or `[merge] command` and `args` there to override config.toml on this machine. Without `args`, the merge tool gets `{local} {remote} {merged}`
 
 - Tether now marks a machine record that may be an old id of this machine: a hostname id from builds before random ids. This is only a guess, and you confirm it before Tether removes anything. Check that no other machine uses the hostname. Tether marks a record when all of these are true. Its hostname or its id is this machine's hostname. Its id is not a random id. It is older than this machine's record. It has not synced for 7 days. No other machine's key signed its bytes, even when the record has entries Tether drops. The build that wrote the record does not count, because a machine keeps its hostname id after an upgrade. `tether machines list` and `tether status` show the command that removes it. On the dashboard Machines tab, press `D` or use "Remove old record" in Ctrl+K, then `y`, to remove it and commit the removal. Under the sync lock, the dashboard checks the record again. If a sync changed the record since the question opened, or it no longer looks like an old id, the dashboard refuses and asks you to review it again
 
@@ -60,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tether machines remove` and the dashboard removal now keep the record when the commit fails, for example on a stale index lock. Before, the files stayed deleted and a retry reported that the machine was not found
 - A uv tool that Tether installed at a pinned version now upgrades again. uv saves `name==version` in the tool receipt, so Tether installs the bare name a second time to drop that pin and keep the installed version. The second install runs offline, so uv cannot fetch a release other than the one OSV checked
 - A pnpm package that Tether installed at a pinned version now upgrades again. pnpm saves the exact version as the range, so upgrades now run `pnpm update -g --latest`, which ignores the saved range and still applies the release-age limit. pnpm upgrades can now cross major versions, like npm upgrades of global packages
+- A machine without `opendiff`, such as a Linux machine, now uses `vimdiff` when the synced merge tool is `opendiff`. Before, the merge failed
 - On Linux, desktop notifications now use `notify-send`. Without it, Tether logs this once and shows no notifications
 
 ### Changed
