@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tether machines remove` and the dashboard removal now keep the record when the commit fails, for example on a stale index lock. Before, the files stayed deleted and a retry reported that the machine was not found
 - A uv tool that Tether installed at a pinned version now upgrades again. uv saves `name==version` in the tool receipt, so Tether installs the bare name a second time to drop that pin and keep the installed version. The second install runs offline, so uv cannot fetch a release other than the one OSV checked
 - A pnpm package that Tether installed at a pinned version now upgrades again. pnpm saves the exact version as the range, so upgrades now run `pnpm update -g --latest`, which ignores the saved range and still applies the release-age limit. pnpm upgrades can now cross major versions, like npm upgrades of global packages
+- Tether no longer installs Homebrew casks on Linux, and it honours `packages.brew.sync_casks = false`. Before, a Linux machine tried each cask from a Mac on every sync, and could hold it in the inbox as "untrusted tap"
+- A synced package that fails to install now waits 24 hours before Tether tries it again, or until its version changes. Tether warns once, not on every sync. `tether packages --list` and the dashboard Packages tab show failed installs. The list stays on this machine, in `~/.tether/state.json`
+- A failed `brew bundle` no longer counts as a Homebrew install
 - A machine without `opendiff`, such as a Linux machine, now uses `vimdiff` when the synced merge tool is `opendiff`. Before, the merge failed
 - On Linux, desktop notifications now use `notify-send`. Without it, Tether logs this once and shows no notifications
 

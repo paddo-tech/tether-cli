@@ -5,11 +5,11 @@ use crate::packages::osv;
 use crate::packages::pin::{format_pin, parse_pin};
 use crate::packages::resolve::resolve_version;
 use crate::packages::{
-    normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageManager,
-    PackagePolicy,
+    normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageInfo,
+    PackageManager, PackagePolicy,
 };
 use crate::sync::signing::{self, Generations, SignedRecord, TrustStore};
-use crate::sync::state::PackageState;
+use crate::sync::state::{InstallFailure, PackageState};
 use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::Result;
 use ssh_key::PublicKey;
@@ -101,6 +101,7 @@ pub async fn import_packages(
 
     let mid = &machine_state.machine_id;
     prune_inbox(machine_state)?;
+    prune_failures(&mut state.install_failures, machine_state);
     let held_machines = inbox::queue_machine_keys(sync_path, mid)?;
     let trust = Trust::load(config, sync_path, mid)?;
     let mut gated = Gated::default();
@@ -110,10 +111,14 @@ pub async fn import_packages(
         let (casks, installed) = import_brew(
             &manifests_dir,
             machine_state,
-            daemon_mode,
-            previously_deferred,
+            BrewImport {
+                daemon_mode,
+                casks: import_casks(config.packages.brew.sync_casks),
+                previously_deferred,
+            },
             &trust,
             &mut gated,
+            &mut state.install_failures,
         )
         .await;
         outcome.deferred_casks = casks;
@@ -126,8 +131,15 @@ pub async fn import_packages(
     // Simple package managers (npm, pnpm, bun, gem)
     for def in SIMPLE_MANAGERS {
         if config.is_manager_enabled(mid, def.state_key) {
-            let installed =
-                import_simple_manager(def, &manifests_dir, machine_state, &trust, &mut gated).await;
+            let installed = import_simple_manager(
+                def,
+                &manifests_dir,
+                machine_state,
+                &trust,
+                &mut gated,
+                &mut state.install_failures,
+            )
+            .await;
             if installed {
                 update_last_upgrade(state, def.state_key);
             }
@@ -195,6 +207,74 @@ fn prune_inbox(machine_state: &MachineState) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Failures for packages that are installed now, by any means, are settled.
+fn prune_failures(failures: &mut HashMap<String, InstallFailure>, machine_state: &MachineState) {
+    failures.retain(|key, _| {
+        let Some((manager, name)) = key.split_once(':') else {
+            return false;
+        };
+        !machine_state.packages.get(manager).is_some_and(|names| {
+            names.iter().any(|n| {
+                n == name || (manager.starts_with("brew_") && n == normalize_formula_name(name))
+            })
+        })
+    });
+}
+
+/// Whether a package that failed before may install again now.
+fn retry_due(
+    failures: &HashMap<String, InstallFailure>,
+    manager: &str,
+    name: &str,
+    version: Option<&str>,
+) -> bool {
+    failures
+        .get(&InstallFailure::key(manager, name))
+        .is_none_or(|f| f.should_retry(version, chrono::Utc::now()))
+}
+
+/// Record a failed install. Tether warns on the first failure of each version only, so a
+/// package that cannot install here does not warn on every sync.
+fn record_failure(
+    failures: &mut HashMap<String, InstallFailure>,
+    manager: &str,
+    name: &str,
+    version: Option<&str>,
+    error: &str,
+) {
+    let key = InstallFailure::key(manager, name);
+    let error: String = error.trim().chars().take(300).collect();
+    if failures
+        .get(&key)
+        .is_none_or(|f| f.version.as_deref() != version)
+    {
+        Output::warning(&format!(
+            "Failed to install {}{} ({}): {}. Tether tries again in {} hours, or when the \
+             version changes. 'tether packages --list' shows failed installs",
+            name,
+            version.map(|v| format!(" {}", v)).unwrap_or_default(),
+            manager,
+            error,
+            InstallFailure::RETRY_AFTER_HOURS
+        ));
+    } else {
+        log::debug!("{} still fails to install: {}", key, error);
+    }
+    failures.insert(
+        key,
+        InstallFailure {
+            version: version.map(str::to_string),
+            attempted: chrono::Utc::now(),
+            error,
+        },
+    );
+}
+
+/// Casks are macOS apps: Homebrew on Linux cannot install them.
+fn import_casks(sync_casks: bool) -> bool {
+    sync_casks && cfg!(target_os = "macos")
 }
 
 /// Trust inputs shared by every manager in one import.
@@ -449,17 +529,30 @@ fn update_last_upgrade(state: &mut SyncState, manager: &str) {
         });
 }
 
+/// How one sync imports Homebrew packages.
+struct BrewImport<'a> {
+    daemon_mode: bool,
+    /// Whether casks install on this machine at all
+    casks: bool,
+    previously_deferred: &'a [String],
+}
+
 /// Import brew packages (formulae, casks, taps).
 /// Casks are installed individually to detect which need password.
 /// Returns (deferred_casks, installed_any) - list of casks needing password and whether any packages were installed.
 async fn import_brew(
     manifests_dir: &Path,
     machine_state: &MachineState,
-    daemon_mode: bool,
-    previously_deferred: &[String],
+    opts: BrewImport<'_>,
     trust: &Trust,
     gated: &mut Gated,
+    failures: &mut HashMap<String, InstallFailure>,
 ) -> (Vec<String>, bool) {
+    let BrewImport {
+        daemon_mode,
+        casks: import_casks,
+        previously_deferred,
+    } = opts;
     let brewfile = manifests_dir.join("Brewfile");
     if !brewfile.exists() {
         return (Vec::new(), false);
@@ -501,6 +594,15 @@ async fn import_brew(
     brew_packages.casks.retain(|p| !removed_casks.contains(p));
     brew_packages.taps.retain(|p| !removed_taps.contains(p));
     brew_packages.retain_valid();
+    if !import_casks {
+        // Drop pending inbox items for casks this machine never installs
+        gated.passed.extend(
+            brew_packages
+                .casks
+                .drain(..)
+                .map(|cask| ("brew_casks".to_string(), cask)),
+        );
+    }
 
     let policy = PackagePolicy::load();
     let local_taps: HashSet<String> = brew
@@ -537,6 +639,7 @@ async fn import_brew(
         .formulae
         .iter()
         .filter(|p| !local_formulae.contains(normalize_formula_name(p)))
+        .filter(|p| retry_due(failures, "brew_formulae", p, None))
         .cloned()
         .collect();
 
@@ -548,7 +651,7 @@ async fn import_brew(
         .cloned()
         .collect();
 
-    for deferred in previously_deferred {
+    for deferred in previously_deferred.iter().filter(|_| import_casks) {
         if !local_casks.contains(deferred.as_str())
             && !casks_to_try.contains(deferred)
             && !removed_casks.contains(deferred)
@@ -566,6 +669,7 @@ async fn import_brew(
         gated,
     )
     .await;
+    casks_to_try.retain(|c| retry_due(failures, "brew_casks", c, None));
     let casks_to_try = gate_brew(&brew, &policy, trust, "brew_casks", casks_to_try, gated).await;
 
     let mut installed_any = false;
@@ -581,15 +685,27 @@ async fn import_brew(
 
         let formulae_manifest = BrewfilePackages {
             taps: brew_packages.taps,
-            formulae: missing_formulae,
+            formulae: missing_formulae.clone(),
             casks: Vec::new(),
         };
-        if brew
-            .import_manifest(&formulae_manifest.generate())
-            .await
-            .is_ok()
-        {
-            installed_any = true;
+        let result = brew.import_manifest(&formulae_manifest.generate()).await;
+        installed_any = result.is_ok();
+        // brew bundle reports one exit code, so the installed list tells which formula failed
+        let error = match &result {
+            Ok(()) => "brew bundle did not install it".to_string(),
+            Err(e) => e.to_string(),
+        };
+        match brew.installed_formulae().await {
+            Ok(installed) => {
+                for formula in &missing_formulae {
+                    if installed.contains(normalize_formula_name(formula)) {
+                        failures.remove(&InstallFailure::key("brew_formulae", formula));
+                    } else {
+                        record_failure(failures, "brew_formulae", formula, None, &error);
+                    }
+                }
+            }
+            Err(e) => Output::warning(&format!("Cannot list installed formulae: {}", e)),
         }
     }
 
@@ -611,6 +727,7 @@ async fn import_brew(
             match brew.install_cask(cask, !daemon_mode).await {
                 Ok(true) => {
                     installed_any = true;
+                    failures.remove(&InstallFailure::key("brew_casks", cask));
                 }
                 Ok(false) => {
                     if daemon_mode {
@@ -622,11 +739,17 @@ async fn import_brew(
                         flagged_casks.push(cask.clone());
                     } else {
                         // Interactive: user had their chance, just log failure
-                        Output::warning(&format!("Failed to install cask {}", cask));
+                        record_failure(
+                            failures,
+                            "brew_casks",
+                            cask,
+                            None,
+                            "brew install --cask failed",
+                        );
                     }
                 }
                 Err(e) => {
-                    Output::warning(&format!("Failed to install cask {}: {}", cask, e));
+                    record_failure(failures, "brew_casks", cask, None, &e.to_string());
                 }
             }
         }
@@ -727,6 +850,7 @@ async fn import_simple_manager(
     machine_state: &MachineState,
     trust: &Trust,
     gated: &mut Gated,
+    failures: &mut HashMap<String, InstallFailure>,
 ) -> bool {
     let manifest_path = manifests_dir.join(def.manifest_file);
     if !manifest_path.exists() {
@@ -768,11 +892,18 @@ async fn import_simple_manager(
                 .inbox
                 .is_rejected(def.state_key, name, version.as_deref(), None)
         })
+        .filter(|(name, version, _)| retry_due(failures, def.state_key, name, version.as_deref()))
         .collect();
 
     if missing.is_empty() {
         return false;
     }
+    // A failure is recorded against the version the manifest asked for, which the retry
+    // check above compares
+    let asked: HashMap<String, Option<String>> = missing
+        .iter()
+        .map(|(name, version, _)| (name.clone(), version.clone()))
+        .collect();
 
     let allowed = gate_simple(
         def,
@@ -795,19 +926,31 @@ async fn import_simple_manager(
         if allowed.len() == 1 { "" } else { "s" }
     ));
 
-    let filtered_manifest = allowed.join("\n") + "\n";
-
-    match manager.import_manifest(&filtered_manifest).await {
-        Ok(_) => true,
-        Err(e) => {
-            Output::warning(&format!(
-                "Failed to import {}: {}",
-                manifest_path.display(),
-                e
-            ));
-            false
+    let mut installed_any = false;
+    for line in allowed {
+        let (name, version) = parse_pin(def.ecosystem, &line);
+        let asked = asked.get(&name).cloned().flatten();
+        match manager
+            .install(&PackageInfo {
+                name: name.clone(),
+                version,
+            })
+            .await
+        {
+            Ok(()) => {
+                installed_any = true;
+                failures.remove(&InstallFailure::key(def.state_key, &name));
+            }
+            Err(e) => record_failure(
+                failures,
+                def.state_key,
+                &name,
+                asked.as_deref(),
+                &e.to_string(),
+            ),
         }
     }
+    installed_any
 }
 
 /// A package a rollback would install, at the version its snapshot pins.
@@ -1656,6 +1799,46 @@ mod tests {
     }
 
     #[test]
+    fn casks_import_only_on_macos_and_when_enabled() {
+        assert!(!import_casks(false));
+        assert_eq!(import_casks(true), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn failed_install_waits_a_day_unless_the_version_changes() {
+        let now = chrono::Utc::now();
+        let failure = InstallFailure {
+            version: Some("1.0.0".to_string()),
+            attempted: now,
+            error: "boom".to_string(),
+        };
+        assert!(!failure.should_retry(Some("1.0.0"), now + chrono::Duration::hours(23)));
+        assert!(failure.should_retry(Some("1.0.0"), now + chrono::Duration::hours(24)));
+        assert!(failure.should_retry(Some("1.1.0"), now));
+        assert!(failure.should_retry(None, now));
+    }
+
+    #[test]
+    fn record_failure_keeps_the_newest_attempt_and_prune_settles_installed() {
+        let mut failures = HashMap::new();
+        record_failure(&mut failures, "brew_formulae", "mas", None, "macOS only");
+        record_failure(&mut failures, "npm", "zx", Some("8.0.0"), "boom");
+        assert!(!retry_due(&failures, "brew_formulae", "mas", None));
+        assert!(retry_due(&failures, "npm", "zx", Some("8.1.0")));
+        assert!(retry_due(&failures, "npm", "other", None));
+
+        let mut machine = MachineState::new("me");
+        machine
+            .packages
+            .insert("npm".to_string(), vec!["zx".to_string()]);
+        prune_failures(&mut failures, &machine);
+        assert_eq!(
+            failures.keys().collect::<Vec<_>>(),
+            [&InstallFailure::key("brew_formulae", "mas")]
+        );
+    }
+
+    #[test]
     fn test_update_last_upgrade_creates_entry() {
         let mut state = SyncState {
             machine_id: "test".to_string(),
@@ -1667,6 +1850,7 @@ mod tests {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
+            install_failures: HashMap::new(),
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -1693,6 +1877,7 @@ mod tests {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
+            install_failures: HashMap::new(),
         };
 
         state.packages.insert(

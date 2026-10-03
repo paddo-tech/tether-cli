@@ -519,6 +519,16 @@ impl BrewManager {
         Ok(home.join(".tether").join("Brewfile.tmp"))
     }
 
+    /// Every installed formula, dependencies included, by short name
+    pub async fn installed_formulae(&self) -> Result<std::collections::HashSet<String>> {
+        let output = self.run_brew(&["list", "--formula", "-1"]).await?;
+        Ok(output
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect())
+    }
+
     /// List installed casks
     pub async fn list_installed_casks(&self) -> Result<Vec<String>> {
         let output = self.run_brew(&["list", "--cask", "-1"]).await?;
@@ -734,10 +744,10 @@ impl PackageManager for BrewManager {
         // Clean up temp file
         let _ = tokio::fs::remove_file(&temp_path).await;
 
-        // brew bundle may return non-zero even if most packages installed
-        // (e.g., one cask failed). Log but don't fail.
+        // brew bundle stops short on a formula it cannot install, such as a macOS-only one
+        // on Linux. The caller checks which formulae installed.
         if !status.success() {
-            crate::cli::Output::warning(&format!("brew bundle had issues (exit code: {})", status));
+            anyhow::bail!("brew bundle failed ({})", status);
         }
 
         Ok(())

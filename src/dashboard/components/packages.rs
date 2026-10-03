@@ -95,7 +95,7 @@ fn toggle_row(app: &mut App) {
             let len = build_rows(&app.state, &app.packages).len();
             clamp_cursor(&mut app.packages.cursor, len);
         }
-        Some(PkgRow::DiffRow { .. }) | None => {}
+        Some(PkgRow::DiffRow { .. } | PkgRow::Failed { .. }) | None => {}
     }
 }
 
@@ -233,6 +233,8 @@ pub enum PkgRow {
         manager_key: String,
         label: String,
         count: usize,
+        /// Synced packages that failed to install here
+        failed: usize,
     },
     Package {
         manager_key: String,
@@ -247,6 +249,12 @@ pub enum PkgRow {
     },
     DiffRow {
         line: DiffLine,
+    },
+    /// A synced package that failed to install on this machine
+    Failed {
+        name: String,
+        error: String,
+        attempted: String,
     },
 }
 
@@ -267,15 +275,33 @@ pub fn build_rows(state: &DashboardState, pt: &PackagesTabState) -> Vec<PkgRow> 
         return Vec::new();
     };
 
-    let mut managers: Vec<_> = machine.packages.iter().collect();
-    managers.sort_by(|a, b| a.0.cmp(b.0));
+    let failures: Vec<(&str, &str, &crate::sync::state::InstallFailure)> = state
+        .sync_state
+        .iter()
+        .flat_map(|s| &s.install_failures)
+        .filter_map(|(key, f)| key.split_once(':').map(|(m, n)| (m, n, f)))
+        .collect();
+    let mut managers: Vec<(String, Vec<String>)> = machine
+        .packages
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (manager, _, _) in &failures {
+        if !managers.iter().any(|(k, _)| k == manager) {
+            managers.push((manager.to_string(), Vec::new()));
+        }
+    }
+    managers.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut rows = Vec::new();
     for (key, packages) in &managers {
+        let mut failed: Vec<_> = failures.iter().filter(|(m, _, _)| m == key).collect();
+        failed.sort_by_key(|(_, n, _)| *n);
         rows.push(PkgRow::Header {
-            manager_key: (*key).clone(),
+            manager_key: key.clone(),
             label: manager_label(key).to_string(),
             count: packages.len(),
+            failed: failed.len(),
         });
 
         if pt.history_manager.as_deref() == Some(key.as_str()) {
@@ -296,11 +322,21 @@ pub fn build_rows(state: &DashboardState, pt: &PackagesTabState) -> Vec<PkgRow> 
         }
 
         if pt.expanded.as_deref() == Some(key.as_str()) {
-            let mut sorted_pkgs: Vec<_> = (*packages).clone();
+            for (_, name, failure) in failed {
+                rows.push(PkgRow::Failed {
+                    name: match &failure.version {
+                        Some(v) => format!("{} {}", name, v),
+                        None => name.to_string(),
+                    },
+                    error: failure.error.lines().next().unwrap_or_default().to_string(),
+                    attempted: relative_time(failure.attempted),
+                });
+            }
+            let mut sorted_pkgs = packages.clone();
             sorted_pkgs.sort();
             for pkg in &sorted_pkgs {
                 rows.push(PkgRow::Package {
-                    manager_key: (*key).clone(),
+                    manager_key: key.clone(),
                     name: pkg.clone(),
                 });
             }
@@ -362,6 +398,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 manager_key,
                 label,
                 count,
+                failed,
             } => {
                 let open = pt.expanded.as_deref() == Some(manager_key.as_str());
                 let history = pt.history_manager.as_deref() == Some(manager_key.as_str());
@@ -376,6 +413,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 ];
                 if history {
                     left.push(Span::styled("  history", Style::default().fg(t.info)));
+                }
+                if *failed > 0 {
+                    left.push(Span::styled(
+                        format!("  ✗ {} failed", failed),
+                        Style::default().fg(t.warn),
+                    ));
                 }
                 row(
                     f,
@@ -415,6 +458,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                 super::files::history_row(f, r, open, short_hash, date, machine_id, message, app);
             }
             PkgRow::DiffRow { line } => diff::render_line(f, r, line, selected, t),
+            PkgRow::Failed {
+                name,
+                error,
+                attempted,
+            } => {
+                row(
+                    f,
+                    r,
+                    Line::from(vec![
+                        Span::styled("    ✗ ", Style::default().fg(t.warn)),
+                        Span::styled(name.as_str(), Style::default().fg(t.warn)),
+                        Span::styled(format!("  {}", error), Style::default().fg(t.dim)),
+                    ]),
+                    Line::from(Span::styled(
+                        format!("failed {}", attempted),
+                        Style::default().fg(t.muted),
+                    )),
+                );
+            }
         },
     );
 }

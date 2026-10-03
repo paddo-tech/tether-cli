@@ -23,6 +23,33 @@ pub struct SyncState {
     /// Dotfile paths dismissed when prompted to import from other profiles
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub dismissed_imports: std::collections::HashSet<String>,
+    /// Synced packages that failed to install on this machine, by `manager:name`
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub install_failures: HashMap<String, InstallFailure>,
+}
+
+/// A failed install of a synced package. A package that cannot install here, such as a
+/// macOS-only formula on Linux, would otherwise retry and warn on every sync.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstallFailure {
+    /// The version Tether tried, if the manifest pins one
+    pub version: Option<String>,
+    pub attempted: DateTime<Utc>,
+    pub error: String,
+}
+
+impl InstallFailure {
+    pub const RETRY_AFTER_HOURS: i64 = 24;
+
+    /// Retry after a day, or at once when the version to install changed.
+    pub fn should_retry(&self, version: Option<&str>, now: DateTime<Utc>) -> bool {
+        self.version.as_deref() != version
+            || now - self.attempted >= chrono::Duration::hours(Self::RETRY_AFTER_HOURS)
+    }
+
+    pub fn key(manager: &str, name: &str) -> String {
+        format!("{manager}:{name}")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,6 +469,7 @@ impl SyncState {
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
             dismissed_imports: std::collections::HashSet::new(),
+            install_failures: HashMap::new(),
         }
     }
 

@@ -58,6 +58,8 @@ pub async fn run(list_only: bool, yes: bool) -> Result<()> {
         }
     }
 
+    print_install_failures();
+
     if manager_infos.is_empty() {
         Output::info("No packages found");
         return Ok(());
@@ -132,6 +134,35 @@ pub async fn run(list_only: bool, yes: bool) -> Result<()> {
 
     Output::success("Uninstall complete");
     Ok(())
+}
+
+/// Synced packages that failed to install here. Syncs retry them after a day, or when the
+/// version changes.
+fn print_install_failures() {
+    let Ok(state) = crate::sync::SyncState::load() else {
+        return;
+    };
+    if state.install_failures.is_empty() {
+        return;
+    }
+    Output::section("Failed to install on this machine");
+    let mut failures: Vec<_> = state.install_failures.iter().collect();
+    failures.sort_by_key(|(key, _)| *key);
+    for (key, failure) in failures {
+        let version = failure
+            .version
+            .as_deref()
+            .map(|v| format!(" {}", v))
+            .unwrap_or_default();
+        Output::list_item(&format!(
+            "{}{} ({}): {}",
+            key,
+            version,
+            crate::cli::output::relative_time(failure.attempted),
+            failure.error.lines().next().unwrap_or_default()
+        ));
+    }
+    println!();
 }
 
 fn print_package_list(manager_infos: &[ManagerInfo]) {
