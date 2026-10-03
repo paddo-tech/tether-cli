@@ -1032,26 +1032,45 @@ async fn import_simple_manager(
                 failures.remove(&InstallFailure::key(def.state_key, &name));
             }
             Err(e) if foreign.contains(&name) => {
-                match install_fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await
-                {
-                    Ok(version) => {
+                let error = e.to_string();
+                let first_line = error.lines().next().unwrap_or_default();
+                match fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await {
+                    Ok(Fallback::Installed(version)) => {
                         installed_any = true;
                         failures.remove(&InstallFailure::key(def.state_key, &name));
                         Output::info(&format!(
-                            "Installed {} {} instead of {}, which a machine on another OS \
-                             lists and which failed here: {}",
+                            "Installed {} {} as approved, instead of {}, which a machine on \
+                             another OS lists and which failed here: {}",
                             name,
                             version,
                             asked.as_deref().unwrap_or("the pinned version"),
-                            e.to_string().lines().next().unwrap_or_default()
+                            first_line
                         ));
+                    }
+                    Ok(Fallback::Held(item)) => {
+                        record_failure(
+                            failures,
+                            def.state_key,
+                            &name,
+                            asked.as_deref(),
+                            &format!(
+                                "{}; holding {} for approval",
+                                first_line,
+                                item.version.as_deref().unwrap_or_default()
+                            ),
+                        );
+                        // The held item replaces the pass the failed version got
+                        gated
+                            .passed
+                            .retain(|(m, n)| m != def.state_key || *n != name);
+                        gated.held.push(*item);
                     }
                     Err(fallback) => record_failure(
                         failures,
                         def.state_key,
                         &name,
                         asked.as_deref(),
-                        &format!("{}; no fallback release: {}", e, fallback),
+                        &format!("{}; no fallback release: {}", error, fallback),
                     ),
                 }
             }
@@ -1067,55 +1086,83 @@ async fn import_simple_manager(
     installed_any
 }
 
-/// Install the release an unpinned line would get on this machine, after a version that
-/// only machines on another OS list failed. A trusted record lists the package, so this
-/// release gets the checks of an unpinned line: the release-age limit, rejections and OSV.
-async fn install_fallback(
+/// What happened to the release that suits this machine.
+#[derive(Debug)]
+enum Fallback {
+    /// The user approved that release before, so it installed
+    Installed(String),
+    /// No trusted record lists that release, so it waits for approval
+    Held(Box<InboxItem>),
+}
+
+/// Find the release an unpinned line would get on this machine, after a version that only
+/// machines on another OS list failed. That release gets the release-age limit, rejections
+/// and OSV, and installs only when the user approved it.
+async fn fallback(
     def: &PackageManagerDef,
     manager: &dyn PackageManager,
     trust: &Trust,
     name: &str,
     failed: Option<&str>,
-) -> Result<String> {
+) -> Result<Fallback> {
     let min_age = PackagePolicy::load().min_release_age_days;
     let version = resolve_version(def.state_key, def.ecosystem, name, min_age).await?;
     if failed == Some(version.as_str()) {
         anyhow::bail!("it is the newest release that suits this machine");
-    }
-    if trust
-        .inbox
-        .is_rejected(def.state_key, name, Some(&version), None)
-    {
-        anyhow::bail!("you rejected {} {}", name, version);
     }
     let advisories = osv::advisories(def.ecosystem, &[(name.to_string(), Some(version.clone()))])
         .await
         .into_iter()
         .next()
         .unwrap_or_default();
-    if advisories.iter().any(|id| osv::is_malicious(id)) {
-        anyhow::bail!(
-            "OSV lists {} {} as MALICIOUS ({})",
-            name,
-            version,
-            advisories.join(", ")
-        );
+    let decided = fallback_decision(def, trust, name, version, advisories)?;
+    if let Fallback::Installed(version) = &decided {
+        manager
+            .install(&PackageInfo {
+                name: name.to_string(),
+                version: Some(version.clone()),
+            })
+            .await?;
     }
-    if !advisories.is_empty() {
-        Output::warning(&format!(
-            "{} {} has known vulnerabilities: {}",
-            name,
-            version,
-            advisories.join(", ")
-        ));
+    Ok(decided)
+}
+
+/// Never install a release no trusted record lists without the user's approval of that
+/// exact release. A malicious release is held, and approval cannot install it.
+fn fallback_decision(
+    def: &PackageManagerDef,
+    trust: &Trust,
+    name: &str,
+    version: String,
+    advisories: Vec<String>,
+) -> Result<Fallback> {
+    let key = def.state_key;
+    if trust.inbox.is_rejected(key, name, Some(&version), None) {
+        anyhow::bail!("you rejected {} {}", name, version);
     }
-    manager
-        .install(&PackageInfo {
-            name: name.to_string(),
-            version: Some(version.clone()),
-        })
-        .await?;
-    Ok(version)
+    if trust.inbox.holds_malicious(key, name, Some(&version)) {
+        anyhow::bail!("the inbox holds {} {} as malicious", name, version);
+    }
+    let malicious = advisories.iter().any(|id| osv::is_malicious(id));
+    if !malicious && trust.inbox.is_approved(key, name, Some(&version), None) {
+        if !advisories.is_empty() {
+            Output::warning(&format!(
+                "{} {} has known vulnerabilities: {}",
+                name,
+                version,
+                advisories.join(", ")
+            ));
+        }
+        return Ok(Fallback::Installed(version));
+    }
+    let reason = if malicious {
+        Reason::Malicious
+    } else {
+        Reason::OtherOsVersion
+    };
+    let mut item = trust.item(key, name, Some(version), None, vec![reason]);
+    item.advisories = advisories;
+    Ok(Fallback::Held(Box::new(item)))
 }
 
 /// A package a rollback would install, at the version its snapshot pins.
@@ -1896,6 +1943,61 @@ mod tests {
         );
         machine.save_to_repo(dir).unwrap();
         signing::sign_record(dir, id, key).unwrap();
+    }
+
+    #[test]
+    fn a_release_for_this_os_waits_for_approval_of_that_release() {
+        let (tmp, me, _, store) = two_machines();
+        let mut trust = trust_as(tmp.path(), "me", &me, &store);
+        let npm = &SIMPLE_MANAGERS[0];
+        let decide = |trust: &Trust, advisories: &[&str]| {
+            let advisories = advisories.iter().map(|a| a.to_string()).collect();
+            fallback_decision(npm, trust, "example", "1.5.0".to_string(), advisories)
+        };
+        let held = |decision: Result<Fallback>| match decision.unwrap() {
+            Fallback::Held(item) => (item.version.unwrap(), item.reasons),
+            other => panic!("installed without approval: {other:?}"),
+        };
+
+        assert_eq!(
+            held(decide(&trust, &["GHSA-x"])),
+            ("1.5.0".to_string(), vec![Reason::OtherOsVersion])
+        );
+        assert_eq!(
+            held(decide(&trust, &["MAL-2026-1"])).1,
+            vec![Reason::Malicious]
+        );
+
+        let decision = |version: &str| inbox::Decision {
+            manager: "npm".to_string(),
+            name: "example".to_string(),
+            version: Some(version.to_string()),
+            tap: None,
+            fingerprint: None,
+            at: chrono::Utc::now(),
+        };
+        // An approval covers only the release it named
+        trust.inbox.approved.push(decision("1.4.0"));
+        assert!(matches!(decide(&trust, &[]).unwrap(), Fallback::Held(_)));
+        trust.inbox.approved.push(decision("1.5.0"));
+        assert!(matches!(
+            decide(&trust, &[]).unwrap(),
+            Fallback::Installed(v) if v == "1.5.0"
+        ));
+        // Approval never installs a malicious release
+        assert_eq!(
+            held(decide(&trust, &["MAL-2026-1"])).1,
+            vec![Reason::Malicious]
+        );
+
+        trust.inbox.items.push(InboxItem {
+            reasons: vec![Reason::Malicious],
+            ..trust.item("npm", "example", Some("1.5.0".to_string()), None, vec![])
+        });
+        assert!(decide(&trust, &[]).is_err());
+        trust.inbox.items.clear();
+        trust.inbox.rejected.push(decision("1.5.0"));
+        assert!(decide(&trust, &[]).is_err());
     }
 
     #[test]
