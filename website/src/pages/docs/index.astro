@@ -78,19 +78,21 @@ tether init --repo git@github.com:username/dotfiles.git`} />
   <section id="upgrade">
     <h2>Upgrade to Tether 2.0</h2>
     <p>Tether 2.0 adds signed machine records and checks synced packages before it installs them. After the upgrade, each machine must trust your other machines once. Until then, packages from those machines wait for approval.</p>
+    <p>You can upgrade one machine at a time. Machines on 1.13.1 keep working with the same repo during the upgrade.</p>
 
-    <h3>1. Upgrade every machine</h3>
+    <h3>1. Upgrade a machine</h3>
     <Code code="brew upgrade tether-cli" />
     <p>On Linux, build from source again. See <a href="#linux">Linux</a>.</p>
 
-    <h3>2. Sync each machine once</h3>
+    <h3>2. Sync it once</h3>
     <Code code="tether sync" />
-    <p>The first sync makes the machine's signing key and signs its record. Do this on every machine before step 3.</p>
+    <p>The first sync makes the machine's signing key and signs its record.</p>
 
-    <h3>3. Trust your other machines</h3>
-    <p>On each machine, run <code>tether machines list</code>. Note the fingerprint in the row marked "(this machine)". Then, on every other machine, trust it:</p>
+    <h3>3. Trust your upgraded machines</h3>
+    <p>On each upgraded machine, run <code>tether machines list</code>. Note the fingerprint in the row marked "(this machine)". Then, on your other upgraded machines, trust it:</p>
     <Code code="tether machines trust <id> <fingerprint>" />
     <p>You can also approve the "trust machine" item when <code>tether sync</code> asks, or on the dashboard Security tab.</p>
+    <p>A machine that still runs 1.13.1 has no signed record. Its packages wait in the inbox as "from another machine". Upgrade that machine, sync it, and trust it. The next sync then installs its packages.</p>
 
     <h3>4. Review held packages</h3>
     <Code code="tether packages inbox" />
@@ -111,7 +113,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
       <li>Packages for managers that cannot enforce the release-age limit now wait in the inbox. This covers gem and older npm, pnpm and bun</li>
       <li>Tether no longer runs <code>brew update</code>. Run it yourself to update Homebrew</li>
       <li><code>tether machines rename</code> renames only the machine it runs on</li>
-      <li>The <code>sync_versions</code> settings are gone. Config files that still have them load as before</li>
+      <li>The Config tab no longer shows the <code>sync_versions</code> settings. Tether still writes them as <code>false</code>, because 1.x builds need them to read the synced config</li>
       <li>The dashboard shows a machine as online when its record is at most 90 minutes old</li>
     </ul>
   </section>
@@ -128,6 +130,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     <Code code="tether daemon install" />
     <p>On Linux, this installs and enables a systemd user service in <code>~/.config/systemd/user/tether.service</code>. The service gets your shell's <code>PATH</code>, <code>GEM_HOME</code>, and <code>GEM_PATH</code>. <code>tether daemon uninstall</code> removes it.</p>
     <p>Without a systemd user session, use <code>tether daemon start</code>.</p>
+    <p>Paths with spaces, <code>$</code>, or <code>%</code> work. systemd cannot run a program whose path has a quote, a backslash, or a control character. In that case, <code>tether daemon install</code> stops with an error and writes no unit.</p>
 
     <h3>Notifications</h3>
     <p>Tether uses <code>notify-send</code> for desktop notifications. Without it, Tether logs this once and shows no notifications.</p>
@@ -136,7 +139,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     <ul>
       <li>Tether does not install Homebrew casks on Linux</li>
       <li>Tether skips gems that ship with Ruby or with Debian. On a Ruby from ruby-build or rbenv, Tether cannot identify these gems</li>
-      <li>Machine records name their OS. When only Macs list a version, Linux tries it first. If it fails, Linux installs the newest suitable release after the usual checks</li>
+      <li>Machine records name their OS. When only Macs list a version, Linux tries it first. If it fails, Tether holds the newest release that suits Linux in the inbox as "another OS pins a version that fails here". Approve it to install exactly that release</li>
     </ul>
 
     <h3>Merge tool</h3>
@@ -256,9 +259,8 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     <p>A machine is online when its record is at most 90 minutes old. An idle machine updates its record once an hour. After 24 hours without an update, the card shows the machine as stale.</p>
 
     <h3>Themes</h3>
-    <p>On a terminal with true color, the dashboard uses Catppuccin Mocha or Latte. It picks one from the terminal background. Other terminals get a 16-color theme. To choose a theme, run <code>tether config edit</code> and set <code>dashboard.theme</code>:</p>
-    <Code lang="toml" code={`[dashboard]
-theme = "mocha"   # mocha, latte, ansi, or auto (default)`} />
+    <p>On a terminal with true color, the dashboard uses Catppuccin Mocha or Latte. It picks one from the terminal background. Other terminals get a 16-color theme. To choose a theme, set <code>dashboard.theme</code>:</p>
+    <Code code="tether config set dashboard.theme mocha   # mocha, latte, ansi, or auto" />
 
     <h3>Keybindings</h3>
     <p>You can also click a tab, a row, or a key hint, and scroll lists with the mouse wheel.</p>
@@ -780,6 +782,7 @@ mypy`} />
     <h3>Versions</h3>
     <p>A version must be a concrete release: semver for npm, pnpm and bun, PEP 440 for uv, and a RubyGems version for gem. Tether skips a line with a dist-tag such as <code>latest</code>, or with a range, and shows a warning.</p>
     <p>When machines have different versions, the manifest keeps the newest one by the rules of each ecosystem. A sync installs the newest version that a trusted machine record lists.</p>
+    <p>A sync merges into the manifests. It adds or updates lines only from this machine's record and the records it trusts. It keeps the lines of other machines. It removes a line only when no machine record in the repo lists that package. A pin moves only to a newer version, or off a version that no record lists.</p>
     <p>A package that fails to install waits 24 hours before Tether tries it again, or until its version changes. <code>tether packages --list</code> and the dashboard Packages tab show failed installs.</p>
   </section>
 
@@ -900,7 +903,7 @@ tether packages approve machine:work-laptop SHA256:...`} />
       <li>A package installs on its own only when a trusted, signed record lists that exact version</li>
       <li>Trust is transitive. When you trust a machine, you also trust the packages it installed, whoever installed them. A package you rejected on this machine stays blocked</li>
       <li>Manifests and commit signatures do not grant trust. Commit signatures are an audit trail only</li>
-      <li>A sync writes manifests only from this machine's record and the records it trusts</li>
+      <li>A sync adds manifest lines only from this machine's record and the records it trusts. A line in a manifest grants no trust</li>
     </ul>
 
     <h3>Protection against changed records</h3>
