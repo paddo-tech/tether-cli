@@ -314,9 +314,31 @@ pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
     let Some(item) = reviewed(id, expected, "approve", "Approve this item?")? else {
         return Ok(());
     };
+    // Naming the version on the command line already confirms it
+    if expected.is_none() && item.signature_failed() && !confirm_signature_failed(&item)? {
+        return Ok(());
+    }
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     Output::info(&format!("Approving {}", describe(&item)));
     approve_locked(&item).await
+}
+
+/// A package whose source machine's record fails its signature may be a forged manifest
+/// line, so the user types its version or tap and answers a second question.
+fn confirm_signature_failed(item: &InboxItem) -> Result<bool> {
+    Output::warning(&format!(
+        "{} comes from {}, whose record fails its signature. Someone may have edited it in \
+         the repo. Do not approve it unless you know why the signature fails",
+        item.name,
+        item.source_machine.as_deref().unwrap_or("another machine")
+    ));
+    if let Some(binding) = binding(item) {
+        if Prompt::input(&format!("Type {} to approve it", binding), None)?.trim() != binding {
+            Output::info(&format!("Not approved: {}", item.id()));
+            return Ok(false);
+        }
+    }
+    Prompt::confirm("Approve it anyway?", false)
 }
 
 /// Approve exactly the item shown to the user. The caller holds the sync lock.
@@ -402,9 +424,10 @@ pub async fn review_inbox() -> Result<()> {
         match Prompt::select("Install these packages?", options, 0)? {
             0 => {}
             1 => {
-                // A machine key needs its own answer, so "Install all" leaves it pending
+                // A machine key or a failed signature needs its own answer, so "Install all"
+                // leaves it pending
                 for item in items {
-                    if item.malicious() || item.kind != Kind::Package {
+                    if !item.bulk_approvable() {
                         continue;
                     }
                     if let Err(e) = approve_locked(&item).await {
@@ -426,6 +449,10 @@ pub async fn review_inbox() -> Result<()> {
         };
         let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
         let result = match choice {
+            "Install" if item.signature_failed() => match confirm_signature_failed(&item) {
+                Ok(true) => approve_locked(&item).await,
+                other => other.map(|_| ()),
+            },
             "Install" | "Trust" => approve_locked(&item).await,
             "Reject" => reject_shown(&item),
             _ => Ok(()),

@@ -35,6 +35,9 @@ pub enum Reason {
     /// A trusted machine signs its record with a different key. The old key stays trusted
     /// until the user approves the new one.
     KeyChanged,
+    /// The machine it came from is trusted, but its record fails its signature, so someone
+    /// may have edited the record in the repo.
+    SignatureFailed,
 }
 
 impl Reason {
@@ -49,6 +52,7 @@ impl Reason {
             Reason::MaliciousUnresolved => "malicious releases (OSV), install version unknown",
             Reason::NewMachine => "new machine key",
             Reason::KeyChanged => "machine key changed",
+            Reason::SignatureFailed => "signature failed",
         }
     }
 }
@@ -134,6 +138,17 @@ impl InboxItem {
         self.reasons
             .iter()
             .any(|r| matches!(r, Reason::Malicious | Reason::MaliciousUpgrade))
+    }
+
+    /// The source machine is trusted, but its record fails its signature.
+    pub fn signature_failed(&self) -> bool {
+        self.reasons.contains(&Reason::SignatureFailed)
+    }
+
+    /// Whether one answer for many items may approve it. A machine key, a malicious
+    /// package and a package from a record that fails its signature each need their own.
+    pub fn bulk_approvable(&self) -> bool {
+        self.kind == Kind::Package && !self.malicious() && !self.signature_failed()
     }
 
     /// Fingerprint of the key a machine item asks to trust.
@@ -502,6 +517,8 @@ pub struct Checks {
     pub approved: bool,
     pub auto_install_from_trusted: bool,
     pub signer: Signer,
+    /// The source machine is trusted, but its record fails its signature
+    pub signature_failed: bool,
     pub cooldown_unsupported: bool,
     pub untrusted_tap: bool,
     pub malicious: bool,
@@ -530,6 +547,9 @@ pub fn reasons(checks: Checks) -> Vec<Reason> {
     if !checks.from_this_machine {
         match checks.signer {
             Signer::Trusted if checks.auto_install_from_trusted => {}
+            Signer::None | Signer::Untrusted if checks.signature_failed => {
+                reasons.push(Reason::SignatureFailed)
+            }
             Signer::Untrusted => reasons.push(Reason::UntrustedSigner),
             _ => reasons.push(Reason::Unsigned),
         }
@@ -1137,6 +1157,24 @@ mod tests {
             ..Checks::default()
         };
         assert_eq!(reasons(other), vec![Reason::Unsigned]);
+        // The source machine is trusted, but its record fails its signature
+        let forged = Checks {
+            signature_failed: true,
+            ..other
+        };
+        assert_eq!(reasons(forged), vec![Reason::SignatureFailed]);
+        assert_eq!(
+            reasons(Checks {
+                signer: Signer::Untrusted,
+                ..forged
+            }),
+            vec![Reason::SignatureFailed]
+        );
+        assert!(reasons(Checks {
+            signer: Signer::Trusted,
+            ..forged
+        })
+        .is_empty());
         let trusted = Checks {
             signer: Signer::Trusted,
             ..other

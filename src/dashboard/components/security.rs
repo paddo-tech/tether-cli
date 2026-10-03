@@ -58,7 +58,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
             app.security.detail = !app.security.detail;
             None
         }
-        KeyCode::Char('a') => selected(app).and_then(|item| approve(app, item)),
+        KeyCode::Char('a') => selected(app).and_then(|item| {
+            if item.signature_failed() {
+                app.overlays
+                    .push(Overlay::Confirm(Confirm::approve_signature_failed(item)));
+                None
+            } else {
+                approve(app, item)
+            }
+        }),
         KeyCode::Char('x') => selected(app).map(|item| Cmd::Reject(Box::new(item))),
         KeyCode::Char('A') => {
             confirm_approve_all(app);
@@ -141,7 +149,8 @@ pub fn approve(app: &mut App, item: InboxItem) -> Option<Cmd> {
     }
 }
 
-/// Machine keys are left out: each needs its fingerprint checked on its own.
+/// Machine keys are left out: each needs its fingerprint checked on its own. So are
+/// packages whose source record fails its signature.
 /// The confirm keeps the items it shows, so items that arrive while it is open wait.
 pub fn confirm_approve_all(app: &mut App) {
     let packages = app
@@ -150,13 +159,13 @@ pub fn confirm_approve_all(app: &mut App) {
         .items
         .iter()
         .filter(|i| i.kind == Kind::Package);
-    let malicious = packages.clone().filter(|i| is_malicious(i)).count();
-    let items: Vec<InboxItem> = packages.filter(|i| !is_malicious(i)).cloned().collect();
+    let held = packages.clone().filter(|i| !i.bulk_approvable()).count();
+    let items: Vec<InboxItem> = packages.filter(|i| i.bulk_approvable()).cloned().collect();
     if items.is_empty() {
         app.flash_info("Nothing to approve");
     } else if !app.install_busy() {
         app.overlays
-            .push(Overlay::Confirm(Confirm::approve_all(items, malicious)));
+            .push(Overlay::Confirm(Confirm::approve_all(items, held)));
     }
 }
 
@@ -190,6 +199,7 @@ fn badge(reason: Reason) -> &'static str {
         Reason::UntrustedSigner => "untrusted signer",
         Reason::NewMachine => "new machine",
         Reason::KeyChanged => "KEY CHANGED",
+        Reason::SignatureFailed => "SIGNATURE FAILED",
     }
 }
 
@@ -201,7 +211,8 @@ fn reason_color(reason: Reason, t: &Theme) -> Color {
         Reason::Malicious
         | Reason::MaliciousUpgrade
         | Reason::MaliciousUnresolved
-        | Reason::KeyChanged => t.error,
+        | Reason::KeyChanged
+        | Reason::SignatureFailed => t.error,
         Reason::UntrustedSigner => t.key,
         Reason::NewMachine => t.info,
     }
@@ -232,6 +243,9 @@ fn explain(reason: Reason) -> &'static str {
         }
         Reason::NewMachine => {
             "This machine published a signing key for the first time. Trust it only if you set it up."
+        }
+        Reason::SignatureFailed => {
+            "The machine this came from is trusted, but its record fails its signature. Someone may have edited the record or the manifest in the repo. Do not approve unless you know why the signature fails."
         }
         Reason::KeyChanged => {
             "SIGNING KEY CHANGED. This machine was trusted with a different key. If you did not set it up again, someone may be signing as it. Run `tether machines` on that machine and compare the fingerprint before you trust it."
@@ -369,7 +383,7 @@ fn reason_lines(item: &InboxItem, t: &Theme) -> Vec<Detail> {
     ))
     .into()];
     for reason in &item.reasons {
-        let loud = *reason == Reason::KeyChanged;
+        let loud = matches!(reason, Reason::KeyChanged | Reason::SignatureFailed);
         lines.push(Line::from(pill(reason.label(), reason_color(*reason, t), t)).into());
         lines.push(
             Line::from(Span::styled(

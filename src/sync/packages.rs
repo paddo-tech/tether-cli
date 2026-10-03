@@ -348,6 +348,7 @@ impl Trust {
             approved: self.inbox.is_approved(manager, name, version, tap),
             auto_install_from_trusted: self.auto_install_from_trusted,
             signer: self.provenance.signer(&entry),
+            signature_failed: self.provenance.source_signature_failed(manager, name),
             ..Checks::default()
         }
     }
@@ -544,15 +545,9 @@ impl Provenance {
         }
     }
 
-    /// The other machine that last synced a record listing the package, the commit that
-    /// last changed that record, and the fingerprint of the key that signed it.
-    fn source(
-        &self,
-        manager: &str,
-        name: &str,
-    ) -> (Option<String>, Option<String>, Option<String>) {
-        let Some(r) = self
-            .records
+    /// The other machine's record that last synced and lists the package.
+    fn source_record(&self, manager: &str, name: &str) -> Option<&SignedRecord> {
+        self.records
             .iter()
             .filter(|r| {
                 r.record.machine_id != self.this_machine
@@ -562,7 +557,25 @@ impl Provenance {
                         .is_some_and(|names| names.iter().any(|n| n == name))
             })
             .max_by_key(|r| r.record.last_sync)
-        else {
+    }
+
+    /// Whether the package's source machine is trusted, but its record fails its signature.
+    fn source_signature_failed(&self, manager: &str, name: &str) -> bool {
+        self.source_record(manager, name).is_some_and(|r| {
+            self.failed
+                .iter()
+                .any(|(id, digest)| *id == r.record.machine_id && *digest == r.digest)
+        })
+    }
+
+    /// The other machine that last synced a record listing the package, the commit that
+    /// last changed that record, and the fingerprint of the key that signed it.
+    fn source(
+        &self,
+        manager: &str,
+        name: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let Some(r) = self.source_record(manager, name) else {
             return (None, None, None);
         };
         let commit = GitBackend::new(self.sync_path.clone())
@@ -2046,6 +2059,19 @@ mod tests {
             .map(|(id, _)| id.as_str())
             .collect();
         assert_eq!(ids, ["t", "u", "v"]);
+        assert_eq!(
+            held(&trust, "a", Some("0.9.0")),
+            vec![Reason::SignatureFailed]
+        );
+        assert_eq!(
+            held(&trust, "b", Some("1.0.0")),
+            vec![Reason::SignatureFailed]
+        );
+        assert_eq!(
+            held(&trust, "c", Some("1.0.0")),
+            vec![Reason::SignatureFailed]
+        );
+        assert_eq!(held(&trust, "d", Some("1.0.0")), vec![Reason::Unsigned]);
     }
 
     #[test]

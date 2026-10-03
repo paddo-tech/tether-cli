@@ -90,22 +90,36 @@ pub enum Confirm {
     /// every one of them, because `y` approves exactly this list.
     ApproveAll {
         items: Vec<crate::packages::inbox::InboxItem>,
-        malicious: usize,
+        /// Packages that stay held: malicious, or from a record that fails its signature
+        held: usize,
         /// First listed item
         scroll: usize,
         /// Items the last draw had room for
         rows: std::cell::Cell<usize>,
         arming: Arming,
     },
+    /// Approve and install a package whose source machine's record fails its signature.
+    /// Only `y` accepts.
+    ApproveSignatureFailed {
+        item: Box<crate::packages::inbox::InboxItem>,
+        arming: Arming,
+    },
 }
 
 impl Confirm {
-    pub fn approve_all(items: Vec<crate::packages::inbox::InboxItem>, malicious: usize) -> Self {
+    pub fn approve_all(items: Vec<crate::packages::inbox::InboxItem>, held: usize) -> Self {
         Confirm::ApproveAll {
             items,
-            malicious,
+            held,
             scroll: 0,
             rows: std::cell::Cell::new(1),
+            arming: Arming::default(),
+        }
+    }
+
+    pub fn approve_signature_failed(item: crate::packages::inbox::InboxItem) -> Self {
+        Confirm::ApproveSignatureFailed {
+            item: Box::new(item),
             arming: Arming::default(),
         }
     }
@@ -117,7 +131,8 @@ impl Confirm {
             Confirm::InstallWithoutOsv { arming, .. }
             | Confirm::ApproveWithoutOsv { arming, .. }
             | Confirm::RemoveMachine { arming, .. }
-            | Confirm::ApproveAll { arming, .. } => Some(arming),
+            | Confirm::ApproveAll { arming, .. }
+            | Confirm::ApproveSignatureFailed { arming, .. } => Some(arming),
             _ => None,
         }
     }
@@ -239,6 +254,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             Some(Cmd::RemoveMachine { machine_id, digest })
         }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
+        Confirm::ApproveSignatureFailed { item, .. } => security::approve(app, *item),
         Confirm::ApproveWithoutOsv { items, .. } => {
             security::approve_all(app, items.into_iter().map(|(i, _)| i).collect(), false)
         }
@@ -372,9 +388,23 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 t.error,
             )
         }
+        Confirm::ApproveSignatureFailed { item, .. } => render_popup(
+            f,
+            app,
+            wait,
+            "Signature failed",
+            &format!(
+                "{} comes from {}, whose record fails its signature. Someone may have edited \
+                 it in the repo. Approve and install {} anyway?",
+                item.name,
+                item.source_machine.as_deref().unwrap_or("another machine"),
+                approve_all_line(item)
+            ),
+            t.error,
+        ),
         Confirm::ApproveAll {
             items,
-            malicious,
+            held,
             scroll,
             rows,
             ..
@@ -384,8 +414,11 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 items.len(),
                 if items.len() == 1 { "" } else { "s" }
             );
-            if *malicious > 0 {
-                msg.push_str(&format!(" {} malicious stay held.", malicious));
+            if *held > 0 {
+                msg.push_str(&format!(
+                    " {} malicious or with a failed signature stay held.",
+                    held
+                ));
             }
             let lines: Vec<String> = items.iter().map(approve_all_line).collect();
             render_list_popup(

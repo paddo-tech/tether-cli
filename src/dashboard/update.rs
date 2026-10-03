@@ -1099,9 +1099,9 @@ mod tests {
 
     fn approve_all_names(app: &App) -> Option<(Vec<String>, usize)> {
         match app.overlays.last() {
-            Some(Overlay::Confirm(Confirm::ApproveAll {
-                items, malicious, ..
-            })) => Some((items.iter().map(|i| i.name.clone()).collect(), *malicious)),
+            Some(Overlay::Confirm(Confirm::ApproveAll { items, held, .. })) => {
+                Some((items.iter().map(|i| i.name.clone()).collect(), *held))
+            }
             _ => None,
         }
     }
@@ -1377,6 +1377,40 @@ mod tests {
             panic!("expected a trust command");
         };
         assert_eq!((item.name.as_str(), label.as_str()), ("laptop", "laptop"));
+    }
+
+    #[test]
+    fn signature_failed_items_ask_again_and_stay_out_of_approve_all() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        app.state
+            .inbox
+            .items
+            .insert(0, inbox_item("forged", vec![Reason::SignatureFailed]));
+        app.active_tab = Tab::Security;
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("SIGNATURE FAILED"));
+        key(&mut app, KeyCode::Char('A'));
+        assert_eq!(
+            approve_all_names(&app),
+            Some((vec!["left-pad".to_string()], 2))
+        );
+        app.overlays.clear();
+        draw(&app);
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::ApproveSignatureFailed { .. }))
+        ));
+        let Some(Cmd::ApprovePackages { items, .. }) = armed_key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected an approval");
+        };
+        assert_eq!(items[0].name, "forged");
     }
 
     #[test]
