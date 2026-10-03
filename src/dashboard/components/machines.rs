@@ -5,6 +5,7 @@ use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, Hit, Overlay};
 use crate::dashboard::msg::KeyOutcome;
 use crate::packages::inbox::{Kind, Reason};
+use crate::sync::signing::RecordStatus;
 use crate::sync::MachineState;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -420,10 +421,19 @@ fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String
         }
         _ => None,
     });
-    match pending {
-        Some((true, fp)) => ("changed, review in Security", t.error, Some(fp)),
-        Some((false, fp)) => ("new, not trusted yet", t.info, Some(fp)),
-        None => match app
+    let status = app
+        .state
+        .record_status
+        .iter()
+        .find(|(id, _)| *id == m.machine_id)
+        .map(|(_, status)| *status);
+    match (pending, status) {
+        (Some((true, fp)), _) => ("changed, review in Security", t.error, Some(fp)),
+        (Some((false, fp)), _) => ("new, not trusted yet", t.info, Some(fp)),
+        (None, Some(status @ (RecordStatus::Replayed | RecordStatus::SignatureFailed))) => {
+            (status.label(), t.error, None)
+        }
+        (None, _) => match app
             .state
             .trusted
             .iter()

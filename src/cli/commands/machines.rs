@@ -27,8 +27,7 @@ pub async fn list() -> Result<()> {
 
     let state = SyncState::load()?;
     let current_machine = &state.machine_id;
-    let signers = signing::record_signers(&sync_path);
-    let trusted = inbox::trusted_machines()?;
+    let statuses = signing::record_statuses(&sync_path, current_machine)?;
     let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, current_machine);
 
     println!();
@@ -80,21 +79,13 @@ pub async fn list() -> Result<()> {
             .as_deref()
             .unwrap_or(config.profile_name(&machine.machine_id));
 
-        let key = signers
+        let (text, color) = statuses
             .iter()
-            .find(|(id, _)| id == &machine.machine_id)
-            .map(|(_, key)| signing::fingerprint(key));
-        let key_cell = match key {
-            Some(fp)
-                if trusted
-                    .iter()
-                    .any(|t| t.machine_id == machine.machine_id && t.fingerprint == fp) =>
-            {
-                Cell::new(format!("{} (trusted)", fp)).fg(Color::Green)
-            }
-            Some(fp) => Cell::new(format!("{} (untrusted)", fp)).fg(Color::Yellow),
-            None => Cell::new("-"),
-        };
+            .find(|(id, _, _)| id == &machine.machine_id)
+            .map_or(("-".to_string(), Color::Reset), |(_, status, fp)| {
+                key_label(*status, fp.as_deref())
+            });
+        let key_cell = Cell::new(text).fg(color);
 
         table.add_row(vec![
             if is_current {
@@ -119,6 +110,26 @@ pub async fn list() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The signing key column: the fingerprint, if a signature verifies, and how a sync reads
+/// the record.
+fn key_label(status: signing::RecordStatus, fingerprint: Option<&str>) -> (String, Color) {
+    use signing::RecordStatus;
+    let color = match status {
+        RecordStatus::Trusted => Color::Green,
+        RecordStatus::Untrusted => Color::Yellow,
+        RecordStatus::Replayed | RecordStatus::SignatureFailed => Color::Red,
+    };
+    let text = match (fingerprint, status) {
+        (None, RecordStatus::Untrusted) => "-".to_string(),
+        (None, _) => status.label().to_string(),
+        (Some(fp), RecordStatus::Trusted | RecordStatus::Untrusted) => {
+            format!("{} ({})", fp, status.label())
+        }
+        (Some(fp), _) => format!("{} {}", fp, status.label()),
+    };
+    (text, color)
 }
 
 /// One line per record that looks like an earlier id of this machine, with the command
@@ -741,6 +752,30 @@ pub async fn profile_list() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_column_shows_records_a_sync_ignores() {
+        use crate::sync::signing::RecordStatus;
+        use comfy_table::Color;
+
+        let fp = Some("SHA256:abc");
+        assert_eq!(
+            super::key_label(RecordStatus::Trusted, fp),
+            ("SHA256:abc (trusted)".to_string(), Color::Green)
+        );
+        assert_eq!(
+            super::key_label(RecordStatus::Replayed, fp),
+            ("SHA256:abc replayed (ignored)".to_string(), Color::Red)
+        );
+        assert_eq!(
+            super::key_label(RecordStatus::SignatureFailed, None),
+            ("signature failed (ignored)".to_string(), Color::Red)
+        );
+        assert_eq!(
+            super::key_label(RecordStatus::Untrusted, None),
+            ("-".to_string(), Color::Yellow)
+        );
+    }
+
     use super::*;
 
     #[test]

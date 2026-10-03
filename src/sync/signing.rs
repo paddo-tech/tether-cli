@@ -419,6 +419,38 @@ pub enum RecordStatus {
     SignatureFailed,
 }
 
+impl RecordStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            RecordStatus::Trusted => "trusted",
+            RecordStatus::Untrusted => "untrusted",
+            RecordStatus::Replayed => "replayed (ignored)",
+            RecordStatus::SignatureFailed => "signature failed (ignored)",
+        }
+    }
+}
+
+/// Each record's machine id, status as a sync reads it, and the fingerprint of the key whose
+/// signature over it verifies.
+pub fn record_statuses(
+    sync_path: &Path,
+    this_machine: &str,
+) -> Result<Vec<(String, RecordStatus, Option<String>)>> {
+    let own_key = load_or_create(this_machine)?;
+    let store = TrustStore::load()?;
+    let generations = Generations::load()?;
+    Ok(records(sync_path)
+        .iter()
+        .map(|r| {
+            (
+                r.record.machine_id.clone(),
+                record_status(r, this_machine, own_key.public_key(), &store, &generations),
+                r.signer.as_ref().map(fingerprint),
+            )
+        })
+        .collect())
+}
+
 /// The status of `record`. This machine's own id is trusted with `own_key` only.
 pub fn record_status(
     record: &SignedRecord,
@@ -730,6 +762,43 @@ mod tests {
         let bytes = std::fs::read(record_path(tmp.path(), "m1")).unwrap();
         let commit_sig = sign_commit(&key, &record_message("m1", &bytes)).unwrap();
         assert!(record_signer("m1", &bytes, &commit_sig).is_none());
+    }
+
+    #[test]
+    fn record_status_reads_records_as_a_sync_does() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        let (me, t, other) = (key(), key(), key());
+        let mut store = TrustStore::default();
+        store.trust("t", t.public_key()).unwrap();
+        store.trust("u", other.public_key()).unwrap();
+        let signed = |id: &str, generation: u64, key: &PrivateKey| {
+            let mut record = MachineState::new(id);
+            record.generation = generation;
+            write_record(dir, id, &record);
+            sign_record(dir, id, key).unwrap();
+        };
+        let status = |id: &str, generations: &Generations| {
+            let r = records(dir)
+                .into_iter()
+                .find(|r| r.record.machine_id == id)
+                .unwrap();
+            record_status(&r, "me", me.public_key(), &store, generations)
+        };
+        let mut generations = Generations::default();
+        signed("me", 1, &me);
+        signed("t", 5, &t);
+        signed("u", 1, &t);
+        signed("stranger", 1, &other);
+        assert_eq!(status("me", &generations), RecordStatus::Trusted);
+        assert_eq!(status("t", &generations), RecordStatus::Trusted);
+        assert_eq!(status("u", &generations), RecordStatus::SignatureFailed);
+        assert_eq!(status("stranger", &generations), RecordStatus::Untrusted);
+        // An older record by the same key, restored from git history
+        generations.accept(t.public_key(), 6, "newer");
+        assert_eq!(status("t", &generations), RecordStatus::Replayed);
+        std::fs::remove_file(record_sig_path(dir, "t")).unwrap();
+        assert_eq!(status("t", &generations), RecordStatus::SignatureFailed);
     }
 
     #[test]

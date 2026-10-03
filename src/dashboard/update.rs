@@ -506,6 +506,7 @@ mod tests {
             inbox: Default::default(),
             trusted: Vec::new(),
             old_ids: Vec::new(),
+            record_status: Vec::new(),
         };
         App::new(state, HashMap::new())
     }
