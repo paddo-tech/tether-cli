@@ -297,8 +297,8 @@ fn systemd_unit_path() -> Result<PathBuf> {
     Ok(config.join("systemd").join("user").join(SYSTEMD_UNIT))
 }
 
-/// systemd expands `%` specifiers in every value. ExecStart also expands `$` variables,
-/// so its caller escapes those.
+/// systemd expands `%` specifiers in every value and C-unescapes quoted words. ExecStart
+/// expands `$` variables only in arguments, not in the executable path, so `$` stays as is.
 #[cfg(any(target_os = "linux", test))]
 fn systemd_quote(value: &str) -> String {
     let escaped = value
@@ -308,8 +308,31 @@ fn systemd_quote(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// A unit file line ends at a newline, so no value may contain one.
 #[cfg(any(target_os = "linux", test))]
-fn generate_unit(exe: &std::path::Path, log: &std::path::Path, env: &[(&str, String)]) -> String {
+fn generate_unit(
+    exe: &std::path::Path,
+    log: &std::path::Path,
+    env: &[(&str, String)],
+) -> Result<String> {
+    let exe = exe.display().to_string();
+    let log = log.display().to_string();
+    // systemd rejects these in an executable path even when escaped
+    if exe
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '"' | '\'' | '\\'))
+    {
+        anyhow::bail!(
+            "systemd cannot run {exe:?}: the path has a quote, backslash or control character. \
+             Install tether in a path without them"
+        );
+    }
+    if log.contains('\n') {
+        anyhow::bail!("systemd cannot log to {log:?}: the path has a newline");
+    }
+    if let Some((key, _)) = env.iter().find(|(_, value)| value.contains('\n')) {
+        anyhow::bail!("{key} contains a newline, which a systemd unit cannot hold");
+    }
     let environment: String = env
         .iter()
         .map(|(key, value)| {
@@ -317,8 +340,10 @@ fn generate_unit(exe: &std::path::Path, log: &std::path::Path, env: &[(&str, Str
             format!("Environment={pair}\n")
         })
         .collect();
-    let log = log.display().to_string().replace('%', "%%");
-    format!(
+    // systemd reads an append: path literally to the end of the line: spaces need no
+    // escape, and quotes would become part of the path
+    let log = log.replace('%', "%%");
+    Ok(format!(
         "[Unit]\n\
          Description=Tether dotfile and package sync\n\
          \n\
@@ -332,8 +357,8 @@ fn generate_unit(exe: &std::path::Path, log: &std::path::Path, env: &[(&str, Str
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        systemd_quote(&exe.display().to_string().replace('$', "$$")),
-    )
+        systemd_quote(&exe),
+    ))
 }
 
 /// The user's systemd manager answers only when systemd runs this login session.
@@ -387,7 +412,7 @@ pub async fn install() -> Result<()> {
         &std::env::current_exe()?,
         &DaemonPaths::new()?.log,
         &service_env(),
-    );
+    )?;
     fs::write(&unit_path, unit)?;
 
     systemctl_user(&["daemon-reload"])?;
@@ -572,7 +597,8 @@ mod tests {
                 ("PATH", "/home/me/.local/bin:/usr/bin".to_string()),
                 ("GEM_HOME", "/home/me/.gem".to_string()),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(
             unit,
             "[Unit]\n\
@@ -595,12 +621,29 @@ mod tests {
     #[test]
     fn systemd_unit_escapes_specifiers_and_quotes() {
         let unit = generate_unit(
-            Path::new("/opt/$X/100%/te\"ther"),
-            Path::new("/home/a%b/daemon.log"),
-            &[("PATH", "/x$HOME:/y\\z".to_string())],
-        );
-        assert!(unit.contains("ExecStart=\"/opt/$$X/100%%/te\\\"ther\" daemon run\n"));
-        assert!(unit.contains("Environment=\"PATH=/x$HOME:/y\\\\z\"\n"));
-        assert!(unit.contains("StandardOutput=append:/home/a%%b/daemon.log\n"));
+            Path::new("/opt/$X/100% y/tether"),
+            Path::new("/home/a%b c/daemon.log"),
+            &[("PATH", "/x$HOME:/y\\z\"".to_string())],
+        )
+        .unwrap();
+        assert!(unit.contains("ExecStart=\"/opt/$X/100%% y/tether\" daemon run\n"));
+        assert!(unit.contains("Environment=\"PATH=/x$HOME:/y\\\\z\\\"\"\n"));
+        assert!(unit.contains("StandardOutput=append:/home/a%%b c/daemon.log\n"));
+    }
+
+    #[test]
+    fn systemd_unit_refuses_values_it_cannot_hold() {
+        let exe = Path::new("/usr/bin/tether");
+        let log = Path::new("/home/me/.tether/daemon.log");
+        for bad in [
+            "/opt/a\nb/tether",
+            "/opt/a\"b/tether",
+            "/opt/a'b/tether",
+            "/a\\b/tether",
+        ] {
+            assert!(generate_unit(Path::new(bad), log, &[]).is_err(), "{bad}");
+        }
+        assert!(generate_unit(exe, Path::new("/home/a\nb/daemon.log"), &[]).is_err());
+        assert!(generate_unit(exe, log, &[("PATH", "/a\n/b".to_string())]).is_err());
     }
 }
