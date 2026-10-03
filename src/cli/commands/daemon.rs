@@ -206,8 +206,10 @@ fn cleanup_pid_file(expected_pid: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "com.tether.daemon";
 
+#[cfg(target_os = "macos")]
 fn launchd_plist_path() -> Result<PathBuf> {
     let home = crate::home_dir()?;
     Ok(home
@@ -216,6 +218,7 @@ fn launchd_plist_path() -> Result<PathBuf> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
+#[cfg(target_os = "macos")]
 fn generate_plist(exe: &std::path::Path) -> Result<String> {
     let paths = DaemonPaths::new()?;
 
@@ -269,59 +272,57 @@ fn generate_plist(exe: &std::path::Path) -> Result<String> {
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
 pub async fn install() -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    {
+    Err(anyhow::anyhow!(
+        "Launchd is only available on macOS. Use 'tether daemon start' instead."
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub async fn install() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+
+    // Stop existing daemon if running via manual start
+    if let Some(pid) = read_daemon_pid()? {
+        if is_process_running(pid) {
+            Output::info("Stopping existing daemon...");
+            stop().await?;
+        }
+    }
+
+    // Unload if already loaded
+    let _ = Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .output();
+
+    // Create LaunchAgents directory if needed
+    if let Some(parent) = plist_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Write plist
+    let plist = generate_plist(&std::env::current_exe()?)?;
+    fs::write(&plist_path, plist)?;
+
+    // Load the service
+    let output = Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(&plist_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow::anyhow!(
-            "Launchd is only available on macOS. Use 'tether daemon start' instead."
+            "Failed to load launchd service: {}",
+            stderr
         ));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let plist_path = launchd_plist_path()?;
-
-        // Stop existing daemon if running via manual start
-        if let Some(pid) = read_daemon_pid()? {
-            if is_process_running(pid) {
-                Output::info("Stopping existing daemon...");
-                stop().await?;
-            }
-        }
-
-        // Unload if already loaded
-        let _ = Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(&plist_path)
-            .output();
-
-        // Create LaunchAgents directory if needed
-        if let Some(parent) = plist_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Write plist
-        let plist = generate_plist(&std::env::current_exe()?)?;
-        fs::write(&plist_path, plist)?;
-
-        // Load the service
-        let output = Command::new("launchctl")
-            .args(["load", "-w"])
-            .arg(&plist_path)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "Failed to load launchd service: {}",
-                stderr
-            ));
-        }
-
-        Output::success("Launchd service installed");
-        Output::info("Daemon will now start automatically on login and restart if it exits");
-        Ok(())
-    }
+    Output::success("Launchd service installed");
+    Output::info("Daemon will now start automatically on login and restart if it exits");
+    Ok(())
 }
 
 /// Plists written before 1.12.1 have no EnvironmentVariables, so launchd runs the
@@ -383,36 +384,34 @@ pub async fn refresh_stale_launchd_service() -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 pub async fn uninstall() -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        return Err(anyhow::anyhow!("Launchd is only available on macOS"));
+    Err(anyhow::anyhow!("Launchd is only available on macOS"))
+}
+
+#[cfg(target_os = "macos")]
+pub async fn uninstall() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+
+    if !plist_path.exists() {
+        Output::info("Launchd service is not installed");
+        return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let plist_path = launchd_plist_path()?;
+    // Unload the service
+    let output = Command::new("launchctl")
+        .args(["unload", "-w"])
+        .arg(&plist_path)
+        .output()?;
 
-        if !plist_path.exists() {
-            Output::info("Launchd service is not installed");
-            return Ok(());
-        }
-
-        // Unload the service
-        let output = Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(&plist_path)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Output::warning(&format!("launchctl unload warning: {}", stderr));
-        }
-
-        // Remove the plist file
-        fs::remove_file(&plist_path)?;
-
-        Output::success("Launchd service uninstalled");
-        Ok(())
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Output::warning(&format!("launchctl unload warning: {}", stderr));
     }
+
+    // Remove the plist file
+    fs::remove_file(&plist_path)?;
+
+    Output::success("Launchd service uninstalled");
+    Ok(())
 }
