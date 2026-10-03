@@ -575,6 +575,15 @@ pub enum ProjectsAction {
 }
 
 impl Cli {
+    pub fn is_daemon_run(&self) -> bool {
+        matches!(
+            self.command,
+            Some(Commands::Daemon {
+                action: DaemonAction::Run
+            })
+        )
+    }
+
     pub async fn run(&self) -> Result<()> {
         match &self.command {
             None | Some(Commands::Dashboard) => {

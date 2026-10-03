@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - gem now picks the newest release whose `required_ruby_version` admits the local Ruby (`ruby -e 'print RUBY_VERSION'`). Before, it picked the newest release, which could fail to install
 - A machine without `opendiff`, such as a Linux machine, now uses `vimdiff` when the synced merge tool is `opendiff`. Before, the merge failed
 - On Linux, desktop notifications now use `notify-send`. Without it, Tether logs this once and shows no notifications
+- The daemon now writes info lines, such as each sync, to `daemon.log`. Before, it wrote only errors unless `RUST_LOG` was set
 
 ### Changed
 
