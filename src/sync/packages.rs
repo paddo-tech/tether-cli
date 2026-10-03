@@ -405,8 +405,9 @@ impl Trust {
 /// Manager key, name and reported version of one package.
 type Entry = (String, String, Option<String>);
 
+/// A record with no OS data counts as this OS, so missing data never makes a pin foreign.
 fn same_os(record: &MachineState) -> bool {
-    record.os_family() == std::env::consts::OS
+    record.os_family() == "unknown" || record.os_family() == std::env::consts::OS
 }
 
 /// Every package a machine record lists, at the version the record reports.
@@ -1838,13 +1839,17 @@ mod tests {
     }
 
     #[test]
-    fn records_without_an_os_field_read_macos_from_the_os_version() {
+    fn records_without_an_os_field_read_the_family_from_the_os_version() {
         let mut machine = MachineState::new("m");
         machine.os = String::new();
         machine.os_version = "macOS 15.5".to_string();
         assert_eq!(machine.os_family(), "macos");
         machine.os_version = "Ubuntu 24.04 LTS".to_string();
-        assert_eq!(machine.os_family(), "");
+        assert_eq!(machine.os_family(), "linux");
+        assert_eq!(same_os(&machine), std::env::consts::OS == "linux");
+        machine.os_version = String::new();
+        assert_eq!(machine.os_family(), "unknown");
+        assert!(same_os(&machine));
         machine.os = "linux".to_string();
         assert_eq!(machine.os_family(), "linux");
     }

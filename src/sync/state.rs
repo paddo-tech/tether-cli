@@ -184,14 +184,16 @@ pub fn local_os_version() -> String {
 
 impl MachineState {
     /// The OS family of the machine that wrote this record. Records from before the `os`
-    /// field name only an OS version, which tells macOS apart.
+    /// field name only an OS version: "macOS ..." on macOS, the os-release name on Linux.
     pub fn os_family(&self) -> &str {
         if !self.os.is_empty() {
             &self.os
         } else if self.os_version.starts_with("macOS") {
             "macos"
+        } else if !self.os_version.is_empty() {
+            "linux"
         } else {
-            ""
+            "unknown"
         }
     }
 
