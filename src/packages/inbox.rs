@@ -19,8 +19,13 @@ pub enum Reason {
     UntrustedSigner,
     /// It is a tap outside the trusted taps, or a formula or cask from one.
     UntrustedTap,
-    /// The installed manager cannot enforce `packages.min_release_age_days`.
+    /// The installed manager cannot enforce `packages.min_release_age_days`, and Tether could
+    /// not check the release age in the registry either.
     CooldownUnsupported,
+    /// The installed manager cannot enforce `packages.min_release_age_days`, and the registry
+    /// shows that the pinned release is newer than the limit. The hold ends when it is old
+    /// enough.
+    TooNew,
     /// OSV lists a `MAL-` advisory for it. Approval cannot override this.
     Malicious,
     /// OSV lists a `MAL-` advisory for the version an upgrade would install. Approval cannot
@@ -50,6 +55,7 @@ impl Reason {
             Reason::UntrustedSigner => "signed by an untrusted key",
             Reason::UntrustedTap => "untrusted tap",
             Reason::CooldownUnsupported => "release age not checked",
+            Reason::TooNew => "newer than the release-age limit",
             Reason::Malicious => "malicious (OSV)",
             Reason::MaliciousUpgrade => "malicious upgrade (OSV)",
             Reason::MaliciousUnresolved => "malicious releases (OSV), install version unknown",
@@ -524,6 +530,7 @@ pub struct Checks {
     /// The source machine is trusted, but its record fails its signature
     pub signature_failed: bool,
     pub cooldown_unsupported: bool,
+    pub too_new: bool,
     pub untrusted_tap: bool,
     pub malicious: bool,
     pub malicious_unresolved: bool,
@@ -546,6 +553,9 @@ pub fn reasons(checks: Checks) -> Vec<Reason> {
     }
     if checks.cooldown_unsupported {
         reasons.push(Reason::CooldownUnsupported);
+    }
+    if checks.too_new {
+        reasons.push(Reason::TooNew);
     }
     // Another machine's package installs on its own only when a trusted machine record lists it
     if !checks.from_this_machine {

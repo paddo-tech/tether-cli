@@ -1299,6 +1299,33 @@ fn manifest_names(ecosystem: Ecosystem, manifest: &str) -> Vec<String> {
         .collect()
 }
 
+/// How the release age of a package was checked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AgeCheck {
+    /// The manager holds to the limit, or the release is old enough
+    Met,
+    /// The pinned release is newer than the limit
+    TooNew,
+    /// The manager cannot hold to the limit, and the registry could not tell
+    Unchecked,
+}
+
+/// The release age of a package whose manager may not hold to the limit. Tether checks it
+/// itself from the registry: a resolved release already meets the limit, and a pinned one
+/// must be old enough by its publish time. `pinned` is that publish-time check.
+fn age_check(cooldown_unsupported: bool, resolved: bool, pinned: Option<Result<bool>>) -> AgeCheck {
+    if !cooldown_unsupported {
+        return AgeCheck::Met;
+    }
+    match pinned {
+        Some(Ok(true)) => AgeCheck::Met,
+        Some(Ok(false)) => AgeCheck::TooNew,
+        Some(Err(_)) => AgeCheck::Unchecked,
+        None if resolved => AgeCheck::Met,
+        None => AgeCheck::Unchecked,
+    }
+}
+
 /// Keep the lines that may install and queue the rest with their OSV advisories.
 /// `confirmed` names packages whose version the user confirmed just now.
 async fn gate_simple(
@@ -1311,30 +1338,56 @@ async fn gate_simple(
 ) -> Vec<String> {
     let cooldown_unsupported = manager.cooldown().await == Cooldown::Unsupported;
     let min_age = crate::packages::PackagePolicy::load().min_release_age_days;
-    // An unpinned line installs the release resolved here, so OSV checks that release
+    let base = |name: &str, version: Option<&str>| {
+        let mut checks = trust.checks(def.state_key, name, version, None);
+        checks.approved |= confirmed.contains(name);
+        checks
+    };
+    // An unpinned line installs the release resolved here, so OSV checks that release. A
+    // package that waits for trust anyway is not resolved: OSV checks all its releases.
     let mut pins: Vec<(String, Option<String>)> = Vec::new();
+    let mut ages = Vec::new();
     for (name, version, _) in &missing {
-        let version = match version {
+        if !inbox::reasons(base(name, version.as_deref())).is_empty() {
+            pins.push((name.clone(), version.clone()));
+            ages.push(AgeCheck::Met);
+            continue;
+        }
+        let resolved = match version {
             Some(v) => Some(v.clone()),
             None => resolve_version(def.state_key, def.ecosystem, name, min_age)
                 .await
                 .ok(),
         };
-        pins.push((name.clone(), version));
+        let pinned = match (cooldown_unsupported, version) {
+            (true, Some(v)) => Some(
+                crate::packages::resolve::old_enough(
+                    def.state_key,
+                    def.ecosystem,
+                    name,
+                    v,
+                    min_age,
+                )
+                .await,
+            ),
+            _ => None,
+        };
+        ages.push(age_check(cooldown_unsupported, resolved.is_some(), pinned));
+        pins.push((name.clone(), resolved));
     }
     let advisories = osv::advisories(def.ecosystem, &pins).await;
     let mut allowed = Vec::new();
-    for (((name, version, line), (_, resolved)), advisories) in
-        missing.into_iter().zip(pins).zip(advisories)
+    for ((((name, version, line), (_, resolved)), advisories), age) in
+        missing.into_iter().zip(pins).zip(advisories).zip(ages)
     {
         let malicious = advisories.iter().any(|id| osv::is_malicious(id));
-        let mut checks = Checks {
-            cooldown_unsupported,
+        let checks = Checks {
+            cooldown_unsupported: age == AgeCheck::Unchecked,
+            too_new: age == AgeCheck::TooNew,
             malicious: malicious && resolved.is_some(),
             malicious_unresolved: malicious && resolved.is_none(),
-            ..trust.checks(def.state_key, &name, version.as_deref(), None)
+            ..base(&name, version.as_deref())
         };
-        checks.approved |= confirmed.contains(&name);
         let reasons = inbox::reasons(checks);
         if reasons.is_empty() {
             if checks.malicious_unresolved {
@@ -2376,6 +2429,33 @@ mod tests {
             held(&gate.trust, "good2", Some("1.0.0")),
             vec![Reason::Unsigned]
         );
+    }
+
+    #[test]
+    fn tether_checks_the_release_age_a_manager_cannot() {
+        // npm 11.10 and later holds to the limit itself
+        assert_eq!(age_check(false, false, None), AgeCheck::Met);
+        // gem: an unpinned package installs the release resolved before the cutoff
+        assert_eq!(age_check(true, true, None), AgeCheck::Met);
+        assert_eq!(age_check(true, false, None), AgeCheck::Unchecked);
+        // gem: a trusted record's version installs only once it is old enough
+        assert_eq!(age_check(true, true, Some(Ok(true))), AgeCheck::Met);
+        assert_eq!(age_check(true, true, Some(Ok(false))), AgeCheck::TooNew);
+        assert_eq!(
+            age_check(true, true, Some(Err(anyhow::anyhow!("offline")))),
+            AgeCheck::Unchecked
+        );
+        let reasons = |age: AgeCheck| {
+            inbox::reasons(Checks {
+                from_this_machine: true,
+                cooldown_unsupported: age == AgeCheck::Unchecked,
+                too_new: age == AgeCheck::TooNew,
+                ..Checks::default()
+            })
+        };
+        assert!(reasons(AgeCheck::Met).is_empty());
+        assert_eq!(reasons(AgeCheck::TooNew), [Reason::TooNew]);
+        assert_eq!(reasons(AgeCheck::Unchecked), [Reason::CooldownUnsupported]);
     }
 
     #[test]

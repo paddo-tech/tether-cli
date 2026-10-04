@@ -193,6 +193,7 @@ fn badge(reason: Reason) -> &'static str {
         Reason::Unsigned => "unsigned",
         Reason::UntrustedTap => "untrusted tap",
         Reason::CooldownUnsupported => "no age check",
+        Reason::TooNew => "too new",
         Reason::Malicious => "MALICIOUS",
         Reason::MaliciousUpgrade => "MALICIOUS UPGRADE",
         Reason::MaliciousUnresolved => "MALICIOUS RELEASES",
@@ -208,7 +209,7 @@ fn reason_color(reason: Reason, t: &Theme) -> Color {
     match reason {
         Reason::Unsigned => t.warn,
         Reason::UntrustedTap => t.key,
-        Reason::CooldownUnsupported => t.info,
+        Reason::CooldownUnsupported | Reason::TooNew => t.info,
         Reason::Malicious
         | Reason::MaliciousUpgrade
         | Reason::MaliciousUnresolved
@@ -229,7 +230,10 @@ fn explain(reason: Reason) -> &'static str {
             "It comes from a Homebrew tap outside your trusted taps. Approval covers this package only, not the tap."
         }
         Reason::CooldownUnsupported => {
-            "The installed package manager cannot enforce the minimum release age, so a very new release could install."
+            "The installed package manager cannot enforce the minimum release age, and Tether could not check it in the registry, so a very new release could install."
+        }
+        Reason::TooNew => {
+            "The installed package manager cannot enforce the minimum release age, and the registry shows this release is newer than it. It installs on its own once it is old enough."
         }
         Reason::Malicious => {
             "OSV reports this package as malicious. Tether will not install it, even with approval."
