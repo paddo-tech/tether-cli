@@ -2,8 +2,9 @@ use crate::cli::prompts::Prompt;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::packages::pin::parse_pin;
+use crate::packages::Ecosystem;
 use crate::sync::packages::{RollbackGate, RollbackLine};
-use crate::sync::{GitBackend, SyncEngine, SyncState};
+use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
@@ -11,7 +12,8 @@ use std::io::IsTerminal;
 /// Reverse-delta against the union manifest at `commit`; the follow-up sync records removals.
 /// Nothing changes before the user confirms the plan. The sync lock covers the whole rollback, so the daemon cannot install or record packages
 /// between its steps. Each package installs at the newest version a trusted machine record
-/// lists, as in a sync, unless the user confirms the snapshot's version in a terminal. Every
+/// lists, as in a sync, unless the user confirms the snapshot's version in a terminal. The
+/// snapshot's version is the one this machine's record lists at `commit`. Every
 /// install passes the trust and OSV checks of a sync, and a confirmed version counts as
 /// approved. Without a terminal, `yes` must confirm the rollback, and no older version
 /// installs.
@@ -37,12 +39,17 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     let git = GitBackend::open(&sync_path)?;
     let snapshot = git.show_at_commit(commit, &repo_path)?;
     let snapshot = String::from_utf8_lossy(&snapshot);
-    let pins: HashMap<String, String> = snapshot
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(|l| (parse_pin(pkg_manager.ecosystem(), l).0, l.to_string()))
-        .collect();
+    // Manifests name packages only, so the versions come from this machine's record at the
+    // same commit. They are only suggestions: an older version still needs confirmation.
+    let record = git
+        .show_at_commit(commit, &format!("machines/{}.json", state.machine_id))
+        .ok();
+    let pins = snapshot_versions(
+        pkg_manager.ecosystem(),
+        manager,
+        &snapshot,
+        record.as_deref(),
+    );
     let target: HashSet<String> = pins.keys().cloned().collect();
 
     let installed: HashSet<String> = pkg_manager
@@ -64,10 +71,10 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
 
     let gate = RollbackGate::load(&config, &sync_path, &state.machine_id, manager)?;
     let plan = gate.plan(
-        &to_install
+        to_install
             .iter()
-            .map(|name| pins[*name].clone())
-            .collect::<Vec<_>>(),
+            .map(|name| ((*name).clone(), pins[*name].clone()))
+            .collect(),
     );
 
     Output::header(&format!("Rolling back {} to {}", manager, commit));
@@ -156,6 +163,33 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
+/// Each package a manifest snapshot names, with the version this machine's record at that
+/// commit lists. A pinned line from a pre-release 2.0 build keeps its own version.
+fn snapshot_versions(
+    ecosystem: Ecosystem,
+    manager: &str,
+    snapshot: &str,
+    record: Option<&[u8]>,
+) -> HashMap<String, Option<String>> {
+    let recorded = record
+        .and_then(|bytes| serde_json::from_slice::<MachineState>(bytes).ok())
+        .and_then(|mut record| {
+            record.validate().ok()?;
+            record.package_versions.remove(manager)
+        })
+        .unwrap_or_default();
+    snapshot
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let (name, version) = parse_pin(ecosystem, l);
+            let version = version.or_else(|| recorded.get(&name).cloned());
+            (name, version)
+        })
+        .collect()
+}
+
 /// Add `names` to the record's removals for `manager`. Returns true when the record changed.
 fn add_tombstones(
     record: &mut crate::sync::MachineState,
@@ -205,6 +239,27 @@ fn not_trusted(line: &RollbackLine) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_versions_come_from_this_machines_record_at_the_commit() {
+        let mut record = MachineState::new("this");
+        record.package_versions.insert(
+            "npm".to_string(),
+            HashMap::from([
+                ("a".to_string(), "1.0.0".to_string()),
+                ("b".to_string(), "2.0.0".to_string()),
+            ]),
+        );
+        let json = serde_json::to_vec(&record).unwrap();
+        let versions = snapshot_versions(Ecosystem::Npm, "npm", "a\nb@3.0.0\nc\n", Some(&json));
+        assert_eq!(versions["a"].as_deref(), Some("1.0.0"));
+        assert_eq!(versions["b"].as_deref(), Some("3.0.0"));
+        assert_eq!(versions["c"], None);
+        assert_eq!(
+            snapshot_versions(Ecosystem::Npm, "npm", "a\n", None)["a"],
+            None
+        );
+    }
 
     #[test]
     fn add_tombstones_records_each_removal_once() {
