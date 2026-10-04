@@ -1,9 +1,10 @@
 use super::Ecosystem;
 use std::cmp::Ordering;
 
-/// Manifest lines pin a version in each tool's own spec syntax: `name@1.2.3` for the npm
+/// An install spec that pins a version in each tool's own syntax: `name@1.2.3` for the npm
 /// registry, `name==1.2.3` for uv, `name:1.2.3` for gem. Homebrew installs only the current
-/// release, so the Brewfile stays unpinned.
+/// release, so it gets the name. Never write these to a manifest: 1.x reads a manifest line
+/// as an installed name.
 pub fn format_pin(ecosystem: Ecosystem, name: &str, version: Option<&str>) -> String {
     match (version, separator(ecosystem)) {
         (Some(version), Some(sep)) => format!("{}{}{}", name, sep, version),
@@ -11,8 +12,8 @@ pub fn format_pin(ecosystem: Ecosystem, name: &str, version: Option<&str>) -> St
     }
 }
 
-/// Split a manifest line into name and pinned version. Lines from before pinning carry
-/// only a name and install the newest release that passes the release-age limit.
+/// Split an install spec into name and pinned version. Manifest lines carry only a name,
+/// but pre-release 2.0 builds wrote pinned manifest lines, so those parse too.
 pub fn parse_pin(ecosystem: Ecosystem, line: &str) -> (String, Option<String>) {
     let line = line.trim();
     let Some(sep) = separator(ecosystem) else {
