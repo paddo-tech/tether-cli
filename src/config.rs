@@ -1184,8 +1184,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_saved_config_parses_with_1_13_package_shape() {
-        // 1.13.1 manager tables, where sync_versions has no serde default
+    fn test_saved_config_parses_with_1x_shape() {
+        // The fields 1.11.10, 1.12.0 and 1.13.1 require, with their types and names. All
+        // three have the same required fields, and none denies unknown fields, so 2.0's
+        // new fields must stay optional additions.
         #[derive(Deserialize)]
         #[allow(dead_code)]
         struct OldManager {
@@ -1194,7 +1196,16 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code)]
+        struct OldBrew {
+            enabled: bool,
+            sync_casks: bool,
+            sync_taps: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct OldPackages {
+            remove_unlisted: bool,
+            brew: OldBrew,
             npm: OldManager,
             pnpm: OldManager,
             bun: OldManager,
@@ -1203,12 +1214,67 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code)]
+        enum OldStrategy {
+            #[serde(rename = "last-write-wins")]
+            LastWriteWins,
+            #[serde(rename = "manual")]
+            Manual,
+            #[serde(rename = "machine-priority")]
+            MachinePriority,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSync {
+            interval: String,
+            strategy: OldStrategy,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        enum OldBackendType {
+            #[serde(rename = "git")]
+            Git,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldBackend {
+            #[serde(rename = "type")]
+            backend_type: OldBackendType,
+            url: String,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldDotfiles {
+            files: Vec<toml::Value>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSecurity {
+            encrypt_dotfiles: bool,
+            scan_secrets: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct OldConfig {
+            config_version: u32,
+            sync: OldSync,
+            backend: OldBackend,
             packages: OldPackages,
+            dotfiles: OldDotfiles,
+            security: OldSecurity,
         }
 
+        let mut config = Config::default();
+        config.dashboard.theme = Some("mocha".to_string());
+        config.packages.min_release_age_days = 3;
+        config.packages.allow_scripts = vec!["esbuild".to_string()];
+        config.packages.auto_install_from_trusted = false;
+        config.packages.brew.trusted_taps = vec!["azure/kubelogin".to_string()];
+        let written = toml::to_string_pretty(&config).unwrap();
+        let old = toml::from_str::<OldConfig>(&written).unwrap();
+        // 1.x refuses a config_version above its own
+        assert!(old.config_version <= 2);
+
         let saved = toml::to_string_pretty(&Config::default()).unwrap();
-        toml::from_str::<OldConfig>(&saved).unwrap();
 
         let without_field = saved.replace("sync_versions = false\n", "");
         let config: Config = toml::from_str(&without_field).unwrap();

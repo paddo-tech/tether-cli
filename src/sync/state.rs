@@ -653,6 +653,63 @@ mod tests {
     }
 
     #[test]
+    fn a_record_from_2_0_parses_with_1x_shape() {
+        // The fields 1.11.10, 1.12.0 and 1.13.1 require in machines/<id>.json, with their
+        // types. All three have the same ones and accept unknown fields, so os,
+        // package_versions and generation must stay optional additions.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldCheckout {
+            path: PathBuf,
+            checkout_id: String,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldRecord {
+            machine_id: String,
+            hostname: String,
+            last_sync: DateTime<Utc>,
+            os_version: String,
+            cli_version: String,
+            files: HashMap<String, String>,
+            packages: HashMap<String, Vec<String>>,
+            removed_packages: HashMap<String, Vec<String>>,
+            dotfiles: Vec<String>,
+            ignored_dotfiles: Vec<String>,
+            project_configs: HashMap<String, Vec<String>>,
+            ignored_project_configs: HashMap<String, Vec<String>>,
+            checkouts: HashMap<String, Vec<OldCheckout>>,
+        }
+
+        let mut record = MachineState::new("m");
+        record.generation = 7;
+        record
+            .packages
+            .insert("npm".to_string(), vec!["left-pad".to_string()]);
+        record.package_versions.insert(
+            "npm".to_string(),
+            HashMap::from([("left-pad".to_string(), "1.0.0".to_string())]),
+        );
+        record.checkouts.insert(
+            "github.com/a/b".to_string(),
+            vec![CheckoutInfo {
+                path: PathBuf::from("/src/b"),
+                checkout_id: "abcd1234".to_string(),
+            }],
+        );
+        let tmp = tempfile::TempDir::new().unwrap();
+        record.save_to_repo(tmp.path()).unwrap();
+        let written = std::fs::read_to_string(tmp.path().join("machines/m.json")).unwrap();
+        let old: OldRecord = serde_json::from_str(&written).unwrap();
+        assert_eq!(old.packages["npm"], ["left-pad"]);
+        // 1.x lists records by the `json` extension, so it never reads a signature file
+        assert_ne!(
+            std::path::Path::new("machines/m.json.sig").extension(),
+            Some(std::ffi::OsStr::new("json"))
+        );
+    }
+
+    #[test]
     fn test_validate_drops_unsafe_versions() {
         let mut state = MachineState::new("m");
         state.package_versions.insert(
