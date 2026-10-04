@@ -52,6 +52,8 @@ impl DashboardState {
             .map(|(id, status, _)| (id, status))
             .collect();
 
+        let mut inbox = Inbox::load().unwrap_or_default();
+        inbox::sort_by_group(&mut inbox.items);
         let (daemon_pid, daemon_running) = Self::check_daemon();
         let activity_lines = Self::read_activity_log();
 
@@ -64,7 +66,7 @@ impl DashboardState {
             daemon_pid,
             daemon_running,
             activity_lines,
-            inbox: Inbox::load().unwrap_or_default(),
+            inbox,
             trusted: inbox::trusted_machines().unwrap_or_default(),
             old_ids,
             record_status,

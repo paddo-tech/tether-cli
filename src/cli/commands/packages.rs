@@ -248,8 +248,13 @@ pub async fn inbox_list() -> Result<()> {
         return Ok(());
     }
     Output::section("Packages waiting for approval");
-    for item in &items {
-        Output::list_item(&describe(item));
+    let mut items = items;
+    inbox::sort_by_group(&mut items);
+    for group in inbox::groups(&items) {
+        Output::subheader(&group_line(&group));
+        for &i in &group.items {
+            Output::list_item(&describe(&items[i]));
+        }
     }
     Output::dim(
         "Run 'tether packages approve <id> <version, tap or key>' or 'tether packages reject <id> <version, tap or key>'",
@@ -410,38 +415,74 @@ fn reject_shown(shown: &InboxItem) -> Result<()> {
     Ok(())
 }
 
-/// Ask about each held package. Only a terminal user can answer, so callers check for one.
-/// The caller holds the sync lock.
-pub async fn review_inbox() -> Result<()> {
-    let items = inbox::list()?;
-    if items.is_empty() {
-        return Ok(());
-    }
-    Output::section("Packages waiting for approval");
-    for item in &items {
-        Output::list_item(&describe(item));
-    }
-    // A new machine can inherit hundreds of packages, so one answer can cover them all
-    if items.len() > 1 {
-        let options = vec!["Review each", "Install all", "Decide later"];
-        match Prompt::select("Install these packages?", options, 0)? {
-            0 => {}
-            1 => {
-                // A machine key or a failed signature needs its own answer, so "Install all"
-                // leaves it pending
-                for item in items {
-                    if !item.bulk_approvable() {
-                        continue;
-                    }
-                    if let Err(e) = approve_locked(&item).await {
-                        Output::warning(&format!("{}: {}", item.name, e));
-                    }
-                }
-                return Ok(());
-            }
-            _ => return Ok(()),
+/// One group's heading: its machine, how many items, and why they wait.
+fn group_line(group: &inbox::Group) -> String {
+    let reasons: Vec<&str> = group.reasons.iter().map(|r| r.label()).collect();
+    format!(
+        "{}: {} item{} ({})",
+        group
+            .machine
+            .as_deref()
+            .map_or("No machine record".to_string(), |m| format!("From {}", m)),
+        group.items.len(),
+        if group.items.len() == 1 { "" } else { "s" },
+        reasons.join(", ")
+    )
+}
+
+/// Approve each item one answer covered. A machine key, a malicious package or a failed
+/// signature needs its own answer, so callers pass only bulk-approvable items.
+async fn approve_each(items: Vec<InboxItem>) {
+    for item in items {
+        if let Err(e) = approve_locked(&item).await {
+            Output::warning(&format!("{}: {}", item.name, e));
         }
     }
+}
+
+/// Ask about the held packages, by group, then about each one. Only a terminal user can
+/// answer, so callers check for one. The caller holds the sync lock.
+pub async fn review_inbox() -> Result<()> {
+    // A new machine can inherit hundreds of packages, so one answer can cover a machine's
+    // packages, or all of them
+    let items = loop {
+        let mut items = inbox::list()?;
+        if items.len() <= 1 {
+            break items;
+        }
+        inbox::sort_by_group(&mut items);
+        Output::section("Packages waiting for approval");
+        for group in inbox::groups(&items) {
+            Output::list_item(&group_line(&group));
+        }
+        let mut machines: Vec<&str> = items
+            .iter()
+            .filter(|i| i.bulk_approvable())
+            .filter_map(InboxItem::from_machine)
+            .collect();
+        machines.dedup();
+        let mut options = vec!["Review each".to_string(), "Install all".to_string()];
+        options.extend(machines.iter().map(|m| format!("Install all from {}", m)));
+        options.push("Decide later".to_string());
+        let choice = Prompt::select(
+            "Install these packages?",
+            options.iter().map(String::as_str).collect(),
+            0,
+        )?;
+        match choice {
+            0 => break items,
+            1 => {
+                approve_each(items.into_iter().filter(|i| i.bulk_approvable()).collect()).await;
+                return Ok(());
+            }
+            c if c == options.len() - 1 => return Ok(()),
+            c => {
+                // The items shown above, not ones a sync queued since
+                let (approvable, _) = inbox::approvable_from(&items, machines[c - 2]);
+                approve_each(approvable).await;
+            }
+        }
+    };
     for item in items {
         let options = if item.malicious() {
             vec!["Reject", "Decide later"]

@@ -161,6 +161,74 @@ impl InboxItem {
         self.kind == Kind::Package && !self.malicious() && !self.signature_failed()
     }
 
+    /// The machine an item comes from: the machine a key belongs to, or the machine whose
+    /// record lists a package. None when no other machine's record lists it.
+    pub fn from_machine(&self) -> Option<&str> {
+        match self.kind {
+            Kind::TrustMachine { .. } => Some(&self.name),
+            Kind::Package => self.source_machine.as_deref(),
+        }
+    }
+}
+
+/// Items from one machine, held for the same reasons. A new machine can bring hundreds of
+/// packages, and a few groups are easier to review than each item.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub machine: Option<String>,
+    pub reasons: Vec<Reason>,
+    /// Indices into the items, in their order
+    pub items: Vec<usize>,
+}
+
+/// Order items so each group's items are next to each other, keeping their order within a
+/// group.
+pub fn sort_by_group(items: &mut [InboxItem]) {
+    items.sort_by(|a, b| {
+        a.from_machine()
+            .cmp(&b.from_machine())
+            .then_with(|| reason_labels(a).cmp(&reason_labels(b)))
+    });
+}
+
+fn reason_labels(item: &InboxItem) -> Vec<&'static str> {
+    item.reasons.iter().map(|r| r.label()).collect()
+}
+
+/// The groups of `items`, in the order their first items appear.
+pub fn groups(items: &[InboxItem]) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let machine = item.from_machine().map(str::to_string);
+        match groups
+            .iter_mut()
+            .find(|g| g.machine == machine && g.reasons == item.reasons)
+        {
+            Some(group) => group.items.push(i),
+            None => groups.push(Group {
+                machine,
+                reasons: item.reasons.clone(),
+                items: vec![i],
+            }),
+        }
+    }
+    groups
+}
+
+/// What "approve all from `machine`" covers: its items that one answer may approve, and the
+/// number of its packages that stay held, as malicious or from a failed signature.
+pub fn approvable_from(items: &[InboxItem], machine: &str) -> (Vec<InboxItem>, usize) {
+    let packages = items
+        .iter()
+        .filter(|i| i.kind == Kind::Package && i.from_machine() == Some(machine));
+    let held = packages.clone().filter(|i| !i.bulk_approvable()).count();
+    (
+        packages.filter(|i| i.bulk_approvable()).cloned().collect(),
+        held,
+    )
+}
+
+impl InboxItem {
     /// Fingerprint of the key a machine item asks to trust.
     fn fingerprint(&self) -> Option<&str> {
         match &self.kind {
@@ -937,6 +1005,53 @@ mod tests {
             advisories: Vec::new(),
             first_seen: Utc::now(),
         }
+    }
+
+    #[test]
+    fn items_group_by_machine_and_reasons() {
+        let from = |machine: Option<&str>, name: &str, reasons: Vec<Reason>| InboxItem {
+            source_machine: machine.map(str::to_string),
+            reasons,
+            ..item("gem", name)
+        };
+        let key = InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: "SHA256:x".to_string(),
+            },
+            source_machine: None,
+            reasons: vec![Reason::NewMachine],
+            ..item(MACHINE, "laptop")
+        };
+        let mut items = vec![
+            from(Some("laptop"), "a", vec![Reason::Unsigned]),
+            from(Some("desk"), "b", vec![Reason::Unsigned]),
+            key,
+            from(Some("laptop"), "c", vec![Reason::Unsigned]),
+            from(Some("laptop"), "evil", vec![Reason::Malicious]),
+            from(None, "d", vec![Reason::Unsigned]),
+        ];
+        sort_by_group(&mut items);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["d", "b", "a", "c", "evil", "laptop"]);
+        let groups: Vec<(Option<String>, Vec<usize>)> = groups(&items)
+            .into_iter()
+            .map(|g| (g.machine, g.items))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (None, vec![0]),
+                (Some("desk".to_string()), vec![1]),
+                (Some("laptop".to_string()), vec![2, 3]),
+                (Some("laptop".to_string()), vec![4]),
+                (Some("laptop".to_string()), vec![5]),
+            ]
+        );
+        // The malicious package and the machine key need their own answers
+        let (approvable, held) = approvable_from(&items, "laptop");
+        let names: Vec<&str> = approvable.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!((names, held), (vec!["a", "c"], 1));
     }
 
     #[test]

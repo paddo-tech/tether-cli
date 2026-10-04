@@ -32,6 +32,7 @@ const SECURITY: &[Hint] = &[
     ("a", "approve", k(KeyCode::Char('a'))),
     ("x", "reject", k(KeyCode::Char('x'))),
     ("A", "approve all", k(KeyCode::Char('A'))),
+    ("M", "approve machine", k(KeyCode::Char('M'))),
     ("⏎", "details", k(KeyCode::Enter)),
 ];
 
@@ -134,6 +135,7 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         key("a", "Approve, or trust key"),
         key("x", "Reject"),
         key("A", "Approve all safe items"),
+        key("M", "Approve all from its machine"),
         key("Enter", "Details"),
     ];
     let right = vec![

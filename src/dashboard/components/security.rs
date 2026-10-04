@@ -72,6 +72,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
             confirm_approve_all(app);
             None
         }
+        KeyCode::Char('M') => {
+            confirm_approve_machine(app);
+            None
+        }
         _ => return KeyOutcome::Ignored,
     };
     KeyOutcome::Handled(cmd)
@@ -126,6 +130,7 @@ pub fn reselect(app: &mut App) {
 
 pub fn reload(app: &mut App) {
     app.state.inbox = Inbox::load().unwrap_or_default();
+    inbox::sort_by_group(&mut app.state.inbox.items);
     app.state.trusted = inbox::trusted_machines().unwrap_or_default();
     reselect(app);
 }
@@ -165,7 +170,32 @@ pub fn confirm_approve_all(app: &mut App) {
         app.flash_info("Nothing to approve");
     } else if !app.install_busy() {
         app.overlays
-            .push(Overlay::Confirm(Confirm::approve_all(items, held)));
+            .push(Overlay::Confirm(Confirm::approve_all(items, held, None)));
+    }
+}
+
+/// Approve all from the selected item's machine, as approve all does for the whole inbox.
+pub fn confirm_approve_machine(app: &mut App) {
+    let Some(machine) = app
+        .state
+        .inbox
+        .items
+        .get(app.security.cursor)
+        .and_then(|i| i.from_machine().map(str::to_string))
+    else {
+        app.flash_info("This item comes from no machine record");
+        return;
+    };
+    let (items, held) = inbox::approvable_from(&app.state.inbox.items, &machine);
+    if items.is_empty() {
+        app.flash_info(format!("Nothing to approve from {}", machine));
+    } else if !app.install_busy() {
+        let label = machine_name(app, &machine);
+        app.overlays.push(Overlay::Confirm(Confirm::approve_all(
+            items,
+            held,
+            Some(label),
+        )));
     }
 }
 
@@ -778,12 +808,51 @@ fn render_trusted(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+fn group_heading(app: &App, group: &inbox::Group, open: bool) -> (Line<'static>, Line<'static>) {
+    let t = &app.theme;
+    let machine = group
+        .machine
+        .as_deref()
+        .map_or("no machine record".to_string(), |m| machine_name(app, m));
+    let n = group.items.len();
+    let left = Line::from(vec![
+        Span::styled(if open { "▾ " } else { "▸ " }, Style::default().fg(t.dim)),
+        Span::styled(machine, Style::default().fg(t.text).bold()),
+        Span::styled(
+            format!("  {} item{}", n, if n == 1 { "" } else { "s" }),
+            Style::default().fg(t.muted),
+        ),
+    ]);
+    let mut right = Vec::new();
+    for reason in &group.reasons {
+        right.push(pill(badge(*reason), reason_color(*reason, t), t));
+        right.push(Span::raw(" "));
+    }
+    right.pop();
+    (left, Line::from(right))
+}
+
+/// Every group shows as one heading line, and only the group at the cursor lists its items,
+/// in the room the headings leave. So hundreds of packages from a new machine still show
+/// every group. Returns the first item to show and how many fit.
+fn item_window(group_len: usize, position: usize, groups: usize, height: u16) -> (usize, usize) {
+    let room = (height as usize).saturating_sub(groups);
+    let visible = (room / ITEM_H as usize).clamp(1, group_len.max(1));
+    (scroll_for(position, visible), visible)
+}
+
 fn render_list(f: &mut Frame, area: Rect, app: &App, cursor: usize) {
     let t = &app.theme;
     let items = &app.state.inbox.items;
+    let groups = inbox::groups(items);
     let malicious = items.iter().filter(|i| is_malicious(i)).count();
     let mut count = vec![Span::styled(
-        format!(" {} pending", items.len()),
+        format!(
+            " {} pending in {} group{}",
+            items.len(),
+            groups.len(),
+            if groups.len() == 1 { "" } else { "s" }
+        ),
         Style::default().fg(t.muted),
     )];
     if malicious > 0 {
@@ -798,35 +867,49 @@ fn render_list(f: &mut Frame, area: Rect, app: &App, cursor: usize) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let visible = (inner.height / ITEM_H).max(1) as usize;
-    let scroll = scroll_for(cursor, visible);
-    for (i, item) in items.iter().enumerate().skip(scroll).take(visible) {
-        let y = inner.y + (i - scroll) as u16 * ITEM_H;
-        let h = (ITEM_H - 1).min(inner.bottom().saturating_sub(y));
-        if h == 0 {
+    let mut y = inner.y;
+    for group in &groups {
+        if y >= inner.bottom() {
             break;
         }
-        let rect = Rect::new(inner.x, y, inner.width, h);
-        if i == cursor {
-            for dy in 0..h {
-                select_row(f, Rect::new(inner.x, y + dy, inner.width, 1), t);
+        let position = group.items.iter().position(|&i| i == cursor);
+        let rect = Rect::new(inner.x, y, inner.width, 1);
+        let (left, right) = group_heading(app, group, position.is_some());
+        row(f, rect, left, right);
+        app.add_hit(rect, Hit::Row(group.items[0]));
+        y += 1;
+        let Some(position) = position else {
+            continue;
+        };
+        let (first, visible) = item_window(group.items.len(), position, groups.len(), inner.height);
+        for &i in group.items.iter().skip(first).take(visible) {
+            let h = (ITEM_H - 1).min(inner.bottom().saturating_sub(y));
+            if h == 0 {
+                break;
             }
+            let rect = Rect::new(inner.x + 2, y, inner.width.saturating_sub(2), h);
+            if i == cursor {
+                for dy in 0..h {
+                    select_row(f, Rect::new(rect.x, y + dy, rect.width, 1), t);
+                }
+            }
+            let view = item_view(app, &items[i]);
+            row(f, Rect { height: 1, ..rect }, view.title, view.badges);
+            if h > 1 {
+                let w = rect.width as usize;
+                let mut meta = view.meta;
+                let fits = meta
+                    .iter()
+                    .position(|(l, r)| l.width() + 2 + r.width() <= w)
+                    .unwrap_or(meta.len() - 1);
+                let (left, right) = meta.swap_remove(fits);
+                row(f, Rect::new(rect.x, y + 1, rect.width, 1), left, right);
+            }
+            app.add_hit(rect, Hit::Row(i));
+            y += ITEM_H;
         }
-        let view = item_view(app, item);
-        row(f, Rect { height: 1, ..rect }, view.title, view.badges);
-        if h > 1 {
-            let w = inner.width as usize;
-            let mut meta = view.meta;
-            let fits = meta
-                .iter()
-                .position(|(l, r)| l.width() + 2 + r.width() <= w)
-                .unwrap_or(meta.len() - 1);
-            let (left, right) = meta.swap_remove(fits);
-            row(f, Rect::new(inner.x, y + 1, inner.width, 1), left, right);
-        }
-        app.add_hit(rect, Hit::Row(i));
+        scrollbar(f, area, group.items.len(), first, visible, t);
     }
-    scrollbar(f, area, items.len(), scroll, visible, t);
 }
 
 fn render_detail(f: &mut Frame, area: Rect, app: &App, view: ItemView) {

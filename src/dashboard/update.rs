@@ -1078,6 +1078,58 @@ mod tests {
     }
 
     #[test]
+    fn security_tab_groups_a_flood_by_machine() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        app.active_tab = Tab::Security;
+        let from = |machine: &str, name: String| InboxItem {
+            source_machine: Some(machine.into()),
+            advisories: Vec::new(),
+            ..inbox_item(&name, vec![Reason::Unsigned])
+        };
+        let mut items: Vec<InboxItem> = (0..200)
+            .map(|i| from("laptop", format!("gem{i}")))
+            .chain((0..80).map(|i| from("desk", format!("npm{i}"))))
+            .collect();
+        items.push(inbox_item(
+            "evil",
+            vec![Reason::Malicious, Reason::Unsigned],
+        ));
+        crate::packages::inbox::sort_by_group(&mut items);
+        app.state.inbox.items = items;
+        app.state.old_builds = vec!["oldbox".into()];
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("281 pending in 3 groups"));
+        assert!(text.contains("200 items"));
+        assert!(text.contains("80 items"));
+        assert!(text.contains("oldbox on 1.x"));
+
+        // The cursor starts on desk's first package; approve all from desk
+        key(&mut app, KeyCode::Char('M'));
+        let (names, held) = approve_all_names(&app).unwrap();
+        assert_eq!((names.len(), held), (80, 0));
+        assert!(names.iter().all(|n| n.starts_with("npm")));
+        app.overlays.clear();
+        // other's malicious package stays out
+        let evil = app
+            .state
+            .inbox
+            .items
+            .iter()
+            .position(|i| i.name == "evil")
+            .unwrap();
+        security::move_cursor(&mut app, evil);
+        key(&mut app, KeyCode::Char('M'));
+        assert!(approve_all_names(&app).is_none());
+    }
+
+    #[test]
     fn security_keys_move_and_open_details() {
         let mut app = with_inbox();
         app.active_tab = Tab::Security;

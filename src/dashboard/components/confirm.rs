@@ -90,6 +90,8 @@ pub enum Confirm {
     /// every one of them, because `y` approves exactly this list.
     ApproveAll {
         items: Vec<crate::packages::inbox::InboxItem>,
+        /// The machine whose packages these are, for "approve all from <machine>"
+        from: Option<String>,
         /// Packages that stay held: malicious, or from a record that fails its signature
         held: usize,
         /// First listed item
@@ -107,9 +109,14 @@ pub enum Confirm {
 }
 
 impl Confirm {
-    pub fn approve_all(items: Vec<crate::packages::inbox::InboxItem>, held: usize) -> Self {
+    pub fn approve_all(
+        items: Vec<crate::packages::inbox::InboxItem>,
+        held: usize,
+        from: Option<String>,
+    ) -> Self {
         Confirm::ApproveAll {
             items,
+            from,
             held,
             scroll: 0,
             rows: std::cell::Cell::new(1),
@@ -404,15 +411,19 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
         ),
         Confirm::ApproveAll {
             items,
+            from,
             held,
             scroll,
             rows,
             ..
         } => {
             let mut msg = format!(
-                "Approve and install these {} package{}?",
+                "Approve and install these {} package{}{}?",
                 items.len(),
-                if items.len() == 1 { "" } else { "s" }
+                if items.len() == 1 { "" } else { "s" },
+                from.as_deref()
+                    .map(|m| format!(" from {}", m))
+                    .unwrap_or_default()
             );
             if *held > 0 {
                 msg.push_str(&format!(
