@@ -85,9 +85,16 @@ Managed via `tether config features`. Available toggles:
 **Sync repo structure:**
 - `dotfiles/` - Dotfiles
 - `configs/` - App configs
-- `manifests/` - Package manifests
+- `manifests/` - Package manifests: one package name per line, never a version, as 1.x reads them. Versions come only from signed machine records (`package_versions`). Pinned lines from pre-release 2.0 builds still parse, and the next write drops the version
 - `machines/` - Machine-specific state (`<id>.json`) and its signature (`<id>.json.sig`, sshsig, namespace `tether-machine`, over `tether-machine-v1\n<id>\n<sha256 of the json bytes>\n`). Only a record whose signature verifies against the trusted key for its id lets packages auto-install. Trust is transitive: a signed record lists the packages its machine installed, so trusting a machine trusts what it installed. A local rejection still blocks a package
 - `projects/` - Project secrets
+
+## Compatibility with 1.x
+
+- Rolling upgrades work one machine at a time. A sync repo can hold 1.x and 2.0 machines together.
+- The 2.0 protections (trust, release age, OSV, signatures) apply only on upgraded machines. A 1.x machine installs without them. Its unsigned record grants no trust, so its packages wait in the inbox of 2.0 machines.
+- Manifests stay names-only. Never write `name@ver`, `name==ver` or `name:ver` to `manifests/*`.
+- Synced formats change only by additions until 3.0. Do not add `deny_unknown_fields` to a synced struct. Do not remove, rename or retype a field that 1.11.10, 1.12.0 or 1.13.1 requires. New fields take `#[serde(default)]`. Tests in `config.rs` and `sync/state.rs` pin the 1.x shapes.
 
 ## Code Quality
 
