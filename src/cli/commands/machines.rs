@@ -29,6 +29,7 @@ pub async fn list() -> Result<()> {
     let current_machine = &state.machine_id;
     let statuses = signing::record_statuses(&sync_path, current_machine)?;
     let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, current_machine);
+    let old_builds = signing::old_builds(&machines, &statuses, current_machine);
 
     println!();
     println!("{}", "Synced Machines".bright_cyan().bold());
@@ -63,6 +64,8 @@ pub async fn list() -> Result<()> {
             Cell::new("(this machine)").fg(Color::Green)
         } else if old_ids.iter().any(|o| o.machine_id == machine.machine_id) {
             Cell::new("(may be an old id of this machine)").fg(Color::Yellow)
+        } else if old_builds.contains(&machine.machine_id) {
+            Cell::new("(on 1.x)").fg(Color::Yellow)
         } else {
             Cell::new("")
         };
@@ -108,8 +111,19 @@ pub async fn list() -> Result<()> {
         print_old_id_hints(&old_ids);
         println!();
     }
+    if !old_builds.is_empty() {
+        print_old_build_notes(&old_builds);
+        println!();
+    }
 
     Ok(())
+}
+
+/// One line per machine on 1.x, which a rolling upgrade leaves behind for a while.
+pub fn print_old_build_notes(ids: &[String]) {
+    for id in ids {
+        Output::warning(&format!("{} is {}", id, signing::OLD_BUILD_NOTE));
+    }
 }
 
 /// The signing key column: the fingerprint, if a signature verifies, and how a sync reads

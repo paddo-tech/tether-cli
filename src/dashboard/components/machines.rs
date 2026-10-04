@@ -159,6 +159,10 @@ pub fn is_old_id(app: &App, machine_id: &str) -> bool {
     app.state.old_ids.iter().any(|o| o.machine_id == machine_id)
 }
 
+pub fn is_old_build(app: &App, machine_id: &str) -> bool {
+    app.state.old_builds.iter().any(|id| id == machine_id)
+}
+
 pub fn display_name(m: &MachineState) -> String {
     let host = m.hostname.trim_end_matches(".local");
     if host.is_empty() {
@@ -317,6 +321,9 @@ fn card(
     } else if old_id {
         first.push(pill("may be old id", t.warn, t));
         first.push(Span::raw(" "));
+    } else if is_old_build(app, &m.machine_id) {
+        first.push(pill("on 1.x", t.warn, t));
+        first.push(Span::raw(" "));
     }
     first.push(Span::styled(
         os,
@@ -450,13 +457,22 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
     let block = panel(format!(" {} ", display_name(m)), true, t);
     let mut inner = block.inner(area);
     f.render_widget(block, area);
-    if is_old_id(app, &m.machine_id) {
-        let note = format!(
+    let note = if is_old_id(app, &m.machine_id) {
+        Some(format!(
             "May be an old id of this machine. Tether guesses: it matches this hostname, comes \
              from an old build and has not synced for over {} days. Check that no other machine \
              uses this hostname. Its packages still count for every machine. Press D to remove it.",
             crate::sync::state::OLD_ID_SILENT_DAYS
-        );
+        ))
+    } else if is_old_build(app, &m.machine_id) {
+        Some(format!(
+            "This machine is {}.",
+            crate::sync::signing::OLD_BUILD_NOTE
+        ))
+    } else {
+        None
+    };
+    if let Some(note) = note {
         // A blank line under the note, which word wrap may take
         let h = (note.chars().count().div_ceil(inner.width.max(1) as usize) as u16 + 1)
             .min(inner.height);
@@ -558,6 +574,8 @@ pub fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let mut right = Vec::new();
         if is_old_id(app, &m.machine_id) {
             right.push(Span::styled("old id? ", Style::default().fg(t.warn)));
+        } else if is_old_build(app, &m.machine_id) {
+            right.push(Span::styled("on 1.x ", Style::default().fg(t.warn)));
         }
         right.push(Span::styled(
             relative_time(m.last_sync),

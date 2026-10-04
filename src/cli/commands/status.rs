@@ -70,6 +70,12 @@ pub async fn run() -> Result<()> {
             println!();
             super::machines::print_old_id_hints(&old_ids);
         }
+        let statuses = signing::record_statuses(&sync_path, &state.machine_id)?;
+        let old_builds = signing::old_builds(&machines, &statuses, &state.machine_id);
+        if !old_builds.is_empty() {
+            println!();
+            super::machines::print_old_build_notes(&old_builds);
+        }
     }
 
     // Conflicts warning

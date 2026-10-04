@@ -506,6 +506,7 @@ mod tests {
             trusted: Vec::new(),
             old_ids: Vec::new(),
             record_status: Vec::new(),
+            old_builds: Vec::new(),
         };
         App::new(state, HashMap::new())
     }

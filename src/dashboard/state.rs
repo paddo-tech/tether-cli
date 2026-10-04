@@ -17,6 +17,8 @@ pub struct DashboardState {
     pub old_ids: Vec<signing::OldId>,
     /// How a sync reads each record, by machine id
     pub record_status: Vec<(String, signing::RecordStatus)>,
+    /// Other machines on 1.x, or without a signed record
+    pub old_builds: Vec<String>,
 }
 
 impl DashboardState {
@@ -37,14 +39,18 @@ impl DashboardState {
             (Some(p), Some(s)) => signing::old_ids_of_this_machine(p, &machines, &s.machine_id),
             _ => Vec::new(),
         };
-        let record_status = match (&sync_path, &sync_state) {
-            (Some(p), Some(s)) => signing::record_statuses(p, &s.machine_id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(id, status, _)| (id, status))
-                .collect(),
+        let statuses = match (&sync_path, &sync_state) {
+            (Some(p), Some(s)) => signing::record_statuses(p, &s.machine_id).unwrap_or_default(),
             _ => Vec::new(),
         };
+        let old_builds = sync_state
+            .as_ref()
+            .map(|s| signing::old_builds(&machines, &statuses, &s.machine_id))
+            .unwrap_or_default();
+        let record_status = statuses
+            .into_iter()
+            .map(|(id, status, _)| (id, status))
+            .collect();
 
         let (daemon_pid, daemon_running) = Self::check_daemon();
         let activity_lines = Self::read_activity_log();
@@ -62,6 +68,7 @@ impl DashboardState {
             trusted: inbox::trusted_machines().unwrap_or_default(),
             old_ids,
             record_status,
+            old_builds,
         }
     }
 

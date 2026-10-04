@@ -643,6 +643,7 @@ fn package_view(app: &App, item: &InboxItem) -> ItemView {
 }
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let area = old_build_note(f, area, app);
     let items = &app.state.inbox.items;
     if items.is_empty() {
         let (main, trusted) = split_trusted(area, app);
@@ -683,6 +684,25 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             render_trusted(f, trusted, app);
         }
     }
+}
+
+/// One line naming the machines on 1.x above the tab, and the area left under it.
+fn old_build_note(f: &mut Frame, area: Rect, app: &App) -> Rect {
+    let ids = &app.state.old_builds;
+    if ids.is_empty() || area.height < 10 {
+        return area;
+    }
+    let [note, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let text = format!(
+        "{} {}",
+        ids.join(", "),
+        crate::sync::signing::OLD_BUILD_NOTE
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(text, Style::default().fg(app.theme.warn))),
+        note,
+    );
+    rest
 }
 
 /// Room for the trusted-machines panel under `area`, when it leaves the inbox enough height.
