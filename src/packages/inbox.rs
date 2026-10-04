@@ -388,11 +388,19 @@ impl Inbox {
         true
     }
 
-    /// Apply one sync's checks: drop the pending items for packages that now pass, and queue
-    /// the held ones. Returns the held items that are new or changed.
-    pub fn settle(&mut self, held: Vec<InboxItem>, passed: &[(String, String)]) -> Vec<InboxItem> {
-        self.items
-            .retain(|i| !passed.iter().any(|(manager, name)| i.is(manager, name)));
+    /// Apply one sync's checks: drop the pending items for packages that now pass or that no
+    /// machine record lists any more, and queue the held ones. `listed` tells whether some
+    /// record lists a package. Returns the held items that are new or changed.
+    pub fn settle(
+        &mut self,
+        held: Vec<InboxItem>,
+        passed: &[(String, String)],
+        listed: impl Fn(&str, &str) -> bool,
+    ) -> Vec<InboxItem> {
+        self.items.retain(|i| {
+            !passed.iter().any(|(manager, name)| i.is(manager, name))
+                && (i.kind != Kind::Package || listed(&i.manager, &i.name))
+        });
         held.into_iter()
             .filter(|item| self.add(item.clone()))
             .collect()
@@ -590,11 +598,21 @@ pub fn add(items: Vec<InboxItem>) -> Result<Vec<InboxItem>> {
 }
 
 /// See [`Inbox::settle`].
-pub fn settle(held: Vec<InboxItem>, passed: &[(String, String)]) -> Result<Vec<InboxItem>> {
-    if held.is_empty() && passed.is_empty() {
+pub fn settle(
+    held: Vec<InboxItem>,
+    passed: &[(String, String)],
+    listed: impl Fn(&str, &str) -> bool,
+) -> Result<Vec<InboxItem>> {
+    let unlisted = |inbox: &Inbox| {
+        inbox
+            .items
+            .iter()
+            .any(|i| i.kind == Kind::Package && !listed(&i.manager, &i.name))
+    };
+    if held.is_empty() && passed.is_empty() && !unlisted(&Inbox::load()?) {
         return Ok(Vec::new());
     }
-    Inbox::update(|inbox| Ok(inbox.settle(held, passed)))
+    Inbox::update(|inbox| Ok(inbox.settle(held, passed, &listed)))
 }
 
 /// Record approval of the item the user reviewed, as shown to them. A machine item trusts
@@ -1006,20 +1024,37 @@ mod tests {
             reasons: vec![Reason::CooldownUnsupported],
             ..item("npm", "a")
         };
-        let new = inbox.settle(vec![cooldown.clone(), item("npm", "b")], &[]);
+        let all = |_: &str, _: &str| true;
+        let new = inbox.settle(vec![cooldown.clone(), item("npm", "b")], &[], all);
         assert_eq!(new.len(), 2);
         // The same reasons again are not news
-        assert!(inbox.settle(vec![cooldown.clone()], &[]).is_empty());
+        assert!(inbox.settle(vec![cooldown.clone()], &[], all).is_empty());
         // Other reasons replace the item and report it again
         let changed = InboxItem {
             reasons: vec![Reason::Unsigned, Reason::CooldownUnsupported],
             ..cooldown
         };
-        assert_eq!(inbox.settle(vec![changed.clone()], &[]), vec![changed]);
+        assert_eq!(inbox.settle(vec![changed.clone()], &[], all), vec![changed]);
         // Once npm enforces the limit, the package passes and its item goes
-        inbox.settle(Vec::new(), &[("npm".to_string(), "a".to_string())]);
+        inbox.settle(Vec::new(), &[("npm".to_string(), "a".to_string())], all);
         let left: Vec<String> = inbox.items.iter().map(|i| i.id()).collect();
         assert_eq!(left, vec!["npm:b"]);
+    }
+
+    #[test]
+    fn settle_drops_items_no_record_lists_any_more() {
+        let mut inbox = Inbox::default();
+        let machine = InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: String::new(),
+            },
+            ..item(MACHINE, "laptop")
+        };
+        inbox.items = vec![item("npm", "kept"), item("npm", "gone"), machine];
+        inbox.settle(Vec::new(), &[], |_, name| name == "kept");
+        let left: Vec<String> = inbox.items.iter().map(|i| i.id()).collect();
+        assert_eq!(left, vec!["npm:kept", "machine:laptop"]);
     }
 
     #[test]

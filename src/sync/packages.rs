@@ -169,7 +169,8 @@ pub async fn import_packages(
             ));
         }
     }
-    outcome.queued = inbox::settle(gated.held, &gated.passed)?;
+    let listed = Listed::new(&trust.provenance.records, machine_state);
+    outcome.queued = inbox::settle(gated.held, &gated.passed, |m, n| listed.holds(m, n))?;
     report_held(&outcome.queued);
     outcome.queued.splice(0..0, held_machines);
 
@@ -1267,7 +1268,8 @@ impl RollbackGate {
             &mut gated,
         )
         .await;
-        report_held(&inbox::settle(gated.held, &gated.passed)?);
+        // A snapshot may name packages no record lists now, and their items stay
+        report_held(&inbox::settle(gated.held, &gated.passed, |_, _| true)?);
         Ok(allowed)
     }
 }
@@ -1472,6 +1474,16 @@ impl Listed {
     fn lists(&self, manager: &str, name: &str) -> bool {
         self.names
             .contains(&(manager.to_string(), name.to_string()))
+    }
+
+    /// Whether an inbox item still concerns a listed package. A Homebrew formula or cask
+    /// may be named with or without its tap.
+    fn holds(&self, manager: &str, name: &str) -> bool {
+        self.lists(manager, name)
+            || (manager.starts_with("brew_")
+                && self.names.iter().any(|(m, n)| {
+                    m == manager && normalize_formula_name(n) == normalize_formula_name(name)
+                }))
     }
 }
 
@@ -2154,7 +2166,7 @@ mod tests {
 
         // A held tap is checked again: once trusted, it taps and leaves the inbox
         let mut trust = trust;
-        trust.inbox.settle(gated.held, &gated.passed);
+        trust.inbox.settle(gated.held, &gated.passed, |_, _| true);
         let policy = crate::packages::PackagePolicy {
             trusted_taps: vec!["listed/tap".to_string(), "other/tap".to_string()],
             ..policy
@@ -2162,7 +2174,7 @@ mod tests {
         let mut gated = Gated::default();
         let allowed = gate_taps(&policy, &trust, &local, taps, &mut gated);
         assert_eq!(allowed, vec!["listed/tap", "other/tap", "local/tap"]);
-        trust.inbox.settle(gated.held, &gated.passed);
+        trust.inbox.settle(gated.held, &gated.passed, |_, _| true);
         let pending: Vec<String> = trust.inbox.items.iter().map(|i| i.id()).collect();
         assert_eq!(pending, vec!["brew_taps:added/tap"]);
     }
