@@ -47,39 +47,22 @@ pub async fn get(key: &str) -> Result<()> {
 
 pub async fn set(key: &str, value: &str) -> Result<()> {
     let config = Config::load()?;
-
-    // Parse the value string into appropriate TOML type
-    let new_value: toml::Value = if value == "true" {
-        toml::Value::Boolean(true)
-    } else if value == "false" {
-        toml::Value::Boolean(false)
-    } else if let Ok(i) = value.parse::<i64>() {
-        toml::Value::Integer(i)
-    } else if let Ok(f) = value.parse::<f64>() {
-        toml::Value::Float(f)
-    } else if value.starts_with('[') && value.ends_with(']') {
-        // Array value - parse as TOML
-        match toml::from_str(value) {
-            Ok(v) => v,
-            Err(e) => {
-                Output::error(&format!("Failed to parse array: {}", e));
-                return Ok(());
-            }
-        }
-    } else {
-        toml::Value::String(value.to_string())
-    };
-
-    match set_key(&config, key, new_value) {
-        Ok(config) => config.save()?,
-        Err(e) => {
-            Output::error(&e.to_string());
-            return Ok(());
-        }
-    }
-
+    set_key(&config, key, parse_value(value)?)?.save()?;
     Output::success(&format!("Set {} = {}", key, value));
     Ok(())
+}
+
+/// Read `value` as a TOML value, such as `true`, `7` or `["a/b"]`. A bare word that is not
+/// TOML, such as `mocha`, is a string. A value that starts like an array, table or quoted
+/// string must parse.
+fn parse_value(value: &str) -> Result<toml::Value> {
+    match toml::from_str::<toml::Table>(&format!("v = {}", value)) {
+        Ok(mut table) => Ok(table.remove("v").expect("the table has v")),
+        Err(e) if value.trim_start().starts_with(['[', '{', '"', '\'']) => {
+            anyhow::bail!("Cannot read {} as a TOML value: {}", value, e)
+        }
+        Err(_) => Ok(toml::Value::String(value.to_string())),
+    }
 }
 
 /// Tables at their defaults are not serialized, so missing tables on the path are created.
@@ -620,6 +603,27 @@ mod tests {
         let value = toml::Value::Boolean(true);
         assert!(set_key(&Config::default(), "nope.enabled", value.clone()).is_err());
         assert!(set_key(&Config::default(), "dashboard.nope", value).is_err());
+    }
+
+    #[test]
+    fn values_parse_as_toml() {
+        use toml::Value;
+        assert_eq!(parse_value("true").unwrap(), Value::Boolean(true));
+        assert_eq!(parse_value("7").unwrap(), Value::Integer(7));
+        assert_eq!(parse_value("mocha").unwrap(), Value::String("mocha".into()));
+        assert_eq!(parse_value("\"7\"").unwrap(), Value::String("7".into()));
+        assert_eq!(parse_value("1.2.3").unwrap(), Value::String("1.2.3".into()));
+        let taps = parse_value(r#"["azure/kubelogin"]"#).unwrap();
+        assert_eq!(
+            taps,
+            Value::Array(vec![Value::String("azure/kubelogin".into())])
+        );
+        let config = set_key(&Config::default(), "packages.brew.trusted_taps", taps).unwrap();
+        assert_eq!(config.packages.brew.trusted_taps, ["azure/kubelogin"]);
+        assert!(parse_value("[\"unclosed\"").is_err());
+        // A string where the config wants an array is an error, not a silent no-op
+        let wrong = parse_value("azure/kubelogin").unwrap();
+        assert!(set_key(&Config::default(), "packages.brew.trusted_taps", wrong).is_err());
     }
 
     #[test]
