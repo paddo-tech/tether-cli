@@ -92,6 +92,12 @@ impl BrewfilePackages {
         }
     }
 
+    /// Drop the taps named in `taps`. brew lists taps in lower case.
+    pub fn drop_taps(&mut self, taps: &[String]) {
+        self.taps
+            .retain(|tap| !taps.iter().any(|t| t.eq_ignore_ascii_case(tap)));
+    }
+
     pub fn is_empty(&self) -> bool {
         self.taps.is_empty() && self.formulae.is_empty() && self.casks.is_empty()
     }
@@ -447,9 +453,11 @@ impl BrewManager {
         }
     }
 
-    /// Validate and trust-filter a Brewfile before brew sees it.
-    pub fn filter_brewfile(&self, packages: &mut BrewfilePackages) {
+    /// Validate and trust-filter a Brewfile before brew sees it. A tap in `local_taps` is
+    /// tapped already, so it needs no tapping and no trust decision.
+    pub fn filter_brewfile(&self, packages: &mut BrewfilePackages, local_taps: &[String]) {
         packages.retain_valid();
+        packages.drop_taps(local_taps);
         let untrusted = packages.take_untrusted(&self.policy());
         if !untrusted.is_empty() {
             hold_untrusted(&untrusted);
@@ -703,7 +711,8 @@ impl PackageManager for BrewManager {
 
     async fn import_manifest(&self, manifest_content: &str) -> Result<()> {
         let mut packages = BrewfilePackages::parse(manifest_content);
-        self.filter_brewfile(&mut packages);
+        let local_taps = self.list_taps().await?;
+        self.filter_brewfile(&mut packages, &local_taps);
         let manifest = packages.generate();
         let manifest_content = manifest.as_str();
 
@@ -1043,8 +1052,13 @@ brew "git"
             ],
             casks: vec!["iterm2".to_string(), "evil/tap/app".to_string()],
         };
+        let mut local = packages.clone();
         let untrusted = packages.take_untrusted(&policy);
         assert_eq!(packages.taps, vec!["homebrew/cask", "oven-sh/bun"]);
+        // A tap already tapped here is neither tapped again nor held
+        local.drop_taps(&["evil/tap".to_string(), "Oven-sh/Bun".to_string()]);
+        assert_eq!(local.taps, vec!["homebrew/cask"]);
+        assert!(local.take_untrusted(&policy).taps.is_empty());
         assert_eq!(
             packages.formulae,
             vec!["git", "oven-sh/bun/bun", "evil/tap/approved"]
