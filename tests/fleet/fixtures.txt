@@ -1,0 +1,28 @@
+# machine  key  name  version
+# Packages each machine has before `tether init`. Names that start with "old-" exist only
+# on machines that start on 1.x; names that start with "head-" exist only on machines that
+# start on HEAD. The test removes "cowsay" from m1 after the fleet settles.
+m1 brew_formulae jq 1.0.0
+m1 npm typescript 1.0.0
+m1 npm cowsay 1.0.0
+m1 npm old-npm-m1 1.0.0
+m1 uv old-uv-m1 1.0.0
+m2 brew_formulae jq 1.0.0
+m2 npm typescript 1.0.0
+m2 gem old-gem-m2 1.0.0
+m2 bun old-bun-m2 1.0.0
+m3 brew_formulae jq 1.0.0
+m3 npm typescript 1.0.0
+m3 pnpm old-pnpm-m3 1.0.0
+m3 uv ruff 1.0.0
+m4 brew_formulae ripgrep 1.0.0
+m4 npm typescript 1.0.0
+m4 npm old-npm-m4 1.0.0
+h1 brew_formulae jq 1.0.0
+h1 npm typescript 1.0.0
+h1 npm head-npm-h1 1.0.0
+h1 uv ruff 1.0.0
+h2 brew_formulae jq 1.0.0
+h2 npm typescript 1.0.0
+h2 uv head-uv-h2 1.0.0
+h2 bun head-bun-h2 1.0.0

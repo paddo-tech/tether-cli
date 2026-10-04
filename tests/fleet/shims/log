@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for desktop and service tools: Tether may call them, and the test only records it.
+python3 -c 'import json,os,sys; open("/state/calls.jsonl","a").write(json.dumps({"r":open("/state/round").read().strip(),"tool":os.path.basename(sys.argv[1]),"argv":sys.argv[2:]})+"\n")' "$0" "$@" 2>/dev/null
+exit 0
