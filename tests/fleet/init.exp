@@ -1,0 +1,14 @@
+# expect -f init.exp <command...>: answer `tether init` prompts with their defaults.
+set timeout 120
+eval spawn [lrange $argv 0 end]
+expect {
+  -ex "What would you like to sync?  " { send "\r"; exp_continue }
+  -ex "Confirm passphrase  " { sleep 0.3; send "fleet-passphrase\r"; exp_continue }
+  -ex "Passphrase  " { sleep 0.3; send "fleet-passphrase\r"; exp_continue }
+  -ex "enter to select, type to filter" { sleep 0.3; send "\r"; exp_continue }
+  -re {\(y/N\)|\(Y/n\)} { sleep 0.3; send "\r"; exp_continue }
+  timeout { puts "EXPECT TIMEOUT"; exit 1 }
+  eof
+}
+lassign [wait] pid spawnid os_error value
+exit $value

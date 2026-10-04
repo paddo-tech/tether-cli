@@ -8,6 +8,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
+      - 'tests/fleet/**'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
+      - 'tests/fleet/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -82,3 +84,32 @@ jobs:
 
       - name: Run tests
         run: cargo test --lib
+
+  fleet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The test builds old releases from their tags
+          fetch-depth: 0
+
+      # Released versions never change, so their binaries are built once per tag
+      - name: Cache release binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/fleet-bin/tether-v1.11.10
+            target/fleet-bin/tether-v1.12.0
+            target/fleet-bin/tether-v1.13.1
+          key: fleet-bin-${{ runner.os }}-rust-1-bookworm-v1.11.10-v1.12.0-v1.13.1
+
+      - name: Mixed-version fleet test
+        run: tests/fleet/run.py
+
+      - name: Upload fleet logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleet-logs
+          path: target/fleet/
