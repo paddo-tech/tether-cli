@@ -617,9 +617,20 @@ mod tests {
             "uv:ruff",
             leave("server").apply(&on_server.members("uv", "ruff")),
         );
+        // A machine key is not a package: no profile scope drops it
+        inbox.items.push(InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: "SHA256:x".to_string(),
+            },
+            manager: "machine".to_string(),
+            name: "mac2".to_string(),
+            ..inbox.items[0].clone()
+        });
         let on_server = Membership::new(&c, &t, &server, &[(&mac1, true), (&mac2, true)]);
         inbox.settle(Vec::new(), &[], |m, n| on_server.includes(m, n));
-        assert!(inbox.items.is_empty());
+        assert_eq!(inbox.items.len(), 1);
+        assert_eq!(inbox.items[0].name, "mac2");
     }
 
     #[test]
