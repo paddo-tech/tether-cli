@@ -249,6 +249,7 @@ pub fn share(id: &str, to: &[String]) -> Result<()> {
         add: to.iter().cloned().collect(),
         ..Edit::default()
     };
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let members = membership::save_edit(&config, manager, name, &edit)?.unwrap_or_default();
     Output::success(&format!(
         "{} now belongs to: {}. Machines in these profiles install it on their next sync",
@@ -279,7 +280,9 @@ pub async fn remove(id: &str) -> Result<()> {
         remove: [membership.profile.clone()].into(),
         ..Edit::default()
     };
-    match membership::save_edit(&config, manager, name, &edit) {
+    let saved = crate::sync::acquire_sync_lock(true)
+        .and_then(|_lock| membership::save_edit(&config, manager, name, &edit));
+    match saved {
         Ok(Some(keep)) => Output::info(&format!(
             "Other machines in profile {} no longer install {}, but keep any copy they have. \
              Profiles {} keep it",

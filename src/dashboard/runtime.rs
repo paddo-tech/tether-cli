@@ -504,7 +504,11 @@ fn save_profiles(
     edit: &crate::sync::membership::Edit,
 ) -> Result<Option<std::collections::BTreeSet<String>>, String> {
     crate::config::Config::load()
-        .and_then(|config| crate::sync::membership::save_edit(&config, manager_key, name, edit))
+        .and_then(|config| {
+            // The dashboard owns the terminal, so it cannot wait for a sync with a prompt
+            let _sync_lock = crate::sync::acquire_sync_lock(false)?;
+            crate::sync::membership::save_edit(&config, manager_key, name, edit)
+        })
         .map_err(|e| e.to_string())
 }
 

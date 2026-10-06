@@ -75,7 +75,8 @@ impl Edit {
 
 /// Apply `edit` to one package's members and push it. Returns the new members, or None
 /// when the edit would leave the package with no member: removing the last profile is a
-/// plain uninstall. An edit that changes nothing writes nothing.
+/// plain uninstall. An edit that changes nothing writes nothing. The caller holds the sync
+/// lock, so no sync commits in the repo meanwhile.
 pub fn save_edit(
     config: &Config,
     manager: &str,
@@ -92,15 +93,14 @@ pub fn save_edit(
 }
 
 /// Apply `edit` to the members `members_now` reads from the table, and push the entry.
-/// Under the sync lock, each attempt resets to the remote branch and reads the table again,
-/// so edits from other machines are kept.
+/// Each attempt resets to the remote branch and reads the table again, so edits from other
+/// machines are kept.
 fn save_members(
     sync_path: &Path,
     id: &str,
     edit: &Edit,
     members_now: impl Fn(&Table) -> Result<BTreeSet<String>>,
 ) -> Result<Option<BTreeSet<String>>> {
-    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let repo = GitBackend::open(sync_path)?;
     // Each attempt resets to the remote branch, which must drop only this edit's commit
     if repo.has_changes()? || repo.has_unpushed_commits() {
