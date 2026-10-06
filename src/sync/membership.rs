@@ -230,6 +230,8 @@ pub struct Membership {
     untrusted: HashMap<Key, BTreeSet<String>>,
     /// Listed by this machine's record
     own: HashSet<Key>,
+    /// Removed on this machine, so never news to it
+    removed: HashSet<Key>,
 }
 
 impl Membership {
@@ -257,6 +259,11 @@ impl Membership {
             trusted: HashMap::new(),
             untrusted: HashMap::new(),
             own: HashSet::new(),
+            removed: this
+                .removed_packages
+                .iter()
+                .flat_map(|(manager, names)| names.iter().map(|name| key(manager, name)))
+                .collect(),
         };
         for (manager, names) in &this.packages {
             for name in names {
@@ -336,12 +343,13 @@ impl Membership {
             || self.members(manager, name).contains(&self.profile)
     }
 
-    /// Packages that trusted records list, that this machine does not list, and whose
-    /// members do not include this machine's profile, as `manager:name`, sorted.
+    /// Packages that trusted records list, that this machine does not list or removed, and
+    /// whose members do not include this machine's profile, as `manager:name`, sorted.
     pub fn excluded(&self) -> Vec<String> {
         let mut ids: Vec<String> = self
             .trusted
             .keys()
+            .filter(|k| !self.removed.contains(*k))
             .filter(|(m, n)| !self.includes(m, n))
             .map(|(m, n)| format!("{}:{}", m, n))
             .collect();
@@ -431,6 +439,17 @@ mod tests {
         let on_mac1 = Membership::new(&c, &t, &mac1, &[(&mac2, true), (&server, true)]);
         assert!(on_mac1.includes("uv", "ruff"));
         assert!(!on_mac1.includes("brew_formulae", "nginx"));
+
+        // A package this machine removed is not named as one it misses
+        let mut server = server;
+        server
+            .removed_packages
+            .insert("uv".to_string(), vec!["ruff".to_string()]);
+        let on_server = Membership::new(&c, &t, &server, &[(&mac1, true), (&mac2, true)]);
+        assert_eq!(
+            on_server.excluded(),
+            vec!["brew_casks:zoom", "npm:typescript"]
+        );
     }
 
     #[test]
