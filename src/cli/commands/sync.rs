@@ -1497,8 +1497,9 @@ fn apply_remote_config(
     apply
 }
 
-/// A machine on 1.x that saves an older config.toml can change this machine's profile
-/// assignment, and the packages this machine installs with it.
+/// A synced config.toml can change this machine's profile assignment, and the packages this
+/// machine installs with it: a user on another machine, or a 1.x machine that saved an
+/// older config.
 pub fn warn_changed_profile(old: &Config, new: &Config) {
     let Ok(state) = SyncState::load() else {
         return;
@@ -1508,10 +1509,11 @@ pub fn warn_changed_profile(old: &Config, new: &Config) {
     };
     if new.machine_profiles.get(&state.machine_id) != Some(profile) {
         Output::warning(&format!(
-            "The synced config no longer puts this machine in profile {}, so it now installs \
-             the packages of profile {}. A machine on 1.x may have saved an older config. To \
-             restore it, run 'tether machines profile set {}'",
+            "The synced config changed this machine's profile from {} to {}, so it now \
+             installs the packages of profile {}. If nobody meant to change it, run 'tether \
+             machines profile set {}'",
             profile,
+            new.profile_name(&state.machine_id),
             new.profile_name(&state.machine_id),
             profile
         ));

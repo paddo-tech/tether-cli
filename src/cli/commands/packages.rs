@@ -281,7 +281,8 @@ pub async fn remove(id: &str) -> Result<()> {
     };
     match membership::save_edit(&config, manager, name, &edit) {
         Ok(Some(keep)) => Output::info(&format!(
-            "Profile {} no longer installs {}. Profiles {} keep it",
+            "Other machines in profile {} no longer install {}, but keep any copy they have. \
+             Profiles {} keep it",
             membership.profile,
             id,
             keep.into_iter().collect::<Vec<_>>().join(", ")

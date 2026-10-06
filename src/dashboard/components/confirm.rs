@@ -294,25 +294,26 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
     let wait = confirm.arming().and_then(|a| a.remaining(now));
     match confirm {
         Confirm::Uninstall { manager_key, name } => {
-            let keep = app
-                .state
-                .membership
-                .as_ref()
-                .map(|m| {
-                    let mut members = m.members(manager_key, name);
-                    members.remove(&m.profile);
-                    members.into_iter().collect::<Vec<_>>()
+            let leaving = app.state.membership.as_ref().and_then(|m| {
+                let mut members = m.members(manager_key, name);
+                (members.remove(&m.profile) && !members.is_empty()).then(|| {
+                    (
+                        m.profile.clone(),
+                        members.into_iter().collect::<Vec<_>>().join(", "),
+                    )
                 })
-                .unwrap_or_default();
-            let question = if keep.is_empty() {
-                format!("Uninstall {} ({})?", name, manager_label(manager_key))
-            } else {
-                format!(
-                    "Uninstall {} ({}) here and on this profile's machines? Profiles {} keep it",
+            });
+            let question = match leaving {
+                None => format!("Uninstall {} ({})?", name, manager_label(manager_key)),
+                // Machines that have the package keep it; only new installs stop
+                Some((profile, keep)) => format!(
+                    "Uninstall {} ({}) here? Other machines in profile {} stop installing it \
+                     but keep any copy they have. Profiles {} keep it",
                     name,
                     manager_label(manager_key),
-                    keep.join(", ")
-                )
+                    profile,
+                    keep
+                ),
             };
             render_popup(f, app, wait, "Uninstall", &question, t.error)
         }
