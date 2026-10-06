@@ -72,7 +72,7 @@ impl Edit {
 
 /// Apply `edit` to one package's members and push it. Returns the new members, or None
 /// when the edit would leave the package with no member: removing the last profile is a
-/// plain uninstall.
+/// plain uninstall. An edit that changes nothing writes nothing.
 pub fn save_edit(
     config: &Config,
     manager: &str,
@@ -111,9 +111,13 @@ fn save_members(
         repo.fetch()?;
         repo.reset_to_remote()?;
         let table = read_table(sync_path)?;
-        let members = edit.apply(&members_now(&table)?);
+        let current = members_now(&table)?;
+        let members = edit.apply(&current);
         if members.is_empty() {
             return Ok(None);
+        }
+        if members == current {
+            return Ok(Some(members));
         }
         let previous = match std::fs::read_to_string(&path) {
             Ok(text) => Some(text),
@@ -711,6 +715,23 @@ mod tests {
         assert_eq!(table["npm:b"], vec!["dev", "server"]);
         let repo = GitBackend::open(&a).unwrap();
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
+
+        // An edit that changes nothing commits nothing
+        let head = || {
+            String::from_utf8(
+                std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&a)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+        };
+        let before = head();
+        let saved = save_members(&a, "npm:a", &share(&["dev"]), listed("npm:a")).unwrap();
+        assert_eq!(saved, Some(set(&["dev", "mini", "server"])));
+        assert_eq!(head(), before);
 
         // A save never commits changes it did not make
         std::fs::write(a.join("stray"), "x").unwrap();

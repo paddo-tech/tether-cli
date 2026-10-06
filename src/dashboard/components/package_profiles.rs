@@ -63,6 +63,9 @@ pub fn handle_key(app: &mut App, mut picker: PackageProfiles, key: KeyEvent) -> 
                     add: picker.checked.difference(&base).cloned().collect(),
                     remove: base.difference(&picker.checked).cloned().collect(),
                 };
+                if edit.add.is_empty() && edit.remove.is_empty() {
+                    return None;
+                }
                 return Some(Cmd::SaveProfiles {
                     manager_key: picker.manager_key,
                     name: picker.name,
