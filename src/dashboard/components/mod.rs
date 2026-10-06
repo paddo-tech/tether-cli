@@ -8,6 +8,7 @@ pub mod header;
 pub mod help;
 pub mod machines;
 pub mod overview;
+pub mod package_profiles;
 pub mod packages;
 pub mod palette;
 pub mod pkg_import;

@@ -185,6 +185,19 @@ pub enum PackagesAction {
         /// The version, Homebrew tap or key fingerprint you reviewed. Required without a terminal
         expected: Option<String>,
     },
+    /// Add profiles to a package's members, so machines in those profiles install it
+    Share {
+        /// Package as manager:name, such as npm:typescript or brew_casks:zoom
+        id: String,
+        /// Profiles to add, separated by commas
+        #[arg(long, value_delimiter = ',', required = true)]
+        to: Vec<String>,
+    },
+    /// Uninstall a package here and take this machine's profile out of its members
+    Remove {
+        /// Package as manager:name, such as npm:typescript or brew_casks:zoom
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -731,6 +744,8 @@ impl Cli {
                 Some(PackagesAction::Reject { id, expected }) => {
                     packages::reject(id, expected.as_deref()).await
                 }
+                Some(PackagesAction::Share { id, to }) => packages::share(id, to),
+                Some(PackagesAction::Remove { id }) => packages::remove(id).await,
             },
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,

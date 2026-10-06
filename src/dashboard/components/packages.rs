@@ -50,6 +50,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
             }
         }
         KeyCode::Char('h') => toggle_history(app),
+        KeyCode::Char('t') => {
+            if let Some(PkgRow::Package { manager_key, name }) =
+                build_rows(&app.state, &app.packages).get(app.packages.cursor)
+            {
+                super::package_profiles::open(app, manager_key, name);
+            }
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             let len = build_rows(&app.state, &app.packages).len();
             cursor_down(&mut app.packages.cursor, len);
@@ -360,9 +367,15 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             _ => 0,
         })
         .sum();
+    let scope = app
+        .state
+        .membership
+        .as_ref()
+        .map(|m| format!(" profile {} · ", m.profile))
+        .unwrap_or_default();
     let block = panel(" Packages ", true, t).title_top(
         Line::from(Span::styled(
-            format!(" {} installed ", total),
+            format!("{}{} installed ", scope, total),
             Style::default().fg(t.muted),
         ))
         .right_aligned(),
@@ -435,8 +448,16 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                     ]),
                 );
             }
-            PkgRow::Package { name, .. } => {
-                f.render_widget(
+            PkgRow::Package { manager_key, name } => {
+                let members = app
+                    .state
+                    .membership
+                    .as_ref()
+                    .map(|m| members_line(m, manager_key, name, t))
+                    .unwrap_or_default();
+                row(
+                    f,
+                    r,
                     Line::from(vec![
                         Span::styled("    • ", Style::default().fg(t.dim)),
                         Span::styled(
@@ -448,7 +469,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                             },
                         ),
                     ]),
-                    r,
+                    members,
                 );
             }
             PkgRow::HistoryEntry {
@@ -483,6 +504,35 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             }
         },
     );
+}
+
+/// The profiles a package belongs to, one pill each, or "this profile only".
+fn members_line<'a>(
+    membership: &crate::sync::membership::Membership,
+    manager_key: &str,
+    name: &str,
+    t: &crate::dashboard::theme::Theme,
+) -> Line<'a> {
+    let members = membership.members(manager_key, name);
+    if members.len() == 1 && members.contains(&membership.profile) {
+        return Line::from(Span::styled(
+            "this profile only",
+            Style::default().fg(t.dim),
+        ));
+    }
+    Line::from(
+        members
+            .into_iter()
+            .map(|p| {
+                let color = if p == membership.profile {
+                    t.ok
+                } else {
+                    t.info
+                };
+                Span::styled(format!(" {} ", p), Style::default().fg(color))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Manager summary for the Overview tab, with a bar per manager.

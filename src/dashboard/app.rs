@@ -3,6 +3,7 @@ use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
 use super::components::files::{self, FilesTabState};
 use super::components::machines::MachinesTabState;
+use super::components::package_profiles::PackageProfiles;
 use super::components::packages::{self, PackagesTabState};
 use super::components::palette::Palette;
 use super::components::pkg_import::PkgImport;
@@ -101,6 +102,7 @@ pub enum Overlay {
     FileImport(FileImport),
     PkgImport(PkgImport),
     ProfilePicker(ProfilePicker),
+    PackageProfiles(PackageProfiles),
     Palette(Palette),
 }
 

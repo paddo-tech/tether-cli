@@ -212,8 +212,17 @@ fn cancel(app: &mut App, confirm: Confirm) -> Option<Cmd> {
 fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
     match confirm {
         Confirm::Uninstall { manager_key, name } => {
+            // Other member profiles keep the package; this profile leaves it
+            let leave = app.state.membership.as_ref().and_then(|m| {
+                m.left(&manager_key, &name)
+                    .map(|members| (m.members(&manager_key, &name), members))
+            });
             app.uninstalling = Some((manager_key.clone(), name.clone()));
-            Some(Cmd::Uninstall { manager_key, name })
+            Some(Cmd::Uninstall {
+                manager_key,
+                name,
+                leave,
+            })
         }
         Confirm::Restore {
             repo_path,
@@ -279,14 +288,29 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
     }
     let wait = confirm.arming().and_then(|a| a.remaining(now));
     match confirm {
-        Confirm::Uninstall { manager_key, name } => render_popup(
-            f,
-            app,
-            wait,
-            "Uninstall",
-            &format!("Uninstall {} ({})?", name, manager_label(manager_key)),
-            t.error,
-        ),
+        Confirm::Uninstall { manager_key, name } => {
+            let keep = app
+                .state
+                .membership
+                .as_ref()
+                .map(|m| {
+                    let mut members = m.members(manager_key, name);
+                    members.remove(&m.profile);
+                    members.into_iter().collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let question = if keep.is_empty() {
+                format!("Uninstall {} ({})?", name, manager_label(manager_key))
+            } else {
+                format!(
+                    "Uninstall {} ({}) here and on this profile's machines? Profiles {} keep it",
+                    name,
+                    manager_label(manager_key),
+                    keep.join(", ")
+                )
+            };
+            render_popup(f, app, wait, "Uninstall", &question, t.error)
+        }
         Confirm::Restore {
             dotfile,
             short_hash,

@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod engine;
 pub mod git;
 pub mod layers;
+pub mod membership;
 pub mod merge;
 pub mod packages;
 pub mod signing;

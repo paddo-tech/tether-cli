@@ -58,6 +58,16 @@ pub fn manager_for_key(key: &str) -> Option<Box<dyn PackageManager>> {
     })
 }
 
+/// Uninstall a package by its machine-state key, such as `brew_casks` or `npm`.
+pub async fn uninstall(manager_key: &str, name: &str) -> anyhow::Result<()> {
+    let manager: Box<dyn PackageManager> = match manager_key {
+        "brew_formulae" | "brew_casks" => Box::new(BrewManager),
+        _ => manager_for_key(manager_key)
+            .ok_or_else(|| anyhow::anyhow!("Unknown manager: {}", manager_key))?,
+    };
+    manager.uninstall(name).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::command_error_message;

@@ -1,8 +1,8 @@
 use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
 use super::components::palette::{self, Palette, Target};
 use super::components::{
-    config, confirm, file_import, files, machines, overview, packages, pkg_import, profile_picker,
-    security,
+    config, confirm, file_import, files, machines, overview, package_profiles, packages,
+    pkg_import, profile_picker, security,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -86,6 +86,14 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                     None
                 }
             }
+        }
+        Msg::ProfilesSaved(result) => {
+            app.reload_state();
+            match result {
+                Ok(msg) => app.flash_success(msg),
+                Err(e) => app.flash_error(format!("saving profiles failed: {}", e)),
+            }
+            None
         }
         Msg::InstallDone { op, result } => on_install_done(app, op, result),
         Msg::OsvUnreachable { op, error } => {
@@ -208,6 +216,7 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
             Overlay::FileImport(p) => file_import::handle_key(app, p, key),
             Overlay::PkgImport(p) => pkg_import::handle_key(app, p, key),
             Overlay::ProfilePicker(p) => profile_picker::handle_key(app, p, key),
+            Overlay::PackageProfiles(p) => package_profiles::handle_key(app, p, key),
             Overlay::Palette(p) => match palette::handle_key(app, p, key) {
                 Some(target) => run_target(app, target),
                 None => None,
@@ -424,6 +433,7 @@ fn click_item(app: &mut App, i: usize) -> Option<Cmd> {
         Overlay::FileImport(p) => &mut p.cursor,
         Overlay::PkgImport(p) if p.confirm.is_none() => &mut p.cursor,
         Overlay::ProfilePicker(p) => &mut p.cursor,
+        Overlay::PackageProfiles(p) => &mut p.cursor,
         _ => return None,
     };
     if *cursor == i {
@@ -489,7 +499,7 @@ mod tests {
     use crate::dashboard::state::DashboardState;
     use crate::packages::inbox::{InboxItem, Kind, Reason};
     use crate::sync::{ConflictState, TeamManifest};
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::time::Instant;
 
     fn app() -> App {
@@ -507,6 +517,7 @@ mod tests {
             old_ids: Vec::new(),
             record_status: Vec::new(),
             old_builds: Vec::new(),
+            membership: None,
         };
         App::new(state, HashMap::new())
     }
@@ -684,6 +695,56 @@ mod tests {
         app.show_local_packages();
         assert_eq!(app.state.machines[0].packages, record.packages);
         assert!(app.local_packages.is_none());
+    }
+
+    #[test]
+    fn t_on_a_package_opens_its_profile_checklist() {
+        let mut app = app();
+        app.state.sync_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "me",
+                "last_sync": "2026-01-01T00:00:00Z",
+                "files": {},
+                "packages": {},
+            }))
+            .unwrap(),
+        );
+        let mut config = crate::config::Config::default();
+        for name in ["dev", "server"] {
+            config
+                .profiles
+                .insert(name.to_string(), crate::config::ProfileConfig::default());
+        }
+        let mut record = crate::sync::MachineState::new("me");
+        record.packages.insert("npm".into(), vec!["zx".into()]);
+        app.state.membership = Some(crate::sync::membership::Membership::new(
+            &config,
+            &Default::default(),
+            &record,
+            &[],
+        ));
+        app.state.config = Some(config);
+        app.state.machines = vec![record];
+        app.active_tab = Tab::Packages;
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('t'));
+        let Some(Overlay::PackageProfiles(picker)) = app.overlays.last() else {
+            panic!("expected the profile checklist");
+        };
+        assert_eq!(picker.name, "zx");
+        assert_eq!(picker.checked, BTreeSet::from(["dev".to_string()]));
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char(' '));
+        let Some(Overlay::PackageProfiles(picker)) = app.overlays.last() else {
+            panic!("expected the profile checklist");
+        };
+        assert_eq!(
+            picker.checked,
+            BTreeSet::from(["dev".to_string(), "server".to_string()])
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(app.overlays.is_empty());
     }
 
     #[test]

@@ -38,10 +38,41 @@ impl Runtime {
         match cmd {
             Cmd::Run(job) => self.run_job(job),
             Cmd::Daemon(op) => self.run_daemon(op),
-            Cmd::Uninstall { manager_key, name } => {
+            Cmd::Uninstall {
+                manager_key,
+                name,
+                leave,
+            } => {
                 self.spawn(
-                    async move { Msg::UninstallDone(run_uninstall(&manager_key, &name).await) },
+                    async move {
+                        if let Some((base, members)) = leave {
+                            if let Err(e) =
+                                save_profiles(&format!("{}:{}", manager_key, name), &base, &members)
+                            {
+                                return Msg::UninstallDone(Err(e));
+                            }
+                        }
+                        Msg::UninstallDone(
+                            crate::packages::uninstall(&manager_key, &name)
+                                .await
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
                     |e| Some(Msg::UninstallDone(Err(e))),
+                );
+            }
+            Cmd::SaveProfiles { id, base, members } => {
+                self.spawn(
+                    async move {
+                        Msg::ProfilesSaved(save_profiles(&id, &base, &members).map(|()| {
+                            format!(
+                                "{} profiles: {}",
+                                id,
+                                members.into_iter().collect::<Vec<_>>().join(", ")
+                            )
+                        }))
+                    },
+                    |e| Some(Msg::ProfilesSaved(Err(e))),
                 );
             }
             Cmd::Install {
@@ -309,18 +340,6 @@ fn tether_exe() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| "tether".into())
 }
 
-async fn run_uninstall(manager_key: &str, package: &str) -> Result<(), String> {
-    use crate::packages::*;
-
-    let manager: Box<dyn PackageManager> = match manager_key {
-        "brew_formulae" | "brew_casks" => Box::new(BrewManager),
-        _ => manager_for_key(manager_key)
-            .ok_or_else(|| format!("Unknown manager: {}", manager_key))?,
-    };
-
-    manager.uninstall(package).await.map_err(|e| e.to_string())
-}
-
 /// Why a dashboard install did not run.
 enum Blocked {
     Refused(String),
@@ -466,6 +485,15 @@ async fn collect_local_packages(
     }
 
     packages
+}
+
+fn save_profiles(
+    id: &str,
+    base: &std::collections::BTreeSet<String>,
+    members: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let sync_path = crate::sync::SyncEngine::sync_path().map_err(|e| e.to_string())?;
+    crate::sync::membership::save_members(&sync_path, id, base, members).map_err(|e| e.to_string())
 }
 
 fn remove_from_removed_packages(machine_id: &str, manager_key: &str, pkg_name: &str) {

@@ -8,6 +8,7 @@ use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageInfo,
     PackageManager, PackagePolicy,
 };
+use crate::sync::membership::Membership;
 use crate::sync::signing::{self, Generations, RecordStatus, SignedRecord, TrustStore};
 use crate::sync::state::{InstallFailure, PackageState};
 use crate::sync::{GitBackend, MachineState, SyncState};
@@ -118,6 +119,8 @@ pub async fn import_packages(
             id
         ));
     }
+    let scope = Membership::load(config, sync_path, machine_state)?;
+    notify_excluded(&scope, &mut state.profile_notice_shown);
     let mut gated = Gated::default();
 
     // Homebrew - special handling for formulae/casks/taps
@@ -131,6 +134,7 @@ pub async fn import_packages(
                 previously_deferred,
             },
             &trust,
+            &scope,
             &mut gated,
             &mut state.install_failures,
         )
@@ -150,6 +154,7 @@ pub async fn import_packages(
                 &manifests_dir,
                 machine_state,
                 &trust,
+                &scope,
                 &mut gated,
                 &mut state.install_failures,
             )
@@ -170,11 +175,35 @@ pub async fn import_packages(
         }
     }
     let listed = Listed::new(&trust.provenance.records, machine_state);
-    outcome.queued = inbox::settle(gated.held, &gated.passed, |m, n| listed.holds(m, n))?;
+    // An item for a package this machine's profile left is dropped like an unlisted one
+    outcome.queued = inbox::settle(gated.held, &gated.passed, |m, n| {
+        listed.holds(m, n) && scope.includes(m, n)
+    })?;
     report_held(&outcome.queued);
     outcome.queued.splice(0..0, held_machines);
 
     Ok(outcome)
+}
+
+/// Name once the packages other profiles have that this machine does not install, so an
+/// upgrade from a build that installed every machine's packages does not drop them silently.
+fn notify_excluded(scope: &Membership, shown: &mut bool) {
+    if *shown {
+        return;
+    }
+    let excluded = scope.excluded();
+    if excluded.is_empty() {
+        return;
+    }
+    Output::warning(&format!(
+        "This machine (profile {}) installs only the packages of its profile. It does not \
+         install these packages from other profiles: {}. To install one here, run 'tether \
+         packages share <manager:name> --to {}'",
+        scope.profile,
+        excluded.join(", "),
+        scope.profile
+    ));
+    *shown = true;
 }
 
 /// The ids of failing records not reported before. `warned` keeps only records that still
@@ -622,6 +651,7 @@ async fn import_brew(
     machine_state: &MachineState,
     opts: BrewImport<'_>,
     trust: &Trust,
+    scope: &Membership,
     gated: &mut Gated,
     failures: &mut HashMap<String, InstallFailure>,
 ) -> (Vec<String>, bool) {
@@ -667,9 +697,13 @@ async fn import_brew(
 
     brew_packages
         .formulae
-        .retain(|p| !removed_formulae.contains(p));
-    brew_packages.casks.retain(|p| !removed_casks.contains(p));
-    brew_packages.taps.retain(|p| !removed_taps.contains(p));
+        .retain(|p| !removed_formulae.contains(p) && scope.includes("brew_formulae", p));
+    brew_packages
+        .casks
+        .retain(|p| !removed_casks.contains(p) && scope.includes("brew_casks", p));
+    brew_packages
+        .taps
+        .retain(|p| !removed_taps.contains(p) && scope.includes("brew_taps", p));
     brew_packages.retain_valid();
     if !import_casks {
         // Drop pending inbox items for casks this machine never installs
@@ -732,6 +766,7 @@ async fn import_brew(
         if !local_casks.contains(deferred.as_str())
             && !casks_to_try.contains(deferred)
             && !removed_casks.contains(deferred)
+            && scope.includes("brew_casks", deferred)
         {
             casks_to_try.push(deferred.clone());
         }
@@ -926,6 +961,7 @@ async fn import_simple_manager(
     manifests_dir: &Path,
     machine_state: &MachineState,
     trust: &Trust,
+    scope: &Membership,
     gated: &mut Gated,
     failures: &mut HashMap<String, InstallFailure>,
 ) -> bool {
@@ -963,6 +999,7 @@ async fn import_simple_manager(
     let missing: Vec<(String, Option<String>, String)> = manifest_names(def.ecosystem, &manifest)
         .into_iter()
         .filter(|name| !removed_packages.contains(name) && !local_packages.contains(name))
+        .filter(|name| scope.includes(def.state_key, name))
         .map(|name| trust.trusted_pin(def, name))
         .filter(|(name, version, _)| {
             !trust
@@ -2524,6 +2561,7 @@ mod tests {
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
+            profile_notice_shown: false,
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -2552,6 +2590,7 @@ mod tests {
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
+            profile_notice_shown: false,
         };
 
         state.packages.insert(
@@ -2573,5 +2612,29 @@ mod tests {
         assert_eq!(pkg_state.last_modified, original_modified);
         assert_eq!(pkg_state.last_sync, original_time);
         assert_eq!(pkg_state.hash, "existing_hash");
+    }
+
+    #[test]
+    fn the_excluded_packages_notice_shows_once() {
+        let mut config = Config::default();
+        config
+            .machine_profiles
+            .insert("server".to_string(), "server".to_string());
+        let server = MachineState::new("server");
+        let mut mac = MachineState::new("mac");
+        mac.profile = Some("dev".to_string());
+        let mut shown = false;
+
+        // Nothing excluded yet, so the notice waits
+        let scope = Membership::new(&config, &Default::default(), &server, &[(&mac, true)]);
+        notify_excluded(&scope, &mut shown);
+        assert!(!shown);
+
+        mac.packages
+            .insert("brew_casks".to_string(), vec!["zoom".to_string()]);
+        let scope = Membership::new(&config, &Default::default(), &server, &[(&mac, true)]);
+        assert_eq!(scope.excluded(), vec!["brew_casks:zoom"]);
+        notify_excluded(&scope, &mut shown);
+        assert!(shown);
     }
 }

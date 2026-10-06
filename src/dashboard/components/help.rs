@@ -19,6 +19,7 @@ const FILES: &[Hint] = &[
 const PACKAGES: &[Hint] = &[
     ("⏎", "expand/uninstall", k(KeyCode::Enter)),
     ("i", "import", k(KeyCode::Char('i'))),
+    ("t", "profiles", k(KeyCode::Char('t'))),
     ("h", "history", k(KeyCode::Char('h'))),
     ("R", "rollback", k(KeyCode::Char('R'))),
 ];

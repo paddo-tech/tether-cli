@@ -19,6 +19,8 @@ pub struct DashboardState {
     pub record_status: Vec<(String, signing::RecordStatus)>,
     /// Other machines on 1.x, or without a signed record
     pub old_builds: Vec<String>,
+    /// The profiles each package belongs to, as a sync reads the records
+    pub membership: Option<crate::sync::membership::Membership>,
 }
 
 impl DashboardState {
@@ -47,10 +49,37 @@ impl DashboardState {
             .as_ref()
             .map(|s| signing::old_builds(&machines, &statuses, &s.machine_id))
             .unwrap_or_default();
-        let record_status = statuses
+        let record_status: Vec<(String, signing::RecordStatus)> = statuses
             .into_iter()
             .map(|(id, status, _)| (id, status))
             .collect();
+        let membership = match (&config, &sync_state) {
+            (Some(config), Some(s)) => {
+                let this = machines
+                    .iter()
+                    .find(|m| m.machine_id == s.machine_id)
+                    .cloned()
+                    .unwrap_or_else(|| MachineState::new(&s.machine_id));
+                let others: Vec<(&MachineState, bool)> = machines
+                    .iter()
+                    .filter(|m| m.machine_id != s.machine_id)
+                    .map(|m| {
+                        let trusted = record_status.iter().any(|(id, status)| {
+                            *id == m.machine_id && *status == signing::RecordStatus::Trusted
+                        });
+                        (m, trusted)
+                    })
+                    .collect();
+                let table = sync_path
+                    .as_deref()
+                    .map(crate::sync::membership::read_table)
+                    .unwrap_or_default();
+                Some(crate::sync::membership::Membership::new(
+                    config, &table, &this, &others,
+                ))
+            }
+            _ => None,
+        };
 
         let mut inbox = Inbox::load().unwrap_or_default();
         inbox::sort_by_group(&mut inbox.items);
@@ -71,6 +100,7 @@ impl DashboardState {
             old_ids,
             record_status,
             old_builds,
+            membership,
         }
     }
 

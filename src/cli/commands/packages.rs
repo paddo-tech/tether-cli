@@ -7,6 +7,7 @@ use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
     UvManager,
 };
+use crate::sync::membership::{self, Membership};
 
 struct PackageEntry {
     manager: String,
@@ -166,17 +167,125 @@ fn print_install_failures() {
 }
 
 fn print_package_list(manager_infos: &[ManagerInfo]) {
+    let membership = crate::config::Config::load()
+        .and_then(|config| Membership::load_current(&config))
+        .ok();
+    if let Some(m) = &membership {
+        Output::info(&format!(
+            "This machine installs the packages of profile {}",
+            m.profile
+        ));
+    }
     for info in manager_infos {
         Output::section(&info.name);
+        let key = if info.name == "brew" {
+            "brew_formulae"
+        } else {
+            info.name.as_str()
+        };
         for pkg in &info.packages {
-            let display = match &pkg.version {
+            let mut display = match &pkg.version {
                 Some(v) => format!("{} ({})", pkg.name, v),
                 None => pkg.name.clone(),
             };
+            if let Some(m) = &membership {
+                display.push_str(&format!("  [{}]", members_label(m, key, &pkg.name)));
+            }
             Output::list_item(&display);
         }
     }
     println!();
+}
+
+/// The package's member profiles, or "this profile only".
+pub fn members_label(membership: &Membership, manager: &str, name: &str) -> String {
+    let members = membership.members(manager, name);
+    if members.len() == 1 && members.contains(&membership.profile) {
+        "this profile only".to_string()
+    } else {
+        members.into_iter().collect::<Vec<_>>().join(", ")
+    }
+}
+
+const MANAGER_KEYS: &[&str] = &[
+    "brew_formulae",
+    "brew_casks",
+    "brew_taps",
+    "npm",
+    "pnpm",
+    "bun",
+    "gem",
+    "uv",
+];
+
+fn split_id(id: &str) -> Result<(&str, &str)> {
+    match id.split_once(':') {
+        Some((manager, name)) if MANAGER_KEYS.contains(&manager) && !name.is_empty() => {
+            Ok((manager, name))
+        }
+        _ => anyhow::bail!(
+            "Name the package as manager:name, such as npm:typescript or brew_casks:zoom. \
+             Managers: {}",
+            MANAGER_KEYS.join(", ")
+        ),
+    }
+}
+
+pub fn share(id: &str, to: &[String]) -> Result<()> {
+    let (manager, name) = split_id(id)?;
+    let config = crate::config::Config::load()?;
+    if let Some(unknown) = to
+        .iter()
+        .find(|p| !config.profiles.contains_key(p.as_str()))
+    {
+        anyhow::bail!(
+            "No profile '{}'. Profiles: {}",
+            unknown,
+            config
+                .profiles
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let membership = Membership::load_current(&config)?;
+    let members = membership.shared(manager, name, to);
+    membership::save_members(
+        &crate::sync::SyncEngine::sync_path()?,
+        id,
+        &membership.members(manager, name),
+        &members,
+    )?;
+    Output::success(&format!(
+        "{} now belongs to: {}. Machines in these profiles install it on their next sync",
+        id,
+        members.into_iter().collect::<Vec<_>>().join(", ")
+    ));
+    Ok(())
+}
+
+pub async fn remove(id: &str) -> Result<()> {
+    let (manager, name) = split_id(id)?;
+    let config = crate::config::Config::load()?;
+    let membership = Membership::load_current(&config)?;
+    if let Some(keep) = membership.left(manager, name) {
+        membership::save_members(
+            &crate::sync::SyncEngine::sync_path()?,
+            id,
+            &membership.members(manager, name),
+            &keep,
+        )?;
+        Output::info(&format!(
+            "Profile {} no longer installs {}. Profiles {} keep it",
+            membership.profile,
+            id,
+            keep.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    crate::packages::uninstall(manager, name).await?;
+    Output::success(&format!("Uninstalled {}", id));
+    Ok(())
 }
 
 async fn uninstall_package(

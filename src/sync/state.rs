@@ -30,6 +30,9 @@ pub struct SyncState {
     /// warns once per record
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub warned_signatures: std::collections::HashSet<String>,
+    /// Whether a sync named the packages of other profiles that this machine does not install
+    #[serde(default)]
+    pub profile_notice_shown: bool,
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -475,6 +478,7 @@ impl SyncState {
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
+            profile_notice_shown: false,
         }
     }
 

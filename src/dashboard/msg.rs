@@ -1,7 +1,7 @@
 use super::app::{DaemonOp, InstallOp, Job};
 use crate::packages::inbox::InboxItem;
 use crossterm::event::{KeyEvent, MouseEvent};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// Everything that can change dashboard state. Terminal events, the tick and
 /// background work all arrive as a `Msg` and go through `update`.
@@ -20,6 +20,8 @@ pub enum Msg {
     DaemonOpStarted(DaemonOp),
     DaemonOpExited,
     UninstallDone(Result<(), String>),
+    /// A package's profiles were saved and pushed: the toast text, or the error.
+    ProfilesSaved(Result<String, String>),
     InstallDone {
         op: InstallOp,
         result: Result<(), String>,
@@ -59,9 +61,18 @@ pub enum Msg {
 pub enum Cmd {
     Run(Job),
     Daemon(DaemonOp),
+    /// With `leave`, first save the package's members (as read, after) without this
+    /// machine's profile.
     Uninstall {
         manager_key: String,
         name: String,
+        leave: Option<(BTreeSet<String>, BTreeSet<String>)>,
+    },
+    /// Save a package's members, from `base` as read to `members`, and push.
+    SaveProfiles {
+        id: String,
+        base: BTreeSet<String>,
+        members: BTreeSet<String>,
     },
     /// With `osv_required`, an install that OSV cannot check waits for the user.
     Install {
