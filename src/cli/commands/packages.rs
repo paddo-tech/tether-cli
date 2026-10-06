@@ -7,7 +7,7 @@ use crate::packages::{
     BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
     UvManager,
 };
-use crate::sync::membership::{self, Membership};
+use crate::sync::membership::{self, Edit, Membership};
 
 struct PackageEntry {
     manager: String,
@@ -249,18 +249,14 @@ pub fn share(id: &str, to: &[String]) -> Result<()> {
                 .join(", ")
         );
     }
-    let membership = Membership::load_current(&config)?;
-    let members = membership.shared(manager, name, to);
-    let id = membership::canonical_id(manager, name);
-    membership::save_members(
-        &crate::sync::SyncEngine::sync_path()?,
-        &id,
-        &membership.members(manager, name),
-        &members,
-    )?;
+    let edit = Edit {
+        add: to.iter().cloned().collect(),
+        ..Edit::default()
+    };
+    let members = membership::save_edit(&config, manager, name, &edit)?.unwrap_or_default();
     Output::success(&format!(
         "{} now belongs to: {}. Machines in these profiles install it on their next sync",
-        id,
+        membership::canonical_id(manager, name),
         members.into_iter().collect::<Vec<_>>().join(", ")
     ));
     Ok(())
@@ -270,13 +266,11 @@ pub async fn remove(id: &str) -> Result<()> {
     let (manager, name) = split_id(id)?;
     let config = crate::config::Config::load()?;
     let membership = Membership::load_current(&config)?;
-    if let Some(keep) = membership.left(manager, name) {
-        membership::save_members(
-            &crate::sync::SyncEngine::sync_path()?,
-            &membership::canonical_id(manager, name),
-            &membership.members(manager, name),
-            &keep,
-        )?;
+    let edit = Edit {
+        remove: [membership.profile.clone()].into(),
+        ..Edit::default()
+    };
+    if let Some(keep) = membership::save_edit(&config, manager, name, &edit)? {
         Output::info(&format!(
             "Profile {} no longer installs {}. Profiles {} keep it",
             membership.profile,

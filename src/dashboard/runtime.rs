@@ -45,12 +45,8 @@ impl Runtime {
             } => {
                 self.spawn(
                     async move {
-                        if let Some((base, members)) = leave {
-                            if let Err(e) = save_profiles(
-                                &crate::sync::membership::canonical_id(&manager_key, &name),
-                                &base,
-                                &members,
-                            ) {
+                        if let Some(edit) = leave {
+                            if let Err(e) = save_profiles(&manager_key, &name, &edit) {
                                 return Msg::UninstallDone(Err(e));
                             }
                         }
@@ -63,16 +59,26 @@ impl Runtime {
                     |e| Some(Msg::UninstallDone(Err(e))),
                 );
             }
-            Cmd::SaveProfiles { id, base, members } => {
+            Cmd::SaveProfiles {
+                manager_key,
+                name,
+                edit,
+            } => {
                 self.spawn(
                     async move {
-                        Msg::ProfilesSaved(save_profiles(&id, &base, &members).map(|()| {
-                            format!(
-                                "{} profiles: {}",
-                                id,
-                                members.into_iter().collect::<Vec<_>>().join(", ")
-                            )
-                        }))
+                        Msg::ProfilesSaved(save_profiles(&manager_key, &name, &edit).map(
+                            |members| {
+                                format!(
+                                    "{} profiles: {}",
+                                    name,
+                                    members
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            },
+                        ))
                     },
                     |e| Some(Msg::ProfilesSaved(Err(e))),
                 );
@@ -490,12 +496,13 @@ async fn collect_local_packages(
 }
 
 fn save_profiles(
-    id: &str,
-    base: &std::collections::BTreeSet<String>,
-    members: &std::collections::BTreeSet<String>,
-) -> Result<(), String> {
-    let sync_path = crate::sync::SyncEngine::sync_path().map_err(|e| e.to_string())?;
-    crate::sync::membership::save_members(&sync_path, id, base, members).map_err(|e| e.to_string())
+    manager_key: &str,
+    name: &str,
+    edit: &crate::sync::membership::Edit,
+) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+    crate::config::Config::load()
+        .and_then(|config| crate::sync::membership::save_edit(&config, manager_key, name, edit))
+        .map_err(|e| e.to_string())
 }
 
 fn remove_from_removed_packages(machine_id: &str, manager_key: &str, pkg_name: &str) {

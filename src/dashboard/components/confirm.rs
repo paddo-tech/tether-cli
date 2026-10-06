@@ -3,9 +3,11 @@ use crate::dashboard::app::{App, Hit, Job, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
+use crate::sync::membership::Edit;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 /// How long a confirm that can open under the user's typing ignores keys after its first draw.
@@ -214,8 +216,11 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         Confirm::Uninstall { manager_key, name } => {
             // Other member profiles keep the package; this profile leaves it
             let leave = app.state.membership.as_ref().and_then(|m| {
-                m.left(&manager_key, &name)
-                    .map(|members| (m.members(&manager_key, &name), members))
+                let members = m.members(&manager_key, &name);
+                (members.contains(&m.profile) && members.len() > 1).then(|| Edit {
+                    remove: BTreeSet::from([m.profile.clone()]),
+                    ..Edit::default()
+                })
             });
             app.uninstalling = Some((manager_key.clone(), name.clone()));
             Some(Cmd::Uninstall {

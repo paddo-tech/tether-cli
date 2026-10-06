@@ -1,6 +1,7 @@
 use super::{cursor_down, manager_label, picker as picker_popup};
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::msg::Cmd;
+use crate::sync::membership::Edit;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use std::collections::BTreeSet;
@@ -58,10 +59,14 @@ pub fn handle_key(app: &mut App, mut picker: PackageProfiles, key: KeyEvent) -> 
                     .as_ref()
                     .map(|m| m.members(&picker.manager_key, &picker.name))
                     .unwrap_or_default();
+                let edit = Edit {
+                    add: picker.checked.difference(&base).cloned().collect(),
+                    remove: base.difference(&picker.checked).cloned().collect(),
+                };
                 return Some(Cmd::SaveProfiles {
-                    id: crate::sync::membership::canonical_id(&picker.manager_key, &picker.name),
-                    base,
-                    members: picker.checked,
+                    manager_key: picker.manager_key,
+                    name: picker.name,
+                    edit,
                 });
             }
         }

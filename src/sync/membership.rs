@@ -38,38 +38,65 @@ pub fn read_table(sync_path: &Path) -> Result<Table> {
         .map_err(|e| anyhow::anyhow!("Cannot read {} in the sync repo: {}", FILE, e))
 }
 
-/// Apply one package's new members to the file text. Returns the new text, and whether
-/// another machine changed the entry since this machine read it as `base`.
-fn merge_entry(
-    text: &str,
-    id: &str,
-    base: &BTreeSet<String>,
-    members: &BTreeSet<String>,
-) -> Result<(String, bool)> {
+/// Apply one package's new members to the file text.
+fn merge_entry(text: &str, id: &str, members: &BTreeSet<String>) -> Result<String> {
     let mut file: ProfilesFile = toml::from_str(text)?;
-    let conflict = file
-        .profiles
-        .get(id)
-        .is_some_and(|now| now.iter().cloned().collect::<BTreeSet<_>>() != *base);
     // The canonical entry replaces any other spelling of the same package
     let canonical = id.split_once(':').map(|(manager, name)| key(manager, name));
     file.profiles
         .retain(|other, _| other.split_once(':').map(|(m, n)| key(m, n)) != canonical);
     file.profiles
         .insert(id.to_string(), members.iter().cloned().collect());
-    Ok((toml::to_string_pretty(&file)?, conflict))
+    Ok(toml::to_string_pretty(&file)?)
 }
 
-/// Set one package's members in the repo and push. Under the sync lock, each attempt resets
-/// to the remote branch, reads the file again and changes only this entry, so edits to
-/// other packages from other machines are kept. An edit to the same package from another
-/// machine is replaced: the last writer wins, with a warning.
-pub fn save_members(
+/// A change to one package's members. A save applies it to the members as the remote has
+/// them, so a change another machine made in the meantime stays.
+#[derive(Debug, Clone, Default)]
+pub struct Edit {
+    pub add: BTreeSet<String>,
+    pub remove: BTreeSet<String>,
+}
+
+impl Edit {
+    /// The members after the edit.
+    pub fn apply(&self, members: &BTreeSet<String>) -> BTreeSet<String> {
+        members
+            .iter()
+            .chain(&self.add)
+            .filter(|p| !self.remove.contains(*p))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Apply `edit` to one package's members and push it. Returns the new members, or None
+/// when the edit would leave the package with no member: removing the last profile is a
+/// plain uninstall.
+pub fn save_edit(
+    config: &Config,
+    manager: &str,
+    name: &str,
+    edit: &Edit,
+) -> Result<Option<BTreeSet<String>>> {
+    let sync_path = SyncEngine::sync_path()?;
+    let machine_id = SyncState::load()?.machine_id;
+    save_members(&sync_path, &canonical_id(manager, name), edit, |table| {
+        let this = signing::own_record(&sync_path, &machine_id)?
+            .unwrap_or_else(|| MachineState::new(&machine_id));
+        Ok(Membership::load(config, &sync_path, &this, table)?.members(manager, name))
+    })
+}
+
+/// Apply `edit` to the members `members_now` reads from the table, and push the entry.
+/// Under the sync lock, each attempt resets to the remote branch and reads the table again,
+/// so edits from other machines are kept.
+fn save_members(
     sync_path: &Path,
     id: &str,
-    base: &BTreeSet<String>,
-    members: &BTreeSet<String>,
-) -> Result<()> {
+    edit: &Edit,
+    members_now: impl Fn(&Table) -> Result<BTreeSet<String>>,
+) -> Result<Option<BTreeSet<String>>> {
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let repo = GitBackend::open(sync_path)?;
     // Each attempt resets to the remote branch, which must drop only this edit's commit
@@ -83,20 +110,17 @@ pub fn save_members(
     for _ in 0..3 {
         repo.fetch()?;
         repo.reset_to_remote()?;
+        let table = read_table(sync_path)?;
+        let members = edit.apply(&members_now(&table)?);
+        if members.is_empty() {
+            return Ok(None);
+        }
         let previous = match std::fs::read_to_string(&path) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-        let (text, conflict) =
-            merge_entry(previous.as_deref().unwrap_or_default(), id, base, members)?;
-        if conflict {
-            crate::cli::Output::warning(&format!(
-                "Another machine changed the profiles of {} since this machine read them. \
-                 This edit replaces that change",
-                id
-            ));
-        }
+        let text = merge_entry(previous.as_deref().unwrap_or_default(), id, &members)?;
         let written = (|| {
             std::fs::create_dir_all(path.parent().expect("FILE has a directory"))?;
             crate::sync::atomic_write(&path, text.as_bytes())?;
@@ -108,7 +132,7 @@ pub fn save_members(
         let committed = written.is_ok();
         let pushed = written.and_then(|()| repo.push_once());
         let Err(e) = pushed else {
-            return Ok(());
+            return Ok(Some(members));
         };
         // A failed attempt leaves the repo as the remote has it, so a sync never pushes it
         repo.reset_to_remote()?;
@@ -298,22 +322,6 @@ impl Membership {
         ids.sort();
         ids
     }
-
-    /// The members after adding `profiles`. The profiles that have the package keep it.
-    pub fn shared(&self, manager: &str, name: &str, profiles: &[String]) -> BTreeSet<String> {
-        let mut members = self.members(manager, name);
-        members.extend(profiles.iter().cloned());
-        members
-    }
-
-    /// The members after this machine's profile leaves, so other machines in it stop
-    /// installing the package. None when this profile was its only member: removing it here
-    /// is then a plain uninstall.
-    pub fn left(&self, manager: &str, name: &str) -> Option<BTreeSet<String>> {
-        let mut members = self.members(manager, name);
-        members.remove(&self.profile);
-        (!members.is_empty()).then_some(members)
-    }
 }
 
 #[cfg(test)]
@@ -343,6 +351,20 @@ mod tests {
 
     fn set(profiles: &[&str]) -> BTreeSet<String> {
         profiles.iter().map(|p| p.to_string()).collect()
+    }
+
+    fn share(profiles: &[&str]) -> Edit {
+        Edit {
+            add: set(profiles),
+            ..Edit::default()
+        }
+    }
+
+    fn leave(profile: &str) -> Edit {
+        Edit {
+            remove: set(&[profile]),
+            ..Edit::default()
+        }
     }
 
     fn entry(table: &mut Table, id: &str, members: BTreeSet<String>) {
@@ -406,7 +428,7 @@ mod tests {
         let (c, mac1, mac2, server) = fleet();
         let mut t = Table::new();
         let on_mac1 = Membership::new(&c, &t, &mac1, &[(&mac2, true), (&server, true)]);
-        let members = on_mac1.shared("brew_casks", "zoom", &["server".to_string()]);
+        let members = share(&["server"]).apply(&on_mac1.members("brew_casks", "zoom"));
         assert_eq!(members, set(&["dev", "server"]));
         entry(&mut t, "brew_casks:zoom", members);
 
@@ -425,9 +447,9 @@ mod tests {
             .insert("brew_casks".to_string(), vec!["zoom".to_string()]);
 
         let on_server = Membership::new(&c, &t, &server, &[(&mac1, true), (&mac2, true)]);
-        let members = on_server.left("brew_casks", "zoom");
-        assert_eq!(members, Some(set(&["dev"])));
-        entry(&mut t, "brew_casks:zoom", members.unwrap());
+        let members = leave(&on_server.profile).apply(&on_server.members("brew_casks", "zoom"));
+        assert_eq!(members, set(&["dev"]));
+        entry(&mut t, "brew_casks:zoom", members);
 
         // After the uninstall, the server's record no longer lists it
         server.packages.remove("brew_casks");
@@ -441,7 +463,9 @@ mod tests {
     fn leave_by_the_only_member_is_a_plain_uninstall() {
         let (c, mac1, mac2, server) = fleet();
         let on_mac1 = Membership::new(&c, &Table::new(), &mac1, &[(&mac2, true), (&server, true)]);
-        assert_eq!(on_mac1.left("brew_casks", "zoom"), None);
+        assert!(leave("dev")
+            .apply(&on_mac1.members("brew_casks", "zoom"))
+            .is_empty());
     }
 
     #[test]
@@ -543,28 +567,26 @@ mod tests {
         inbox.settle(Vec::new(), &[], |m, n| on_server.includes(m, n));
         assert_eq!(inbox.items.len(), 1);
 
-        entry(&mut t, "uv:ruff", on_server.left("uv", "ruff").unwrap());
+        entry(
+            &mut t,
+            "uv:ruff",
+            leave("server").apply(&on_server.members("uv", "ruff")),
+        );
         let on_server = Membership::new(&c, &t, &server, &[(&mac1, true), (&mac2, true)]);
         inbox.settle(Vec::new(), &[], |m, n| on_server.includes(m, n));
         assert!(inbox.items.is_empty());
     }
 
     #[test]
-    fn merge_entry_keeps_other_packages_and_reports_a_conflict() {
+    fn merge_entry_keeps_other_packages() {
         let text = "[profiles]\n\"npm:a\" = [\"dev\"]\n\"npm:b\" = [\"dev\", \"server\"]\n";
-        let (merged, conflict) =
-            merge_entry(text, "npm:c", &BTreeSet::new(), &set(&["server"])).unwrap();
-        assert!(!conflict);
+        let merged = merge_entry(text, "npm:c", &set(&["server"])).unwrap();
         let file: ProfilesFile = toml::from_str(&merged).unwrap();
         assert_eq!(file.profiles.len(), 3);
         assert_eq!(file.profiles["npm:b"], vec!["dev", "server"]);
         assert_eq!(file.profiles["npm:c"], vec!["server"]);
         // Sorted, so two machines write the same bytes for the same table
         assert!(merged.find("npm:a").unwrap() < merged.find("npm:c").unwrap());
-
-        // Another machine changed npm:b after this machine read it as dev only
-        let (_, conflict) = merge_entry(text, "npm:b", &set(&["dev"]), &set(&["server"])).unwrap();
-        assert!(conflict);
     }
 
     #[test]
@@ -585,8 +607,7 @@ mod tests {
 
         // A write keeps one entry under the canonical id
         let text = "[profiles]\n\"uv:Ruff\" = [\"server\"]\n\"uv:ruff\" = [\"dev\"]\n";
-        let (merged, _) =
-            merge_entry(text, "uv:ruff", &BTreeSet::new(), &set(&["dev", "server"])).unwrap();
+        let merged = merge_entry(text, "uv:ruff", &set(&["dev", "server"])).unwrap();
         let file: ProfilesFile = toml::from_str(&merged).unwrap();
         assert_eq!(file.profiles.len(), 1);
         assert_eq!(file.profiles["uv:ruff"], vec!["dev", "server"]);
@@ -622,6 +643,16 @@ mod tests {
 
     fn read_entries(dir: &Path) -> Table {
         read_table(dir).unwrap()
+    }
+
+    /// The members a table entry lists, as `save_members` reads them.
+    fn listed(id: &'static str) -> impl Fn(&Table) -> Result<BTreeSet<String>> {
+        move |table| {
+            Ok(table
+                .get(id)
+                .map(|m| m.iter().cloned().collect())
+                .unwrap_or_default())
+        }
     }
 
     /// A bare remote whose main has the table, and two clones of it.
@@ -669,18 +700,21 @@ mod tests {
             "[profiles]\n\"npm:a\" = [\"dev\"]\n\"npm:b\" = [\"dev\"]\n",
         );
 
-        // b changes the adjacent entry and pushes; a is now behind the remote
-        save_members(&b, "npm:b", &set(&["dev"]), &set(&["dev", "server"])).unwrap();
-        save_members(&a, "npm:a", &set(&["dev"]), &set(&["server"])).unwrap();
+        // b changes both entries and pushes; a is now behind the remote. a's edit applies
+        // to the members the remote has, so b's change to the same entry stays
+        save_members(&b, "npm:b", &share(&["server"]), listed("npm:b")).unwrap();
+        save_members(&b, "npm:a", &share(&["mini"]), listed("npm:a")).unwrap();
+        let saved = save_members(&a, "npm:a", &share(&["server"]), listed("npm:a")).unwrap();
+        assert_eq!(saved, Some(set(&["dev", "mini", "server"])));
         let table = read_entries(&a);
-        assert_eq!(table["npm:a"], vec!["server"]);
+        assert_eq!(table["npm:a"], vec!["dev", "mini", "server"]);
         assert_eq!(table["npm:b"], vec!["dev", "server"]);
         let repo = GitBackend::open(&a).unwrap();
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
 
         // A save never commits changes it did not make
         std::fs::write(a.join("stray"), "x").unwrap();
-        assert!(save_members(&a, "npm:a", &set(&["server"]), &set(&["dev"])).is_err());
+        assert!(save_members(&a, "npm:a", &leave("dev"), listed("npm:a")).is_err());
         std::fs::remove_file(a.join("stray")).unwrap();
 
         // A rejected push leaves the clone as the remote has it
@@ -691,8 +725,8 @@ mod tests {
                 .unwrap();
         };
         reject_pushes();
-        assert!(save_members(&a, "npm:a", &set(&["server"]), &set(&["dev"])).is_err());
-        assert_eq!(read_entries(&a)["npm:a"], vec!["server"]);
+        assert!(save_members(&a, "npm:a", &leave("dev"), listed("npm:a")).is_err());
+        assert_eq!(read_entries(&a)["npm:a"], vec!["dev", "mini", "server"]);
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
 
         // Also when the file did not exist before the save
@@ -701,7 +735,7 @@ mod tests {
         GitBackend::new(a.clone()).commit("drop", "test").unwrap();
         git(&a, &["push", "-q", "origin", "main"]);
         reject_pushes();
-        assert!(save_members(&a, "npm:a", &BTreeSet::new(), &set(&["dev"])).is_err());
+        assert!(save_members(&a, "npm:a", &share(&["dev"]), listed("npm:a")).is_err());
         assert!(!a.join(FILE).exists());
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
     }
