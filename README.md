@@ -69,6 +69,20 @@ Share a sync repo across your team for consistent development environments, shar
 - **gem** - Ruby gems
 - **uv** - Python packages
 
+### Packages per profile
+A package belongs to the profiles of the machines that installed it. A machine installs only the packages of its own profile. So a server does not get the desktop apps of your laptops.
+
+Keep a server clean:
+
+```bash
+tether config set profiles.server.dotfiles '[]'   # create the profile once
+tether machines profile set server                # on the server
+tether packages share npm:typescript --to server  # send one package to the server
+tether packages remove npm:typescript             # on the server: uninstall it, laptops keep it
+```
+
+The shares are in `packages/profiles.toml` in the sync repo, as `"npm:typescript" = ["dev", "server"]`. The dashboard Packages tab shows each package's profiles. Press `t` on a package to change them. Machines on 1.x ignore profiles and install the packages of every machine. A machine on 1.x can also undo a `machines profile set`; a 2.0 sync then warns. Set profiles before you add 1.x machines, or after all machines run 2.0.
+
 ## Commands
 
 ```bash

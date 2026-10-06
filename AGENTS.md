@@ -63,9 +63,9 @@ Managed via `tether config features`. Available toggles:
 ## Data Layout
 
 **~/.tether/**
-- `config.toml` - Main config (versioned)
+- `config.toml` - Main config (versioned, synced encrypted)
 - `local.toml` - Settings for this machine only (never synced). `[packages] min_release_age_days` and `[merge] command`/`args` override config.toml on this machine
-- `state.json` - Sync state, including `install_failures` (synced packages that failed to install here; retried after 24h or on a new version)
+- `state.json` - Sync state, including `install_failures` (synced packages that failed to install here; retried after 24h or on a new version) and `profile_notice_shown` (the one-time notice of packages other profiles have)
 - `sync/` - Personal sync repo
 - `teams/<name>/` - Team sync repos
 - `collabs/` - Collab project configs
@@ -87,12 +87,28 @@ Managed via `tether config features`. Available toggles:
 - `configs/` - App configs
 - `manifests/` - Package manifests: one package name per line, never a version, as 1.x reads them. Versions come only from signed machine records (`package_versions`). Pinned lines from pre-release 2.0 builds still parse, and the next write drops the version
 - `machines/` - Machine-specific state (`<id>.json`) and its signature (`<id>.json.sig`, sshsig, namespace `tether-machine`, over `tether-machine-v1\n<id>\n<sha256 of the json bytes>\n`). Only a record whose signature verifies against the trusted key for its id lets packages auto-install. Trust is transitive: a signed record lists the packages its machine installed, so trusting a machine trusts what it installed. A local rejection still blocks a package
+- `packages/profiles.toml` - Package membership: `[profiles]` maps `"manager:name"` to the profile names the package belongs to. Plain TOML, sorted, names only. 1.x never reads or writes it
 - `projects/` - Project secrets
+
+## Package profiles
+
+- Each package belongs to one or more profiles. A 2.0 machine installs a synced package only when its profile is a member, and a trusted record lists the package. The version still comes from trusted records of any profile.
+- Without an entry in `packages/profiles.toml`, the members are the profiles of this machine and of the trusted machines whose signed records list the package. The profile comes from the signed `profile` field of `machines/<id>.json`. A record without one counts as the default profile `dev` (`DEFAULT_PROFILE`), which is also the profile of a machine with no assignment.
+- An entry is authoritative: `"npm:typescript" = ["dev", "server"]`. Brew formulae and casks match with or without their tap.
+- Records that are not trusted count only for a package no trusted record lists. Such a package can only wait in the inbox, so a forged profile cannot widen a trusted package.
+- This machine's own record always counts, so a machine never loses what it installed.
+- `tether packages share <manager:name> --to <a,b>` adds profiles to the current members. `tether packages remove <manager:name>` takes this machine's profile out of the entry and uninstalls the package here. When this profile is the only member, it is a plain uninstall. The dashboard Packages tab does the same with `t` (profile checklist) and Enter (uninstall).
+- A sync drops inbox items for packages that leave this machine's profile.
+- `membership::save_members` writes one entry under the sync lock: pull, read the file again, change that entry, commit, push, up to three tries. Edits to different packages from different machines survive. For the same package the last writer wins, with a warning.
+- Integrity limit: anyone who can push can edit the file and widen membership. A package still installs only when a trusted signed record lists it, so the edit only moves already-trusted packages between profiles.
+- Removals stay per machine (`removed_packages`). `packages.remove_unlisted` is not wired to any code path, so no machine uninstalls packages that other profiles list.
+- Code: `src/sync/membership.rs`; `import_packages` filters manifest names through it.
 
 ## Compatibility with 1.x
 
 - Rolling upgrades work one machine at a time. A sync repo can hold 1.x and 2.0 machines together.
 - The 2.0 protections (trust, release age, OSV, signatures) apply only on upgraded machines. A 1.x machine installs without them. Its unsigned record grants no trust, so its packages wait in the inbox of 2.0 machines.
+- Package profiles apply only on 2.0 machines. Manifests stay the union of all records, so a 1.x machine still installs the packages of every profile. Profile definitions and `machine_profiles` stay in config.toml. A 1.x machine exports its stale copy of config.toml after it applies a remote one, and 1.x writes its maps in random order. So in a fleet with 1.x machines, one config.toml change (including `machines profile set`) is reverted, and with several 1.x machines it can flap on every sync. 2.0 records the applied hash and writes maps sorted, so 2.0 machines settle. Change config.toml before 1.x machines join or after they upgrade. A 2.0 sync warns when this machine's own assignment changes in the synced config. `tests/fleet/run.py --scenario config-flap` shows the flap; a version `ref:<commit>` builds any commit, such as a 1.x patch.
 - Manifests stay names-only. Never write `name@ver`, `name==ver` or `name:ver` to `manifests/*`.
 - Synced formats change only by additions until 3.0. Do not add `deny_unknown_fields` to a synced struct. Do not remove, rename or retype a field that 1.11.10, 1.12.0 or 1.13.1 requires. New fields take `#[serde(default)]`. Tests in `config.rs` and `sync/state.rs` pin the 1.x shapes.
 
