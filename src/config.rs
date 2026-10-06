@@ -23,6 +23,17 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// config.toml syncs as bytes, so each save must write a map in the same order. Otherwise
+/// machines see a change where there is none, and push it back and forth.
+fn sorted<S: serde::Serializer, V: Serialize>(
+    map: &HashMap<String, V>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    map.iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Config format version - prevents older tether from corrupting newer configs
@@ -50,10 +61,18 @@ pub struct Config {
     #[serde(default)]
     pub project_configs: ProjectConfigSettings,
     /// Machine-to-profile assignments (machine_id -> profile_name)
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "sorted"
+    )]
     pub machine_profiles: HashMap<String, String>,
     /// Named profiles that restrict what a machine syncs
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "sorted"
+    )]
     pub profiles: HashMap<String, ProfileConfig>,
     #[serde(default, skip_serializing_if = "DashboardConfig::is_default")]
     pub dashboard: DashboardConfig,
@@ -655,12 +674,13 @@ pub struct TeamsConfig {
     #[serde(default, deserialize_with = "deserialize_active_teams")]
     pub active: Vec<String>,
     /// Map of team name -> team configuration
+    #[serde(serialize_with = "sorted")]
     pub teams: HashMap<String, TeamConfig>,
     /// Allowed GitHub organizations for team repos (empty = no restriction)
     #[serde(default)]
     pub allowed_orgs: Vec<String>,
     /// Collaborator-based project secret sharing (keyed by collab name)
-    #[serde(default)]
+    #[serde(default, serialize_with = "sorted")]
     pub collabs: HashMap<String, CollabConfig>,
 }
 
@@ -1182,6 +1202,35 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_config_bytes_do_not_depend_on_map_order() {
+        let ids = ["m1", "a7", "zz", "b2", "q9", "c3"];
+        let build = |order: &mut dyn Iterator<Item = &&str>| {
+            let mut config = Config::default();
+            for id in order {
+                config
+                    .machine_profiles
+                    .insert(id.to_string(), "dev".to_string());
+                config
+                    .profiles
+                    .insert(id.to_string(), ProfileConfig::default());
+            }
+            toml::to_string_pretty(&config).unwrap()
+        };
+        let written = build(&mut ids.iter());
+        assert_eq!(build(&mut ids.iter().rev()), written);
+        let reread: Config = toml::from_str(&written).unwrap();
+        assert_eq!(toml::to_string_pretty(&reread).unwrap(), written);
+        let listed: Vec<&str> = written
+            .lines()
+            .skip_while(|l| *l != "[machine_profiles]")
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(|l| l.split(' ').next().unwrap())
+            .collect();
+        assert_eq!(listed, ["a7", "b2", "c3", "m1", "q9", "zz"]);
+    }
 
     #[test]
     fn test_saved_config_parses_with_1x_shape() {
