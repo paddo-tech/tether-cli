@@ -12,6 +12,8 @@ pub struct PackageProfiles {
     pub name: String,
     pub options: Vec<String>,
     pub checked: BTreeSet<String>,
+    /// The members when the checklist opened. A save compares the repo against them
+    pub base: BTreeSet<String>,
     pub cursor: usize,
 }
 
@@ -31,6 +33,7 @@ pub fn open(app: &mut App, manager_key: &str, name: &str) {
         manager_key: manager_key.to_string(),
         name: name.to_string(),
         options,
+        base: checked.clone(),
         checked,
         cursor: 0,
     }));
@@ -53,15 +56,10 @@ pub fn handle_key(app: &mut App, mut picker: PackageProfiles, key: KeyEvent) -> 
             if picker.checked.is_empty() {
                 app.flash_error("A package needs one profile at least. Uninstall it instead");
             } else {
-                let base = app
-                    .state
-                    .membership
-                    .as_ref()
-                    .map(|m| m.members(&picker.manager_key, &picker.name))
-                    .unwrap_or_default();
                 let edit = Edit {
-                    add: picker.checked.difference(&base).cloned().collect(),
-                    remove: base.difference(&picker.checked).cloned().collect(),
+                    add: picker.checked.difference(&picker.base).cloned().collect(),
+                    remove: picker.base.difference(&picker.checked).cloned().collect(),
+                    seen: Some(picker.base),
                 };
                 if edit.add.is_empty() && edit.remove.is_empty() {
                     return None;

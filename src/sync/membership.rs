@@ -56,6 +56,9 @@ fn merge_entry(text: &str, id: &str, members: &BTreeSet<String>) -> Result<Strin
 pub struct Edit {
     pub add: BTreeSet<String>,
     pub remove: BTreeSet<String>,
+    /// The members the user saw when they chose the edit. When set, a save refuses if the
+    /// members changed since, so the user decides again
+    pub seen: Option<BTreeSet<String>>,
 }
 
 impl Edit {
@@ -112,6 +115,12 @@ fn save_members(
         repo.reset_to_remote()?;
         let table = read_table(sync_path)?;
         let current = members_now(&table)?;
+        if edit.seen.as_ref().is_some_and(|seen| *seen != current) {
+            anyhow::bail!(
+                "The profiles of {} changed since you opened them. Check them again",
+                id
+            );
+        }
         let members = edit.apply(&current);
         if members.is_empty() {
             return Ok(None);
@@ -715,6 +724,14 @@ mod tests {
         assert_eq!(table["npm:b"], vec!["dev", "server"]);
         let repo = GitBackend::open(&a).unwrap();
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
+
+        // A checklist opened before another machine's change does not overwrite it
+        let stale = Edit {
+            seen: Some(set(&["dev", "mini"])),
+            ..leave("mini")
+        };
+        assert!(save_members(&a, "npm:a", &stale, listed("npm:a")).is_err());
+        assert_eq!(read_entries(&a)["npm:a"], vec!["dev", "mini", "server"]);
 
         // An edit that changes nothing commits nothing
         let head = || {
