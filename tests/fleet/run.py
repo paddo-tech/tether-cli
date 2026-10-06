@@ -14,8 +14,25 @@ Assertions:
   d  the manifests never return to an earlier state, and do not change once settled
   e  machines that start on HEAD never install a package that only 1.x machines list
   f  (a) to (d) still hold in the rounds after one 1.13.1 machine upgrades to HEAD
+  g  the HEAD machine in profile "server" installs no package that only dev machines list,
+     except SHARED while it is shared with the server profile
+  h  after `packages share SHARED --to server` the server machine installs it
+  i  after the server machine runs `packages remove SHARED`, it does not install it again,
+     and no dev machine uninstalls it
+  j  dev HEAD machines install each other's packages, and never the server's own packages
+  k  the server keeps its profile assignment to the end. The server sets its profile before
+     the other machines join: in a mixed fleet, a config.toml change made later flaps (see
+     --scenario config-flap)
+
+Scenario config-flap (--scenario config-flap): after the fleet settles, one HEAD machine
+changes config.toml once. Checks (a), and
+  l  HEAD machines stop committing config.toml one round after they applied the change
+It also reports how often 1.x machines commit config.toml per round, without failing on it.
+A version is a git tag, 'head', or 'ref:<git ref>' for a build of any commit, such as a 1.x
+patch: --fleet m1=ref:<sha>,m2=v1.12.0,h1=head --scenario config-flap
 
 Usage: tests/fleet/run.py [--fleet m1=v1.11.10,...] [--upgrade m4=head] [--steady N]
+                          [--scenario default|config-flap]
 Logs and a summary land in --out (default target/fleet).
 """
 import argparse
@@ -35,7 +52,12 @@ RUST_IMAGE = "rust:1-bookworm"
 REPO_URL = "git://repo/fleet.git"
 REMOVE = ("m1", "npm", "cowsay")
 SETTLE = 2
-DEFAULT_FLEET = "m1=v1.11.10,m2=v1.12.0,m3=v1.13.1,m4=v1.13.1,h1=head,h2=head"
+DEFAULT_FLEET = "m1=v1.11.10,m2=v1.12.0,m3=v1.13.1,m4=v1.13.1,h1=head,h2=head,h3=head"
+# HEAD machines in profile "server"; every other machine stays in "dev"
+SERVERS = ("h3",)
+# A package only dev machines list, which h1 shares with the server profile and the server
+# then removes again
+SHARED = ("h1", "npm", "head-npm-h1")
 # Text a sync prints when it cannot read its config, state or a machine record
 PARSE_ERROR = re.compile(
     r"parse error|failed to parse|TOML parse|invalid type|unknown variant|missing field|"
@@ -81,12 +103,16 @@ class Fleet:
         self.rounds = []
         self.events = []
         self.ids = {}
+        # Servers that lost their profile assignment by the end
+        self.lost = []
 
     def ref(self, label):
-        return self.head_sha if label == "head" else label
+        if label == "head":
+            return self.head_sha
+        return label.removeprefix("ref:")
 
     def binary(self, label):
-        key = f"head-{self.head_sha[:12]}" if label == "head" else label
+        key = f"head-{self.head_sha[:12]}" if label == "head" else slug(label)
         return self.cache / f"tether-{key}"
 
     def build(self, label):
@@ -96,14 +122,14 @@ class Fleet:
         ref = self.ref(label)
         has_lock = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{ref}:Cargo.lock"],
                                   capture_output=True).returncode == 0
-        name = f"{P}-build-{label}"
+        name = f"{P}-build-{slug(label)}"
         sh("docker", "rm", "-f", name, check=False)
         archive = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", ref], capture_output=True, check=True).stdout
         # One registry per build: parallel builds that share one race to unpack crates
-        volumes = ["-v", f"{P}-cargo-{label}:/usr/local/cargo/registry"]
+        volumes = ["-v", f"{P}-cargo-{slug(label)}:/usr/local/cargo/registry"]
         if label == "head":
             volumes += ["-v", f"{P}-target-head:/src/target"]
-        log = self.out / f"build-{label}.log"
+        log = self.out / f"build-{slug(label)}.log"
         r = subprocess.run(
             ["docker", "run", "-i", "--name", name, *volumes, RUST_IMAGE, "sh", "-c",
              f"mkdir -p /src && tar x -C /src && cd /src && cargo build --release {'--locked' if has_lock else ''}"],
@@ -135,12 +161,12 @@ class Fleet:
             sh("docker", "run", "-d", "--name", f"{P}-{m}", "--hostname", m, "--network", f"{P}-net",
                f"{P}-img", "sleep", "infinity")
             for lb in labels:
-                sh("docker", "cp", str(self.binary(lb)), f"{P}-{m}:/usr/local/bin/tether-{lb}")
-            dexec(m, f"ln -sf tether-{label} /usr/local/bin/tether && mkdir -p /state/pkgs && echo init > /state/round && "
+                sh("docker", "cp", str(self.binary(lb)), f"{P}-{m}:/usr/local/bin/tether-{slug(lb)}")
+            dexec(m, f"ln -sf tether-{slug(label)} /usr/local/bin/tether && mkdir -p /state/pkgs && echo init > /state/round && "
                      f"awk '$1==\"{m}\" {{print $3, $4 >> \"/state/pkgs/\" $2}}' /fleet/fixtures.txt", check=True)
 
     def set_version(self, m, label):
-        dexec(m, f"ln -sf tether-{label} /usr/local/bin/tether", check=True)
+        dexec(m, f"ln -sf tether-{slug(label)} /usr/local/bin/tether", check=True)
         self.version[m] = label
 
     def run_tether(self, rnd, phase, m, command):
@@ -179,9 +205,16 @@ class Fleet:
               f"manifests={tree_after[:8]} {took:.1f}s {mark} {' '.join(record['foreign'])}", flush=True)
         return record
 
-    def init(self):
-        for m in self.machines:
+    def init(self, servers):
+        # Servers join first and set their profile, so no config.toml change follows once 1.x
+        # machines have joined
+        for m in servers + [m for m in self.machines if m not in servers]:
             self.run_tether("init", "init", m, f"expect -f /fleet/init.exp tether init --repo {REPO_URL} --no-daemon")
+            if m in servers:
+                for command in ("tether config set profiles.server.dotfiles '[]'",
+                                "tether machines profile set server", "tether sync"):
+                    if self.run_tether("init", "profile", m, command)["rc"] != 0:
+                        raise SystemExit(f"{m}: {command} failed")
 
     def trust(self):
         heads = [m for m, v in self.version.items() if v == "head"]
@@ -221,6 +254,17 @@ class Fleet:
             self.round("settle")
         for _ in range(self.steady):
             self.round("steady")
+        if any(m in self.machines for m in SERVERS):
+            m, key, name = SHARED
+            self.event(m, "share", f"tether packages share {key}:{name} --to server")
+            for _ in range(SETTLE):
+                self.round("settle-share")
+            self.round("steady-share")
+            for m in SERVERS:
+                self.event(m, "leave", f"tether packages remove {key}:{name}")
+            for _ in range(SETTLE):
+                self.round("settle-leave")
+            self.round("steady-leave")
         m, key, name = REMOVE
         dexec(m, f"sed -i '/^{name} /d' /state/pkgs/{key}", check=True)
         self.events.append(f"removed {key} {name} on {m} before R{len(self.rounds) + 1}")
@@ -238,6 +282,31 @@ class Fleet:
                 self.round("settle-upgrade")
             for _ in range(self.steady):
                 self.round("steady-upgrade")
+        self.lost = [m for m in SERVERS if m in self.machines and not self.in_profile(m, "server")]
+
+    def flap(self):
+        """One config.toml change on a HEAD machine after the fleet settled."""
+        self.round("settle")
+        self.trust()
+        for _ in range(SETTLE):
+            self.round("settle")
+        m = next(m for m, v in self.version.items() if v == "head" and m not in SERVERS)
+        self.event(m, "change", "tether config set dashboard.theme mocha")
+        for _ in range(SETTLE + 2 * self.steady):
+            self.round("after-change")
+
+    def in_profile(self, m, profile):
+        mid = self.ids.get(m)
+        text = dexec(m, "cat /root/.tether/config.toml").stdout
+        return re.search(rf'^"?{re.escape(mid)}"? = "{profile}"$', text, re.MULTILINE) is not None
+
+    def event(self, m, phase, command):
+        rnd = f"{phase}{len(self.rounds) + 1}"
+        self.events.append(f"{m}: {command} before R{len(self.rounds) + 1}")
+        print(f"  {m}: {command}")
+        r = self.run_tether(rnd, phase, m, command)
+        if r["rc"] != 0:
+            raise SystemExit(f"{m}: {command} failed, see {r['log']}")
 
     def collect(self):
         calls = {}
@@ -259,6 +328,11 @@ def seeded():
         if parts and not line.startswith("#"):
             seeds.setdefault(parts[0], set()).add((parts[1], parts[2]))
     return seeds
+
+
+def slug(label):
+    """A label as a file and container name: 'ref:abc/def' becomes 'ref-abc-def'."""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", label)
 
 
 def is_old(label):
@@ -337,6 +411,13 @@ def check(fleet, calls):
     results["e"] = e if start_heads else None
     results["e_trusted_installs"] = trusted_installs
 
+    # g to j: per-profile package sets
+    servers = [m for m in SERVERS if m in fleet.machines]
+    if servers:
+        g_to_j(fleet, calls, seeds, results, servers)
+    else:
+        results.update(g=None, h=None, i=None, j=None, k=None)
+
     # f: a to d in the rounds after the upgrade
     if rounds_after:
         f = [x for k in "abcd" for x in results[k] if x.split()[0] in rounds_after]
@@ -344,6 +425,107 @@ def check(fleet, calls):
     else:
         results["f"] = None
     return results
+
+
+def g_to_j(fleet, calls, seeds, results, servers):
+    order = []
+    for s in fleet.syncs:
+        if s["round"] not in order:
+            order.append(s["round"])
+
+    def at(rnd):
+        return order.index(rnd) if rnd in order else -1
+
+    share_at = next((at(s["round"]) for s in fleet.syncs if s["phase"] == "share"), None)
+    leave_at = next((at(s["round"]) for s in fleet.syncs if s["phase"] == "leave"), None)
+    _, _, shared = SHARED
+    devs = [m for m, v in fleet.start_version.items() if v == "head" and m not in servers]
+    server_names = {n for m in servers for _, n in seeds.get(m, ())}
+    dev_names = {n for m in devs for _, n in seeds.get(m, ())}
+    dev_only = dev_names - server_names
+    server_only = server_names - dev_names
+
+    g, h, i, j, dev_installs = [], [], [], [], []
+    for m in servers:
+        for e in calls.get(m, []):
+            for x in e.get("installs", []):
+                if x["name"] not in dev_only or x["already"]:
+                    continue
+                r = at(e["r"])
+                if x["name"] == shared and share_at is not None and share_at < r and (leave_at is None or r < leave_at):
+                    h.append(f"{e['r']} {m}")
+                elif x["name"] == shared and leave_at is not None and r > leave_at:
+                    i.append(f"{e['r']} {m} installed {shared} again after leaving it")
+                else:
+                    g.append(f"{e['r']} {m} installed {x['key']} {x['name']} that only dev machines list")
+    for m in devs:
+        for e in calls.get(m, []):
+            for x in e.get("uninstalls", []):
+                if x["name"] == shared:
+                    i.append(f"{e['r']} {m} uninstalled {shared}")
+            for x in e.get("installs", []):
+                if x["name"] in server_only:
+                    j.append(f"{e['r']} {m} installed {x['key']} {x['name']} that only the server lists")
+                elif x["name"] in dev_names and not x["already"]:
+                    dev_installs.append((m, x["name"]))
+    left = [x for m in servers for e in calls.get(m, []) for x in e.get("uninstalls", []) if x["name"] == shared]
+    if leave_at is not None and not left:
+        i.append(f"no server machine uninstalled {shared}")
+    results["g"] = g
+    results["h"] = [] if h or share_at is None else [f"no server machine installed {shared} after it was shared"]
+    results["h_installs"] = h
+    results["i"] = i
+    for m in devs:
+        others = {n for d in devs if d != m for _, n in seeds.get(d, ())} - {n for _, n in seeds.get(m, ())}
+        missing = others - {n for d, n in dev_installs if d == m}
+        if missing:
+            j.append(f"{m} never installed {', '.join(sorted(missing))} from its dev peers")
+    results["j"] = j
+    k = []
+    for m in fleet.lost:
+        warned = any("no longer puts this machine in profile server" in (fleet.out / s["log"]).read_text()
+                     for s in fleet.syncs if s["machine"] == m)
+        k.append(f"{m} lost its server profile ({'with' if warned else 'without'} the warning)")
+    results["k"] = k
+
+
+def check_flap(fleet):
+    """(a), and whether HEAD machines settle after one config.toml change."""
+    results = {"a": [f"{s['round']} {s['machine']} [{s['version']}] rc={s['rc']} {' | '.join(s['parse_errors'])} ({s['log']})"
+                     for s in fleet.syncs if s["rc"] != 0 or s["parse_errors"]]}
+    after = [r["round"] for r in fleet.rounds if r["phase"] == "after-change"]
+    config = "configs/tether/config.toml.enc"
+    # A HEAD machine may export once, in the round it applies the change; later rounds must be quiet
+    results["l"] = [f"{s['round']} {s['machine']} committed {config}" for s in fleet.syncs
+                    if s["round"] in after[1:] and s["version"] == "head" and config in s["changed"]]
+    results["flap_1x"] = {r: [s["machine"] for s in fleet.syncs
+                              if s["round"] == r and is_old(s["version"]) and config in s["changed"]] for r in after}
+    return results
+
+
+def report_flap(fleet, results):
+    lines = ["", "Round   1.x machines that committed config.toml"]
+    for r, ms in results["flap_1x"].items():
+        lines.append(f"{r:<7} {' '.join(ms) or '-'}")
+    lines.append("")
+    failed = False
+    for k, desc in (("a", "every machine loads config and syncs every round"),
+                    ("l", "HEAD machines stop committing config.toml after they applied the change")):
+        v = results[k]
+        failed |= bool(v)
+        lines.append(f"  {k}  {'FAIL' if v else 'pass'}  {desc}" + (f" ({len(v)} findings)" if v else ""))
+        for x in v[:8]:
+            lines.append(f"         {x}")
+    last = list(results["flap_1x"].values())[-2:]
+    lines.append(f"  1.x config flapping in the last two rounds: {'yes' if any(last) else 'no'} (reported, not checked)")
+    lines.append(f"\nLogs: {fleet.out}")
+    text = "\n".join(lines)
+    print(text)
+    (fleet.out / "summary.txt").write_text(text + "\n")
+    (fleet.out / "summary.json").write_text(json.dumps(
+        {"fleet": fleet.start_version, "head": fleet.head_sha, "events": fleet.events,
+         "rounds": fleet.rounds, "syncs": fleet.syncs, "results": results}, indent=1))
+    return failed
 
 
 def report(fleet, results):
@@ -361,6 +543,11 @@ def report(fleet, results):
         "d": "manifests never flip",
         "e": "HEAD machines never install packages only 1.x records list",
         "f": "(a)-(d) hold after a 1.13.1 machine upgrades to HEAD",
+        "g": "the server machine installs no dev-only package that is not shared with it",
+        "h": "the server machine installs a package once it is shared with its profile",
+        "i": "after the server leaves a shared package, dev machines keep it and the server stops",
+        "j": "dev HEAD machines install each other's packages and never the server's",
+        "k": "the server keeps its profile assignment to the end",
     }
     failed = False
     for k, desc in names.items():
@@ -397,12 +584,15 @@ def main():
     ap.add_argument("--out", default=str(ROOT / "target" / "fleet"))
     ap.add_argument("--cache", default=str(ROOT / "target" / "fleet-bin"))
     ap.add_argument("--keep", action="store_true", help="leave the containers running")
+    ap.add_argument("--scenario", choices=("default", "config-flap"), default="default")
     opts = ap.parse_args()
 
     fleet = Fleet(opts)
     sh("rm", "-rf", str(fleet.out))
     (fleet.out / "logs").mkdir(parents=True)
     t0 = time.time()
+    if opts.scenario == "config-flap":
+        fleet.upgrade = {}
     labels = sorted(set(fleet.machines.values()) | set(fleet.upgrade.values()))
     print(f"Building {', '.join(labels)} (HEAD {fleet.head_sha[:12]})", flush=True)
     with concurrent.futures.ThreadPoolExecutor() as pool:
@@ -411,13 +601,20 @@ def main():
     print(f"Starting fleet: {', '.join(f'{m}={v}' for m, v in fleet.machines.items())}", flush=True)
     try:
         fleet.start()
-        fleet.init()
-        fleet.phases()
-        calls = fleet.collect()
+        if opts.scenario == "config-flap":
+            fleet.init([])
+            fleet.flap()
+        else:
+            fleet.init([m for m in SERVERS if m in fleet.machines])
+            fleet.phases()
+            calls = fleet.collect()
     finally:
         if not opts.keep:
             fleet.teardown()
-    failed = report(fleet, check(fleet, calls))
+    if opts.scenario == "config-flap":
+        failed = report_flap(fleet, check_flap(fleet))
+    else:
+        failed = report(fleet, check(fleet, calls))
     print(f"Took {time.time() - t0:.0f}s")
     sys.exit(1 if failed else 0)
 

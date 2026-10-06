@@ -44,12 +44,20 @@ def write(key, pkgs):
 
 
 INSTALLS = []
+UNINSTALLS = []
 
 
 def install(key, name, version, spec):
     pkgs = installed(key)
     INSTALLS.append({"key": key, "name": name, "spec": spec, "already": name in pkgs})
     pkgs[name] = version or REGISTRY_VERSION
+    write(key, pkgs)
+
+
+def uninstall(key, name):
+    pkgs = installed(key)
+    UNINSTALLS.append({"key": key, "name": name, "present": name in pkgs})
+    pkgs.pop(name, None)
     write(key, pkgs)
 
 
@@ -88,6 +96,10 @@ def npm_like(tool, args):
         for spec in positional(args[1:]):
             name, version = split_npm(spec)
             install(key, name, version, spec)
+        return ""
+    if args[:1] in (["uninstall"], ["remove"]) and "-g" in args:
+        for name in positional(args[1:]):
+            uninstall(key, name)
         return ""
     if args[:1] == ["outdated"]:
         return "{}" if tool != "bun" else ""
@@ -224,6 +236,8 @@ def main():
         entry = {"r": read_round(), "tool": tool, "argv": args}
         if INSTALLS:
             entry["installs"] = INSTALLS
+        if UNINSTALLS:
+            entry["uninstalls"] = UNINSTALLS
         with open(f"{STATE}/calls.jsonl", "a") as f:
             f.write(json.dumps(entry) + "\n")
     if out:
