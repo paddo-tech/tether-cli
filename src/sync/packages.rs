@@ -199,8 +199,11 @@ pub async fn import_packages(
     }
     let listed = Listed::new(&trust.provenance.records, machine_state);
     // An item for a package this machine's profile left is dropped like an unlisted one
+    let needed_taps = gated.needed_taps;
     outcome.queued = inbox::settle(gated.held, &gated.passed, |m, n| {
-        listed.holds(m, n) && scope.includes(m, n)
+        listed.holds(m, n)
+            && (scope.includes(m, n)
+                || (m == "brew_taps" && needed_taps.contains(&n.to_lowercase())))
     })?;
     report_held(&outcome.queued);
     outcome.queued.splice(0..0, held_machines);
@@ -252,6 +255,21 @@ struct Gated {
     held: Vec<InboxItem>,
     /// May install now, as manager key and name. A pending item for one is dropped.
     passed: Vec<(String, String)>,
+    /// Taps, lowercase, that an included formula or cask names. They count as in scope, so
+    /// a formula shared to this profile brings its tap
+    needed_taps: HashSet<String>,
+}
+
+/// The taps the formulae and casks name, as `owner/repo/name` does, lowercase.
+fn needed_taps(packages: &BrewfilePackages) -> HashSet<String> {
+    packages
+        .formulae
+        .iter()
+        .chain(&packages.casks)
+        .filter_map(|name| name.rsplit_once('/'))
+        .map(|(tap, _)| tap.to_lowercase())
+        .filter(|tap| tap.contains('/'))
+        .collect()
 }
 
 fn report_held(items: &[InboxItem]) {
@@ -724,9 +742,11 @@ async fn import_brew(
     brew_packages
         .casks
         .retain(|p| !removed_casks.contains(p) && scope.includes("brew_casks", p));
-    brew_packages
-        .taps
-        .retain(|p| !removed_taps.contains(p) && scope.includes("brew_taps", p));
+    gated.needed_taps = needed_taps(&brew_packages);
+    brew_packages.taps.retain(|p| {
+        !removed_taps.contains(p)
+            && (scope.includes("brew_taps", p) || gated.needed_taps.contains(&p.to_lowercase()))
+    });
     brew_packages.retain_valid();
     if !import_casks {
         // Drop pending inbox items for casks this machine never installs
@@ -2190,6 +2210,18 @@ mod tests {
         assert_eq!(
             held(&trust, "other", other.1.as_deref()),
             vec![Reason::Unsigned]
+        );
+    }
+
+    #[test]
+    fn an_included_formula_brings_its_tap() {
+        let packages = BrewfilePackages::parse(
+            "tap \"vendor/tools\"\ntap \"other/tap\"\nbrew \"Vendor/Tools/thing\"\nbrew \"wget\"\ncask \"homebrew/cask/zoom\"\n",
+        );
+        let needed = needed_taps(&packages);
+        assert_eq!(
+            needed,
+            HashSet::from(["vendor/tools".to_string(), "homebrew/cask".to_string()])
         );
     }
 
