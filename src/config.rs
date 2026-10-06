@@ -1212,9 +1212,35 @@ mod tests {
                 config
                     .machine_profiles
                     .insert(id.to_string(), "dev".to_string());
-                config
-                    .profiles
-                    .insert(id.to_string(), ProfileConfig::default());
+                config.profiles.insert(
+                    id.to_string(),
+                    ProfileConfig {
+                        dotfiles: vec![ProfileDotfileEntry::Simple(format!(".{}rc", id))],
+                        dirs: vec![format!(".config/{}", id)],
+                        packages: vec!["brew".to_string(), "npm".to_string()],
+                    },
+                );
+                let teams = config.teams.get_or_insert_with(Default::default);
+                teams.teams.insert(
+                    id.to_string(),
+                    TeamConfig {
+                        enabled: true,
+                        url: format!("git@github.com:{}/dotfiles.git", id),
+                        auto_inject: false,
+                        read_only: true,
+                        orgs: vec![format!("github.com/{}", id)],
+                    },
+                );
+                teams.collabs.insert(
+                    id.to_string(),
+                    CollabConfig {
+                        sync_url: format!("git@github.com:{}/collab.git", id),
+                        projects: vec![format!("github.com/{}/app", id)],
+                        members_cache: vec![id.to_string()],
+                        last_refresh: None,
+                        enabled: true,
+                    },
+                );
             }
             toml::to_string_pretty(&config).unwrap()
         };
