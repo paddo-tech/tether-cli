@@ -250,8 +250,27 @@ impl GitBackend {
         Ok(())
     }
 
+    /// Fetch origin/main without changing the local branch.
+    pub fn fetch(&self) -> Result<()> {
+        let output = Command::new("git")
+            .args(["fetch", "origin", "main"])
+            .current_dir(&self.repo_path)
+            .stdin(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to fetch changes: {}", error));
+        }
+        Ok(())
+    }
+
+    /// Push main once. A rejected push fails and leaves the local commits as they are.
+    pub fn push_once(&self) -> Result<()> {
+        self.git(&["push", "origin", "main"])
+    }
+
     /// Reset local branch to match remote
-    fn reset_to_remote(&self) -> Result<()> {
+    pub fn reset_to_remote(&self) -> Result<()> {
         let output = Command::new("git")
             .args(["reset", "--hard", "origin/main"])
             .current_dir(&self.repo_path)

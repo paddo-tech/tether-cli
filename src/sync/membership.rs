@@ -60,10 +60,10 @@ fn merge_entry(
     Ok((toml::to_string_pretty(&file)?, conflict))
 }
 
-/// Set one package's members in the repo and push. Under the sync lock, each attempt pulls,
-/// reads the file again and changes only this entry, so edits to other packages from other
-/// machines are kept. An edit to the same package from another machine is replaced: the
-/// last writer wins, with a warning.
+/// Set one package's members in the repo and push. Under the sync lock, each attempt resets
+/// to the remote branch, reads the file again and changes only this entry, so edits to
+/// other packages from other machines are kept. An edit to the same package from another
+/// machine is replaced: the last writer wins, with a warning.
 pub fn save_members(
     sync_path: &Path,
     id: &str,
@@ -72,11 +72,22 @@ pub fn save_members(
 ) -> Result<()> {
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let repo = GitBackend::open(sync_path)?;
+    // Each attempt resets to the remote branch, which must drop only this edit's commit
+    if repo.has_changes()? || repo.has_unpushed_commits() {
+        anyhow::bail!(
+            "The sync repo has changes that are not pushed. Run 'tether sync', then try again"
+        );
+    }
     let path = sync_path.join(FILE);
     let mut last_error = None;
     for _ in 0..3 {
-        repo.pull()?;
-        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        repo.fetch()?;
+        repo.reset_to_remote()?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
         let (text, conflict) = merge_entry(&text, id, base, members)?;
         if conflict {
             crate::cli::Output::warning(&format!(
@@ -91,7 +102,7 @@ pub fn save_members(
             &format!("Set profiles of {}", id),
             &crate::sync::local_hostname(),
         )?;
-        match repo.push() {
+        match repo.push_once() {
             Ok(()) => return Ok(()),
             Err(e) => last_error = Some(e),
         }
