@@ -8,7 +8,7 @@ use crate::packages::{
     normalize_formula_name, BrewManager, BrewfilePackages, Cooldown, Ecosystem, PackageInfo,
     PackageManager, PackagePolicy,
 };
-use crate::sync::membership::Membership;
+use crate::sync::membership::{self, Membership};
 use crate::sync::signing::{self, Generations, RecordStatus, SignedRecord, TrustStore};
 use crate::sync::state::{InstallFailure, PackageState};
 use crate::sync::{GitBackend, MachineState, SyncState};
@@ -83,6 +83,8 @@ pub struct ImportOutcome {
     pub queued: Vec<InboxItem>,
     /// Trusted machines whose record newly fails its signature
     pub signature_failed: Vec<String>,
+    /// Why the package profiles table does not read, when this sync first met the error
+    pub membership_error: Option<String>,
 }
 
 /// Import packages from manifests, installing only missing packages that pass the
@@ -119,7 +121,28 @@ pub async fn import_packages(
             id
         ));
     }
-    let scope = Membership::load(config, sync_path, machine_state)?;
+    let table = match membership::read_table(sync_path) {
+        Ok(table) => {
+            state.membership_error = None;
+            table
+        }
+        Err(e) => {
+            // Without the table every package would install everywhere, so none installs
+            let error = e.to_string();
+            Output::warning(&format!(
+                "{}. Tether installs no synced packages until the file reads. Fix or delete it \
+                 in the sync repo",
+                error
+            ));
+            if state.membership_error.as_deref() != Some(error.as_str()) {
+                state.membership_error = Some(error.clone());
+                outcome.membership_error = Some(error);
+            }
+            outcome.queued = held_machines;
+            return Ok(outcome);
+        }
+    };
+    let scope = Membership::load(config, sync_path, machine_state, &table)?;
     notify_excluded(&scope, &mut state.profile_notice_shown);
     let mut gated = Gated::default();
 
@@ -2562,6 +2585,7 @@ mod tests {
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
             profile_notice_shown: false,
+            membership_error: None,
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -2591,6 +2615,7 @@ mod tests {
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
             profile_notice_shown: false,
+            membership_error: None,
         };
 
         state.packages.insert(

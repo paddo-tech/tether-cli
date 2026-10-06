@@ -220,13 +220,14 @@ pub async fn run() -> Result<()> {
         println!();
         println!("  {}", "Packages".bright_cyan().bold());
         Output::divider();
-        if let Ok(m) = crate::sync::membership::Membership::load_current(&config) {
-            println!(
+        match crate::sync::membership::Membership::load_current(&config) {
+            Ok(m) => println!(
                 "  Installs the packages of profile {}. Not installed here: {} package(s) of \
                  other profiles",
                 m.profile,
                 m.excluded().len()
-            );
+            ),
+            Err(e) => Output::warning(&format!("{}. No synced package installs", e)),
         }
         for (manager, pkg_state) in &state.packages {
             let time = pkg_state

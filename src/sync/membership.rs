@@ -24,19 +24,18 @@ struct ProfilesFile {
     profiles: Table,
 }
 
-/// The table in the sync repo. A missing or unreadable file is an empty table, so every
-/// package falls back to implicit membership.
-pub fn read_table(sync_path: &Path) -> Table {
-    let Ok(text) = std::fs::read_to_string(sync_path.join(FILE)) else {
-        return Table::new();
+/// The table in the sync repo. A missing file is an empty table, so every package has
+/// implicit membership. A file that exists but does not read is an error, never an empty
+/// table: implicit membership would widen every package the table narrows.
+pub fn read_table(sync_path: &Path) -> Result<Table> {
+    let text = match std::fs::read_to_string(sync_path.join(FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Table::new()),
+        Err(e) => anyhow::bail!("Cannot read {} in the sync repo: {}", FILE, e),
     };
-    match toml::from_str::<ProfilesFile>(&text) {
-        Ok(file) => file.profiles,
-        Err(e) => {
-            crate::cli::Output::warning(&format!("Cannot read {}: {}", FILE, e));
-            Table::new()
-        }
-    }
+    toml::from_str::<ProfilesFile>(&text)
+        .map(|file| file.profiles)
+        .map_err(|e| anyhow::anyhow!("Cannot read {} in the sync repo: {}", FILE, e))
 }
 
 /// Apply one package's new members to the file text. Returns the new text, and whether
@@ -179,9 +178,13 @@ impl Membership {
         membership
     }
 
-    /// Read the table and the records in the repo as a sync does. `this` is this machine's
-    /// current record.
-    pub fn load(config: &Config, sync_path: &Path, this: &MachineState) -> Result<Self> {
+    /// Read the records in the repo as a sync does. `this` is this machine's current record.
+    pub fn load(
+        config: &Config,
+        sync_path: &Path,
+        this: &MachineState,
+        table: &Table,
+    ) -> Result<Self> {
         let statuses = signing::record_statuses(sync_path, &this.machine_id)?;
         let records = signing::records(sync_path);
         let others: Vec<(&MachineState, bool)> = records
@@ -195,7 +198,7 @@ impl Membership {
                 (r, trusted)
             })
             .collect();
-        Ok(Self::new(config, &read_table(sync_path), this, &others))
+        Ok(Self::new(config, table, this, &others))
     }
 
     /// For commands outside a sync: this machine's last saved record, and the repo as it is.
@@ -204,7 +207,7 @@ impl Membership {
         let sync_path = SyncEngine::sync_path()?;
         let this = signing::own_record(&sync_path, &state.machine_id)?
             .unwrap_or_else(|| MachineState::new(&state.machine_id));
-        Self::load(config, &sync_path, &this)
+        Self::load(config, &sync_path, &this, &read_table(&sync_path)?)
     }
 
     /// The profiles the package belongs to: its table entry, else the profiles of the
@@ -505,6 +508,17 @@ mod tests {
         // Another machine changed npm:b after this machine read it as dev only
         let (_, conflict) = merge_entry(text, "npm:b", &set(&["dev"]), &set(&["server"])).unwrap();
         assert!(conflict);
+    }
+
+    #[test]
+    fn an_unreadable_table_is_an_error_not_an_empty_table() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_table(dir.path()).unwrap().is_empty());
+        std::fs::create_dir_all(dir.path().join("packages")).unwrap();
+        std::fs::write(dir.path().join(FILE), "[profiles]\n\"npm:a\" = \"dev\"\n").unwrap();
+        assert!(read_table(dir.path()).is_err());
+        std::fs::write(dir.path().join(FILE), "[profiles]\n\"npm:a\" = [\"dev\"]\n").unwrap();
+        assert_eq!(read_table(dir.path()).unwrap()["npm:a"], vec!["dev"]);
     }
 
     #[test]

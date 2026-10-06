@@ -518,6 +518,7 @@ mod tests {
             record_status: Vec::new(),
             old_builds: Vec::new(),
             membership: None,
+            membership_error: None,
         };
         App::new(state, HashMap::new())
     }

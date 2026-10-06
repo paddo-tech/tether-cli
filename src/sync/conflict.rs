@@ -420,6 +420,14 @@ pub fn notify_signature_failed(ids: &[String]) -> Result<()> {
     )
 }
 
+/// Notify that the package profiles table does not read, so no synced package installs
+pub fn notify_membership_error() -> Result<()> {
+    notify(
+        "Synced packages are not installing",
+        "packages/profiles.toml in the sync repo does not read. Fix or delete it",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

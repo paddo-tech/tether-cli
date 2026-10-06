@@ -21,6 +21,9 @@ pub struct DashboardState {
     pub old_builds: Vec<String>,
     /// The profiles each package belongs to, as a sync reads the records
     pub membership: Option<crate::sync::membership::Membership>,
+    /// Why the package profiles table does not read. Membership is then unknown, never
+    /// implicit
+    pub membership_error: Option<String>,
 }
 
 impl DashboardState {
@@ -53,8 +56,20 @@ impl DashboardState {
             .into_iter()
             .map(|(id, status, _)| (id, status))
             .collect();
-        let membership = match (&config, &sync_state) {
-            (Some(config), Some(s)) => {
+        let mut membership_error = None;
+        let table = match sync_path
+            .as_deref()
+            .map(crate::sync::membership::read_table)
+        {
+            Some(Ok(table)) => Some(table),
+            Some(Err(e)) => {
+                membership_error = Some(e.to_string());
+                None
+            }
+            None => Some(Default::default()),
+        };
+        let membership = match (&config, &sync_state, &table) {
+            (Some(config), Some(s), Some(table)) => {
                 let this = machines
                     .iter()
                     .find(|m| m.machine_id == s.machine_id)
@@ -70,12 +85,8 @@ impl DashboardState {
                         (m, trusted)
                     })
                     .collect();
-                let table = sync_path
-                    .as_deref()
-                    .map(crate::sync::membership::read_table)
-                    .unwrap_or_default();
                 Some(crate::sync::membership::Membership::new(
-                    config, &table, &this, &others,
+                    config, table, &this, &others,
                 ))
             }
             _ => None,
@@ -101,6 +112,7 @@ impl DashboardState {
             record_status,
             old_builds,
             membership,
+            membership_error,
         }
     }
 

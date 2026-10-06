@@ -33,6 +33,10 @@ pub struct SyncState {
     /// Whether a sync named the packages of other profiles that this machine does not install
     #[serde(default)]
     pub profile_notice_shown: bool,
+    /// The error that stops Tether reading the package profiles table, once notified, so the
+    /// daemon notifies once per error
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_error: Option<String>,
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -479,6 +483,7 @@ impl SyncState {
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
             profile_notice_shown: false,
+            membership_error: None,
         }
     }
 

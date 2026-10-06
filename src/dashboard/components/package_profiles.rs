@@ -16,6 +16,10 @@ pub struct PackageProfiles {
 
 /// Open the checklist with the package's current members checked.
 pub fn open(app: &mut App, manager_key: &str, name: &str) {
+    if let Some(error) = app.state.membership_error.clone() {
+        app.flash_error(error);
+        return;
+    }
     let (Some(config), Some(membership)) = (&app.state.config, &app.state.membership) else {
         return;
     };

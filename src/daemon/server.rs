@@ -408,6 +408,14 @@ impl DaemonServer {
                 crate::sync::notify_signature_failed(&outcome.signature_failed).ok();
             }
 
+            if let Some(error) = &outcome.membership_error {
+                log::warn!(
+                    "{}. Tether installs no synced packages until it reads",
+                    error
+                );
+                crate::sync::notify_membership_error().ok();
+            }
+
             // One notification per batch of newly held packages
             if !outcome.queued.is_empty() {
                 let names: Vec<&str> = outcome.queued.iter().map(|i| i.name.as_str()).collect();
