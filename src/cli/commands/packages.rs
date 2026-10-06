@@ -234,19 +234,15 @@ fn split_id(id: &str) -> Result<(&str, &str)> {
 pub fn share(id: &str, to: &[String]) -> Result<()> {
     let (manager, name) = split_id(id)?;
     let config = crate::config::Config::load()?;
-    if let Some(unknown) = to
-        .iter()
-        .find(|p| !config.profiles.contains_key(p.as_str()))
-    {
+    let choices = membership::profile_choices(
+        &config,
+        &Membership::load_current(&config)?.members(manager, name),
+    );
+    if let Some(unknown) = to.iter().find(|p| !choices.contains(p.as_str())) {
         anyhow::bail!(
             "No profile '{}'. Profiles: {}",
             unknown,
-            config
-                .profiles
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
+            choices.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
     let edit = Edit {

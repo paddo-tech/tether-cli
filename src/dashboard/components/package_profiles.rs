@@ -26,9 +26,10 @@ pub fn open(app: &mut App, manager_key: &str, name: &str) {
     let (Some(config), Some(membership)) = (&app.state.config, &app.state.membership) else {
         return;
     };
-    let mut options: Vec<String> = config.profiles.keys().cloned().collect();
-    options.sort();
     let checked = membership.members(manager_key, name);
+    let mut choices = crate::sync::membership::profile_choices(config, &checked);
+    choices.insert(membership.profile.clone());
+    let options: Vec<String> = choices.into_iter().collect();
     app.overlays.push(Overlay::PackageProfiles(PackageProfiles {
         manager_key: manager_key.to_string(),
         name: name.to_string(),

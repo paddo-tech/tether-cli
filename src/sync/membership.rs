@@ -199,6 +199,19 @@ pub fn canonical_id(manager: &str, name: &str) -> String {
     format!("{}:{}", manager, name)
 }
 
+/// The profiles a package can belong to: those the config defines, the default profile,
+/// which machines without a profile use even when the config does not define it, and the
+/// package's current members.
+pub fn profile_choices(config: &Config, members: &BTreeSet<String>) -> BTreeSet<String> {
+    config
+        .profiles
+        .keys()
+        .cloned()
+        .chain([DEFAULT_PROFILE.to_string()])
+        .chain(members.iter().cloned())
+        .collect()
+}
+
 /// A machine without a profile counts as the default profile, as everywhere else in Tether.
 fn record_profile(record: &MachineState) -> &str {
     record.profile.as_deref().unwrap_or(DEFAULT_PROFILE)
@@ -624,6 +637,15 @@ mod tests {
         let file: ProfilesFile = toml::from_str(&merged).unwrap();
         assert_eq!(file.profiles.len(), 1);
         assert_eq!(file.profiles["uv:ruff"], vec!["dev", "server"]);
+    }
+
+    #[test]
+    fn the_default_profile_and_current_members_are_choices() {
+        let c = Config::default();
+        assert!(!c.profiles.contains_key(DEFAULT_PROFILE));
+        let choices = profile_choices(&c, &set(&["old"]));
+        assert!(choices.contains(DEFAULT_PROFILE));
+        assert!(choices.contains("old"));
     }
 
     #[test]
