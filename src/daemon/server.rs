@@ -221,6 +221,7 @@ impl DaemonServer {
             if let Some(new_config) =
                 crate::cli::commands::sync::sync_tether_config(&sync_path, &home)?
             {
+                crate::cli::commands::sync::warn_changed_profile(&config, &new_config);
                 config = new_config;
             }
         }
