@@ -83,12 +83,13 @@ pub fn save_members(
     for _ in 0..3 {
         repo.fetch()?;
         repo.reset_to_remote()?;
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        let previous = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.into()),
         };
-        let (text, conflict) = merge_entry(&text, id, base, members)?;
+        let (text, conflict) =
+            merge_entry(previous.as_deref().unwrap_or_default(), id, base, members)?;
         if conflict {
             crate::cli::Output::warning(&format!(
                 "Another machine changed the profiles of {} since this machine read them. \
@@ -96,16 +97,31 @@ pub fn save_members(
                 id
             ));
         }
-        std::fs::create_dir_all(path.parent().expect("FILE has a directory"))?;
-        crate::sync::atomic_write(&path, text.as_bytes())?;
-        repo.commit(
-            &format!("Set profiles of {}", id),
-            &crate::sync::local_hostname(),
-        )?;
-        match repo.push_once() {
-            Ok(()) => return Ok(()),
-            Err(e) => last_error = Some(e),
+        let written = (|| {
+            std::fs::create_dir_all(path.parent().expect("FILE has a directory"))?;
+            crate::sync::atomic_write(&path, text.as_bytes())?;
+            repo.commit(
+                &format!("Set profiles of {}", id),
+                &crate::sync::local_hostname(),
+            )
+        })();
+        let committed = written.is_ok();
+        let pushed = written.and_then(|()| repo.push_once());
+        let Err(e) = pushed else {
+            return Ok(());
+        };
+        // A failed attempt leaves the repo as the remote has it, so a sync never pushes it
+        repo.reset_to_remote()?;
+        if previous.is_none() {
+            match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
         }
+        if !committed {
+            return Err(e);
+        }
+        last_error = Some(e);
     }
     Err(last_error.expect("three attempts failed"))
 }
@@ -593,5 +609,100 @@ mod tests {
             toml::from_str("version = 2\n[profiles]\n\"npm:a\" = [\"dev\"]\n[later]\nx = 1\n")
                 .unwrap();
         assert_eq!(file.profiles["npm:a"], vec!["dev"]);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "git {:?}: {:?}", args, status);
+    }
+
+    fn read_entries(dir: &Path) -> Table {
+        read_table(dir).unwrap()
+    }
+
+    /// A bare remote whose main has the table, and two clones of it.
+    fn remote_with_clones(
+        root: &Path,
+        table: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::create_dir_all(seed.join("packages")).unwrap();
+        git(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        git(&seed, &["init", "-q", "-b", "main"]);
+        std::fs::write(seed.join(FILE), table).unwrap();
+        GitBackend::new(seed.clone())
+            .commit("seed", "test")
+            .unwrap();
+        git(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-q", "origin", "main"]);
+        let clone = |name: &str| {
+            let dir = root.join(name);
+            git(
+                root,
+                &[
+                    "clone",
+                    "-q",
+                    remote.to_str().unwrap(),
+                    dir.to_str().unwrap(),
+                ],
+            );
+            dir
+        };
+        let (a, b) = (clone("a"), clone("b"));
+        (remote, a, b)
+    }
+
+    #[test]
+    fn save_members_starts_from_the_remote_and_leaves_nothing_behind() {
+        let root = tempfile::tempdir().unwrap();
+        let (remote, a, b) = remote_with_clones(
+            root.path(),
+            "[profiles]\n\"npm:a\" = [\"dev\"]\n\"npm:b\" = [\"dev\"]\n",
+        );
+
+        // b changes the adjacent entry and pushes; a is now behind the remote
+        save_members(&b, "npm:b", &set(&["dev"]), &set(&["dev", "server"])).unwrap();
+        save_members(&a, "npm:a", &set(&["dev"]), &set(&["server"])).unwrap();
+        let table = read_entries(&a);
+        assert_eq!(table["npm:a"], vec!["server"]);
+        assert_eq!(table["npm:b"], vec!["dev", "server"]);
+        let repo = GitBackend::open(&a).unwrap();
+        assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
+
+        // A save never commits changes it did not make
+        std::fs::write(a.join("stray"), "x").unwrap();
+        assert!(save_members(&a, "npm:a", &set(&["server"]), &set(&["dev"])).is_err());
+        std::fs::remove_file(a.join("stray")).unwrap();
+
+        // A rejected push leaves the clone as the remote has it
+        let hook = remote.join("hooks/pre-receive");
+        let reject_pushes = || {
+            std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        };
+        reject_pushes();
+        assert!(save_members(&a, "npm:a", &set(&["server"]), &set(&["dev"])).is_err());
+        assert_eq!(read_entries(&a)["npm:a"], vec!["server"]);
+        assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
+
+        // Also when the file did not exist before the save
+        std::fs::remove_file(&hook).unwrap();
+        git(&a, &["rm", "-q", FILE]);
+        GitBackend::new(a.clone()).commit("drop", "test").unwrap();
+        git(&a, &["push", "-q", "origin", "main"]);
+        reject_pushes();
+        assert!(save_members(&a, "npm:a", &BTreeSet::new(), &set(&["dev"])).is_err());
+        assert!(!a.join(FILE).exists());
+        assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
     }
 }
