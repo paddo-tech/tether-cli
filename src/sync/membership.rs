@@ -51,6 +51,10 @@ fn merge_entry(
         .profiles
         .get(id)
         .is_some_and(|now| now.iter().cloned().collect::<BTreeSet<_>>() != *base);
+    // The canonical entry replaces any other spelling of the same package
+    let canonical = id.split_once(':').map(|(manager, name)| key(manager, name));
+    file.profiles
+        .retain(|other, _| other.split_once(':').map(|(m, n)| key(m, n)) != canonical);
     file.profiles
         .insert(id.to_string(), members.iter().cloned().collect());
     Ok((toml::to_string_pretty(&file)?, conflict))
@@ -98,14 +102,37 @@ pub fn save_members(
 /// Manager key and name.
 type Key = (String, String);
 
-/// A Homebrew formula or cask may be named with or without its tap.
+/// A Homebrew formula or cask may be named with or without its tap. A Python package name
+/// compares as PEP 503 normalizes it. npm, pnpm, bun and gem names are case-sensitive.
 fn key(manager: &str, name: &str) -> Key {
-    let name = if manager == "brew_formulae" || manager == "brew_casks" {
-        normalize_formula_name(name)
-    } else {
-        name
+    let name = match manager {
+        "brew_formulae" | "brew_casks" => normalize_formula_name(name).to_string(),
+        "uv" => pep503(name),
+        _ => name.to_string(),
     };
-    (manager.to_string(), name.to_string())
+    (manager.to_string(), name)
+}
+
+/// Lowercase, with each run of `-`, `_` and `.` as one `-`.
+fn pep503(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !out.ends_with('-') {
+                out.push('-');
+            }
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    out
+}
+
+/// The table id for a package: `manager:name`, with the name as reads compare it. Writes
+/// use it, so one package never has two entries.
+pub fn canonical_id(manager: &str, name: &str) -> String {
+    let (manager, name) = key(manager, name);
+    format!("{}:{}", manager, name)
 }
 
 /// A machine without a profile counts as the default profile, as everywhere else in Tether.
@@ -137,13 +164,16 @@ impl Membership {
         others: &[(&MachineState, bool)],
     ) -> Self {
         let profile = config.profile_name(&this.machine_id).to_string();
-        let explicit = table
-            .iter()
-            .filter_map(|(id, members)| {
-                let (manager, name) = id.split_once(':')?;
-                Some((key(manager, name), members.iter().cloned().collect()))
-            })
-            .collect();
+        // Entries that name one package two ways count together
+        let mut explicit: HashMap<Key, BTreeSet<String>> = HashMap::new();
+        for (id, members) in table {
+            if let Some((manager, name)) = id.split_once(':') {
+                explicit
+                    .entry(key(manager, name))
+                    .or_default()
+                    .extend(members.iter().cloned());
+            }
+        }
         let mut membership = Self {
             profile: profile.clone(),
             explicit,
@@ -508,6 +538,31 @@ mod tests {
         // Another machine changed npm:b after this machine read it as dev only
         let (_, conflict) = merge_entry(text, "npm:b", &set(&["dev"]), &set(&["server"])).unwrap();
         assert!(conflict);
+    }
+
+    #[test]
+    fn ids_are_canonical_and_aliases_merge() {
+        assert_eq!(canonical_id("uv", "Ruamel.YAML__x"), "uv:ruamel-yaml-x");
+        assert_eq!(
+            canonical_id("brew_casks", "homebrew/cask/zoom"),
+            "brew_casks:zoom"
+        );
+        assert_eq!(canonical_id("npm", "JSONStream"), "npm:JSONStream");
+
+        let (c, mac1, mac2, server) = fleet();
+        let mut t = Table::new();
+        entry(&mut t, "uv:Ruff", set(&["server"]));
+        entry(&mut t, "uv:ruff", set(&["dev"]));
+        let on_server = Membership::new(&c, &t, &server, &[(&mac1, true), (&mac2, true)]);
+        assert_eq!(on_server.members("uv", "RUFF"), set(&["dev", "server"]));
+
+        // A write keeps one entry under the canonical id
+        let text = "[profiles]\n\"uv:Ruff\" = [\"server\"]\n\"uv:ruff\" = [\"dev\"]\n";
+        let (merged, _) =
+            merge_entry(text, "uv:ruff", &BTreeSet::new(), &set(&["dev", "server"])).unwrap();
+        let file: ProfilesFile = toml::from_str(&merged).unwrap();
+        assert_eq!(file.profiles.len(), 1);
+        assert_eq!(file.profiles["uv:ruff"], vec!["dev", "server"]);
     }
 
     #[test]

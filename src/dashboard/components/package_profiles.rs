@@ -59,7 +59,7 @@ pub fn handle_key(app: &mut App, mut picker: PackageProfiles, key: KeyEvent) -> 
                     .map(|m| m.members(&picker.manager_key, &picker.name))
                     .unwrap_or_default();
                 return Some(Cmd::SaveProfiles {
-                    id: format!("{}:{}", picker.manager_key, picker.name),
+                    id: crate::sync::membership::canonical_id(&picker.manager_key, &picker.name),
                     base,
                     members: picker.checked,
                 });

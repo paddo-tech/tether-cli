@@ -251,9 +251,10 @@ pub fn share(id: &str, to: &[String]) -> Result<()> {
     }
     let membership = Membership::load_current(&config)?;
     let members = membership.shared(manager, name, to);
+    let id = membership::canonical_id(manager, name);
     membership::save_members(
         &crate::sync::SyncEngine::sync_path()?,
-        id,
+        &id,
         &membership.members(manager, name),
         &members,
     )?;
@@ -272,7 +273,7 @@ pub async fn remove(id: &str) -> Result<()> {
     if let Some(keep) = membership.left(manager, name) {
         membership::save_members(
             &crate::sync::SyncEngine::sync_path()?,
-            id,
+            &membership::canonical_id(manager, name),
             &membership.members(manager, name),
             &keep,
         )?;

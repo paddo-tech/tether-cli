@@ -46,9 +46,11 @@ impl Runtime {
                 self.spawn(
                     async move {
                         if let Some((base, members)) = leave {
-                            if let Err(e) =
-                                save_profiles(&format!("{}:{}", manager_key, name), &base, &members)
-                            {
+                            if let Err(e) = save_profiles(
+                                &crate::sync::membership::canonical_id(&manager_key, &name),
+                                &base,
+                                &members,
+                            ) {
                                 return Msg::UninstallDone(Err(e));
                             }
                         }
