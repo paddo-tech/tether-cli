@@ -260,22 +260,41 @@ pub fn share(id: &str, to: &[String]) -> Result<()> {
 
 pub async fn remove(id: &str) -> Result<()> {
     let (manager, name) = split_id(id)?;
+    if manager == "brew_taps" {
+        anyhow::bail!(
+            "Tether does not remove taps. Run 'brew untap {}' on each machine that has it",
+            name
+        );
+    }
     let config = crate::config::Config::load()?;
     let membership = Membership::load_current(&config)?;
+    // The profile leaves the package only once it is gone here
+    crate::packages::uninstall(manager, name).await?;
+    Output::success(&format!("Uninstalled {}", id));
+    let members = membership.members(manager, name);
+    if !members.contains(&membership.profile) || members.len() == 1 {
+        return Ok(());
+    }
     let edit = Edit {
         remove: [membership.profile.clone()].into(),
         ..Edit::default()
     };
-    if let Some(keep) = membership::save_edit(&config, manager, name, &edit)? {
-        Output::info(&format!(
+    match membership::save_edit(&config, manager, name, &edit) {
+        Ok(Some(keep)) => Output::info(&format!(
             "Profile {} no longer installs {}. Profiles {} keep it",
             membership.profile,
             id,
             keep.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+        )),
+        Ok(None) => {}
+        Err(e) => anyhow::bail!(
+            "Uninstalled {}, but saving its profiles failed: {}. Other machines in profile {} \
+             still install it",
+            id,
+            e,
+            membership.profile
+        ),
     }
-    crate::packages::uninstall(manager, name).await?;
-    Output::success(&format!("Uninstalled {}", id));
     Ok(())
 }
 

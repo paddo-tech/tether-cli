@@ -80,7 +80,12 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
         Msg::UninstallDone(result) => {
             app.uninstalling = None;
             match result {
-                Ok(()) => app.follow_up_sync(),
+                Ok(not_saved) => {
+                    if let Some(e) = not_saved {
+                        app.flash_error(e);
+                    }
+                    app.follow_up_sync()
+                }
                 Err(e) => {
                     app.flash_error(format!("uninstall failed: {}", e));
                     None
@@ -634,6 +639,16 @@ mod tests {
             last_toast(&app),
             Some((ToastKind::Error, "uninstall failed: boom"))
         );
+        // The package is gone, so the sync still runs; the toast names what did not save
+        let cmd = update(
+            &mut app,
+            Msg::UninstallDone(Ok(Some("profiles not saved".into()))),
+        );
+        assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Error, "profiles not saved"))
+        );
     }
 
     #[test]
@@ -656,7 +671,7 @@ mod tests {
         let mut app = app();
         update(&mut app, Msg::JobStarted(Job::Sync));
         app.uninstalling = Some(("npm".into(), "left-pad".into()));
-        assert!(update(&mut app, Msg::UninstallDone(Ok(()))).is_none());
+        assert!(update(&mut app, Msg::UninstallDone(Ok(None))).is_none());
         let cmd = update(
             &mut app,
             Msg::JobExited {

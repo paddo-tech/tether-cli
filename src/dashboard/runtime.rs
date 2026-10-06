@@ -45,16 +45,19 @@ impl Runtime {
             } => {
                 self.spawn(
                     async move {
-                        if let Some(edit) = leave {
-                            if let Err(e) = save_profiles(&manager_key, &name, &edit) {
-                                return Msg::UninstallDone(Err(e));
-                            }
+                        // The profile leaves the package only once it is gone here
+                        if let Err(e) = crate::packages::uninstall(&manager_key, &name).await {
+                            return Msg::UninstallDone(Err(e.to_string()));
                         }
-                        Msg::UninstallDone(
-                            crate::packages::uninstall(&manager_key, &name)
-                                .await
-                                .map_err(|e| e.to_string()),
-                        )
+                        let not_saved = leave
+                            .and_then(|edit| save_profiles(&manager_key, &name, &edit).err())
+                            .map(|e| {
+                                format!(
+                                    "uninstalled {}, but saving its profiles failed: {}",
+                                    name, e
+                                )
+                            });
+                        Msg::UninstallDone(Ok(not_saved))
                     },
                     |e| Some(Msg::UninstallDone(Err(e))),
                 );
