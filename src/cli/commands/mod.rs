@@ -25,8 +25,8 @@ use clap::{Parser, Subcommand};
 #[command(about = "Sync your dev environment across machines", long_about = None)]
 #[command(version)]
 pub struct Cli {
-    /// Answer yes to confirmations and take the default answer of other questions. Approvals,
-    /// key trust and choices without a safe default still need a terminal or their own flags
+    /// Confirm without asking and take each question's default answer. Approvals and key
+    /// trust still need --expect or --fingerprint
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
 
@@ -89,13 +89,13 @@ pub enum Commands {
         action: DaemonAction,
     },
 
-    /// Manage machines in sync network
+    /// List, show, trust and remove machines, and manage profiles
     Machines {
         #[command(subcommand)]
         action: MachineAction,
     },
 
-    /// Manage ignore patterns
+    /// Manage what Tether ignores: secret scanning patterns, and files this machine keeps
     Ignore {
         #[command(subcommand)]
         action: IgnoreAction,
@@ -135,6 +135,9 @@ pub enum Commands {
 
     /// List, share and uninstall packages, and decide on the inbox. Without a subcommand,
     /// lists the installed packages
+    ///
+    /// A package id is manager:name, such as npm:typescript. Managers: brew_formulae (or
+    /// brew), brew_casks (or cask), brew_taps, npm, pnpm, bun, gem, uv.
     Packages {
         /// Same as `tether packages list`
         #[arg(long, hide = true)]
@@ -178,8 +181,6 @@ pub enum Commands {
     },
 }
 
-/// Package ids are `manager:name`. Managers: brew_formulae (alias brew), brew_casks (alias
-/// cask), brew_taps, npm, pnpm, bun, gem, uv.
 #[derive(Subcommand)]
 pub enum PackagesAction {
     /// List installed packages by manager, with the profiles each belongs to
@@ -188,13 +189,13 @@ pub enum PackagesAction {
         #[arg(long)]
         json: bool,
     },
-    /// List packages and machine keys waiting in the inbox for approval
+    /// List the inbox: packages and machine keys that wait for your approval
     Inbox {
         /// Print JSON (experimental in 2.0: field names may still change)
         #[arg(long)]
         json: bool,
     },
-    /// Approve a held package and install it
+    /// Approve an inbox item: install the package, or trust the machine key
     Approve {
         /// Item id (manager:name) or a package name. machine:<id> trusts that machine's key,
         /// as 'tether machines trust' does
@@ -203,9 +204,9 @@ pub enum PackagesAction {
         /// Same as --expect
         #[arg(conflicts_with = "expect", hide = true)]
         expected: Option<String>,
-        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a
-        /// terminal
-        #[arg(long)]
+        /// The version, Homebrew tap or key fingerprint you reviewed, as 'packages inbox'
+        /// shows it. Required without a terminal
+        #[arg(long, value_name = "VERSION|TAP|KEY")]
         expect: Option<String>,
         /// Approve and install every package in the inbox, except packages OSV lists as
         /// malicious, packages whose record fails its signature, and machine keys. Asks
@@ -213,19 +214,19 @@ pub enum PackagesAction {
         #[arg(long)]
         all: bool,
         /// With --all, only the items from this machine (id or hostname)
-        #[arg(long, requires = "all")]
+        #[arg(long, requires = "all", value_name = "MACHINE")]
         from: Option<String>,
     },
-    /// Reject a held package or key so syncs stop offering that version, tap or key
+    /// Reject an inbox item, so syncs stop offering that version, tap or key
     Reject {
         /// Item id (manager:name) or a package name
         id: String,
         /// Same as --expect
         #[arg(conflicts_with = "expect", hide = true)]
         expected: Option<String>,
-        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a
-        /// terminal
-        #[arg(long)]
+        /// The version, Homebrew tap or key fingerprint you reviewed, as 'packages inbox'
+        /// shows it. Required without a terminal
+        #[arg(long, value_name = "VERSION|TAP|KEY")]
         expect: Option<String>,
     },
     /// Install a package that another machine lists, as the dashboard's Import does. OSV
@@ -239,7 +240,7 @@ pub enum PackagesAction {
         /// Package as manager:name, such as npm:typescript or cask:zoom
         id: String,
         /// Profiles to add, separated by commas
-        #[arg(long, value_delimiter = ',', required = true)]
+        #[arg(long, value_delimiter = ',', required = true, value_name = "PROFILES")]
         to: Vec<String>,
     },
     /// Take profiles out of a package's members, so machines in those profiles stop
@@ -248,7 +249,7 @@ pub enum PackagesAction {
         /// Package as manager:name, such as npm:typescript or cask:zoom
         id: String,
         /// Profiles to take out, separated by commas
-        #[arg(long, value_delimiter = ',', required = true)]
+        #[arg(long, value_delimiter = ',', required = true, value_name = "PROFILES")]
         from: Vec<String>,
     },
     /// Uninstall a package here and take this machine's profile out of its members. Without
@@ -319,6 +320,7 @@ pub enum MachineAction {
     /// works in 2.0 and is deprecated
     Rename {
         /// The new name, or this machine's current name in the deprecated two-name form
+        #[arg(value_name = "NEW")]
         name: String,
         /// The new name, in the deprecated form
         #[arg(hide = true)]
@@ -340,7 +342,11 @@ pub enum MachineAction {
         fingerprint: Option<String>,
         /// Fingerprint you checked on that machine with 'tether machines show'
         /// (`SHA256:...`). Required without a terminal
-        #[arg(long = "fingerprint", id = "fingerprint_flag")]
+        #[arg(
+            long = "fingerprint",
+            id = "fingerprint_flag",
+            value_name = "SHA256:..."
+        )]
         fingerprint_flag: Option<String>,
     },
     /// Stop trusting a machine's signing key
@@ -357,7 +363,7 @@ pub enum MachineAction {
 
 #[derive(Subcommand)]
 pub enum MachineProfileAction {
-    /// Assign a profile to this machine
+    /// Assign a profile to this machine. Each machine sets only its own profile
     Set {
         /// Profile name (must exist in config)
         profile: String,
@@ -368,17 +374,19 @@ pub enum MachineProfileAction {
     /// -y takes every default, and --from copies a profile without asking
     Create {
         /// Profile name
+        #[arg(value_name = "PROFILE")]
         name: String,
         /// Copy this existing profile
-        #[arg(long)]
+        #[arg(long, value_name = "PROFILE")]
         from: Option<String>,
         /// Package managers of the profile, separated by commas (brew, npm, pnpm, bun, gem, uv)
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', value_name = "MANAGERS")]
         managers: Option<Vec<String>>,
     },
     /// Edit an existing profile
     Edit {
         /// Profile name
+        #[arg(value_name = "PROFILE")]
         name: String,
     },
     /// List all profiles
@@ -387,26 +395,58 @@ pub enum MachineProfileAction {
 
 #[derive(Subcommand)]
 pub enum IgnoreAction {
-    /// Add secret scanning ignore pattern
+    /// Patterns the secret scanner skips
+    Secrets {
+        #[command(subcommand)]
+        action: IgnoreSecretsAction,
+    },
+    /// Files this machine keeps: a sync does not overwrite them
+    Files {
+        #[command(subcommand)]
+        action: IgnoreFilesAction,
+    },
+    #[command(hide = true)]
     Add { pattern: String },
-    /// List secret scanning ignore patterns
+    #[command(hide = true)]
     List,
-    /// Remove secret scanning ignore pattern
+    #[command(hide = true)]
     Remove { pattern: String },
-    /// Ignore a dotfile on this machine (won't be overwritten during sync)
+    #[command(hide = true)]
     Dotfile { file: String },
-    /// Ignore a project config on this machine
+    #[command(hide = true)]
+    Project { project: String, path: String },
+    #[command(hide = true)]
+    SyncList,
+    #[command(hide = true)]
+    SyncRemove { file: String },
+}
+
+#[derive(Subcommand)]
+pub enum IgnoreSecretsAction {
+    /// Add a pattern the secret scanner skips
+    Add { pattern: String },
+    /// List the patterns
+    List,
+    /// Remove a pattern
+    Remove { pattern: String },
+}
+
+#[derive(Subcommand)]
+pub enum IgnoreFilesAction {
+    /// Keep a dotfile on this machine, such as .zshrc
+    Add { file: String },
+    /// Keep a project config file on this machine
     Project {
         /// Project identifier (repo name or path)
         project: String,
         /// Config file path relative to project root
         path: String,
     },
-    /// List files ignored on this machine
-    SyncList,
-    /// Unignore a file on this machine
-    SyncRemove {
-        /// File to unignore (dotfile name or "project:path")
+    /// List the files this machine keeps
+    List,
+    /// Sync a kept file again
+    Remove {
+        /// Dotfile name, or project:path
         file: String,
     },
 }
@@ -791,15 +831,36 @@ impl Cli {
                 },
             },
             Commands::Ignore { action } => match action {
-                IgnoreAction::Add { pattern } => ignore::add(pattern).await,
-                IgnoreAction::List => ignore::list().await,
-                IgnoreAction::Remove { pattern } => ignore::remove(pattern).await,
-                IgnoreAction::Dotfile { file } => ignore::ignore_dotfile(file).await,
-                IgnoreAction::Project { project, path } => {
+                IgnoreAction::Secrets {
+                    action: IgnoreSecretsAction::Add { pattern },
+                }
+                | IgnoreAction::Add { pattern } => ignore::add(pattern).await,
+                IgnoreAction::Secrets {
+                    action: IgnoreSecretsAction::List,
+                }
+                | IgnoreAction::List => ignore::list().await,
+                IgnoreAction::Secrets {
+                    action: IgnoreSecretsAction::Remove { pattern },
+                }
+                | IgnoreAction::Remove { pattern } => ignore::remove(pattern).await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::Add { file },
+                }
+                | IgnoreAction::Dotfile { file } => ignore::ignore_dotfile(file).await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::Project { project, path },
+                }
+                | IgnoreAction::Project { project, path } => {
                     ignore::ignore_project(project, path).await
                 }
-                IgnoreAction::SyncList => ignore::sync_list().await,
-                IgnoreAction::SyncRemove { file } => ignore::sync_remove(file).await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::List,
+                }
+                | IgnoreAction::SyncList => ignore::sync_list().await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::Remove { file },
+                }
+                | IgnoreAction::SyncRemove { file } => ignore::sync_remove(file).await,
             },
             Commands::Config { action } => match action {
                 ConfigAction::Get { key } => config::get(key).await,

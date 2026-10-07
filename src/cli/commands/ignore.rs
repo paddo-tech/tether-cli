@@ -42,7 +42,7 @@ pub async fn list() -> Result<()> {
 
     if !path.exists() {
         Output::info("No ignore patterns configured");
-        Output::info("Add patterns with: tether ignore add <pattern>");
+        Output::info("Add patterns with: tether ignore secrets add <pattern>");
         return Ok(());
     }
 
@@ -172,7 +172,7 @@ pub async fn sync_list() -> Result<()> {
 
     if !has_ignored {
         Output::info("No files are ignored on this machine");
-        Output::info("Use 'tether ignore dotfile <file>' or 'tether ignore project <project> <path>' to ignore files");
+        Output::info("Use 'tether ignore files add <file>' or 'tether ignore files project <project> <path>' to keep files");
         return Ok(());
     }
 

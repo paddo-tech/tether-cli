@@ -301,6 +301,36 @@ fn rename_with_two_names_is_deprecated_and_checks_this_machine() {
     fails(h.path(), &["machines", "show", "nope"], "not found");
 }
 
+#[test]
+fn ignore_secrets_and_files_with_the_old_forms_as_aliases() {
+    let h = home();
+    tether(h.path())
+        .args(["ignore", "secrets", "add", "*.pem"])
+        .assert()
+        .success();
+    tether(h.path())
+        .args(["ignore", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("*.pem"));
+    tether(h.path())
+        .args(["ignore", "remove", "*.pem"])
+        .assert()
+        .success();
+    fails(
+        h.path(),
+        &["ignore", "secrets", "remove", "*.pem"],
+        "not found",
+    );
+    let help = tether(h.path())
+        .args(["ignore", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("secrets") && help.contains("files"));
+    assert!(!help.contains("sync-list"));
+}
+
 fn json(home: &Path, args: &[&str]) -> serde_json::Value {
     let out = tether(home).args(args).output().unwrap();
     assert!(
