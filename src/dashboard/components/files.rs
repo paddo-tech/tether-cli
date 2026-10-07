@@ -159,6 +159,7 @@ fn confirm_restore(app: &mut App) {
         dotfile,
         commit: commit_hash.clone(),
         short_hash: short_hash.clone(),
+        arming: Default::default(),
     }));
 }
 
@@ -177,8 +178,10 @@ fn confirm_remove(app: &mut App) {
         })
         .unwrap_or(false);
     if is_personal {
-        app.overlays
-            .push(Overlay::Confirm(Confirm::RemoveFile { path: path.clone() }));
+        app.overlays.push(Overlay::Confirm(Confirm::RemoveFile {
+            path: path.clone(),
+            arming: Default::default(),
+        }));
     }
 }
 

@@ -245,7 +245,7 @@ impl App {
     /// The top confirm counts down before it accepts keys.
     fn confirm_arming(&self) -> bool {
         match self.overlays.last() {
-            Some(Overlay::Confirm(c)) => c.arming().is_some_and(|a| !a.armed(Instant::now())),
+            Some(Overlay::Confirm(c)) => !c.arming().armed(Instant::now()),
             _ => false,
         }
     }

@@ -17,7 +17,8 @@ const FILES: &[Hint] = &[
     ("x", "remove", k(KeyCode::Char('x'))),
 ];
 const PACKAGES: &[Hint] = &[
-    ("⏎", "expand/uninstall", k(KeyCode::Enter)),
+    ("⏎", "expand", k(KeyCode::Enter)),
+    ("x", "uninstall", k(KeyCode::Char('x'))),
     ("i", "import", k(KeyCode::Char('i'))),
     ("t", "profiles", k(KeyCode::Char('t'))),
     ("h", "history", k(KeyCode::Char('h'))),
@@ -148,7 +149,8 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         key("x", "Remove from profile"),
         Line::from(""),
         section("Packages"),
-        key("Enter", "Expand / uninstall"),
+        key("Enter", "Expand"),
+        key("x", "Uninstall"),
         key("i", "Import from machines"),
         key("h", "Manifest history"),
         key("R", "Roll back to entry"),

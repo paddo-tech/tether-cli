@@ -539,9 +539,7 @@ mod tests {
     /// Press a key once the top confirm has been on screen for the arming delay.
     fn armed_key(app: &mut App, code: KeyCode) -> Option<Cmd> {
         if let Some(Overlay::Confirm(c)) = app.overlays.last() {
-            if let Some(arming) = c.arming() {
-                arming.drawn_long_ago();
-            }
+            c.arming().drawn_long_ago();
         }
         key(app, code)
     }
@@ -622,11 +620,14 @@ mod tests {
         app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
             manager_key: "npm".into(),
             name: "left-pad".into(),
+            arming: Default::default(),
         }));
         key(&mut app, KeyCode::Char('2'));
         assert_eq!(app.active_tab, Tab::Overview);
         assert_eq!(app.overlays.len(), 1);
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        // Not drawn yet, so not armed: `y` typed for something else does not uninstall
+        assert!(key(&mut app, KeyCode::Char('y')).is_none());
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         assert!(matches!(cmd, Some(Cmd::Uninstall { .. })));
         assert!(app.overlays.is_empty());
         assert_eq!(
@@ -713,8 +714,8 @@ mod tests {
         assert!(app.local_packages.is_none());
     }
 
-    #[test]
-    fn t_on_a_package_opens_its_profile_checklist() {
+    /// This machine "me" with npm package zx, in profile dev of profiles dev and server.
+    fn packages_app() -> App {
         let mut app = app();
         app.state.sync_state = Some(
             serde_json::from_value(serde_json::json!({
@@ -742,6 +743,38 @@ mod tests {
         app.state.config = Some(config);
         app.state.machines = vec![record];
         app.active_tab = Tab::Packages;
+        app
+    }
+
+    #[test]
+    fn enter_and_double_click_never_uninstall() {
+        let mut app = packages_app();
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(1));
+        click(&mut app, 2, 5);
+        assert!(app.overlays.is_empty());
+
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::Uninstall { .. }))
+        ));
+        draw(&app);
+        // Enter cancels even once armed
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Uninstall { .. })
+        ));
+    }
+
+    #[test]
+    fn t_on_a_package_opens_its_profile_checklist() {
+        let mut app = packages_app();
         key(&mut app, KeyCode::Enter);
         key(&mut app, KeyCode::Char('j'));
         key(&mut app, KeyCode::Char('t'));
@@ -955,6 +988,7 @@ mod tests {
         app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
             manager_key: "npm".into(),
             name: "left-pad".into(),
+            arming: Default::default(),
         }));
         app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(0));
         assert!(click(&mut app, 2, 5).is_none());
@@ -1065,6 +1099,18 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(screen.contains("Install left-pad (npm)?"));
+
+        // Enter opened the question, so Enter never answers it
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        let Some(Overlay::PkgImport(picker)) = app.overlays.last_mut() else {
+            panic!("expected the picker");
+        };
+        assert!(picker.confirm.is_none());
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Install { .. })
+        ));
     }
 
     fn inbox_item(name: &str, reasons: Vec<Reason>) -> InboxItem {
@@ -1570,8 +1616,11 @@ mod tests {
             to_install: vec![("evil".into(), Some("1.0.0".into()))],
             uninstall: 0,
         };
-        app.overlays.push(Overlay::Confirm(Confirm::Rollback(plan)));
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        app.overlays.push(Overlay::Confirm(Confirm::Rollback {
+            plan,
+            arming: Default::default(),
+        }));
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         let Some(Cmd::Run(job)) = cmd else {
             panic!("expected the rollback job");
         };

@@ -47,38 +47,44 @@ impl Arming {
     }
 }
 
-/// A yes/no question about one action.
+/// A yes/no question about one action. Every one changes this machine or what it trusts,
+/// so only `y` accepts, once armed; Enter and a click on the tab underneath never do.
 pub enum Confirm {
     Uninstall {
         manager_key: String,
         name: String,
+        arming: Arming,
     },
     Restore {
         repo_path: String,
         dotfile: String,
         commit: String,
         short_hash: String,
+        arming: Arming,
     },
-    Rollback(RollbackPlan),
+    Rollback {
+        plan: RollbackPlan,
+        arming: Arming,
+    },
     RemoveFile {
         path: String,
+        arming: Arming,
     },
-    /// Install a package that OSV could not check. Only `y` accepts.
+    /// Install a package that OSV could not check.
     InstallWithoutOsv {
         manager_key: String,
         name: String,
         error: String,
         arming: Arming,
     },
-    /// Approve and install inbox items that OSV could not check. Only `y` accepts.
+    /// Approve and install inbox items that OSV could not check.
     /// Each item comes with its own OSV error, because one may warn of malicious releases
     /// while another only timed out.
     ApproveWithoutOsv {
         items: Vec<(crate::packages::inbox::InboxItem, String)>,
         arming: Arming,
     },
-    /// Remove another machine's record that looks like an old id of this machine. Only `y`
-    /// accepts.
+    /// Remove another machine's record that looks like an old id of this machine.
     RemoveMachine {
         machine_id: String,
         hostname: String,
@@ -103,7 +109,6 @@ pub enum Confirm {
         arming: Arming,
     },
     /// Approve and install a package whose source machine's record fails its signature.
-    /// Only `y` accepts.
     ApproveSignatureFailed {
         item: Box<crate::packages::inbox::InboxItem>,
         arming: Arming,
@@ -133,16 +138,17 @@ impl Confirm {
         }
     }
 
-    /// Confirms that install without the malicious-package check, approve, or delete a
-    /// record wait to be armed. Only `y` accepts them.
-    pub fn arming(&self) -> Option<&Arming> {
+    pub fn arming(&self) -> &Arming {
         match self {
-            Confirm::InstallWithoutOsv { arming, .. }
+            Confirm::Uninstall { arming, .. }
+            | Confirm::Restore { arming, .. }
+            | Confirm::Rollback { arming, .. }
+            | Confirm::RemoveFile { arming, .. }
+            | Confirm::InstallWithoutOsv { arming, .. }
             | Confirm::ApproveWithoutOsv { arming, .. }
             | Confirm::RemoveMachine { arming, .. }
             | Confirm::ApproveAll { arming, .. }
-            | Confirm::ApproveSignatureFailed { arming, .. } => Some(arming),
-            _ => None,
+            | Confirm::ApproveSignatureFailed { arming, .. } => arming,
         }
     }
 }
@@ -159,16 +165,13 @@ pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd>
             | KeyCode::PageUp
     );
     // Scrolling is harmless, so it works before the confirm is armed
-    if !scroll && confirm.arming().is_some_and(|a| !a.armed(Instant::now())) {
+    if !scroll && !confirm.arming().armed(Instant::now()) {
         app.overlays.push(Overlay::Confirm(confirm));
         return None;
     }
     match key.code {
-        // Installing without the malicious-package check, approving, or deleting a record is
-        // never the default answer
-        KeyCode::Enter if confirm.arming().is_some() => cancel(app, confirm),
-        KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
-        KeyCode::Char('n') | KeyCode::Esc => cancel(app, confirm),
+        KeyCode::Char('y') => accept(app, confirm),
+        KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => cancel(app, confirm),
         KeyCode::Char('j')
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -213,7 +216,9 @@ fn cancel(app: &mut App, confirm: Confirm) -> Option<Cmd> {
 
 fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
     match confirm {
-        Confirm::Uninstall { manager_key, name } => {
+        Confirm::Uninstall {
+            manager_key, name, ..
+        } => {
             // Other member profiles keep the package; this profile leaves it
             let leave = app.state.membership.as_ref().and_then(|m| {
                 let members = m.members(&manager_key, &name);
@@ -234,13 +239,14 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             dotfile,
             commit,
             short_hash,
+            ..
         } => Some(Cmd::Restore {
             repo_path,
             dotfile,
             commit,
             short_hash,
         }),
-        Confirm::Rollback(plan) => {
+        Confirm::Rollback { plan, .. } => {
             if app.running.is_some() {
                 app.flash_error("Another tether command is still running");
                 return None;
@@ -251,7 +257,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
                 short_hash: plan.short_hash,
             }))
         }
-        Confirm::RemoveFile { path } => {
+        Confirm::RemoveFile { path, .. } => {
             let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
                 return None;
             };
@@ -288,12 +294,12 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
 pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
     let t = &app.theme;
     let now = Instant::now();
-    if let Some(arming) = confirm.arming() {
-        arming.drawn(now);
-    }
-    let wait = confirm.arming().and_then(|a| a.remaining(now));
+    confirm.arming().drawn(now);
+    let wait = confirm.arming().remaining(now);
     match confirm {
-        Confirm::Uninstall { manager_key, name } => {
+        Confirm::Uninstall {
+            manager_key, name, ..
+        } => {
             let leaving = app.state.membership.as_ref().and_then(|m| {
                 let mut members = m.members(manager_key, name);
                 (members.remove(&m.profile) && !members.is_empty()).then(|| {
@@ -329,7 +335,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             &format!("Restore {} to {}?", dotfile, short_hash),
             t.warn,
         ),
-        Confirm::Rollback(plan) => render_popup(
+        Confirm::Rollback { plan, .. } => render_popup(
             f,
             app,
             wait,
@@ -343,7 +349,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.warn,
         ),
-        Confirm::RemoveFile { path } => render_popup(
+        Confirm::RemoveFile { path, .. } => render_popup(
             f,
             app,
             wait,
