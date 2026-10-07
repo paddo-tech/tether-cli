@@ -13,4 +13,5 @@ mod identity;
 mod inbox;
 mod linux;
 mod trust;
+mod unattended;
 mod upgrade;

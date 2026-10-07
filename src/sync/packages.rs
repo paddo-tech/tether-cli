@@ -74,6 +74,36 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
     },
 ];
 
+/// Add casks that need a password to the list a sync in a terminal installs. Notifies only
+/// when the list changes.
+pub fn defer_casks(state: &mut SyncState, casks: &[String]) -> Result<()> {
+    if casks.is_empty() {
+        return Ok(());
+    }
+    let mut all: std::collections::BTreeSet<String> =
+        state.deferred_casks.iter().cloned().collect();
+    all.extend(casks.iter().cloned());
+    state.deferred_casks = all.into_iter().collect();
+
+    let hash = crate::sha256_hex(state.deferred_casks.join(",").as_bytes());
+    if state.deferred_casks_hash.as_ref() != Some(&hash) {
+        crate::sync::notify_deferred_casks(&state.deferred_casks).ok();
+        state.deferred_casks_hash = Some(hash);
+        Output::info(&format!(
+            "Deferred {} cask{} that need a password: {}. Run 'tether sync' in a terminal to \
+             install them",
+            state.deferred_casks.len(),
+            if state.deferred_casks.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            state.deferred_casks.join(", ")
+        ));
+    }
+    state.save()
+}
+
 /// What an import did beyond installing.
 #[derive(Debug, Default)]
 pub struct ImportOutcome {

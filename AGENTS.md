@@ -28,7 +28,7 @@ Never run Tether or a package manager against your own `~/.tether` or your own m
 - `TETHER_E2E_FLAP_REF=<git ref>` sets the 1.x binary of `config_flap`, for example a 1.x patch commit.
 - Logs: `target/e2e/logs/<test>/<machine>.log` has every command, its exit code and its output. The fleet tests also write `events.log` and `summary.txt`.
 - CI runs `cargo test --locked --lib --test cli` on macOS and Linux. The e2e HEAD binary is keyed on every top-level entry of the archive except `tests`, `website`, `fastlane`, `.github` and `*.md`.
-- Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `config_changes_merge`, `trust`, `inbox`, `rejected_push_without_git_identity` (two HEAD machines without a git identity push at the same time), `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
+- Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `config_changes_merge`, `sync_without_a_terminal_skips_conflicts`, `trust`, `inbox`, `rejected_push_without_git_identity` (two HEAD machines without a git identity push at the same time), `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
 
 ## CLI Commands
 

@@ -134,9 +134,11 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
     let machine_state_for_decrypt =
         crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
-    // Apply dotfiles from sync repo (if encrypted) - with conflict detection
-    // Interactive mode when run manually, non-interactive when run by daemon
-    let interactive = !crate::daemon::is_daemon_mode();
+    // Without a terminal, a sync runs as the daemon does: conflicts wait for 'tether resolve'
+    // and casks that need a password wait for a sync in a terminal. -y still answers prompts.
+    let daemon_like = crate::daemon::is_daemon_mode() || !Prompt::is_interactive();
+    let interactive =
+        !crate::daemon::is_daemon_mode() && (Prompt::is_interactive() || Prompt::assume_yes());
     if config.security.encrypt_dotfiles && !dry_run {
         decrypt_from_repo(
             &config,
@@ -301,19 +303,20 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
     let mut machine_state = build_machine_state(&config, &state, &sync_path).await?;
 
     // Import packages from manifests (install missing packages, respecting removed_packages)
-    // Interactive mode: install deferred casks from daemon syncs
+    // In a terminal: install deferred casks from daemon syncs
     if config.features.personal_packages && !dry_run {
         let deferred_casks = state.deferred_casks.clone();
 
-        import_packages(
+        let outcome = import_packages(
             &config,
             &sync_path,
             &mut state,
             &machine_state,
-            false, // interactive mode
+            daemon_like,
             &deferred_casks,
         )
         .await?;
+        crate::sync::packages::defer_casks(&mut state, &outcome.deferred_casks)?;
 
         if crate::cli::Prompt::is_interactive() && !crate::cli::Prompt::assume_yes() {
             // A cancelled prompt defers the review; the sync must still save and push
@@ -322,8 +325,8 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             }
         }
 
-        // Clear deferred casks after interactive sync (user had their chance)
-        if !state.deferred_casks.is_empty() {
+        // Clear deferred casks after a sync in a terminal (user had their chance)
+        if !daemon_like && !state.deferred_casks.is_empty() {
             state.deferred_casks.clear();
             state.deferred_casks_hash = None;
             state.save()?;
