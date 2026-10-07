@@ -28,7 +28,7 @@ Never run Tether or a package manager against your own `~/.tether` or your own m
 - `TETHER_E2E_FLAP_REF=<git ref>` sets the 1.x binary of `config_flap`, for example a 1.x patch commit.
 - Logs: `target/e2e/logs/<test>/<machine>.log` has every command, its exit code and its output. The fleet tests also write `events.log` and `summary.txt`.
 - CI runs `cargo test --locked --lib --test cli` on macOS and Linux. The e2e HEAD binary is keyed on every top-level entry of the archive except `tests`, `website`, `fastlane`, `.github` and `*.md`.
-- Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `trust`, `inbox`, `rejected_push_without_git_identity` (two HEAD machines without a git identity push at the same time), `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
+- Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `config_changes_merge`, `trust`, `inbox`, `rejected_push_without_git_identity` (two HEAD machines without a git identity push at the same time), `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
 
 ## CLI Commands
 
@@ -82,7 +82,8 @@ Managed via `tether config features`. Available toggles:
 ## Data Layout
 
 **~/.tether/**
-- `config.toml` - Main config (versioned, synced encrypted)
+- `config.toml` - Main config (versioned, synced encrypted). A sync merges the synced copy into it, three-way (`src/sync/config_merge.rs`)
+- `config.base.toml` - The synced config.toml of the last merge, the base of the next one (never synced). Without it, the base is the config whose hash `state.json` recorded, from the local file or the sync repo's history
 - `local.toml` - Settings for this machine only (never synced). `[packages] min_release_age_days` and `[merge] command`/`args` override config.toml on this machine
 - `state.json` - Sync state, including `install_failures` (synced packages that failed to install here; retried after 24h or on a new version) and `profile_notice_shown` (the one-time notice of packages other profiles have)
 - `sync/` - Personal sync repo
@@ -129,7 +130,7 @@ Managed via `tether config features`. Available toggles:
 
 - Rolling upgrades work one machine at a time. A sync repo can hold 1.x and 2.0 machines together.
 - The 2.0 protections (trust, release age, OSV, signatures) apply only on upgraded machines. A 1.x machine installs without them. Its unsigned record grants no trust, so its packages wait in the inbox of 2.0 machines.
-- Package profiles apply only on 2.0 machines. Manifests stay the union of all records, so a 1.x machine still installs the packages of every profile. Profile definitions and `machine_profiles` stay in config.toml. A 1.x machine exports its stale copy of config.toml after it applies a remote one, and 1.x writes its maps in random order. So in a fleet with 1.x machines, one config.toml change (including `machines profile set`) is reverted, and with several 1.x machines it can flap on every sync. 2.0 records the applied hash and writes maps sorted, so 2.0 machines settle. Change config.toml before 1.x machines join or after they upgrade. A 2.0 sync warns when this machine's own assignment changes in the synced config. The e2e test `config_flap` shows the flap. Set `TETHER_E2E_FLAP_REF` to run any commit as its 1.x machine, such as a 1.x patch.
+- Package profiles apply only on 2.0 machines. Manifests stay the union of all records, so a 1.x machine still installs the packages of every profile. Profile definitions and `machine_profiles` stay in config.toml. A 1.x machine exports its stale copy of config.toml after it applies a remote one, and 1.x writes its maps in random order. So a 1.x machine can revert a config.toml change (including `machines profile set`), and with several 1.x machines config.toml can flap for some rounds. 2.0 merges config.toml instead: it compares parsed settings, so a format-only rewrite is no change, and it merges each setting against the last synced copy. Maps merge per key and lists as sets. When both sides changed one value, the local value stays with a warning. A machine's own `machine_profiles` entry always keeps its local value. A machine that never synced its config takes the remote one, except its own assignment. A 1.x stale copy changes no setting against the base, so a 2.0 machine keeps its change and exports it again, until the 1.x machines applied it. 2.0 writes maps sorted, so 2.0 machines settle. Change config.toml before 1.x machines join or after they upgrade. A 2.0 sync warns when this machine's own profile changes in the synced config. The e2e test `config_flap` shows the flap. Set `TETHER_E2E_FLAP_REF` to run any commit as its 1.x machine, such as a 1.x patch.
 - Manifests stay names-only. Never write `name@ver`, `name==ver` or `name:ver` to `manifests/*`.
 - Synced formats change only by additions until 3.0. Do not add `deny_unknown_fields` to a synced struct. Do not remove, rename or retype a field that 1.11.10, 1.12.0 or 1.13.1 requires. New fields take `#[serde(default)]`. Tests in `config.rs` and `sync/state.rs` pin the 1.x shapes.
 

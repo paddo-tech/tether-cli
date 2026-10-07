@@ -1032,7 +1032,21 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         let content = std::fs::read_to_string(&path)?;
-        let mut config: Self = toml::from_str(&content)?;
+        let (config, migrated) = Self::parse_migrated(&content)?;
+        if migrated {
+            // Best-effort save (don't fail load if save fails)
+            let _ = config.save();
+        }
+        Ok(config)
+    }
+
+    /// Parses config.toml text as `load` reads it, without saving a migration.
+    pub fn parse(content: &str) -> Result<Self> {
+        Ok(Self::parse_migrated(content)?.0)
+    }
+
+    fn parse_migrated(content: &str) -> Result<(Self, bool)> {
+        let mut config: Self = toml::from_str(content)?;
 
         if config.config_version > CURRENT_CONFIG_VERSION {
             bail!(
@@ -1050,14 +1064,13 @@ impl Config {
         }
 
         // v1 → v2 migration: create "dev" profile from global dotfiles/dirs/packages
-        if config.config_version < 2 && config.profiles.is_empty() {
+        let migrated = config.config_version < 2 && config.profiles.is_empty();
+        if migrated {
             config.migrate_v1_to_v2();
             config.config_version = CURRENT_CONFIG_VERSION;
-            // Best-effort save (don't fail load if save fails)
-            let _ = config.save();
         }
 
-        Ok(config)
+        Ok((config, migrated))
     }
 
     /// Migrate v1 config to v2: create "dev" profile from global settings.

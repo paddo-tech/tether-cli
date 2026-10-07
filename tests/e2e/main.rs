@@ -5,6 +5,7 @@
 //! The suite runs only with TETHER_E2E=1, and skips with a message when Docker is missing.
 //! The first test builds the binaries and images with tests/e2e/images.sh. See AGENTS.md.
 
+mod config_merge;
 mod contract;
 mod fleet;
 mod harness;

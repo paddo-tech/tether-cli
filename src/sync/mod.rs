@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod config_merge;
 pub mod conflict;
 pub mod discovery;
 pub mod engine;

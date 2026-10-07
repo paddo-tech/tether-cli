@@ -21,7 +21,9 @@
 //!
 //! `config_flap`: after the fleet settles, one HEAD machine changes config.toml once.
 //! It checks (a), and
-//!   l  HEAD machines stop committing config.toml one round after they applied the change
+//!   l  after the round of the change, a HEAD machine commits config.toml only to restore
+//!      the change after a 1.x machine exported its stale copy earlier in that round
+//!   m  every HEAD machine ends with the change, and the last rounds commit no config.toml
 //! It also logs how often 1.x machines commit config.toml per round, without failing on
 //! it. Its 1.x machine runs TETHER_E2E_FLAP_REF (default v1.13.1), which can be any commit.
 
@@ -785,15 +787,41 @@ async fn config_flap() {
         .filter(|r| r.phase == "after-change")
         .map(|r| r.round.as_str())
         .collect();
-    // A HEAD machine may export once, in the round it applies the change; later rounds
-    // must be quiet
+    // A HEAD machine may export in the round it applies the change. Later, it exports only
+    // to restore the change after a 1.x machine exported its stale copy earlier that round
     let l: Vec<String> = f
         .syncs
         .iter()
-        .filter(|s| after[1..].contains(&s.round.as_str()) && s.version == HEAD)
-        .filter(|s| s.changed.iter().any(|c| c == CONFIG))
+        .enumerate()
+        .filter(|(_, s)| after[1..].contains(&s.round.as_str()) && s.version == HEAD)
+        .filter(|(_, s)| s.changed.iter().any(|c| c == CONFIG))
+        .filter(|(i, s)| {
+            !f.syncs[..*i].iter().any(|o| {
+                o.round == s.round && is_old(&o.version) && o.changed.iter().any(|c| c == CONFIG)
+            })
+        })
+        .map(|(_, s)| format!("{} {} committed {CONFIG}", s.round, s.machine))
+        .collect();
+    let last = after[after.len() - STEADY..].to_vec();
+    let steady: Vec<String> = f
+        .syncs
+        .iter()
+        .filter(|s| last.contains(&s.round.as_str()) && s.changed.iter().any(|c| c == CONFIG))
         .map(|s| format!("{} {} committed {CONFIG}", s.round, s.machine))
         .collect();
+    // The change survives the stale copies of 1.x machines. 1.x drops the dashboard table
+    let mut m = Vec::new();
+    for machine in f.machines.iter().filter(|m| m.version() == HEAD) {
+        let config: toml::Table =
+            toml::from_str(&machine.read("/root/.tether/config.toml").await).unwrap();
+        let theme = config
+            .get("dashboard")
+            .and_then(|d| d.get("theme"))
+            .and_then(|t| t.as_str());
+        if theme != Some("mocha") {
+            m.push(format!("{} has dashboard.theme {:?}", machine.name, theme));
+        }
+    }
     let mut flaps =
         String::from("\nRound   1.x machines that committed config.toml (reported, not checked)\n");
     for r in &after {
@@ -827,8 +855,15 @@ async fn config_flap() {
     results.insert(
         "l",
         (
-            "HEAD machines stop committing config.toml after they applied the change",
+            "HEAD machines commit config.toml after the change only to restore it",
             Some(l),
+        ),
+    );
+    results.insert(
+        "m",
+        (
+            "the change reaches every machine, and the fleet then stops committing config.toml",
+            Some([m, steady].concat()),
         ),
     );
     report(&f.lab, &results, &flaps);

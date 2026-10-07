@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.3] - 2026-10-08
+
+### Fixed
+
+- A sync no longer exports a machine's config.toml over changes that another machine pushed. Before, a machine that only rewrote its config in another format, as the first sync after an upgrade does, exported its whole copy. Another machine then lost its new profile and its profile assignment, and installed the packages of profile `dev`. Tether now compares settings, not bytes, and merges config.toml against the copy of the last sync, which it keeps in `~/.tether/config.base.toml`. Edits to different settings on two machines both stay. Lists, such as dotfiles, keep the additions of both machines. When both machines changed one setting, this machine's value stays, and the sync warns. A machine always keeps its own profile assignment. A new machine takes the synced config, so its defaults no longer replace the settings of the other machines. A change on a 2.0 machine now stays when a 1.x machine exports its older copy of config.toml
+
 ## [2.0.0-beta.2] - 2026-10-08
 
 ### Fixed
