@@ -727,14 +727,21 @@ fn old_build_note(f: &mut Frame, area: Rect, app: &App) -> Rect {
     if ids.is_empty() || area.height < 10 {
         return area;
     }
-    let [note, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let text = format!(
         "{} {}",
         ids.join(", "),
         crate::sync::signing::OLD_BUILD_NOTE
     );
+    let lines = wrap_words(&text, area.width.max(1) as usize);
+    let [note, rest] =
+        Layout::vertical([Constraint::Length(lines.len() as u16), Constraint::Min(0)]).areas(area);
     f.render_widget(
-        Paragraph::new(Span::styled(text, Style::default().fg(app.theme.warn))),
+        Paragraph::new(
+            lines
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, Style::default().fg(app.theme.warn))))
+                .collect::<Vec<_>>(),
+        ),
         note,
     );
     rest

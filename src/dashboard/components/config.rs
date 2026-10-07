@@ -159,9 +159,16 @@ fn list_edit_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         }
         KeyCode::Char('x') | KeyCode::Delete => {
             if let Some(item) = le.items.get(le.cursor) {
+                let name = match (le.is_dotfile, &app.state.config) {
+                    (true, Some(config)) => config_edit::get_dotfile_items(config)
+                        .get(le.cursor)
+                        .map(|(path, _)| path.clone()),
+                    _ => None,
+                };
                 let confirm = Confirm::RemoveListItem {
                     list: le.field_label,
                     index: le.cursor,
+                    name: name.unwrap_or_else(|| item.clone()),
                     item: item.clone(),
                     arming: Default::default(),
                 };
@@ -361,27 +368,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState, app: &App) {
     let t = &app.theme;
-    let mut hints = vec![
-        Span::styled(" esc", t.key_hint()),
-        Span::styled(" back  ", Style::default().fg(t.muted)),
-        Span::styled("a", t.key_hint()),
-        Span::styled(" add  ", Style::default().fg(t.muted)),
-        Span::styled("x", t.key_hint()),
-        Span::styled(" remove ", Style::default().fg(t.muted)),
-    ];
-    if le.is_dotfile {
-        hints.push(Span::styled(" t", t.key_hint()));
-        hints.push(Span::styled(
-            " toggle create ",
-            Style::default().fg(t.muted),
-        ));
-    }
     let block = panel(
         format!(" Config › {} ({}) ", le.field_label, le.items.len()),
         true,
         t,
-    )
-    .title_bottom(Line::from(hints).right_aligned());
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height == 0 {

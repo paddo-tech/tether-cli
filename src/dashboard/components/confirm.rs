@@ -18,6 +18,9 @@ pub const ARM_DELAY: Duration = Duration::from_millis(400);
 #[derive(Default)]
 pub struct Arming {
     drawn: Cell<Option<Instant>>,
+    /// A draw showed the armed buttons. Until then the loop keeps drawing, so the screen
+    /// never shows a countdown that has ended.
+    shown_armed: Cell<bool>,
 }
 
 impl Arming {
@@ -25,6 +28,13 @@ impl Arming {
         if self.drawn.get().is_none() {
             self.drawn.set(Some(now));
         }
+        if self.armed(now) {
+            self.shown_armed.set(true);
+        }
+    }
+
+    pub fn shown_armed(&self) -> bool {
+        self.shown_armed.get()
     }
 
     /// Time left before keys count, or `None` once armed. A confirm never drawn is not armed.
@@ -139,7 +149,10 @@ pub enum Confirm {
     RemoveListItem {
         list: &'static str,
         index: usize,
+        /// The row as shown, to check that the list still has it at `index`
         item: String,
+        /// The item without its options
+        name: String,
         arming: Arming,
     },
     /// Stop the daemon, which syncs this machine every few minutes.
@@ -541,12 +554,12 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
-        Confirm::RemoveListItem { list, item, .. } => render_popup(
+        Confirm::RemoveListItem { list, name, .. } => render_popup(
             f,
             app,
             wait,
             "Remove",
-            &format!("Remove {} from {}?", item, list),
+            &format!("Remove {} from {}?", name, list),
             t.error,
         ),
         Confirm::StopDaemon { .. } => render_popup(
@@ -833,7 +846,11 @@ pub fn render_popup(
 fn buttons(f: &mut Frame, app: &App, wait: Option<Duration>, inner: Rect, color: Color) {
     let t = &app.theme;
     let yes = match wait {
-        Some(left) => format!(" y  wait {:.1}s ", left.as_secs_f32()),
+        // Rounded up, so the last tenth of a second does not read 0.0s
+        Some(left) => format!(
+            " y  wait {:.1}s ",
+            left.as_millis().div_ceil(100) as f32 / 10.0
+        ),
         None => " y  confirm ".to_string(),
     };
     let yes = yes.as_str();
@@ -874,8 +891,11 @@ mod tests {
         arming.drawn(t0);
         assert_eq!(arming.remaining(t0), Some(ARM_DELAY));
         assert!(!arming.armed(t0 + ARM_DELAY - Duration::from_millis(1)));
+        assert!(!arming.shown_armed());
         // Later draws keep the first draw's time
         arming.drawn(t0 + Duration::from_secs(1));
         assert!(arming.armed(t0 + ARM_DELAY));
+        // The loop draws until a draw shows the armed buttons
+        assert!(arming.shown_armed());
     }
 }

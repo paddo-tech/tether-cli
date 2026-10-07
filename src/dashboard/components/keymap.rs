@@ -214,7 +214,7 @@ const PACKAGES: &[Binding] = &[
         &[Char('t')],
         "t",
         "profiles",
-        "Share with profiles: choose the profiles that install it",
+        "Share: pick the profiles that install it",
         2,
     ),
     b(
@@ -297,7 +297,7 @@ const MACHINES: &[Binding] = &[
         &[Char('D')],
         "D",
         "remove old id",
-        "Remove a record that is an old id of this machine (asks)",
+        "Remove an old id of this machine (asks)",
         8,
     ),
 ];
@@ -345,7 +345,7 @@ const SECURITY: &[Binding] = &[
         &[Char('a')],
         "a",
         "approve",
-        "Approve and install, or trust a key (asks)",
+        "Approve and install; a key or failed signature asks first",
         1,
     ),
     b(&[Char('x')], "x", "reject", "Reject (asks)", 2),
