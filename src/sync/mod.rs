@@ -419,7 +419,7 @@ pub fn migrate_dotfile_shared_change(
         if let Some(parent) = target_full.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let git_mv = std::process::Command::new("git")
+        let git_mv = crate::sync::git::git_command()
             .args(["mv", &old, &target])
             .current_dir(sync_path)
             .output();

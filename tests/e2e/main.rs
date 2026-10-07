@@ -8,6 +8,7 @@
 mod contract;
 mod fleet;
 mod harness;
+mod identity;
 mod inbox;
 mod linux;
 mod trust;

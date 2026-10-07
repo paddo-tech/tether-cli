@@ -210,7 +210,7 @@ impl Lab {
             &self.server,
             &format!(
                 "set -e; rm -rf /tmp/w && git clone -q /srv/e2e.git /tmp/w && cd /tmp/w && \
-                 {script} && git add -A && git commit -qm edit && git push -q origin HEAD:main"
+                 {script} && git add -A && git -c user.name=e2e -c user.email=e2e@example.invalid commit -qm edit && git push -q origin HEAD:main"
             ),
         )
         .await;

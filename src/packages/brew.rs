@@ -931,6 +931,7 @@ impl PackageManager for BrewManager {
                 continue;
             }
             let output = command("git")?
+                .args(crate::sync::git::identity_args())
                 .arg("-C")
                 .arg(&tap.1)
                 .args(["pull", "--ff-only", "--quiet"])

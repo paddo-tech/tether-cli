@@ -21,14 +21,14 @@ cargo fmt                # Format
 
 Never run Tether or a package manager against your own `~/.tether` or your own machine. A scratch `HOME` is not isolation: npm, uv, brew and gem act on the whole machine. Anything that can run a package manager runs only inside a container. `tests/cli.rs` runs the binary with an empty `PATH`, so no package manager can start.
 
-`tests/e2e/` is a cargo integration test that uses the `testcontainers` crate. Each test starts a Docker network, a git server container and one container per machine. Most machines have logging shims for brew, npm, pnpm, bun, uv, gem, ruby, curl, notify-send and systemctl (`tests/e2e/docker/shims`). So nothing installs, and no package request leaves the container. The upgrade test uses the `tether-e2e-real` image, with real npm, uv and curl.
+`tests/e2e/` is a cargo integration test that uses the `testcontainers` crate. Each test starts a Docker network, a git server container and one container per machine. Most machines have logging shims for brew, npm, pnpm, bun, uv, gem, ruby, curl, notify-send and systemctl (`tests/e2e/docker/shims`). So nothing installs, and no package request leaves the container. The upgrade test uses the `tether-e2e-real` image, with real npm, uv and curl. The images set no git identity, as on a new machine.
 
 - Run: `TETHER_E2E=1 cargo test --test e2e`. One test: `TETHER_E2E=1 cargo test --test e2e trust`. Without `TETHER_E2E=1` or without Docker, each test prints why and passes.
 - Setup: the first test runs `tests/e2e/images.sh` once. The script builds HEAD and v1.11.10, v1.12.0 and v1.13.1 from `git archive` in a `rust:1-bookworm` container, into `target/e2e/bin/`. HEAD includes uncommitted changes to tracked files. The script also builds the machine images, tagged by a hash of `tests/e2e/docker/`. Each step skips work that is done. The first run takes a few minutes.
 - `TETHER_E2E_FLAP_REF=<git ref>` sets the 1.x binary of `config_flap`, for example a 1.x patch commit.
 - Logs: `target/e2e/logs/<test>/<machine>.log` has every command, its exit code and its output. The fleet tests also write `events.log` and `summary.txt`.
 - CI runs `cargo test --locked --lib --test cli` on macOS and Linux. The e2e HEAD binary is keyed on every top-level entry of the archive except `tests`, `website`, `fastlane`, `.github` and `*.md`.
-- Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `trust`, `inbox`, `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
+- Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `trust`, `inbox`, `rejected_push_without_git_identity` (two HEAD machines without a git identity push at the same time), `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
 
 ## CLI Commands
 
