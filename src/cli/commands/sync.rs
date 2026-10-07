@@ -1534,20 +1534,28 @@ pub fn warn_changed_profile(old: &Config, new: &Config) {
     let Ok(state) = SyncState::load() else {
         return;
     };
-    let Some(profile) = old.machine_profiles.get(&state.machine_id) else {
-        return;
-    };
-    if new.machine_profiles.get(&state.machine_id) != Some(profile) {
-        Output::warning(&format!(
-            "The synced config changed this machine's profile from {} to {}, so it now \
-             installs the packages of profile {}. If nobody meant to change it, run 'tether \
-             machines profile set {}'",
-            profile,
-            new.profile_name(&state.machine_id),
-            new.profile_name(&state.machine_id),
-            profile
-        ));
+    if let Some(message) = changed_profile_warning(old, new, &state.machine_id) {
+        Output::warning(&message);
     }
+}
+
+/// A missing assignment counts as the default profile, so only a different profile warns.
+fn changed_profile_warning(old: &Config, new: &Config, machine_id: &str) -> Option<String> {
+    let before = old.profile_name(machine_id);
+    let after = new.profile_name(machine_id);
+    if before == after {
+        return None;
+    }
+    let restore = if old.machine_profiles.contains_key(machine_id) {
+        format!("tether machines profile set {}", before)
+    } else {
+        "tether machines profile unset".to_string()
+    };
+    Some(format!(
+        "The synced config changed this machine's profile from {} to {}, so it now installs \
+         the packages of profile {}. If nobody meant to change it, run '{}'",
+        before, after, after, restore
+    ))
 }
 
 /// Export tether config to sync repo (always, independent of config file list)
@@ -2513,5 +2521,33 @@ mod tests {
             recover_config_base(dir, &state, b"synced = 1\n", &key).as_deref(),
             Some(&b"synced = 1\n"[..])
         );
+    }
+
+    #[test]
+    fn profile_warning_only_for_a_different_profile() {
+        let assigned = |profile: Option<&str>| {
+            let mut c = Config::default();
+            if let Some(p) = profile {
+                c.machine_profiles.insert("me".into(), p.into());
+            }
+            c
+        };
+        // An explicit dev and a missing assignment are the same profile
+        assert_eq!(
+            changed_profile_warning(&assigned(Some("dev")), &assigned(None), "me"),
+            None
+        );
+        assert_eq!(
+            changed_profile_warning(&assigned(None), &assigned(Some("dev")), "me"),
+            None
+        );
+        let warning =
+            changed_profile_warning(&assigned(Some("server")), &assigned(None), "me").unwrap();
+        assert!(warning.contains("from server to dev"), "{warning}");
+        assert!(warning.contains("'tether machines profile set server'"));
+        let warning =
+            changed_profile_warning(&assigned(None), &assigned(Some("server")), "me").unwrap();
+        assert!(warning.contains("from dev to server"), "{warning}");
+        assert!(warning.contains("'tether machines profile unset'"));
     }
 }
