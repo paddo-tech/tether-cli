@@ -35,8 +35,9 @@ build() {
 
 head=$(git -C "$root" stash create)
 head=${head:-HEAD}
-# Keyed by the build inputs only, so a change to the tests does not rebuild the binary
-key=$(git -C "$root" rev-parse "$head:src" "$head:Cargo.toml" "$head:Cargo.lock" | git hash-object --stdin | cut -c1-12)
+# Keyed by every top-level entry of the archive except the ones the build never reads, so a
+# new build input such as build.rs or an include_str! file counts, and a test change does not
+key=$(git -C "$root" ls-tree "$head" | grep -v -E "	(tests|website|fastlane|\.github|[^/]*\.md)\$" | git hash-object --stdin | cut -c1-12)
 build "$head" "head-$key"
 cp "$out/bin/tether-head-$key" "$out/bin/tether-head"
 for f in "$out"/bin/tether-head-*; do
