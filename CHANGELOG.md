@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The warning that the synced config changed this machine's profile no longer says "from dev to dev". A machine without an assignment is in profile `dev`, so the sync now warns only when the profile differs, and names both profiles
 - `tether sync` without a terminal, for example from cron or ssh, now runs as the daemon does. Before, a dotfile conflict failed the whole sync with "needs a terminal", and casks that need a password failed and counted as install failures. Now the sync skips the conflict, records it for `tether resolve` and notifies. It defers casks that need a password to the list that the next `tether sync` in a terminal installs. `-y` still answers prompts as before
 - The one-time notice about packages of other profiles is now short. Before, it named every package on one line, often hundreds. It now counts them per manager and per profile, and names the commands that list and share them. The new `tether packages list --other-profiles` lists these packages with their profiles, also with `--json`
+- `tether machines trust <id> --fingerprint <fp>` now pulls the sync repo when it does not have the machine's signed record yet. Before, it failed with "has no signed machine record" until the next sync. When the record is still missing after the pull, the error says to run `tether sync` on that machine first. The command now takes the sync lock
 
 ## [2.0.0-beta.2] - 2026-10-08
 

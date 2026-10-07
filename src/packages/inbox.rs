@@ -755,7 +755,10 @@ fn shown_key(
     shown: &str,
 ) -> Result<PublicKey> {
     let Some((_, key)) = signers.into_iter().find(|(id, _)| id == machine_id) else {
-        bail!("Machine {} has no signed machine record", machine_id);
+        bail!(
+            "Machine {} has no signed machine record. Run 'tether sync' on that machine first",
+            machine_id
+        );
     };
     let current = signing::fingerprint(&key);
     if current != shown {

@@ -125,3 +125,32 @@ async fn trust() {
     b.tether_ok("sync").await;
     assert_eq!(b.installed("npm", "gamma").await.as_deref(), Some("1.0.0"));
 }
+
+/// `machines trust` pulls a record that arrived after this machine's last sync.
+#[tokio::test(flavor = "multi_thread")]
+async fn trust_pulls_a_new_record() {
+    if !enabled("trust_pulls_a_new_record") {
+        return;
+    }
+    let lab = Lab::new("trust_pulls_a_new_record").await;
+    let a = lab.machine("a", &[HEAD]).await;
+    let b = lab.machine("b", &[HEAD]).await;
+    assert_eq!(b.init(&lab).await.code, 0, "init b");
+    assert_eq!(a.init(&lab).await.code, 0, "init a");
+    let a_id = a.machine_id().await;
+    let a_key = a.fingerprint().await;
+    let out = b
+        .tether_ok(&format!("machines trust {a_id} --fingerprint {a_key}"))
+        .await
+        .text();
+    assert!(out.contains(&format!("Trusted machine {a_id}")), "{out}");
+    let missing = b
+        .tether("machines trust 0123456789ab --fingerprint SHA256:x")
+        .await;
+    assert_eq!(missing.code, 1);
+    assert!(
+        missing.text().contains("No machine 0123456789ab"),
+        "{}",
+        missing.text()
+    );
+}

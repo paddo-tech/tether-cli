@@ -661,13 +661,29 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
-    let resolved = resolve_for_trust(&sync_path, name)?;
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    let signed = resolve_for_trust(&sync_path, name)
+        .ok()
+        .filter(|id| inbox::signing_fingerprint(&sync_path, id).is_some());
+    let resolved = match signed {
+        Some(id) => id,
+        None => {
+            // A new machine's record may have arrived after this machine's last sync
+            Output::info("Pulling latest changes...");
+            GitBackend::open(&sync_path)?.pull()?;
+            resolve_for_trust(&sync_path, name)?
+        }
+    };
     let name = resolved.as_str();
     let fingerprint = match fingerprint {
         Some(fingerprint) => fingerprint.to_string(),
         None => {
             let Some(current) = inbox::signing_fingerprint(&sync_path, name) else {
-                anyhow::bail!("Machine {} has no signed machine record", name);
+                anyhow::bail!(
+                    "Machine {} has no signed machine record. Run 'tether sync' on that machine \
+                     first",
+                    name
+                );
             };
             if !Prompt::is_interactive() || Prompt::assume_yes() {
                 anyhow::bail!(
