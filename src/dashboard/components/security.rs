@@ -236,24 +236,6 @@ fn is_malicious(item: &InboxItem) -> bool {
     item.malicious()
 }
 
-/// Short badge text for the list; the detail pane uses `Reason::label`.
-fn badge(reason: Reason) -> &'static str {
-    match reason {
-        Reason::Unsigned => "unsigned",
-        Reason::UntrustedTap => "untrusted tap",
-        Reason::CooldownUnsupported => "no age check",
-        Reason::TooNew => "too new",
-        Reason::Malicious => "MALICIOUS",
-        Reason::MaliciousUpgrade => "MALICIOUS UPGRADE",
-        Reason::MaliciousUnresolved => "MALICIOUS RELEASES",
-        Reason::UntrustedSigner => "untrusted signer",
-        Reason::NewMachine => "new machine",
-        Reason::KeyChanged => "KEY CHANGED",
-        Reason::SignatureFailed => "SIGNATURE FAILED",
-        Reason::OtherOsVersion => "other OS pin",
-    }
-}
-
 fn reason_color(reason: Reason, t: &Theme) -> Color {
     match reason {
         Reason::Unsigned => t.warn,
@@ -303,7 +285,7 @@ fn explain(reason: Reason) -> &'static str {
             "The machine this came from is trusted, but its record fails its signature. Someone may have edited the record or the manifest in the repo. Do not approve unless you know why the signature fails."
         }
         Reason::KeyChanged => {
-            "SIGNING KEY CHANGED. This machine was trusted with a different key. If you did not set it up again, someone may be signing as it. Run `tether machines` on that machine and compare the fingerprint before you trust it."
+            "SIGNING KEY CHANGED. This machine was trusted with a different key. If you did not set it up again, someone may be signing as it. Run 'tether machines list' on that machine and compare the fingerprint before you trust it."
         }
         Reason::OtherOsVersion => {
             "Only machines on another OS list the newest trusted version, and it failed to install here. This is the newest release that suits this machine. No trusted machine lists it, so it installs only when you approve it."
@@ -461,7 +443,7 @@ fn reason_lines(item: &InboxItem, t: &Theme) -> Vec<Detail> {
 fn badges(item: &InboxItem, t: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     for reason in &item.reasons {
-        spans.push(pill(badge(*reason), reason_color(*reason, t), t));
+        spans.push(pill(reason.label(), reason_color(*reason, t), t));
         spans.push(Span::raw(" "));
     }
     spans.pop();
@@ -844,7 +826,7 @@ fn group_heading(app: &App, group: &inbox::Group, open: bool) -> (Line<'static>,
     ]);
     let mut right = Vec::new();
     for reason in &group.reasons {
-        right.push(pill(badge(*reason), reason_color(*reason, t), t));
+        right.push(pill(reason.label(), reason_color(*reason, t), t));
         right.push(Span::raw(" "));
     }
     right.pop();
@@ -882,7 +864,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App, cursor: usize) {
         ));
     }
     count.push(Span::raw(" "));
-    let block = panel(" Approval inbox ", true, t).title_top(Line::from(count).right_aligned());
+    let block = panel(" Inbox ", true, t).title_top(Line::from(count).right_aligned());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -998,7 +980,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, view: ItemView) {
 fn render_clean(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let inbox = &app.state.inbox;
-    let block = panel(" Approval inbox ", true, t);
+    let block = panel(" Inbox ", true, t);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1012,7 +994,7 @@ fn render_clean(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(t.text).bold(),
         )),
         Line::from(Span::styled(
-            "No synced packages wait for approval.",
+            "The Inbox is empty: nothing waits for approval.",
             Style::default().fg(t.muted),
         )),
         Line::default(),

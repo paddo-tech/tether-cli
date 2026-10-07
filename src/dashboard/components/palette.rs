@@ -152,7 +152,7 @@ pub fn entries(app: &App) -> Vec<Entry> {
         ("Refresh", Action::Refresh),
         ("Daemon log", Action::DaemonLog),
         (
-            "Import packages from other machines",
+            "Install packages from other machines",
             Action::ImportPackages,
         ),
         ("Import dotfile from another profile", Action::ImportDotfile),
@@ -177,7 +177,7 @@ pub fn entries(app: &App) -> Vec<Entry> {
     // Approve all skips machine keys, so only a safe package makes the action useful.
     if pending.iter().any(|i| i.bulk_approvable()) {
         out.push(Entry {
-            label: "Approve all pending packages".into(),
+            label: "Approve all packages in the Inbox".into(),
             kind: "action".into(),
             target: Target::Action(Action::ApproveAll),
         });

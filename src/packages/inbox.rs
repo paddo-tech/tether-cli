@@ -49,20 +49,22 @@ pub enum Reason {
 }
 
 impl Reason {
+    /// The one name of the reason, in the CLI and in the dashboard badges. Short, so a badge
+    /// fits in a list row; the dashboard details explain each one.
     pub fn label(self) -> &'static str {
         match self {
             Reason::Unsigned => "from another machine",
-            Reason::UntrustedSigner => "signed by an untrusted key",
+            Reason::UntrustedSigner => "untrusted key",
             Reason::UntrustedTap => "untrusted tap",
-            Reason::CooldownUnsupported => "release age not checked",
-            Reason::TooNew => "newer than the release-age limit",
-            Reason::Malicious => "malicious (OSV)",
-            Reason::MaliciousUpgrade => "malicious upgrade (OSV)",
-            Reason::MaliciousUnresolved => "malicious releases (OSV), install version unknown",
+            Reason::CooldownUnsupported => "age not checked",
+            Reason::TooNew => "too new",
+            Reason::Malicious => "malicious",
+            Reason::MaliciousUpgrade => "malicious upgrade",
+            Reason::MaliciousUnresolved => "malicious releases",
             Reason::NewMachine => "new machine key",
-            Reason::KeyChanged => "machine key changed",
+            Reason::KeyChanged => "key changed",
             Reason::SignatureFailed => "signature failed",
-            Reason::OtherOsVersion => "another OS pins a version that fails here",
+            Reason::OtherOsVersion => "other OS version",
         }
     }
 }

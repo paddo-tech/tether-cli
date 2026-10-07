@@ -97,7 +97,7 @@ pub fn render(f: &mut Frame, app: &App, picker: &PkgImport) {
     picker_popup(
         f,
         app,
-        "Import package",
+        "Install from another machine",
         rows,
         picker.cursor,
         &[("⏎", "install"), ("esc", "close")],

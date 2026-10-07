@@ -214,7 +214,7 @@ const PACKAGES: &[Binding] = &[
         &[Char('t')],
         "t",
         "profiles",
-        "Choose the profiles that install the package",
+        "Share with profiles: choose the profiles that install it",
         2,
     ),
     b(
@@ -227,8 +227,8 @@ const PACKAGES: &[Binding] = &[
     b(
         &[Char('i')],
         "i",
-        "import",
-        "Install a package from another machine",
+        "install",
+        "Install a package that another machine has",
         4,
     ),
     b(

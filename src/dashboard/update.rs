@@ -1482,8 +1482,8 @@ mod tests {
             .draw(|f| crate::dashboard::view::view(f, &app))
             .unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("MALICIOUS"));
-        assert!(text.contains("2 pending"));
+        assert!(text.contains("malicious"));
+        assert!(text.contains("Inbox 2"));
         assert!(text.contains("approval is blocked"));
 
         app.state.inbox.items.clear();
@@ -1505,7 +1505,7 @@ mod tests {
         let text = screen(&terminal);
         let first_row: String = text.chars().take(160).collect();
         let x = first_row
-            .find("2 pending")
+            .find("Inbox 2")
             .map(|b| first_row[..b].chars().count());
         click(&mut app, x.unwrap() as u16, 0);
         assert_eq!(app.active_tab, Tab::Security);
@@ -1857,7 +1857,7 @@ mod tests {
             .draw(|f| crate::dashboard::view::view(f, &app))
             .unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("KEY CHANGED"));
+        assert!(text.contains("key changed"));
         assert!(text.contains("SHA256:abc"));
         assert!(text.contains("trust key"));
         key(&mut app, KeyCode::Char('A'));
@@ -2004,7 +2004,7 @@ mod tests {
         terminal
             .draw(|f| crate::dashboard::view::view(f, &app))
             .unwrap();
-        assert!(screen(&terminal).contains("SIGNATURE FAILED"));
+        assert!(screen(&terminal).contains("signature failed"));
         key(&mut app, KeyCode::Char('A'));
         assert_eq!(
             approve_all_names(&app),
