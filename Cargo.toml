@@ -100,6 +100,7 @@ crossterm = "0.29"
 tempfile = "3.8"
 assert_cmd = "2.0"
 predicates = "3.0"
+testcontainers = "0.28"
 
 [profile.release]
 lto = true

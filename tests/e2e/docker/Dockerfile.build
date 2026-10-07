@@ -1,0 +1,12 @@
+# Builds one Tether binary from a `git archive` of any commit. The build profile is cut down
+# for speed; it changes code generation, not behaviour.
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY src.tar /
+RUN tar xf /src.tar -C /src && rm /src.tar
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 CARGO_PROFILE_RELEASE_OPT_LEVEL=1 \
+    cargo build --release $(test -f Cargo.lock && echo --locked)
+
+FROM scratch
+COPY --from=build /src/target/release/tether /tether
