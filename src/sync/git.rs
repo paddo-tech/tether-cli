@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 /// committer from git config, and a new machine may have none, so Tether gives the
 /// identity its git2 commits use. Rebased commits stay unsigned, so a user's
 /// `commit.gpgsign` cannot ask for a passphrase or fail a run without a terminal.
-pub fn identity_args() -> [String; 6] {
+pub fn identity_args() -> [String; 8] {
     [
         "-c".to_string(),
         format!("user.name={}", crate::sync::local_hostname()),
@@ -18,6 +18,9 @@ pub fn identity_args() -> [String; 6] {
         "user.email=tether@local".to_string(),
         "-c".to_string(),
         "commit.gpgsign=false".to_string(),
+        // A recorded resolution would stage a conflict yet still stop the rebase
+        "-c".to_string(),
+        "rerere.enabled=false".to_string(),
     ]
 }
 
@@ -347,9 +350,13 @@ impl GitBackend {
             if !self.has_conflicts() {
                 let error = String::from_utf8_lossy(&rebase_output.stderr);
                 self.abort_rebase()?;
+                // Quitting would leave the autostash unapplied, so keep the rebase for a later abort
                 if self.is_rebase_in_progress() {
-                    self.git(&["rebase", "--quit"])?;
-                    self.git(&["checkout", "main"])?;
+                    anyhow::bail!(
+                        "Failed to rebase onto origin/main, and the rebase could not be aborted. Run 'git rebase --abort' in {}: {}",
+                        self.repo_path.display(),
+                        error.trim()
+                    );
                 }
                 anyhow::bail!("Failed to rebase onto origin/main: {}", error.trim());
             }
