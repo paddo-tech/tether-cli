@@ -879,7 +879,7 @@ mod tests {
     fn old_ids(machines: &[MachineState], this_host: &str, signed: &[String]) -> Vec<String> {
         MachineState::old_ids_of_this_machine(
             machines,
-            "7d184e5919ef",
+            "3f9a1c2b4d5e",
             this_host,
             signed,
             Utc::now(),
@@ -892,50 +892,46 @@ mod tests {
     #[test]
     fn test_old_id_with_hostname_id_is_flagged() {
         let machines = [
-            record_at("7d184e5919ef", "Paddos-Macbook-Pro-M5-Max.local", 0),
-            record_at(
-                "Paddos-Macbook-Pro-M5-Max.local",
-                "Paddos-Macbook-Pro-M5-Max.local",
-                17,
-            ),
+            record_at("3f9a1c2b4d5e", "studio-laptop.local", 0),
+            record_at("studio-laptop.local", "studio-laptop.local", 17),
             record_at("a1b2c3d4e5f6", "studio.local", 30),
         ];
         assert_eq!(
-            old_ids(&machines, "Paddos-Macbook-Pro-M5-Max.local", &[]),
-            ["Paddos-Macbook-Pro-M5-Max.local"]
+            old_ids(&machines, "studio-laptop.local", &[]),
+            ["studio-laptop.local"]
         );
     }
 
     #[test]
     fn test_old_id_ignores_case_and_local_suffix() {
         let machines = [
-            record_at("7d184e5919ef", "paddos-macbook", 0),
-            record_at("PADDOS-MACBOOK.local", "", 20),
-            record_at("work-mac", "Paddos-MacBook.local", 20),
+            record_at("3f9a1c2b4d5e", "studio-laptop", 0),
+            record_at("STUDIO-LAPTOP.local", "", 20),
+            record_at("work-mac", "Studio-Laptop.local", 20),
         ];
-        let mut found = old_ids(&machines, "paddos-macbook", &[]);
+        let mut found = old_ids(&machines, "studio-laptop", &[]);
         found.sort();
-        assert_eq!(found, ["PADDOS-MACBOOK.local", "work-mac"]);
+        assert_eq!(found, ["STUDIO-LAPTOP.local", "work-mac"]);
     }
 
     #[test]
     fn test_old_id_skips_random_ids_but_not_upgraded_hostname_ids() {
         let machines = [
-            record_at("7d184e5919ef", "mac.local", 0),
+            record_at("3f9a1c2b4d5e", "mac.local", 0),
             record_at("0123456789ab", "mac.local", 30),
         ];
         assert!(old_ids(&machines, "mac.local", &[]).is_empty());
 
         let mut upgraded = record_at("mac.local", "mac.local", 30);
         upgraded.cli_version = "1.12.0".to_string();
-        let machines = [record_at("7d184e5919ef", "mac.local", 0), upgraded];
+        let machines = [record_at("3f9a1c2b4d5e", "mac.local", 0), upgraded];
         assert_eq!(old_ids(&machines, "mac.local", &[]), ["mac.local"]);
     }
 
     #[test]
     fn test_old_id_skips_active_twin_with_same_hostname() {
         let machines = [
-            record_at("7d184e5919ef", "mac.local", 0),
+            record_at("3f9a1c2b4d5e", "mac.local", 0),
             record_at("0123456789ab", "mac.local", 1),
         ];
         assert!(old_ids(&machines, "mac.local", &[]).is_empty());
@@ -944,7 +940,7 @@ mod tests {
     #[test]
     fn test_old_id_skips_newer_and_foreign_signed_records() {
         let machines = [
-            record_at("7d184e5919ef", "mac.local", 10),
+            record_at("3f9a1c2b4d5e", "mac.local", 10),
             record_at("mac.local", "mac.local", 8),
             record_at("0123456789ab", "mac.local", 30),
         ];
@@ -956,7 +952,7 @@ mod tests {
         let machines = [record_at("mac.local", "mac.local", 30)];
         assert!(old_ids(&machines, "mac.local", &[]).is_empty());
         let machines = [
-            record_at("7d184e5919ef", "mac.local", 0),
+            record_at("3f9a1c2b4d5e", "mac.local", 0),
             record_at("mac.local", "mac.local", 30),
         ];
         assert!(old_ids(&machines, "", &[]).is_empty());

@@ -1118,7 +1118,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let own = key();
         let now = chrono::Utc::now();
-        let mut this = MachineState::new("7d184e5919ef");
+        let mut this = MachineState::new("3f9a1c2b4d5e");
         this.hostname = "mac.local".to_string();
         let mut twin = MachineState::new("mac.local");
         twin.hostname = "mac.local".to_string();
@@ -1135,7 +1135,7 @@ mod tests {
             old_ids_at(
                 tmp.path(),
                 &machines,
-                "7d184e5919ef",
+                "3f9a1c2b4d5e",
                 "mac.local",
                 Some(own.public_key()),
                 now,
@@ -1157,7 +1157,7 @@ mod tests {
     fn old_id_digest_covers_the_record_as_listed() {
         let tmp = tempfile::TempDir::new().unwrap();
         let now = chrono::Utc::now();
-        let mut this = MachineState::new("7d184e5919ef");
+        let mut this = MachineState::new("3f9a1c2b4d5e");
         this.hostname = "mac.local".to_string();
         let mut old = MachineState::new("mac.local");
         old.hostname = "mac.local".to_string();
@@ -1165,7 +1165,7 @@ mod tests {
         old.last_sync = now - chrono::Duration::days(30);
         write_record(tmp.path(), "mac.local", &old);
         let found = |machines: &[MachineState]| {
-            old_ids_at(tmp.path(), machines, "7d184e5919ef", "mac.local", None, now)
+            old_ids_at(tmp.path(), machines, "3f9a1c2b4d5e", "mac.local", None, now)
         };
 
         let listed = [this.clone(), old.clone()];

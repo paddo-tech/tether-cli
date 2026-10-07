@@ -146,7 +146,7 @@ static FIELDS: LazyLock<Vec<ConfigField>> = LazyLock::new(|| {
         // Package security
         ConfigField {
             key: "min_release_age_days",
-            label: "Min release age (days)",
+            label: "Min release age (days, 0 = off)",
             section: "Package security",
             kind: FieldKind::Text,
         },

@@ -358,9 +358,9 @@ mod tests {
 
     #[test]
     fn fit_ellipsizes_across_spans() {
-        let line = Line::from(vec![Span::raw("from "), Span::raw("Paddos-Mac-mini")]);
-        assert_eq!(fit(line.clone(), 30).to_string(), "from Paddos-Mac-mini");
-        assert_eq!(fit(line.clone(), 10).to_string(), "from Padd…");
+        let line = Line::from(vec![Span::raw("from "), Span::raw("mac-mini")]);
+        assert_eq!(fit(line.clone(), 30).to_string(), "from mac-mini");
+        assert_eq!(fit(line.clone(), 10).to_string(), "from mac-…");
         assert_eq!(fit(line.clone(), 6).to_string(), "from …");
         assert_eq!(fit(line, 0).to_string(), "");
     }
