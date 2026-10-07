@@ -86,11 +86,7 @@ impl Runtime {
                     |e| Some(Msg::ProfilesSaved(Err(e))),
                 );
             }
-            Cmd::Install {
-                op,
-                machine_id,
-                osv_required,
-            } => {
+            Cmd::Install { op, osv_required } => {
                 let failed_op = op.clone();
                 self.spawn(
                     async move {
@@ -110,12 +106,15 @@ impl Runtime {
                                 return Msg::OsvUnreachable { op, error };
                             }
                             Err(Blocked::Refused(e)) => Err(e),
-                            Ok(version) => run_install(&op.manager_key, &op.name, version).await,
+                            Ok(version) => crate::packages::inbox::install_from_machine(
+                                &op.manager_key,
+                                &op.name,
+                                version,
+                                false,
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
                         };
-                        if result.is_ok() {
-                            // Sync would uninstall it again while it is still tombstoned.
-                            remove_from_removed_packages(&machine_id, &op.manager_key, &op.name);
-                        }
                         Msg::InstallDone { op, result }
                     },
                     move |e| {
@@ -472,36 +471,6 @@ async fn approve_and_install(
     (result, unchecked)
 }
 
-async fn run_install(
-    manager_key: &str,
-    package: &str,
-    version: Option<String>,
-) -> Result<(), String> {
-    use crate::packages::*;
-
-    if manager_key == "brew_casks" {
-        return BrewManager
-            .install_cask(package, false)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-    }
-
-    let manager: Box<dyn PackageManager> = match manager_key {
-        "brew_formulae" => Box::new(BrewManager),
-        _ => manager_for_key(manager_key)
-            .ok_or_else(|| format!("Unknown manager: {}", manager_key))?,
-    };
-
-    manager
-        .install(&PackageInfo {
-            name: package.to_string(),
-            version,
-        })
-        .await
-        .map_err(|e| e.to_string())
-}
-
 async fn collect_local_packages(
     config: &crate::config::Config,
     machine_id: &str,
@@ -562,23 +531,6 @@ fn save_profiles(
             crate::sync::membership::save_edit(&config, manager_key, name, edit)
         })
         .map_err(|e| e.to_string())
-}
-
-fn remove_from_removed_packages(machine_id: &str, manager_key: &str, pkg_name: &str) {
-    if machine_id.is_empty() {
-        return;
-    }
-    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
-        if let Ok(Some(mut machine)) = crate::sync::signing::own_record(&sync_path, machine_id) {
-            if let Some(removed) = machine.removed_packages.get_mut(manager_key) {
-                removed.retain(|p| p != pkg_name);
-                if removed.is_empty() {
-                    machine.removed_packages.remove(manager_key);
-                }
-                let _ = crate::sync::signing::save_record(&sync_path, &machine);
-            }
-        }
-    }
 }
 
 fn run_restore(repo_path: &str, dotfile_path: &str, commit_hash: &str) -> Result<(), String> {

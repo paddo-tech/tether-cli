@@ -345,24 +345,7 @@ pub async fn install(id: &str) -> Result<()> {
         canonical,
         sources.join(", ")
     ));
-    inbox::install(
-        &InboxItem {
-            kind: Kind::Package,
-            manager: manager.to_string(),
-            name: name.to_string(),
-            version,
-            tap: None,
-            source_machine: None,
-            commit: None,
-            signer: None,
-            reasons: Vec::new(),
-            advisories: Vec::new(),
-            first_seen: chrono::Utc::now(),
-        },
-        true,
-    )
-    .await?;
-    forget_removal(&sync_path, &machine_id, manager, name)?;
+    inbox::install_from_machine(manager, name, version, true).await?;
     Output::success(&format!("Installed {}", canonical));
     Ok(())
 }
@@ -394,32 +377,6 @@ async fn installed_here(manager: &str, name: &str) -> Result<bool> {
     Ok(names
         .iter()
         .any(|n| membership::canonical_id(manager, n) == canonical))
-}
-
-/// A sync uninstalls a package this machine removed, so an install takes it off that list.
-fn forget_removal(
-    sync_path: &std::path::Path,
-    machine_id: &str,
-    manager: &str,
-    name: &str,
-) -> Result<()> {
-    let Some(mut record) = crate::sync::signing::own_record(sync_path, machine_id)? else {
-        return Ok(());
-    };
-    let Some(removed) = record.removed_packages.get_mut(manager) else {
-        return Ok(());
-    };
-    let before = removed.len();
-    removed.retain(|n| {
-        membership::canonical_id(manager, n) != membership::canonical_id(manager, name)
-    });
-    if removed.len() == before {
-        return Ok(());
-    }
-    if removed.is_empty() {
-        record.removed_packages.remove(manager);
-    }
-    crate::sync::signing::save_record(sync_path, &record)
 }
 
 pub async fn remove(id: &str) -> Result<()> {

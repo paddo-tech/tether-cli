@@ -79,7 +79,6 @@ pub enum Cmd {
     /// With `osv_required`, an install that OSV cannot check waits for the user.
     Install {
         op: InstallOp,
-        machine_id: String,
         osv_required: bool,
     },
     /// Approve inbox items exactly as displayed, then install them one after another.

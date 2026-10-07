@@ -945,6 +945,50 @@ pub async fn check_osv(
     }
 }
 
+/// Install a package another machine lists, at `version` that the caller checked with
+/// [`check_osv`], as `tether packages install` and the dashboard's Import do. The caller
+/// holds the sync lock: a sync uninstalls a package this machine removed, so the install
+/// also takes it off that list, and no sync may save the record meanwhile.
+pub async fn install_from_machine(
+    manager: &str,
+    name: &str,
+    version: Option<String>,
+    interactive: bool,
+) -> Result<()> {
+    let item = InboxItem {
+        kind: Kind::Package,
+        manager: manager.to_string(),
+        name: name.to_string(),
+        version,
+        tap: None,
+        source_machine: None,
+        commit: None,
+        signer: None,
+        reasons: Vec::new(),
+        advisories: Vec::new(),
+        first_seen: Utc::now(),
+    };
+    install(&item, interactive).await?;
+    let sync_path = crate::sync::SyncEngine::sync_path()?;
+    let machine_id = crate::sync::SyncState::load()?.machine_id;
+    let Some(mut record) = signing::own_record(&sync_path, &machine_id)? else {
+        return Ok(());
+    };
+    let Some(removed) = record.removed_packages.get_mut(manager) else {
+        return Ok(());
+    };
+    let id = crate::sync::membership::canonical_id(manager, name);
+    let before = removed.len();
+    removed.retain(|n| crate::sync::membership::canonical_id(manager, n) != id);
+    if removed.len() == before {
+        return Ok(());
+    }
+    if removed.is_empty() {
+        record.removed_packages.remove(manager);
+    }
+    signing::save_record(&sync_path, &record)
+}
+
 /// Install an approved item now. `interactive` lets a cask prompt for a password.
 /// A machine item has nothing to install. The caller asks [`check_osv`] first, before it
 /// approves the item, because an advisory can appear after the item was queued.

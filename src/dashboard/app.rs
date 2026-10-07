@@ -328,11 +328,7 @@ impl App {
             return None;
         }
         let op = self.track_install(manager_key, name);
-        Some(Cmd::Install {
-            op,
-            machine_id: self.machine_id().to_string(),
-            osv_required,
-        })
+        Some(Cmd::Install { op, osv_required })
     }
 
     /// Track the approval and install of inbox items as displayed. `label` names them in the
