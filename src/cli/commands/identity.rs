@@ -1,5 +1,5 @@
+use crate::cli::output::Colorize;
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
@@ -46,8 +46,7 @@ pub async fn show() -> Result<()> {
 /// Unlock identity with passphrase
 pub async fn unlock() -> Result<()> {
     if !recipients::has_identity() {
-        Output::error("No identity found. Run 'tether identity init' first.");
-        return Ok(());
+        anyhow::bail!("No identity found. Run 'tether identity init' first.");
     }
 
     if recipients::is_identity_unlocked() {

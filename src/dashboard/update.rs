@@ -1,8 +1,8 @@
 use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
 use super::components::palette::{self, Palette, Target};
 use super::components::{
-    config, confirm, file_import, files, machines, overview, packages, pkg_import, profile_picker,
-    security,
+    backup_picker, config, confirm, file_import, files, log_view, machines, overview,
+    package_profiles, packages, pkg_import, profile_picker, security,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -80,12 +80,25 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
         Msg::UninstallDone(result) => {
             app.uninstalling = None;
             match result {
-                Ok(()) => app.follow_up_sync(),
+                Ok(not_saved) => {
+                    if let Some(e) = not_saved {
+                        app.flash_error(e);
+                    }
+                    app.follow_up_sync()
+                }
                 Err(e) => {
                     app.flash_error(format!("uninstall failed: {}", e));
                     None
                 }
             }
+        }
+        Msg::ProfilesSaved(result) => {
+            app.reload_state();
+            match result {
+                Ok(msg) => app.flash_success(msg),
+                Err(e) => app.flash_error(format!("saving profiles failed: {}", e)),
+            }
+            None
         }
         Msg::InstallDone { op, result } => on_install_done(app, op, result),
         Msg::OsvUnreachable { op, error } => {
@@ -188,18 +201,11 @@ fn on_tick(app: &mut App) -> Option<Cmd> {
     None
 }
 
-/// Keys go to the top modal overlay, then the active tab, then the global keymap.
+/// Keys go to the Ctrl keys, the top modal overlay, then the active tab, then the global
+/// keymap.
 fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if ctrl && key.code == KeyCode::Char('c') {
-        request_quit(app);
-        return None;
-    }
-    if ctrl && key.code == KeyCode::Char('k') && !app.overlays.last().is_some_and(Overlay::is_modal)
-    {
-        let entries = palette::entries(app);
-        app.overlays.push(Overlay::Palette(Palette::new(entries)));
-        return None;
+    if let KeyOutcome::Handled(cmd) = ctrl_key(app, key) {
+        return cmd;
     }
 
     if app.overlays.last().is_some_and(Overlay::is_modal) {
@@ -208,6 +214,9 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
             Overlay::FileImport(p) => file_import::handle_key(app, p, key),
             Overlay::PkgImport(p) => pkg_import::handle_key(app, p, key),
             Overlay::ProfilePicker(p) => profile_picker::handle_key(app, p, key),
+            Overlay::PackageProfiles(p) => package_profiles::handle_key(app, p, key),
+            Overlay::Log(l) => log_view::handle_key(app, l, key),
+            Overlay::BackupPicker(p) => backup_picker::handle_key(app, p, key),
             Overlay::Palette(p) => match palette::handle_key(app, p, key) {
                 Some(target) => run_target(app, target),
                 None => None,
@@ -216,58 +225,95 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
         };
     }
 
-    let outcome = match app.active_tab {
+    // Help draws over the tab, so Esc closes it before it reaches the tab
+    if key.code == KeyCode::Esc && app.help_open() {
+        app.overlays.retain(|o| !matches!(o, Overlay::Help));
+        return None;
+    }
+
+    if let KeyOutcome::Handled(cmd) = tab_key(app, key) {
+        return cmd;
+    }
+    match global_key(app, key) {
+        KeyOutcome::Handled(cmd) => cmd,
+        KeyOutcome::Ignored => None,
+    }
+}
+
+/// Ctrl-C quits and Ctrl-K opens the palette, before a tab can read them as plain keys.
+fn ctrl_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return KeyOutcome::Ignored;
+    }
+    match key.code {
+        KeyCode::Char('c') => request_quit(app),
+        KeyCode::Char('k') if !app.overlays.last().is_some_and(Overlay::is_modal) => {
+            let entries = palette::entries(app);
+            app.overlays.push(Overlay::Palette(Palette::new(entries)));
+        }
+        _ => return KeyOutcome::Ignored,
+    }
+    KeyOutcome::Handled(None)
+}
+
+fn tab_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    match app.active_tab {
         Tab::Overview => overview::handle_key(app, key),
         Tab::Files => files::handle_key(app, key),
         Tab::Packages => packages::handle_key(app, key),
         Tab::Machines => machines::handle_key(app, key),
         Tab::Config => config::handle_key(app, key),
         Tab::Security => security::handle_key(app, key),
-    };
-    if let KeyOutcome::Handled(cmd) = outcome {
-        return cmd;
     }
+}
 
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
+fn global_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    let cmd = match key.code {
+        KeyCode::Esc => {
+            app.overlays.retain(|o| !matches!(o, Overlay::Help));
+            None
+        }
+        KeyCode::Char('q') => {
             if app.help_open() {
                 app.overlays.retain(|o| !matches!(o, Overlay::Help));
             } else {
                 request_quit(app);
             }
+            None
         }
-        KeyCode::Char('s') => return run_action(app, Action::Sync),
-        KeyCode::Char('d') => return run_action(app, Action::ToggleDaemon),
-        KeyCode::Char('r') => return run_action(app, Action::Refresh),
+        KeyCode::Char('s') => run_action(app, Action::Sync),
+        KeyCode::Char('d') => run_action(app, Action::ToggleDaemon),
+        KeyCode::Char('r') => run_action(app, Action::Refresh),
         KeyCode::Tab => {
             let tabs = Tab::all();
             let current = tabs.iter().position(|t| *t == app.active_tab).unwrap_or(0);
             app.active_tab = tabs[(current + 1) % tabs.len()];
+            None
         }
-        KeyCode::Char(c @ '1'..='9') => {
-            if let Some(tab) = Tab::all().get(c as usize - '1' as usize) {
-                app.active_tab = *tab;
-            }
+        KeyCode::Char(c @ '1'..='9') if c as usize - ('1' as usize) < Tab::all().len() => {
+            app.active_tab = Tab::all()[c as usize - '1' as usize];
+            None
         }
-        KeyCode::Char('?') => return run_action(app, Action::Help),
-        _ => {}
-    }
-    None
+        KeyCode::Char('?') => run_action(app, Action::Help),
+        _ => return KeyOutcome::Ignored,
+    };
+    KeyOutcome::Handled(cmd)
 }
 
 pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
     match action {
         Action::Sync => return app.sync_cmd(),
-        Action::ToggleDaemon => {
-            if app.daemon_op == DaemonOp::None {
-                let op = if app.state.daemon_running {
-                    DaemonOp::Stopping
-                } else {
-                    DaemonOp::Starting
-                };
-                return Some(Cmd::Daemon(op));
+        // Starting is harmless; stopping ends the automatic sync, so it asks
+        Action::ToggleDaemon if app.daemon_op == DaemonOp::None => {
+            if !app.state.daemon_running {
+                return Some(Cmd::Daemon(DaemonOp::Starting));
             }
+            app.overlays
+                .push(Overlay::Confirm(confirm::Confirm::StopDaemon {
+                    arming: Default::default(),
+                }));
         }
+        Action::ToggleDaemon => {}
         Action::Refresh => app.reload_state(),
         Action::Help => {
             if app.help_open() {
@@ -295,6 +341,7 @@ pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
             app.active_tab = Tab::Security;
             security::confirm_approve_all(app);
         }
+        Action::DaemonLog => app.overlays.push(Overlay::Log(log_view::LogView::open())),
     }
     None
 }
@@ -424,6 +471,8 @@ fn click_item(app: &mut App, i: usize) -> Option<Cmd> {
         Overlay::FileImport(p) => &mut p.cursor,
         Overlay::PkgImport(p) if p.confirm.is_none() => &mut p.cursor,
         Overlay::ProfilePicker(p) => &mut p.cursor,
+        Overlay::PackageProfiles(p) => &mut p.cursor,
+        Overlay::BackupPicker(p) => &mut p.cursor,
         _ => return None,
     };
     if *cursor == i {
@@ -489,7 +538,7 @@ mod tests {
     use crate::dashboard::state::DashboardState;
     use crate::packages::inbox::{InboxItem, Kind, Reason};
     use crate::sync::{ConflictState, TeamManifest};
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::time::Instant;
 
     fn app() -> App {
@@ -506,6 +555,9 @@ mod tests {
             trusted: Vec::new(),
             old_ids: Vec::new(),
             record_status: Vec::new(),
+            old_builds: Vec::new(),
+            membership: None,
+            membership_error: None,
         };
         App::new(state, HashMap::new())
     }
@@ -521,9 +573,7 @@ mod tests {
     /// Press a key once the top confirm has been on screen for the arming delay.
     fn armed_key(app: &mut App, code: KeyCode) -> Option<Cmd> {
         if let Some(Overlay::Confirm(c)) = app.overlays.last() {
-            if let Some(arming) = c.arming() {
-                arming.drawn_long_ago();
-            }
+            c.arming().drawn_long_ago();
         }
         key(app, code)
     }
@@ -544,15 +594,45 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_help_before_quitting() {
+    fn escape_closes_help_and_never_quits() {
         let mut app = app();
         key(&mut app, KeyCode::Char('?'));
         assert!(app.help_open());
         key(&mut app, KeyCode::Esc);
         assert!(!app.help_open());
-        assert!(!app.should_quit);
+        for tab in Tab::all() {
+            app.active_tab = *tab;
+            key(&mut app, KeyCode::Esc);
+            assert!(!app.should_quit);
+        }
         key(&mut app, KeyCode::Char('q'));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn escape_collapses_what_enter_opened() {
+        let mut app = packages_app();
+        key(&mut app, KeyCode::Enter);
+        assert!(app.packages.expanded.is_some());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.packages.expanded.is_none());
+        assert!(!app.should_quit);
+
+        app.state
+            .machines
+            .push(crate::sync::MachineState::new("other"));
+        app.active_tab = Tab::Machines;
+        key(&mut app, KeyCode::Enter);
+        assert!(app.machines.expanded.is_some());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.machines.expanded.is_none());
+
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Enter);
+        assert!(app.security.detail);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.security.detail);
+        assert!(!app.should_quit);
     }
 
     #[test]
@@ -599,16 +679,266 @@ mod tests {
     }
 
     #[test]
+    fn config_refuses_invalid_values_with_the_reason() {
+        let mut app = app();
+        let mut config = crate::config::Config::default();
+        config.packages.allow_scripts = vec!["esbuild".into()];
+        app.state.config = Some(config);
+        app.active_tab = Tab::Config;
+        let field = |key: &str| {
+            crate::dashboard::config_edit::fields()
+                .iter()
+                .position(|f| f.key == key)
+                .unwrap()
+        };
+        app.config.selected = field("interval");
+        key(&mut app, KeyCode::Enter);
+        app.config.edit_buf = "often".into();
+        key(&mut app, KeyCode::Enter);
+        // The field stays open with the value, and the toast says why
+        assert!(app.config.editing);
+        assert_eq!(app.config.edit_buf, "often");
+        assert_eq!(
+            last_toast(&app),
+            Some((
+                ToastKind::Error,
+                "Sync interval needs a number and s, m or h, such as 5m"
+            ))
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.config.editing);
+
+        // A list item is removed with x, after a question
+        app.config.selected = field("allow_scripts");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::RemoveListItem { .. }))
+        ));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            app.state.config.as_ref().unwrap().packages.allow_scripts,
+            vec!["esbuild".to_string()]
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(app.config.list_edit.is_none());
+        assert!(!app.should_quit);
+    }
+
+    /// Keys a handler takes, among every printable key and the common special keys.
+    fn handled(
+        fixture: impl Fn() -> App,
+        handler: fn(&mut App, KeyEvent) -> KeyOutcome,
+        modifiers: KeyModifiers,
+    ) -> BTreeSet<String> {
+        use KeyCode::*;
+        let mut codes: Vec<KeyCode> = (' '..='~').map(Char).collect();
+        codes.extend([
+            Enter, Esc, Tab, BackTab, Backspace, Delete, Up, Down, Left, Right, PageUp, PageDown,
+            Home, End,
+        ]);
+        codes
+            .into_iter()
+            .filter(|code| {
+                let mut app = fixture();
+                matches!(
+                    handler(&mut app, KeyEvent::new(*code, modifiers)),
+                    KeyOutcome::Handled(_)
+                )
+            })
+            .map(|code| format!("{:?}", code))
+            .collect()
+    }
+
+    fn listed(
+        bindings: &[crate::dashboard::components::keymap::Binding],
+        ctrl: bool,
+    ) -> BTreeSet<String> {
+        bindings
+            .iter()
+            .filter(|b| b.ctrl == ctrl)
+            .flat_map(|b| b.codes.iter().map(|code| format!("{:?}", code)))
+            .collect()
+    }
+
+    /// The footer and help come from the keymap, so it must list exactly the keys each
+    /// handler takes.
+    #[test]
+    fn keymap_lists_exactly_the_handled_keys() {
+        use crate::dashboard::components::keymap;
+
+        for tab in Tab::all() {
+            let fixture = || {
+                let mut app = app();
+                app.active_tab = *tab;
+                app
+            };
+            assert_eq!(
+                handled(fixture, tab_key, KeyModifiers::NONE),
+                listed(keymap::tab(*tab), false),
+                "{:?}",
+                tab
+            );
+        }
+        let list_fixture = || {
+            let mut app = app();
+            let mut config = crate::config::Config::default();
+            // An empty list, so no probed key can save the config
+            config.dotfiles.files.clear();
+            app.state.config = Some(config);
+            app.active_tab = Tab::Config;
+            app.config.selected = crate::dashboard::config_edit::fields()
+                .iter()
+                .position(|f| f.key == "dotfiles.files")
+                .unwrap();
+            key(&mut app, KeyCode::Enter);
+            assert!(app.config.list_edit.is_some());
+            app
+        };
+        assert_eq!(
+            handled(list_fixture, tab_key, KeyModifiers::NONE),
+            listed(keymap::CONFIG_LIST, false)
+        );
+        assert_eq!(
+            handled(app, global_key, KeyModifiers::NONE),
+            listed(keymap::GLOBAL, false)
+        );
+        assert_eq!(
+            handled(app, ctrl_key, KeyModifiers::CONTROL),
+            listed(keymap::GLOBAL, true)
+        );
+    }
+
+    #[test]
+    fn footer_keeps_the_help_key_and_the_first_keys_at_every_width() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        for tab in Tab::all() {
+            app.active_tab = *tab;
+            for w in [60, 100, 120, 160] {
+                let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
+                terminal
+                    .draw(|f| crate::dashboard::view::view(f, &app))
+                    .unwrap();
+                let footer: String = (0..w)
+                    .map(|x| terminal.backend().buffer()[(x, 29)].symbol().to_string())
+                    .collect();
+                assert!(footer.contains("? more"), "{:?} at {}: {}", tab, w, footer);
+                if w >= 100 {
+                    assert!(footer.contains("s sync") && footer.contains("q quit"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_log_opens_read_only_and_scrolls() {
+        use crate::dashboard::components::log_view::LogView;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlays.last(), Some(Overlay::Log(_))));
+        app.overlays.clear();
+        assert!(palette::entries(&app)
+            .iter()
+            .any(|e| e.target == Target::Action(Action::DaemonLog)));
+
+        app.overlays.push(Overlay::Log(LogView {
+            lines: (0..100).map(|i| format!("✓ line {}", i)).collect(),
+            from_end: 0,
+            rows: std::cell::Cell::new(1),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("line 99"));
+        for code in [KeyCode::Char('g'), KeyCode::Char('s'), KeyCode::Char('d')] {
+            // Keys that would act elsewhere do nothing here
+            assert!(key(&mut app, code).is_none());
+        }
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("line 0") && !text.contains("line 99"));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.overlays.is_empty());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn backup_restores_only_after_y() {
+        use crate::dashboard::components::backup_picker::BackupPicker;
+
+        let mut app = app();
+        app.active_tab = Tab::Files;
+        app.overlays.push(Overlay::BackupPicker(BackupPicker {
+            path: ".zshrc".into(),
+            backups: vec!["2026-10-03T14-55-00".into(), "2026-10-01T09-00-00".into()],
+            cursor: 0,
+        }));
+        key(&mut app, KeyCode::Char('j'));
+        // Enter picks the backup and asks; a second Enter cancels
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::RestoreBackup { .. }))
+        ));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+
+        app.overlays.push(Overlay::Confirm(Confirm::RestoreBackup {
+            path: ".zshrc".into(),
+            timestamp: "2026-10-01T09-00-00".into(),
+            arming: Default::default(),
+        }));
+        let Some(Cmd::RestoreBackup { path, timestamp }) = armed_key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected a restore command");
+        };
+        assert_eq!(
+            (path.as_str(), timestamp.as_str()),
+            (".zshrc", "2026-10-01T09-00-00")
+        );
+    }
+
+    #[test]
+    fn daemon_key_asks_before_it_stops() {
+        let mut app = app();
+        app.state.daemon_running = true;
+        assert!(key(&mut app, KeyCode::Char('d')).is_none());
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::StopDaemon { .. }))
+        ));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('d'));
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Daemon(DaemonOp::Stopping))
+        ));
+    }
+
+    #[test]
     fn confirm_overlay_takes_keys_until_answered() {
         let mut app = app();
         app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
             manager_key: "npm".into(),
             name: "left-pad".into(),
+            arming: Default::default(),
         }));
         key(&mut app, KeyCode::Char('2'));
         assert_eq!(app.active_tab, Tab::Overview);
         assert_eq!(app.overlays.len(), 1);
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        // Not drawn yet, so not armed: `y` typed for something else does not uninstall
+        assert!(key(&mut app, KeyCode::Char('y')).is_none());
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         assert!(matches!(cmd, Some(Cmd::Uninstall { .. })));
         assert!(app.overlays.is_empty());
         assert_eq!(
@@ -620,6 +950,16 @@ mod tests {
         assert_eq!(
             last_toast(&app),
             Some((ToastKind::Error, "uninstall failed: boom"))
+        );
+        // The package is gone, so the sync still runs; the toast names what did not save
+        let cmd = update(
+            &mut app,
+            Msg::UninstallDone(Ok(Some("profiles not saved".into()))),
+        );
+        assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Error, "profiles not saved"))
         );
     }
 
@@ -643,7 +983,7 @@ mod tests {
         let mut app = app();
         update(&mut app, Msg::JobStarted(Job::Sync));
         app.uninstalling = Some(("npm".into(), "left-pad".into()));
-        assert!(update(&mut app, Msg::UninstallDone(Ok(()))).is_none());
+        assert!(update(&mut app, Msg::UninstallDone(Ok(None))).is_none());
         let cmd = update(
             &mut app,
             Msg::JobExited {
@@ -683,6 +1023,88 @@ mod tests {
         app.show_local_packages();
         assert_eq!(app.state.machines[0].packages, record.packages);
         assert!(app.local_packages.is_none());
+    }
+
+    /// This machine "me" with npm package zx, in profile dev of profiles dev and server.
+    fn packages_app() -> App {
+        let mut app = app();
+        app.state.sync_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "me",
+                "last_sync": "2026-01-01T00:00:00Z",
+                "files": {},
+                "packages": {},
+            }))
+            .unwrap(),
+        );
+        let mut config = crate::config::Config::default();
+        for name in ["dev", "server"] {
+            config
+                .profiles
+                .insert(name.to_string(), crate::config::ProfileConfig::default());
+        }
+        let mut record = crate::sync::MachineState::new("me");
+        record.packages.insert("npm".into(), vec!["zx".into()]);
+        app.state.membership = Some(crate::sync::membership::Membership::new(
+            &config,
+            &Default::default(),
+            &record,
+            &[],
+        ));
+        app.state.config = Some(config);
+        app.state.machines = vec![record];
+        app.active_tab = Tab::Packages;
+        app
+    }
+
+    #[test]
+    fn enter_and_double_click_never_uninstall() {
+        let mut app = packages_app();
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(1));
+        click(&mut app, 2, 5);
+        assert!(app.overlays.is_empty());
+
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::Uninstall { .. }))
+        ));
+        draw(&app);
+        // Enter cancels even once armed
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Uninstall { .. })
+        ));
+    }
+
+    #[test]
+    fn t_on_a_package_opens_its_profile_checklist() {
+        let mut app = packages_app();
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('t'));
+        let Some(Overlay::PackageProfiles(picker)) = app.overlays.last() else {
+            panic!("expected the profile checklist");
+        };
+        assert_eq!(picker.name, "zx");
+        assert_eq!(picker.checked, BTreeSet::from(["dev".to_string()]));
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char(' '));
+        let Some(Overlay::PackageProfiles(picker)) = app.overlays.last() else {
+            panic!("expected the profile checklist");
+        };
+        assert_eq!(
+            picker.checked,
+            BTreeSet::from(["dev".to_string(), "server".to_string()])
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(app.overlays.is_empty());
     }
 
     #[test]
@@ -877,6 +1299,7 @@ mod tests {
         app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
             manager_key: "npm".into(),
             name: "left-pad".into(),
+            arming: Default::default(),
         }));
         app.add_hit(Rect::new(0, 5, 40, 1), Hit::Row(0));
         assert!(click(&mut app, 2, 5).is_none());
@@ -987,6 +1410,18 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(screen.contains("Install left-pad (npm)?"));
+
+        // Enter opened the question, so Enter never answers it
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        let Some(Overlay::PkgImport(picker)) = app.overlays.last_mut() else {
+            panic!("expected the picker");
+        };
+        assert!(picker.confirm.is_none());
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Install { .. })
+        ));
     }
 
     fn inbox_item(name: &str, reasons: Vec<Reason>) -> InboxItem {
@@ -1047,8 +1482,8 @@ mod tests {
             .draw(|f| crate::dashboard::view::view(f, &app))
             .unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("MALICIOUS"));
-        assert!(text.contains("2 pending"));
+        assert!(text.contains("malicious"));
+        assert!(text.contains("Inbox 2"));
         assert!(text.contains("approval is blocked"));
 
         app.state.inbox.items.clear();
@@ -1070,10 +1505,62 @@ mod tests {
         let text = screen(&terminal);
         let first_row: String = text.chars().take(160).collect();
         let x = first_row
-            .find("2 pending")
+            .find("Inbox 2")
             .map(|b| first_row[..b].chars().count());
         click(&mut app, x.unwrap() as u16, 0);
         assert_eq!(app.active_tab, Tab::Security);
+    }
+
+    #[test]
+    fn security_tab_groups_a_flood_by_machine() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        app.active_tab = Tab::Security;
+        let from = |machine: &str, name: String| InboxItem {
+            source_machine: Some(machine.into()),
+            advisories: Vec::new(),
+            ..inbox_item(&name, vec![Reason::Unsigned])
+        };
+        let mut items: Vec<InboxItem> = (0..200)
+            .map(|i| from("laptop", format!("gem{i}")))
+            .chain((0..80).map(|i| from("desk", format!("npm{i}"))))
+            .collect();
+        items.push(inbox_item(
+            "evil",
+            vec![Reason::Malicious, Reason::Unsigned],
+        ));
+        crate::packages::inbox::sort_by_group(&mut items);
+        app.state.inbox.items = items;
+        app.state.old_builds = vec!["oldbox".into()];
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("281 pending in 3 groups"));
+        assert!(text.contains("200 items"));
+        assert!(text.contains("80 items"));
+        assert!(text.contains("oldbox on 1.x"));
+
+        // The cursor starts on desk's first package; approve all from desk
+        key(&mut app, KeyCode::Char('M'));
+        let (names, held) = approve_all_names(&app).unwrap();
+        assert_eq!((names.len(), held), (80, 0));
+        assert!(names.iter().all(|n| n.starts_with("npm")));
+        app.overlays.clear();
+        // other's malicious package stays out
+        let evil = app
+            .state
+            .inbox
+            .items
+            .iter()
+            .position(|i| i.name == "evil")
+            .unwrap();
+        security::move_cursor(&mut app, evil);
+        key(&mut app, KeyCode::Char('M'));
+        assert!(approve_all_names(&app).is_none());
     }
 
     #[test]
@@ -1338,7 +1825,13 @@ mod tests {
         app.active_tab = Tab::Security;
         key(&mut app, KeyCode::Char('j'));
         draw(&app);
-        let Some(Cmd::Reject(item)) = key(&mut app, KeyCode::Char('x')) else {
+        // Reject asks first, and Enter does not answer
+        assert!(key(&mut app, KeyCode::Char('x')).is_none());
+        draw(&app);
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('x'));
+        let Some(Cmd::Reject(item)) = armed_key(&mut app, KeyCode::Char('y')) else {
             panic!("expected a reject command");
         };
         assert_eq!(item.name, "left-pad");
@@ -1364,7 +1857,7 @@ mod tests {
             .draw(|f| crate::dashboard::view::view(f, &app))
             .unwrap();
         let text = screen(&terminal);
-        assert!(text.contains("KEY CHANGED"));
+        assert!(text.contains("key changed"));
         assert!(text.contains("SHA256:abc"));
         assert!(text.contains("trust key"));
         key(&mut app, KeyCode::Char('A'));
@@ -1373,10 +1866,128 @@ mod tests {
             Some((vec!["left-pad".to_string()], 1))
         );
         app.overlays.clear();
-        let Some(Cmd::TrustKey { item, label }) = key(&mut app, KeyCode::Char('a')) else {
+        // Trust asks first and shows the whole fingerprint
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("key      SHA256:abc"));
+        let Some(Cmd::TrustKey { item, label }) = armed_key(&mut app, KeyCode::Char('y')) else {
             panic!("expected a trust command");
         };
         assert_eq!((item.name.as_str(), label.as_str()), ("laptop", "laptop"));
+    }
+
+    #[test]
+    fn approve_all_marks_items_with_advisories() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        app.state.inbox.items[1].advisories = vec!["GHSA-1".into(), "GHSA-2".into()];
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('A'));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("1 has OSV advisories"));
+        assert!(text.contains("left-pad 1.0.0 (npm)  ▲ 2 advisories"));
+    }
+
+    /// This machine "me", and "laptop" whose key this machine trusts.
+    fn machines_app() -> App {
+        let mut app = app();
+        app.state.sync_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "me",
+                "last_sync": "2026-01-01T00:00:00Z",
+                "files": {},
+                "packages": {},
+            }))
+            .unwrap(),
+        );
+        app.state.machines = ["me", "laptop"]
+            .map(|id| crate::sync::MachineState {
+                hostname: id.into(),
+                ..crate::sync::MachineState::new(id)
+            })
+            .into();
+        app.state.trusted = vec![crate::packages::inbox::TrustedMachine {
+            machine_id: "laptop".into(),
+            fingerprint: "SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG".into(),
+        }];
+        app.active_tab = Tab::Machines;
+        app
+    }
+
+    #[test]
+    fn profile_is_set_only_on_this_machines_card() {
+        let mut app = machines_app();
+        let mut config = crate::config::Config::default();
+        config
+            .profiles
+            .insert("dev".into(), crate::config::ProfileConfig::default());
+        app.state.config = Some(config);
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Info, "Set the profile of laptop on that machine"))
+        );
+        key(&mut app, KeyCode::Char('h'));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::ProfilePicker(_))
+        ));
+    }
+
+    #[test]
+    fn machine_details_show_the_full_fingerprint() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = machines_app();
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal)
+            .contains("trusted  SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"));
+    }
+
+    #[test]
+    fn machines_tab_untrusts_after_y_with_the_full_fingerprint() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = machines_app();
+        // This machine's own key is never untrusted or trusted again
+        assert!(key(&mut app, KeyCode::Char('x')).is_none());
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Char('a'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Info, "laptop is trusted already"))
+        );
+        key(&mut app, KeyCode::Char('x'));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal)
+            .contains("key      SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        key(&mut app, KeyCode::Char('x'));
+        let Some(Cmd::Untrust { machine_id, .. }) = armed_key(&mut app, KeyCode::Char('y')) else {
+            panic!("expected an untrust command");
+        };
+        assert_eq!(machine_id, "laptop");
     }
 
     #[test]
@@ -1393,7 +2004,7 @@ mod tests {
         terminal
             .draw(|f| crate::dashboard::view::view(f, &app))
             .unwrap();
-        assert!(screen(&terminal).contains("SIGNATURE FAILED"));
+        assert!(screen(&terminal).contains("signature failed"));
         key(&mut app, KeyCode::Char('A'));
         assert_eq!(
             approve_all_names(&app),
@@ -1440,8 +2051,11 @@ mod tests {
             to_install: vec![("evil".into(), Some("1.0.0".into()))],
             uninstall: 0,
         };
-        app.overlays.push(Overlay::Confirm(Confirm::Rollback(plan)));
-        let cmd = key(&mut app, KeyCode::Char('y'));
+        app.overlays.push(Overlay::Confirm(Confirm::Rollback {
+            plan,
+            arming: Default::default(),
+        }));
+        let cmd = armed_key(&mut app, KeyCode::Char('y'));
         let Some(Cmd::Run(job)) = cmd else {
             panic!("expected the rollback job");
         };

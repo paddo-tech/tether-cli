@@ -1,17 +1,19 @@
 use super::command;
 use super::policy::PackagePolicy;
-use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
+use super::{
+    validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 
-/// Name and latest version from `gem outdated` lines like `rdoc (7.0.4 < 8.1.0)`.
-fn parse_outdated(stdout: &str) -> Vec<(String, String)> {
+/// Gems from `gem outdated` lines like `rdoc (7.0.4 < 8.1.0)`.
+fn parse_outdated(stdout: &str) -> Vec<Upgrade> {
     stdout
         .lines()
         .filter_map(|line| {
             let (name, versions) = line.trim().split_once(" (")?;
-            let (_, latest) = versions.strip_suffix(')')?.split_once(" < ")?;
-            Some((name.to_string(), latest.to_string()))
+            let (current, latest) = versions.strip_suffix(')')?.split_once(" < ")?;
+            Some(Upgrade::new(name, Some(current), latest))
         })
         .collect()
 }
@@ -147,18 +149,22 @@ impl PackageManager for GemManager {
             return Ok(());
         }
 
-        // Without names gem updates every gem, so held gems need the rest named
-        let held = super::inbox::hold_malicious_upgrades(self).await;
+        // `gem update` never installs an older version, so a failed outdated check updates
+        // every gem, like a failed OSV request. Without names gem updates every gem.
         let mut names = Vec::new();
-        if !held.is_empty() {
-            names = packages
-                .into_iter()
-                .map(|p| p.name)
-                .filter(|name| !held.contains(name))
-                .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
-                .collect();
-            if names.is_empty() {
-                return Ok(());
+        match super::planned_upgrades(self).await {
+            Ok(upgrades) => {
+                names = upgrades
+                    .into_iter()
+                    .map(|u| u.name)
+                    .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
+                    .collect();
+                if names.is_empty() {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                crate::cli::Output::warning(&format!("gem upgrades not checked against OSV: {}", e))
             }
         }
         let output = command("gem")?
@@ -177,7 +183,7 @@ impl PackageManager for GemManager {
         Ok(())
     }
 
-    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+    async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
         Ok(parse_outdated(
             &self.run_gem(&["outdated", "--remote"]).await?,
         ))
@@ -247,8 +253,8 @@ mod tests {
         assert_eq!(
             parse_outdated(stdout),
             vec![
-                ("rdoc".to_string(), "8.1.0".to_string()),
-                ("net-imap".to_string(), "0.5.6".to_string())
+                Upgrade::new("rdoc", Some("7.0.4"), "8.1.0"),
+                Upgrade::new("net-imap", Some("0.5.1"), "0.5.6")
             ]
         );
     }

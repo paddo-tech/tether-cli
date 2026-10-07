@@ -1,8 +1,11 @@
+use super::components::backup_picker::BackupPicker;
 use super::components::config::ConfigTabState;
 use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
 use super::components::files::{self, FilesTabState};
+use super::components::log_view::LogView;
 use super::components::machines::MachinesTabState;
+use super::components::package_profiles::PackageProfiles;
 use super::components::packages::{self, PackagesTabState};
 use super::components::palette::Palette;
 use super::components::pkg_import::PkgImport;
@@ -31,7 +34,7 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub fn title(&self) -> &str {
+    pub fn title(&self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Files => "Files",
@@ -101,7 +104,10 @@ pub enum Overlay {
     FileImport(FileImport),
     PkgImport(PkgImport),
     ProfilePicker(ProfilePicker),
+    PackageProfiles(PackageProfiles),
     Palette(Palette),
+    Log(LogView),
+    BackupPicker(BackupPicker),
 }
 
 impl Overlay {
@@ -122,6 +128,7 @@ pub enum Action {
     ImportDotfile,
     PickProfile,
     ApproveAll,
+    DaemonLog,
 }
 
 /// A clickable region recorded by the last draw.
@@ -240,10 +247,10 @@ impl App {
             || self.confirm_arming()
     }
 
-    /// The top confirm counts down before it accepts keys.
+    /// The top confirm counts down before it accepts keys, until a draw shows it armed.
     fn confirm_arming(&self) -> bool {
         match self.overlays.last() {
-            Some(Overlay::Confirm(c)) => c.arming().is_some_and(|a| !a.armed(Instant::now())),
+            Some(Overlay::Confirm(c)) => !c.arming().shown_armed(),
             _ => false,
         }
     }
@@ -321,11 +328,7 @@ impl App {
             return None;
         }
         let op = self.track_install(manager_key, name);
-        Some(Cmd::Install {
-            op,
-            machine_id: self.machine_id().to_string(),
-            osv_required,
-        })
+        Some(Cmd::Install { op, osv_required })
     }
 
     /// Track the approval and install of inbox items as displayed. `label` names them in the

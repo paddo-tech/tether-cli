@@ -23,6 +23,17 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// config.toml syncs as bytes, so each save must write a map in the same order. Otherwise
+/// machines see a change where there is none, and push it back and forth.
+fn sorted<S: serde::Serializer, V: Serialize>(
+    map: &HashMap<String, V>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    map.iter()
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .serialize(serializer)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Config format version - prevents older tether from corrupting newer configs
@@ -50,10 +61,18 @@ pub struct Config {
     #[serde(default)]
     pub project_configs: ProjectConfigSettings,
     /// Machine-to-profile assignments (machine_id -> profile_name)
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "sorted"
+    )]
     pub machine_profiles: HashMap<String, String>,
     /// Named profiles that restrict what a machine syncs
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "sorted"
+    )]
     pub profiles: HashMap<String, ProfileConfig>,
     #[serde(default, skip_serializing_if = "DashboardConfig::is_default")]
     pub dashboard: DashboardConfig,
@@ -655,12 +674,13 @@ pub struct TeamsConfig {
     #[serde(default, deserialize_with = "deserialize_active_teams")]
     pub active: Vec<String>,
     /// Map of team name -> team configuration
+    #[serde(serialize_with = "sorted")]
     pub teams: HashMap<String, TeamConfig>,
     /// Allowed GitHub organizations for team repos (empty = no restriction)
     #[serde(default)]
     pub allowed_orgs: Vec<String>,
     /// Collaborator-based project secret sharing (keyed by collab name)
-    #[serde(default)]
+    #[serde(default, serialize_with = "sorted")]
     pub collabs: HashMap<String, CollabConfig>,
 }
 
@@ -1184,8 +1204,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_saved_config_parses_with_1_13_package_shape() {
-        // 1.13.1 manager tables, where sync_versions has no serde default
+    fn saved_config_bytes_do_not_depend_on_map_order() {
+        let ids = ["m1", "a7", "zz", "b2", "q9", "c3"];
+        let build = |order: &mut dyn Iterator<Item = &&str>| {
+            let mut config = Config::default();
+            for id in order {
+                config
+                    .machine_profiles
+                    .insert(id.to_string(), "dev".to_string());
+                config.profiles.insert(
+                    id.to_string(),
+                    ProfileConfig {
+                        dotfiles: vec![ProfileDotfileEntry::Simple(format!(".{}rc", id))],
+                        dirs: vec![format!(".config/{}", id)],
+                        packages: vec!["brew".to_string(), "npm".to_string()],
+                    },
+                );
+                let teams = config.teams.get_or_insert_with(Default::default);
+                teams.teams.insert(
+                    id.to_string(),
+                    TeamConfig {
+                        enabled: true,
+                        url: format!("git@github.com:{}/dotfiles.git", id),
+                        auto_inject: false,
+                        read_only: true,
+                        orgs: vec![format!("github.com/{}", id)],
+                    },
+                );
+                teams.collabs.insert(
+                    id.to_string(),
+                    CollabConfig {
+                        sync_url: format!("git@github.com:{}/collab.git", id),
+                        projects: vec![format!("github.com/{}/app", id)],
+                        members_cache: vec![id.to_string()],
+                        last_refresh: None,
+                        enabled: true,
+                    },
+                );
+            }
+            toml::to_string_pretty(&config).unwrap()
+        };
+        let written = build(&mut ids.iter());
+        assert_eq!(build(&mut ids.iter().rev()), written);
+        let reread: Config = toml::from_str(&written).unwrap();
+        assert_eq!(toml::to_string_pretty(&reread).unwrap(), written);
+        let listed: Vec<&str> = written
+            .lines()
+            .skip_while(|l| *l != "[machine_profiles]")
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .map(|l| l.split(' ').next().unwrap())
+            .collect();
+        assert_eq!(listed, ["a7", "b2", "c3", "m1", "q9", "zz"]);
+    }
+
+    #[test]
+    fn test_saved_config_parses_with_1x_shape() {
+        // The fields 1.11.10, 1.12.0 and 1.13.1 require, with their types and names. All
+        // three have the same required fields, and none denies unknown fields, so 2.0's
+        // new fields must stay optional additions.
         #[derive(Deserialize)]
         #[allow(dead_code)]
         struct OldManager {
@@ -1194,7 +1271,16 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code)]
+        struct OldBrew {
+            enabled: bool,
+            sync_casks: bool,
+            sync_taps: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct OldPackages {
+            remove_unlisted: bool,
+            brew: OldBrew,
             npm: OldManager,
             pnpm: OldManager,
             bun: OldManager,
@@ -1203,12 +1289,67 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code)]
+        enum OldStrategy {
+            #[serde(rename = "last-write-wins")]
+            LastWriteWins,
+            #[serde(rename = "manual")]
+            Manual,
+            #[serde(rename = "machine-priority")]
+            MachinePriority,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSync {
+            interval: String,
+            strategy: OldStrategy,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        enum OldBackendType {
+            #[serde(rename = "git")]
+            Git,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldBackend {
+            #[serde(rename = "type")]
+            backend_type: OldBackendType,
+            url: String,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldDotfiles {
+            files: Vec<toml::Value>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSecurity {
+            encrypt_dotfiles: bool,
+            scan_secrets: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct OldConfig {
+            config_version: u32,
+            sync: OldSync,
+            backend: OldBackend,
             packages: OldPackages,
+            dotfiles: OldDotfiles,
+            security: OldSecurity,
         }
 
+        let mut config = Config::default();
+        config.dashboard.theme = Some("mocha".to_string());
+        config.packages.min_release_age_days = 3;
+        config.packages.allow_scripts = vec!["esbuild".to_string()];
+        config.packages.auto_install_from_trusted = false;
+        config.packages.brew.trusted_taps = vec!["azure/kubelogin".to_string()];
+        let written = toml::to_string_pretty(&config).unwrap();
+        let old = toml::from_str::<OldConfig>(&written).unwrap();
+        // 1.x refuses a config_version above its own
+        assert!(old.config_version <= 2);
+
         let saved = toml::to_string_pretty(&Config::default()).unwrap();
-        toml::from_str::<OldConfig>(&saved).unwrap();
 
         let without_field = saved.replace("sync_versions = false\n", "");
         let config: Config = toml::from_str(&without_field).unwrap();

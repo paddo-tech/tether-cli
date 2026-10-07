@@ -56,7 +56,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     let c = &mut app.machines.cursor;
     match key.code {
         KeyCode::Enter => toggle_expand(app),
-        KeyCode::Char('p') => open_profile_picker(app),
+        KeyCode::Esc => app.machines.expanded = None,
+        KeyCode::Char('p') => {
+            clamp_cursor(&mut app.machines.cursor, len);
+            match app.state.machines.get(app.machines.cursor) {
+                // A machine sets only its own profile
+                Some(m) if m.machine_id != app.machine_id() => {
+                    let name = display_name(m);
+                    app.flash_info(format!("Set the profile of {} on that machine", name));
+                }
+                _ => open_profile_picker(app),
+            }
+        }
+        KeyCode::Char('a') => confirm_trust(app),
+        KeyCode::Char('x') => confirm_untrust(app),
         KeyCode::Char('D') => {
             clamp_cursor(&mut app.machines.cursor, len);
             if let Some(id) = app
@@ -95,6 +108,87 @@ fn toggle_expand(app: &mut App) {
     } else {
         app.machines.expanded = Some(m.machine_id.clone());
     }
+}
+
+/// The machine at the cursor, with its display name, unless it is this machine.
+fn other_machine(app: &mut App, this: &str) -> Option<(String, String)> {
+    clamp_cursor(&mut app.machines.cursor, app.state.machines.len());
+    let m = app.state.machines.get(app.machines.cursor)?;
+    let found = (m.machine_id.clone(), display_name(m));
+    if found.0 == app.machine_id() {
+        app.flash_info(this);
+        return None;
+    }
+    Some(found)
+}
+
+/// Ask before trusting the key that signs the selected machine's record, with its full
+/// fingerprint. An Inbox item for that key is answered as the Security tab answers it.
+fn confirm_trust(app: &mut App) {
+    let Some((id, label)) = other_machine(app, "This machine trusts its own key") else {
+        return;
+    };
+    let pending = app
+        .state
+        .inbox
+        .items
+        .iter()
+        .find(|i| i.name == id && matches!(i.kind, Kind::TrustMachine { .. }));
+    let confirm = match pending {
+        Some(item) => {
+            let Kind::TrustMachine { fingerprint, .. } = &item.kind else {
+                return;
+            };
+            Confirm::Trust {
+                machine_id: id,
+                label,
+                fingerprint: fingerprint.clone(),
+                changed: item.reasons.contains(&Reason::KeyChanged),
+                item: Some(Box::new(item.clone())),
+                arming: Default::default(),
+            }
+        }
+        None if app.state.trusted.iter().any(|k| k.machine_id == id) => {
+            app.flash_info(format!("{} is trusted already", label));
+            return;
+        }
+        None => {
+            let fingerprint = crate::sync::SyncEngine::sync_path()
+                .ok()
+                .and_then(|p| crate::packages::inbox::signing_fingerprint(&p, &id));
+            let Some(fingerprint) = fingerprint else {
+                app.flash_info(format!("{} has no signed machine record", label));
+                return;
+            };
+            Confirm::Trust {
+                machine_id: id,
+                label,
+                fingerprint,
+                changed: false,
+                item: None,
+                arming: Default::default(),
+            }
+        }
+    };
+    app.overlays.push(Overlay::Confirm(confirm));
+}
+
+/// Ask before removing the selected machine's key from the trust store.
+fn confirm_untrust(app: &mut App) {
+    let Some((id, label)) = other_machine(app, "This machine cannot untrust itself") else {
+        return;
+    };
+    let Some(key) = app.state.trusted.iter().find(|k| k.machine_id == id) else {
+        app.flash_info(format!("{} is not trusted", label));
+        return;
+    };
+    let confirm = Confirm::Untrust {
+        machine_id: id,
+        label,
+        fingerprint: key.fingerprint.clone(),
+        arming: Default::default(),
+    };
+    app.overlays.push(Overlay::Confirm(confirm));
 }
 
 /// Pick this machine's profile, starting on the current one.
@@ -157,6 +251,10 @@ pub fn confirm_remove(app: &mut App, machine_id: &str) {
 
 pub fn is_old_id(app: &App, machine_id: &str) -> bool {
     app.state.old_ids.iter().any(|o| o.machine_id == machine_id)
+}
+
+pub fn is_old_build(app: &App, machine_id: &str) -> bool {
+    app.state.old_builds.iter().any(|id| id == machine_id)
 }
 
 pub fn display_name(m: &MachineState) -> String {
@@ -317,6 +415,9 @@ fn card(
     } else if old_id {
         first.push(pill("may be old id", t.warn, t));
         first.push(Span::raw(" "));
+    } else if is_old_build(app, &m.machine_id) {
+        first.push(pill("on 1.x", t.warn, t));
+        first.push(Span::raw(" "));
     }
     first.push(Span::styled(
         os,
@@ -412,8 +513,14 @@ fn card(
 /// fingerprint when known.
 fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String>) {
     let t = &app.theme;
+    let trusted = app
+        .state
+        .trusted
+        .iter()
+        .find(|k| k.machine_id == m.machine_id)
+        .map(|k| k.fingerprint.clone());
     if m.machine_id == app.machine_id() {
-        return ("this machine", t.accent, None);
+        return ("this machine", t.accent, trusted);
     }
     let pending = app.state.inbox.items.iter().find_map(|i| match &i.kind {
         Kind::TrustMachine { fingerprint, .. } if i.name == m.machine_id => {
@@ -433,13 +540,8 @@ fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String
         (None, Some(status @ (RecordStatus::Replayed | RecordStatus::SignatureFailed))) => {
             (status.label(), t.error, None)
         }
-        (None, _) => match app
-            .state
-            .trusted
-            .iter()
-            .find(|k| k.machine_id == m.machine_id)
-        {
-            Some(k) => ("trusted", t.ok, Some(k.fingerprint.clone())),
+        (None, _) => match trusted {
+            Some(fp) => ("trusted", t.ok, Some(fp)),
             None => ("not trusted", t.dim, None),
         },
     }
@@ -450,13 +552,22 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
     let block = panel(format!(" {} ", display_name(m)), true, t);
     let mut inner = block.inner(area);
     f.render_widget(block, area);
-    if is_old_id(app, &m.machine_id) {
-        let note = format!(
+    let note = if is_old_id(app, &m.machine_id) {
+        Some(format!(
             "May be an old id of this machine. Tether guesses: it matches this hostname, comes \
              from an old build and has not synced for over {} days. Check that no other machine \
              uses this hostname. Its packages still count for every machine. Press D to remove it.",
             crate::sync::state::OLD_ID_SILENT_DAYS
-        );
+        ))
+    } else if is_old_build(app, &m.machine_id) {
+        Some(format!(
+            "This machine is {}.",
+            crate::sync::signing::OLD_BUILD_NOTE
+        ))
+    } else {
+        None
+    };
+    if let Some(note) = note {
         // A blank line under the note, which word wrap may take
         let h = (note.chars().count().div_ceil(inner.width.max(1) as usize) as u16 + 1)
             .min(inner.height);
@@ -468,16 +579,38 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
         inner.y += h;
         inner.height -= h;
     }
-    let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .spacing(2)
-        .areas(inner);
-
     let kv = |k: &str, v: String| {
         Line::from(vec![
             Span::styled(format!("{:<14}", k), Style::default().fg(t.dim)),
             Span::styled(v, Style::default().fg(t.text)),
         ])
     };
+
+    // The whole fingerprint, so it can be compared with the one that machine shows
+    let (word, color, fingerprint) = key_state(app, m);
+    let mut key = vec![
+        Span::styled(format!("{:<14}", "Key"), Style::default().fg(t.dim)),
+        Span::styled(word, Style::default().fg(color)),
+    ];
+    if let Some(fp) = fingerprint {
+        key.push(Span::raw("  "));
+        key.push(Span::styled(fp, Style::default().fg(t.hash)));
+    }
+    let key = Line::from(key);
+    let key_h = (key.width().div_ceil(inner.width.max(1) as usize) as u16 + 1).min(inner.height);
+    f.render_widget(
+        Paragraph::new(key).wrap(Wrap { trim: false }),
+        Rect {
+            height: key_h,
+            ..inner
+        },
+    );
+    inner.y += key_h;
+    inner.height -= key_h;
+
+    let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .spacing(2)
+        .areas(inner);
     let mut lines = vec![
         kv("Hostname", m.hostname.clone()),
         kv("Machine ID", m.machine_id.clone()),
@@ -558,6 +691,8 @@ pub fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         let mut right = Vec::new();
         if is_old_id(app, &m.machine_id) {
             right.push(Span::styled("old id? ", Style::default().fg(t.warn)));
+        } else if is_old_build(app, &m.machine_id) {
+            right.push(Span::styled("on 1.x ", Style::default().fg(t.warn)));
         }
         right.push(Span::styled(
             relative_time(m.last_sync),

@@ -38,17 +38,55 @@ impl Runtime {
         match cmd {
             Cmd::Run(job) => self.run_job(job),
             Cmd::Daemon(op) => self.run_daemon(op),
-            Cmd::Uninstall { manager_key, name } => {
+            Cmd::Uninstall {
+                manager_key,
+                name,
+                leave,
+            } => {
                 self.spawn(
-                    async move { Msg::UninstallDone(run_uninstall(&manager_key, &name).await) },
+                    async move {
+                        // The profile leaves the package only once it is gone here
+                        if let Err(e) = crate::packages::uninstall(&manager_key, &name).await {
+                            return Msg::UninstallDone(Err(e.to_string()));
+                        }
+                        let not_saved = leave
+                            .and_then(|edit| save_profiles(&manager_key, &name, &edit).err())
+                            .map(|e| {
+                                format!(
+                                    "uninstalled {}, but saving its profiles failed: {}",
+                                    name, e
+                                )
+                            });
+                        Msg::UninstallDone(Ok(not_saved))
+                    },
                     |e| Some(Msg::UninstallDone(Err(e))),
                 );
             }
-            Cmd::Install {
-                op,
-                machine_id,
-                osv_required,
+            Cmd::SaveProfiles {
+                manager_key,
+                name,
+                edit,
             } => {
+                self.spawn(
+                    async move {
+                        Msg::ProfilesSaved(save_profiles(&manager_key, &name, &edit).map(
+                            |members| {
+                                format!(
+                                    "{} profiles: {}",
+                                    name,
+                                    members
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            },
+                        ))
+                    },
+                    |e| Some(Msg::ProfilesSaved(Err(e))),
+                );
+            }
+            Cmd::Install { op, osv_required } => {
                 let failed_op = op.clone();
                 self.spawn(
                     async move {
@@ -68,12 +106,15 @@ impl Runtime {
                                 return Msg::OsvUnreachable { op, error };
                             }
                             Err(Blocked::Refused(e)) => Err(e),
-                            Ok(version) => run_install(&op.manager_key, &op.name, version).await,
+                            Ok(version) => crate::packages::inbox::install_from_machine(
+                                &op.manager_key,
+                                &op.name,
+                                version,
+                                false,
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
                         };
-                        if result.is_ok() {
-                            // Sync would uninstall it again while it is still tombstoned.
-                            remove_from_removed_packages(&machine_id, &op.manager_key, &op.name);
-                        }
                         Msg::InstallDone { op, result }
                     },
                     move |e| {
@@ -139,6 +180,47 @@ impl Runtime {
                     |e| Some(Msg::InboxDone(Err(e))),
                 );
             }
+            Cmd::TrustMachine {
+                machine_id,
+                fingerprint,
+                label,
+            } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::sync::SyncEngine::sync_path()
+                                .and_then(|sync_path| {
+                                    crate::packages::inbox::trust_machine(
+                                        &sync_path,
+                                        &machine_id,
+                                        &fingerprint,
+                                    )
+                                })
+                                .map(|t| format!("Trusted {} ({})", label, t.fingerprint))
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::Untrust { machine_id, label } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::packages::inbox::untrust_machine(&machine_id)
+                                .map(|removed| {
+                                    if removed {
+                                        format!("{} is no longer trusted", label)
+                                    } else {
+                                        format!("{} was not trusted", label)
+                                    }
+                                })
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
             Cmd::RemoveMachine { machine_id, digest } => {
                 let failed_id = machine_id.clone();
                 self.spawn(
@@ -187,6 +269,17 @@ impl Runtime {
                     },
                     |_| None,
                 );
+            }
+            Cmd::RestoreBackup { path, timestamp } => {
+                // Runs inline, like a restore from a commit
+                let result = crate::sync::restore_file(&timestamp, "dotfiles", &path)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                let _ = self.tx.send(Msg::RestoreDone {
+                    dotfile: path,
+                    short_hash: format!("its backup from {}", timestamp),
+                    result,
+                });
             }
             Cmd::Restore {
                 repo_path,
@@ -309,18 +402,6 @@ fn tether_exe() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|_| "tether".into())
 }
 
-async fn run_uninstall(manager_key: &str, package: &str) -> Result<(), String> {
-    use crate::packages::*;
-
-    let manager: Box<dyn PackageManager> = match manager_key {
-        "brew_formulae" | "brew_casks" => Box::new(BrewManager),
-        _ => manager_for_key(manager_key)
-            .ok_or_else(|| format!("Unknown manager: {}", manager_key))?,
-    };
-
-    manager.uninstall(package).await.map_err(|e| e.to_string())
-}
-
 /// Why a dashboard install did not run.
 enum Blocked {
     Refused(String),
@@ -390,36 +471,6 @@ async fn approve_and_install(
     (result, unchecked)
 }
 
-async fn run_install(
-    manager_key: &str,
-    package: &str,
-    version: Option<String>,
-) -> Result<(), String> {
-    use crate::packages::*;
-
-    if manager_key == "brew_casks" {
-        return BrewManager
-            .install_cask(package, false)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-    }
-
-    let manager: Box<dyn PackageManager> = match manager_key {
-        "brew_formulae" => Box::new(BrewManager),
-        _ => manager_for_key(manager_key)
-            .ok_or_else(|| format!("Unknown manager: {}", manager_key))?,
-    };
-
-    manager
-        .install(&PackageInfo {
-            name: package.to_string(),
-            version,
-        })
-        .await
-        .map_err(|e| e.to_string())
-}
-
 async fn collect_local_packages(
     config: &crate::config::Config,
     machine_id: &str,
@@ -468,21 +519,18 @@ async fn collect_local_packages(
     packages
 }
 
-fn remove_from_removed_packages(machine_id: &str, manager_key: &str, pkg_name: &str) {
-    if machine_id.is_empty() {
-        return;
-    }
-    if let Ok(sync_path) = crate::sync::SyncEngine::sync_path() {
-        if let Ok(Some(mut machine)) = crate::sync::signing::own_record(&sync_path, machine_id) {
-            if let Some(removed) = machine.removed_packages.get_mut(manager_key) {
-                removed.retain(|p| p != pkg_name);
-                if removed.is_empty() {
-                    machine.removed_packages.remove(manager_key);
-                }
-                let _ = crate::sync::signing::save_record(&sync_path, &machine);
-            }
-        }
-    }
+fn save_profiles(
+    manager_key: &str,
+    name: &str,
+    edit: &crate::sync::membership::Edit,
+) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+    crate::config::Config::load()
+        .and_then(|config| {
+            // The dashboard owns the terminal, so it cannot wait for a sync with a prompt
+            let _sync_lock = crate::sync::acquire_sync_lock(false)?;
+            crate::sync::membership::save_edit(&config, manager_key, name, edit)
+        })
+        .map_err(|e| e.to_string())
 }
 
 fn run_restore(repo_path: &str, dotfile_path: &str, commit_hash: &str) -> Result<(), String> {

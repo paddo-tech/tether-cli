@@ -221,6 +221,7 @@ impl DaemonServer {
             if let Some(new_config) =
                 crate::cli::commands::sync::sync_tether_config(&sync_path, &home)?
             {
+                crate::cli::commands::sync::warn_changed_profile(&config, &new_config);
                 config = new_config;
             }
         }
@@ -405,6 +406,14 @@ impl DaemonServer {
                     outcome.signature_failed.join(", ")
                 );
                 crate::sync::notify_signature_failed(&outcome.signature_failed).ok();
+            }
+
+            if let Some(error) = &outcome.membership_error {
+                log::warn!(
+                    "{}. Tether installs no synced packages until it reads",
+                    error
+                );
+                crate::sync::notify_membership_error().ok();
             }
 
             // One notification per batch of newly held packages

@@ -129,23 +129,90 @@ pub async fn restart() -> Result<()> {
     start().await
 }
 
-pub async fn logs() -> Result<()> {
+pub async fn status() -> Result<()> {
+    let paths = DaemonPaths::new()?;
+    let running = match read_daemon_pid()? {
+        Some(pid) if is_process_running(pid) => format!("running (PID {pid})"),
+        _ => "not running. Start it with 'tether daemon start'".to_string(),
+    };
+    Output::key_value("Daemon", &running);
+    let service = match service_path()? {
+        Some(path) if path.exists() => format!("installed ({})", path.display()),
+        Some(_) => "not installed. Install it with 'tether daemon install'".to_string(),
+        None => "not available on this OS".to_string(),
+    };
+    Output::key_value("Login service", &service);
+    let state = crate::sync::SyncState::load()?;
+    Output::key_value(
+        "Last sync",
+        &crate::cli::output::relative_time(state.last_sync),
+    );
+    Output::key_value(
+        "Last upgrade",
+        &state
+            .last_upgrade
+            .map_or("never".to_string(), crate::cli::output::relative_time),
+    );
+    Output::key_value("Log", &paths.log.display().to_string());
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn service_path() -> Result<Option<PathBuf>> {
+    launchd_plist_path().map(Some)
+}
+
+#[cfg(target_os = "linux")]
+fn service_path() -> Result<Option<PathBuf>> {
+    systemd_unit_path().map(Some)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn service_path() -> Result<Option<PathBuf>> {
+    Ok(None)
+}
+
+/// Print the last `lines` lines of the log, then, with `follow`, each line the daemon adds
+/// until Ctrl-C. A log that shrinks was rotated or cleared, so it is read again from the start.
+pub async fn logs(lines: usize, follow: bool) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let log_path = DaemonPaths::new()?.log;
-    if !log_path.exists() {
+    if !log_path.exists() && !follow {
         Output::info("No daemon logs yet");
         return Ok(());
     }
 
-    Output::info(&format!("Showing daemon logs ({})", log_path.display()));
-    let content = fs::read_to_string(&log_path)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(50);
-
-    for line in &lines[start..] {
+    let content = fs::read(&log_path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&content);
+    let all: Vec<&str> = text.lines().collect();
+    for line in &all[all.len().saturating_sub(lines)..] {
         println!("{line}");
     }
+    if !follow {
+        return Ok(());
+    }
 
-    Ok(())
+    let mut offset = content.len() as u64;
+    loop {
+        sleep(Duration::from_millis(500)).await;
+        let Ok(mut file) = fs::File::open(&log_path) else {
+            continue;
+        };
+        let len = file.metadata()?.len();
+        if len < offset {
+            offset = 0;
+        }
+        if len == offset {
+            continue;
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut added = Vec::new();
+        file.read_to_end(&mut added)?;
+        offset += added.len() as u64;
+        print!("{}", String::from_utf8_lossy(&added));
+        io::Write::flush(&mut io::stdout())?;
+    }
 }
 
 pub async fn run_daemon() -> Result<()> {

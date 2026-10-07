@@ -1,11 +1,13 @@
 use super::{centered, clamp_cursor, files, manager_label, popup, security};
-use crate::dashboard::app::{App, Hit, Job, Overlay};
+use crate::dashboard::app::{App, DaemonOp, Hit, Job, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
+use crate::sync::membership::Edit;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 /// How long a confirm that can open under the user's typing ignores keys after its first draw.
@@ -16,6 +18,9 @@ pub const ARM_DELAY: Duration = Duration::from_millis(400);
 #[derive(Default)]
 pub struct Arming {
     drawn: Cell<Option<Instant>>,
+    /// A draw showed the armed buttons. Until then the loop keeps drawing, so the screen
+    /// never shows a countdown that has ended.
+    shown_armed: Cell<bool>,
 }
 
 impl Arming {
@@ -23,6 +28,13 @@ impl Arming {
         if self.drawn.get().is_none() {
             self.drawn.set(Some(now));
         }
+        if self.armed(now) {
+            self.shown_armed.set(true);
+        }
+    }
+
+    pub fn shown_armed(&self) -> bool {
+        self.shown_armed.get()
     }
 
     /// Time left before keys count, or `None` once armed. A confirm never drawn is not armed.
@@ -45,38 +57,50 @@ impl Arming {
     }
 }
 
-/// A yes/no question about one action.
+/// A yes/no question about one action. Every one changes this machine or what it trusts,
+/// so only `y` accepts, once armed; Enter and a click on the tab underneath never do.
 pub enum Confirm {
     Uninstall {
         manager_key: String,
         name: String,
+        arming: Arming,
     },
     Restore {
         repo_path: String,
         dotfile: String,
         commit: String,
         short_hash: String,
+        arming: Arming,
     },
-    Rollback(RollbackPlan),
+    /// Copy a dotfile's backup over the file, as `tether restore` does.
+    RestoreBackup {
+        path: String,
+        timestamp: String,
+        arming: Arming,
+    },
+    Rollback {
+        plan: RollbackPlan,
+        arming: Arming,
+    },
     RemoveFile {
         path: String,
+        arming: Arming,
     },
-    /// Install a package that OSV could not check. Only `y` accepts.
+    /// Install a package that OSV could not check.
     InstallWithoutOsv {
         manager_key: String,
         name: String,
         error: String,
         arming: Arming,
     },
-    /// Approve and install inbox items that OSV could not check. Only `y` accepts.
+    /// Approve and install inbox items that OSV could not check.
     /// Each item comes with its own OSV error, because one may warn of malicious releases
     /// while another only timed out.
     ApproveWithoutOsv {
         items: Vec<(crate::packages::inbox::InboxItem, String)>,
         arming: Arming,
     },
-    /// Remove another machine's record that looks like an old id of this machine. Only `y`
-    /// accepts.
+    /// Remove another machine's record that looks like an old id of this machine.
     RemoveMachine {
         machine_id: String,
         hostname: String,
@@ -90,6 +114,8 @@ pub enum Confirm {
     /// every one of them, because `y` approves exactly this list.
     ApproveAll {
         items: Vec<crate::packages::inbox::InboxItem>,
+        /// The machine whose packages these are, for "approve all from <machine>"
+        from: Option<String>,
         /// Packages that stay held: malicious, or from a record that fails its signature
         held: usize,
         /// First listed item
@@ -99,17 +125,58 @@ pub enum Confirm {
         arming: Arming,
     },
     /// Approve and install a package whose source machine's record fails its signature.
-    /// Only `y` accepts.
     ApproveSignatureFailed {
         item: Box<crate::packages::inbox::InboxItem>,
+        arming: Arming,
+    },
+    /// Reject an Inbox item, as displayed.
+    Reject {
+        item: Box<crate::packages::inbox::InboxItem>,
+        arming: Arming,
+    },
+    /// Trust the key with this fingerprint for a machine. `item` is the Inbox item that asks
+    /// for it, when the user answers that item.
+    Trust {
+        machine_id: String,
+        label: String,
+        fingerprint: String,
+        /// The machine was trusted with another key
+        changed: bool,
+        item: Option<Box<crate::packages::inbox::InboxItem>>,
+        arming: Arming,
+    },
+    /// Remove an item from a Config list, as shown at `index`.
+    RemoveListItem {
+        list: &'static str,
+        index: usize,
+        /// The row as shown, to check that the list still has it at `index`
+        item: String,
+        /// The item without its options
+        name: String,
+        arming: Arming,
+    },
+    /// Stop the daemon, which syncs this machine every few minutes.
+    StopDaemon {
+        arming: Arming,
+    },
+    /// Stop trusting a machine's key.
+    Untrust {
+        machine_id: String,
+        label: String,
+        fingerprint: String,
         arming: Arming,
     },
 }
 
 impl Confirm {
-    pub fn approve_all(items: Vec<crate::packages::inbox::InboxItem>, held: usize) -> Self {
+    pub fn approve_all(
+        items: Vec<crate::packages::inbox::InboxItem>,
+        held: usize,
+        from: Option<String>,
+    ) -> Self {
         Confirm::ApproveAll {
             items,
+            from,
             held,
             scroll: 0,
             rows: std::cell::Cell::new(1),
@@ -124,16 +191,30 @@ impl Confirm {
         }
     }
 
-    /// Confirms that install without the malicious-package check, approve, or delete a
-    /// record wait to be armed. Only `y` accepts them.
-    pub fn arming(&self) -> Option<&Arming> {
+    pub fn reject(item: crate::packages::inbox::InboxItem) -> Self {
+        Confirm::Reject {
+            item: Box::new(item),
+            arming: Arming::default(),
+        }
+    }
+
+    pub fn arming(&self) -> &Arming {
         match self {
-            Confirm::InstallWithoutOsv { arming, .. }
+            Confirm::Uninstall { arming, .. }
+            | Confirm::Restore { arming, .. }
+            | Confirm::Rollback { arming, .. }
+            | Confirm::RestoreBackup { arming, .. }
+            | Confirm::RemoveFile { arming, .. }
+            | Confirm::InstallWithoutOsv { arming, .. }
             | Confirm::ApproveWithoutOsv { arming, .. }
             | Confirm::RemoveMachine { arming, .. }
             | Confirm::ApproveAll { arming, .. }
-            | Confirm::ApproveSignatureFailed { arming, .. } => Some(arming),
-            _ => None,
+            | Confirm::ApproveSignatureFailed { arming, .. }
+            | Confirm::Reject { arming, .. }
+            | Confirm::Trust { arming, .. }
+            | Confirm::Untrust { arming, .. }
+            | Confirm::StopDaemon { arming }
+            | Confirm::RemoveListItem { arming, .. } => arming,
         }
     }
 }
@@ -150,16 +231,13 @@ pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd>
             | KeyCode::PageUp
     );
     // Scrolling is harmless, so it works before the confirm is armed
-    if !scroll && confirm.arming().is_some_and(|a| !a.armed(Instant::now())) {
+    if !scroll && !confirm.arming().armed(Instant::now()) {
         app.overlays.push(Overlay::Confirm(confirm));
         return None;
     }
     match key.code {
-        // Installing without the malicious-package check, approving, or deleting a record is
-        // never the default answer
-        KeyCode::Enter if confirm.arming().is_some() => cancel(app, confirm),
-        KeyCode::Char('y') | KeyCode::Enter => accept(app, confirm),
-        KeyCode::Char('n') | KeyCode::Esc => cancel(app, confirm),
+        KeyCode::Char('y') => accept(app, confirm),
+        KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => cancel(app, confirm),
         KeyCode::Char('j')
         | KeyCode::Char('k')
         | KeyCode::Down
@@ -204,22 +282,40 @@ fn cancel(app: &mut App, confirm: Confirm) -> Option<Cmd> {
 
 fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
     match confirm {
-        Confirm::Uninstall { manager_key, name } => {
+        Confirm::Uninstall {
+            manager_key, name, ..
+        } => {
+            // Other member profiles keep the package; this profile leaves it
+            let leave = app.state.membership.as_ref().and_then(|m| {
+                let members = m.members(&manager_key, &name);
+                (members.contains(&m.profile) && members.len() > 1).then(|| Edit {
+                    remove: BTreeSet::from([m.profile.clone()]),
+                    ..Edit::default()
+                })
+            });
             app.uninstalling = Some((manager_key.clone(), name.clone()));
-            Some(Cmd::Uninstall { manager_key, name })
+            Some(Cmd::Uninstall {
+                manager_key,
+                name,
+                leave,
+            })
         }
         Confirm::Restore {
             repo_path,
             dotfile,
             commit,
             short_hash,
+            ..
         } => Some(Cmd::Restore {
             repo_path,
             dotfile,
             commit,
             short_hash,
         }),
-        Confirm::Rollback(plan) => {
+        Confirm::RestoreBackup {
+            path, timestamp, ..
+        } => Some(Cmd::RestoreBackup { path, timestamp }),
+        Confirm::Rollback { plan, .. } => {
             if app.running.is_some() {
                 app.flash_error("Another tether command is still running");
                 return None;
@@ -230,12 +326,13 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
                 short_hash: plan.short_hash,
             }))
         }
-        Confirm::RemoveFile { path } => {
+        Confirm::RemoveFile { path, .. } => {
             let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
                 return None;
             };
-            if !config_edit::remove_profile_dotfile(config, &ss.machine_id, &path) {
-                app.flash_error("remove failed");
+            if let Err(e) = config_edit::remove_profile_dotfile(config, &ss.machine_id, &path) {
+                app.flash_error(e);
+                app.reload_state();
                 return None;
             }
             app.flash_success(format!("removed {}", path));
@@ -255,6 +352,31 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveSignatureFailed { item, .. } => security::approve(app, *item),
+        Confirm::Reject { item, .. } => Some(Cmd::Reject(item)),
+        Confirm::RemoveListItem { index, item, .. } => {
+            super::config::remove_list_item(app, index, &item);
+            None
+        }
+        Confirm::StopDaemon { .. } => {
+            (app.daemon_op == DaemonOp::None).then_some(Cmd::Daemon(DaemonOp::Stopping))
+        }
+        Confirm::Trust {
+            machine_id,
+            label,
+            fingerprint,
+            item,
+            ..
+        } => Some(match item {
+            Some(item) => Cmd::TrustKey { item, label },
+            None => Cmd::TrustMachine {
+                machine_id,
+                fingerprint,
+                label,
+            },
+        }),
+        Confirm::Untrust {
+            machine_id, label, ..
+        } => Some(Cmd::Untrust { machine_id, label }),
         Confirm::ApproveWithoutOsv { items, .. } => {
             security::approve_all(app, items.into_iter().map(|(i, _)| i).collect(), false)
         }
@@ -267,19 +389,35 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
 pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
     let t = &app.theme;
     let now = Instant::now();
-    if let Some(arming) = confirm.arming() {
-        arming.drawn(now);
-    }
-    let wait = confirm.arming().and_then(|a| a.remaining(now));
+    confirm.arming().drawn(now);
+    let wait = confirm.arming().remaining(now);
     match confirm {
-        Confirm::Uninstall { manager_key, name } => render_popup(
-            f,
-            app,
-            wait,
-            "Uninstall",
-            &format!("Uninstall {} ({})?", name, manager_label(manager_key)),
-            t.error,
-        ),
+        Confirm::Uninstall {
+            manager_key, name, ..
+        } => {
+            let leaving = app.state.membership.as_ref().and_then(|m| {
+                let mut members = m.members(manager_key, name);
+                (members.remove(&m.profile) && !members.is_empty()).then(|| {
+                    (
+                        m.profile.clone(),
+                        members.into_iter().collect::<Vec<_>>().join(", "),
+                    )
+                })
+            });
+            let question = match leaving {
+                None => format!("Uninstall {} ({})?", name, manager_label(manager_key)),
+                // Machines that have the package keep it; only new installs stop
+                Some((profile, keep)) => format!(
+                    "Uninstall {} ({}) here? Other machines in profile {} stop installing it \
+                     but keep any copy they have. Profiles {} keep it",
+                    name,
+                    manager_label(manager_key),
+                    profile,
+                    keep
+                ),
+            };
+            render_popup(f, app, wait, "Uninstall", &question, t.error)
+        }
         Confirm::Restore {
             dotfile,
             short_hash,
@@ -292,7 +430,21 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             &format!("Restore {} to {}?", dotfile, short_hash),
             t.warn,
         ),
-        Confirm::Rollback(plan) => render_popup(
+        Confirm::RestoreBackup {
+            path, timestamp, ..
+        } => render_popup(
+            f,
+            app,
+            wait,
+            "Restore from backup",
+            &format!(
+                "Overwrite ~/{} with its backup from {}? The next sync pushes it to your \
+                 other machines.",
+                path, timestamp
+            ),
+            t.warn,
+        ),
+        Confirm::Rollback { plan, .. } => render_popup(
             f,
             app,
             wait,
@@ -306,7 +458,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.warn,
         ),
-        Confirm::RemoveFile { path } => render_popup(
+        Confirm::RemoveFile { path, .. } => render_popup(
             f,
             app,
             wait,
@@ -402,25 +554,136 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
+        Confirm::RemoveListItem { list, name, .. } => render_popup(
+            f,
+            app,
+            wait,
+            "Remove",
+            &format!("Remove {} from {}?", name, list),
+            t.error,
+        ),
+        Confirm::StopDaemon { .. } => render_popup(
+            f,
+            app,
+            wait,
+            "Stop daemon",
+            "Stop the daemon? This machine then syncs only when you sync it.",
+            t.warn,
+        ),
+        Confirm::Reject { item, .. } => {
+            let what = match &item.kind {
+                crate::packages::inbox::Kind::TrustMachine { fingerprint, .. } => {
+                    format!("the key {} of machine {}", fingerprint, item.name)
+                }
+                crate::packages::inbox::Kind::Package => approve_all_line(item),
+            };
+            render_popup(
+                f,
+                app,
+                wait,
+                "Reject",
+                &format!(
+                    "Reject {}? It leaves the Inbox and comes back only if it changes.",
+                    what
+                ),
+                t.error,
+            )
+        }
+        Confirm::Trust {
+            machine_id,
+            label,
+            fingerprint,
+            changed,
+            ..
+        } => {
+            let mut msg = String::new();
+            if *changed {
+                msg.push_str(
+                    "THE KEY CHANGED. This machine was trusted with another key. If you did not \
+                     set it up again, someone may be signing as it. ",
+                );
+            }
+            msg.push_str(
+                "Compare this fingerprint with the one 'tether machines show' shows on that \
+                 machine. Trust the key? Package changes it signs then install without approval.",
+            );
+            let lines = [
+                format!("machine  {}", machine_label(label, machine_id)),
+                format!("key      {}", fingerprint),
+            ];
+            render_list_popup(
+                f,
+                app,
+                wait,
+                "Trust machine key",
+                &msg,
+                &lines,
+                0,
+                &std::cell::Cell::new(lines.len()),
+                if *changed { t.error } else { t.warn },
+            )
+        }
+        Confirm::Untrust {
+            machine_id,
+            label,
+            fingerprint,
+            ..
+        } => {
+            let lines = [
+                format!("machine  {}", machine_label(label, machine_id)),
+                format!("key      {}", fingerprint),
+            ];
+            render_list_popup(
+                f,
+                app,
+                wait,
+                "Untrust machine key",
+                "Stop trusting this key? Package changes from this machine then wait in the \
+                 Inbox, and its key waits there after the next sync.",
+                &lines,
+                0,
+                &std::cell::Cell::new(lines.len()),
+                t.error,
+            )
+        }
         Confirm::ApproveAll {
             items,
+            from,
             held,
             scroll,
             rows,
             ..
         } => {
             let mut msg = format!(
-                "Approve and install these {} package{}?",
+                "Approve and install these {} package{}{}?",
                 items.len(),
-                if items.len() == 1 { "" } else { "s" }
+                if items.len() == 1 { "" } else { "s" },
+                from.as_deref()
+                    .map(|m| format!(" from {}", m))
+                    .unwrap_or_default()
             );
+            let advised = items.iter().filter(|i| !i.advisories.is_empty()).count();
+            if advised > 0 {
+                msg.push_str(&format!(
+                    " {} {} OSV advisories (marked ▲).",
+                    advised,
+                    if advised == 1 { "has" } else { "have" }
+                ));
+            }
             if *held > 0 {
                 msg.push_str(&format!(
                     " {} malicious or with a failed signature stay held.",
                     held
                 ));
             }
-            let lines: Vec<String> = items.iter().map(approve_all_line).collect();
+            let lines: Vec<String> = items
+                .iter()
+                .map(|i| match i.advisories.len() {
+                    0 => approve_all_line(i),
+                    1 => format!("{}  ▲ 1 advisory", approve_all_line(i)),
+                    n => format!("{}  ▲ {} advisories", approve_all_line(i), n),
+                })
+                .collect();
             render_list_popup(
                 f,
                 app,
@@ -433,6 +696,15 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 t.ok,
             )
         }
+    }
+}
+
+/// A machine's hostname with its id, or the id alone when it has no other name.
+fn machine_label(label: &str, machine_id: &str) -> String {
+    if label == machine_id {
+        machine_id.to_string()
+    } else {
+        format!("{} ({})", label, machine_id)
     }
 }
 
@@ -574,7 +846,11 @@ pub fn render_popup(
 fn buttons(f: &mut Frame, app: &App, wait: Option<Duration>, inner: Rect, color: Color) {
     let t = &app.theme;
     let yes = match wait {
-        Some(left) => format!(" y  wait {:.1}s ", left.as_secs_f32()),
+        // Rounded up, so the last tenth of a second does not read 0.0s
+        Some(left) => format!(
+            " y  wait {:.1}s ",
+            left.as_millis().div_ceil(100) as f32 / 10.0
+        ),
         None => " y  confirm ".to_string(),
     };
     let yes = yes.as_str();
@@ -615,8 +891,11 @@ mod tests {
         arming.drawn(t0);
         assert_eq!(arming.remaining(t0), Some(ARM_DELAY));
         assert!(!arming.armed(t0 + ARM_DELAY - Duration::from_millis(1)));
+        assert!(!arming.shown_armed());
         // Later draws keep the first draw's time
         arming.drawn(t0 + Duration::from_secs(1));
         assert!(arming.armed(t0 + ARM_DELAY));
+        // The loop draws until a draw shows the armed buttons
+        assert!(arming.shown_armed());
     }
 }

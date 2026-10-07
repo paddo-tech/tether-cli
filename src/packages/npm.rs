@@ -1,6 +1,8 @@
 use super::command;
 use super::policy::{self, PackagePolicy};
-use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
+use super::{
+    validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -23,23 +25,24 @@ struct OutdatedEntry {
     latest: Option<String>,
 }
 
-/// Name and upgrade target from `npm outdated --json` or `pnpm outdated --format json`, for
-/// each package whose target differs from `current`. The target is `latest` when the
-/// upgrade ignores the saved range, else `wanted`.
-pub(super) fn parse_outdated_json(stdout: &[u8], latest: bool) -> Result<Vec<(String, String)>> {
+/// Packages from `npm outdated --json` or `pnpm outdated --format json` whose target differs
+/// from `current`. The target is `latest` when the upgrade ignores the saved range, else
+/// `wanted`. With a release-age limit the target can be older than `current`.
+pub(super) fn parse_outdated_json(stdout: &[u8], latest: bool) -> Result<Vec<Upgrade>> {
     let value: serde_json::Value = serde_json::from_slice(stdout)?;
     if let Some(summary) = value.get("error").and_then(|e| e.get("summary")) {
         anyhow::bail!("{}", summary.as_str().unwrap_or("outdated check failed"));
     }
     let entries: HashMap<String, OutdatedEntry> = serde_json::from_value(value)?;
-    let mut candidates: Vec<(String, String)> = entries
+    let mut candidates: Vec<Upgrade> = entries
         .into_iter()
         .filter_map(|(name, entry)| {
             let target = if latest { entry.latest } else { entry.wanted }?;
-            (entry.current.as_ref() != Some(&target)).then_some((name, target))
+            (entry.current.as_ref() != Some(&target))
+                .then(|| Upgrade::new(&name, entry.current.as_deref(), &target))
         })
         .collect();
-    candidates.sort();
+    candidates.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(candidates)
 }
 
@@ -152,32 +155,35 @@ impl PackageManager for NpmManager {
         policy::npm_cooldown(self.policy().min_release_age_days, self.version().await)
     }
 
+    /// Installs each planned target exactly. `npm update -g` would install `wanted`, which
+    /// the release-age limit can set below the installed version.
     async fn update_all(&self) -> Result<()> {
-        let packages = self.list_installed().await?;
-        if packages.is_empty() {
+        let upgrades = super::planned_upgrades(self).await?;
+        if upgrades.is_empty() {
             return Ok(());
         }
 
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let major = self.version().await.map_or(0, |((major, _, _), _)| major);
-        let held = super::inbox::hold_malicious_upgrades(self).await;
 
-        let names: Vec<String> = packages
+        let upgrades: Vec<Upgrade> = upgrades
             .into_iter()
-            .map(|p| p.name)
-            .filter(|name| !held.contains(name))
-            .filter(|name| match validate_name(Ecosystem::Npm, name) {
-                Ok(()) => true,
-                Err(e) => {
-                    crate::cli::Output::warning(&format!("Skipping npm entry: {}", e));
-                    false
+            .filter(|u| {
+                match validate_name(Ecosystem::Npm, &u.name)
+                    .and_then(|()| validate_version(Ecosystem::Npm, &u.target))
+                {
+                    Ok(()) => true,
+                    Err(e) => {
+                        crate::cli::Output::warning(&format!("Skipping npm entry: {}", e));
+                        false
+                    }
                 }
             })
             .collect();
-        let (scripted, plain): (Vec<String>, Vec<String>) = names
+        let (scripted, plain): (Vec<Upgrade>, Vec<Upgrade>) = upgrades
             .into_iter()
-            .partition(|name| package_policy.scripts_allowed(name));
+            .partition(|u| package_policy.scripts_allowed(&u.name));
         if !scripted.is_empty() && major < 12 {
             policy::warn_scripts_unsupported_once("npm", "12");
         }
@@ -189,14 +195,18 @@ impl PackageManager for NpmManager {
             }
             let mut script_args: Vec<String> = batch
                 .iter()
-                .flat_map(|name| policy::npm_script_args(&package_policy, name, major))
+                .flat_map(|u| policy::npm_script_args(&package_policy, &u.name, major))
                 .collect();
             script_args.dedup();
+            let specs: Vec<String> = batch
+                .iter()
+                .map(|u| format!("{}@{}", u.name, u.target))
+                .collect();
             let output = command("npm")?
-                .args(["update", "-g"])
+                .args(["install", "-g"])
                 .args(&cooldown)
                 .args(&script_args)
-                .args(&batch)
+                .args(&specs)
                 .output()
                 .await?;
 
@@ -209,15 +219,18 @@ impl PackageManager for NpmManager {
         Ok(())
     }
 
-    /// `wanted` is what `npm update -g` installs; npm applies the release-age limit to it.
-    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+    /// npm applies the release-age limit to `wanted`.
+    async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
         let output = command("npm")?
             .args(["outdated", "-g", "--json"])
             .args(self.cooldown_args().await)
             .output()
             .await?;
-        // npm exits 1 when something is outdated, so the JSON decides
-        parse_outdated_json(&output.stdout, false)
+        // npm exits 1 when something is outdated, so the JSON decides. npm itself is not a
+        // synced package, as in `list_installed`.
+        let mut candidates = parse_outdated_json(&output.stdout, false)?;
+        candidates.retain(|u| u.name != "npm");
+        Ok(candidates)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -250,20 +263,32 @@ mod tests {
         assert_eq!(
             parse_outdated_json(stdout, false).unwrap(),
             vec![
-                ("cowsay".to_string(), "1.6.0".to_string()),
-                ("missing".to_string(), "1.0.0".to_string())
+                Upgrade::new("cowsay", Some("1.4.0"), "1.6.0"),
+                Upgrade::new("missing", None, "1.0.0")
             ]
         );
         // pnpm saves an exact pin, so `wanted` stays at `current` and only `latest` moves
         assert_eq!(
             parse_outdated_json(stdout, true).unwrap(),
             vec![
-                ("@scope/same".to_string(), "3.0.0".to_string()),
-                ("cowsay".to_string(), "1.6.0".to_string()),
-                ("missing".to_string(), "1.0.0".to_string())
+                Upgrade::new("@scope/same", Some("2.0.0"), "3.0.0"),
+                Upgrade::new("cowsay", Some("1.4.0"), "1.6.0"),
+                Upgrade::new("missing", None, "1.0.0")
             ]
         );
         assert!(parse_outdated_json(b"{}", false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_release_age_target_below_current_never_moves_forward() {
+        // npm outdated with --min-release-age reports the newest mature version as `wanted`
+        let stdout = br#"{
+            "@google/gemini-cli": {"current": "0.63.0", "wanted": "0.62.0", "latest": "0.63.0"}
+        }"#;
+        let candidates = parse_outdated_json(stdout, false).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].is_downgrade());
+        assert!(!candidates[0].moves_forward());
     }
 
     #[test]

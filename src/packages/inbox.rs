@@ -1,4 +1,4 @@
-use super::{manager_for_key, osv, resolve, BrewManager, PackageInfo, PackageManager};
+use super::{manager_for_key, osv, resolve, BrewManager, PackageInfo, PackageManager, Upgrade};
 use crate::cli::Output;
 use crate::sync::signing::{self, TrustStore};
 use anyhow::{bail, Result};
@@ -19,8 +19,13 @@ pub enum Reason {
     UntrustedSigner,
     /// It is a tap outside the trusted taps, or a formula or cask from one.
     UntrustedTap,
-    /// The installed manager cannot enforce `packages.min_release_age_days`.
+    /// The installed manager cannot enforce `packages.min_release_age_days`, and Tether could
+    /// not check the release age in the registry either.
     CooldownUnsupported,
+    /// The installed manager cannot enforce `packages.min_release_age_days`, and the registry
+    /// shows that the pinned release is newer than the limit. The hold ends when it is old
+    /// enough.
+    TooNew,
     /// OSV lists a `MAL-` advisory for it. Approval cannot override this.
     Malicious,
     /// OSV lists a `MAL-` advisory for the version an upgrade would install. Approval cannot
@@ -44,19 +49,22 @@ pub enum Reason {
 }
 
 impl Reason {
+    /// The one name of the reason, in the CLI and in the dashboard badges. Short, so a badge
+    /// fits in a list row; the dashboard details explain each one.
     pub fn label(self) -> &'static str {
         match self {
             Reason::Unsigned => "from another machine",
-            Reason::UntrustedSigner => "signed by an untrusted key",
+            Reason::UntrustedSigner => "untrusted key",
             Reason::UntrustedTap => "untrusted tap",
-            Reason::CooldownUnsupported => "release age not checked",
-            Reason::Malicious => "malicious (OSV)",
-            Reason::MaliciousUpgrade => "malicious upgrade (OSV)",
-            Reason::MaliciousUnresolved => "malicious releases (OSV), install version unknown",
+            Reason::CooldownUnsupported => "age not checked",
+            Reason::TooNew => "too new",
+            Reason::Malicious => "malicious",
+            Reason::MaliciousUpgrade => "malicious upgrade",
+            Reason::MaliciousUnresolved => "malicious releases",
             Reason::NewMachine => "new machine key",
-            Reason::KeyChanged => "machine key changed",
+            Reason::KeyChanged => "key changed",
             Reason::SignatureFailed => "signature failed",
-            Reason::OtherOsVersion => "another OS pins a version that fails here",
+            Reason::OtherOsVersion => "other OS version",
         }
     }
 }
@@ -155,6 +163,74 @@ impl InboxItem {
         self.kind == Kind::Package && !self.malicious() && !self.signature_failed()
     }
 
+    /// The machine an item comes from: the machine a key belongs to, or the machine whose
+    /// record lists a package. None when no other machine's record lists it.
+    pub fn from_machine(&self) -> Option<&str> {
+        match self.kind {
+            Kind::TrustMachine { .. } => Some(&self.name),
+            Kind::Package => self.source_machine.as_deref(),
+        }
+    }
+}
+
+/// Items from one machine, held for the same reasons. A new machine can bring hundreds of
+/// packages, and a few groups are easier to review than each item.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    pub machine: Option<String>,
+    pub reasons: Vec<Reason>,
+    /// Indices into the items, in their order
+    pub items: Vec<usize>,
+}
+
+/// Order items so each group's items are next to each other, keeping their order within a
+/// group.
+pub fn sort_by_group(items: &mut [InboxItem]) {
+    items.sort_by(|a, b| {
+        a.from_machine()
+            .cmp(&b.from_machine())
+            .then_with(|| reason_labels(a).cmp(&reason_labels(b)))
+    });
+}
+
+fn reason_labels(item: &InboxItem) -> Vec<&'static str> {
+    item.reasons.iter().map(|r| r.label()).collect()
+}
+
+/// The groups of `items`, in the order their first items appear.
+pub fn groups(items: &[InboxItem]) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let machine = item.from_machine().map(str::to_string);
+        match groups
+            .iter_mut()
+            .find(|g| g.machine == machine && g.reasons == item.reasons)
+        {
+            Some(group) => group.items.push(i),
+            None => groups.push(Group {
+                machine,
+                reasons: item.reasons.clone(),
+                items: vec![i],
+            }),
+        }
+    }
+    groups
+}
+
+/// What "approve all from `machine`" covers: its items that one answer may approve, and the
+/// number of its packages that stay held, as malicious or from a failed signature.
+pub fn approvable_from(items: &[InboxItem], machine: &str) -> (Vec<InboxItem>, usize) {
+    let packages = items
+        .iter()
+        .filter(|i| i.kind == Kind::Package && i.from_machine() == Some(machine));
+    let held = packages.clone().filter(|i| !i.bulk_approvable()).count();
+    (
+        packages.filter(|i| i.bulk_approvable()).cloned().collect(),
+        held,
+    )
+}
+
+impl InboxItem {
     /// Fingerprint of the key a machine item asks to trust.
     fn fingerprint(&self) -> Option<&str> {
         match &self.kind {
@@ -382,11 +458,19 @@ impl Inbox {
         true
     }
 
-    /// Apply one sync's checks: drop the pending items for packages that now pass, and queue
-    /// the held ones. Returns the held items that are new or changed.
-    pub fn settle(&mut self, held: Vec<InboxItem>, passed: &[(String, String)]) -> Vec<InboxItem> {
-        self.items
-            .retain(|i| !passed.iter().any(|(manager, name)| i.is(manager, name)));
+    /// Apply one sync's checks: drop the pending items for packages that now pass or that no
+    /// machine record lists any more, and queue the held ones. `listed` tells whether some
+    /// record lists a package. Returns the held items that are new or changed.
+    pub fn settle(
+        &mut self,
+        held: Vec<InboxItem>,
+        passed: &[(String, String)],
+        listed: impl Fn(&str, &str) -> bool,
+    ) -> Vec<InboxItem> {
+        self.items.retain(|i| {
+            !passed.iter().any(|(manager, name)| i.is(manager, name))
+                && (i.kind != Kind::Package || listed(&i.manager, &i.name))
+        });
         held.into_iter()
             .filter(|item| self.add(item.clone()))
             .collect()
@@ -394,6 +478,8 @@ impl Inbox {
 
     /// Find a pending item by id (`manager:name`) or by a name only one item has.
     pub fn find(&self, query: &str) -> Result<&InboxItem> {
+        let query = super::normalize_id(query);
+        let query = query.as_str();
         if let Some(item) = self.items.iter().find(|i| i.id() == query) {
             return Ok(item);
         }
@@ -482,10 +568,12 @@ impl Inbox {
                 Output::warning(&format!(
                     "SIGNING KEY CHANGED for machine {}: {} is now {}. Its record is not trusted \
                      until you approve the new key. If you did not set that machine up again, \
-                     someone may be signing as it",
+                     someone may be signing as it. Run 'tether machines show {}' on that \
+                     machine and compare the fingerprint",
                     id,
                     signing::fingerprint(old),
                     signing::fingerprint(&key),
+                    id,
                 ));
             }
             queued.push(item);
@@ -524,6 +612,7 @@ pub struct Checks {
     /// The source machine is trusted, but its record fails its signature
     pub signature_failed: bool,
     pub cooldown_unsupported: bool,
+    pub too_new: bool,
     pub untrusted_tap: bool,
     pub malicious: bool,
     pub malicious_unresolved: bool,
@@ -546,6 +635,9 @@ pub fn reasons(checks: Checks) -> Vec<Reason> {
     }
     if checks.cooldown_unsupported {
         reasons.push(Reason::CooldownUnsupported);
+    }
+    if checks.too_new {
+        reasons.push(Reason::TooNew);
     }
     // Another machine's package installs on its own only when a trusted machine record lists it
     if !checks.from_this_machine {
@@ -580,11 +672,21 @@ pub fn add(items: Vec<InboxItem>) -> Result<Vec<InboxItem>> {
 }
 
 /// See [`Inbox::settle`].
-pub fn settle(held: Vec<InboxItem>, passed: &[(String, String)]) -> Result<Vec<InboxItem>> {
-    if held.is_empty() && passed.is_empty() {
+pub fn settle(
+    held: Vec<InboxItem>,
+    passed: &[(String, String)],
+    listed: impl Fn(&str, &str) -> bool,
+) -> Result<Vec<InboxItem>> {
+    let unlisted = |inbox: &Inbox| {
+        inbox
+            .items
+            .iter()
+            .any(|i| i.kind == Kind::Package && !listed(&i.manager, &i.name))
+    };
+    if held.is_empty() && passed.is_empty() && !unlisted(&Inbox::load()?) {
         return Ok(Vec::new());
     }
-    Inbox::update(|inbox| Ok(inbox.settle(held, passed)))
+    Inbox::update(|inbox| Ok(inbox.settle(held, passed, &listed)))
 }
 
 /// Record approval of the item the user reviewed, as shown to them. A machine item trusts
@@ -699,23 +801,18 @@ pub fn queue_machine_keys(sync_path: &Path, this_machine: &str) -> Result<Vec<In
 }
 
 /// Names whose upgrade target OSV lists as malicious. They go to the inbox, and
-/// `update_all` leaves them at the installed version. Like a failed OSV request, a manager
-/// that cannot list its upgrade targets does not stop upgrades.
-pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String> {
+/// `update_all` leaves them at the installed version.
+pub async fn hold_malicious_upgrades(
+    manager: &dyn PackageManager,
+    upgrades: &[Upgrade],
+) -> Vec<String> {
     if osv::ecosystem_name(manager.ecosystem()).is_none() {
         return Vec::new();
     }
-    let candidates = match manager.upgrade_candidates().await {
-        Ok(candidates) => candidates,
-        Err(e) => {
-            Output::warning(&format!(
-                "{} upgrades not checked against OSV: {}",
-                manager.name(),
-                e
-            ));
-            return Vec::new();
-        }
-    };
+    let candidates: Vec<(String, String)> = upgrades
+        .iter()
+        .map(|u| (u.name.clone(), u.target.clone()))
+        .collect();
     let pins: Vec<(String, Option<String>)> = candidates
         .iter()
         .map(|(name, version)| (name.clone(), Some(version.clone())))
@@ -848,6 +945,50 @@ pub async fn check_osv(
     }
 }
 
+/// Install a package another machine lists, at `version` that the caller checked with
+/// [`check_osv`], as `tether packages install` and the dashboard's Import do. The caller
+/// holds the sync lock: a sync uninstalls a package this machine removed, so the install
+/// also takes it off that list, and no sync may save the record meanwhile.
+pub async fn install_from_machine(
+    manager: &str,
+    name: &str,
+    version: Option<String>,
+    interactive: bool,
+) -> Result<()> {
+    let item = InboxItem {
+        kind: Kind::Package,
+        manager: manager.to_string(),
+        name: name.to_string(),
+        version,
+        tap: None,
+        source_machine: None,
+        commit: None,
+        signer: None,
+        reasons: Vec::new(),
+        advisories: Vec::new(),
+        first_seen: Utc::now(),
+    };
+    install(&item, interactive).await?;
+    let sync_path = crate::sync::SyncEngine::sync_path()?;
+    let machine_id = crate::sync::SyncState::load()?.machine_id;
+    let Some(mut record) = signing::own_record(&sync_path, &machine_id)? else {
+        return Ok(());
+    };
+    let Some(removed) = record.removed_packages.get_mut(manager) else {
+        return Ok(());
+    };
+    let id = crate::sync::membership::canonical_id(manager, name);
+    let before = removed.len();
+    removed.retain(|n| crate::sync::membership::canonical_id(manager, n) != id);
+    if removed.len() == before {
+        return Ok(());
+    }
+    if removed.is_empty() {
+        record.removed_packages.remove(manager);
+    }
+    signing::save_record(&sync_path, &record)
+}
+
 /// Install an approved item now. `interactive` lets a cask prompt for a password.
 /// A machine item has nothing to install. The caller asks [`check_osv`] first, before it
 /// approves the item, because an advisory can appear after the item was queued.
@@ -909,6 +1050,53 @@ mod tests {
             advisories: Vec::new(),
             first_seen: Utc::now(),
         }
+    }
+
+    #[test]
+    fn items_group_by_machine_and_reasons() {
+        let from = |machine: Option<&str>, name: &str, reasons: Vec<Reason>| InboxItem {
+            source_machine: machine.map(str::to_string),
+            reasons,
+            ..item("gem", name)
+        };
+        let key = InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: "SHA256:x".to_string(),
+            },
+            source_machine: None,
+            reasons: vec![Reason::NewMachine],
+            ..item(MACHINE, "laptop")
+        };
+        let mut items = vec![
+            from(Some("laptop"), "a", vec![Reason::Unsigned]),
+            from(Some("desk"), "b", vec![Reason::Unsigned]),
+            key,
+            from(Some("laptop"), "c", vec![Reason::Unsigned]),
+            from(Some("laptop"), "evil", vec![Reason::Malicious]),
+            from(None, "d", vec![Reason::Unsigned]),
+        ];
+        sort_by_group(&mut items);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["d", "b", "a", "c", "evil", "laptop"]);
+        let groups: Vec<(Option<String>, Vec<usize>)> = groups(&items)
+            .into_iter()
+            .map(|g| (g.machine, g.items))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (None, vec![0]),
+                (Some("desk".to_string()), vec![1]),
+                (Some("laptop".to_string()), vec![2, 3]),
+                (Some("laptop".to_string()), vec![4]),
+                (Some("laptop".to_string()), vec![5]),
+            ]
+        );
+        // The malicious package and the machine key need their own answers
+        let (approvable, held) = approvable_from(&items, "laptop");
+        let names: Vec<&str> = approvable.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!((names, held), (vec!["a", "c"], 1));
     }
 
     #[test]
@@ -996,20 +1184,37 @@ mod tests {
             reasons: vec![Reason::CooldownUnsupported],
             ..item("npm", "a")
         };
-        let new = inbox.settle(vec![cooldown.clone(), item("npm", "b")], &[]);
+        let all = |_: &str, _: &str| true;
+        let new = inbox.settle(vec![cooldown.clone(), item("npm", "b")], &[], all);
         assert_eq!(new.len(), 2);
         // The same reasons again are not news
-        assert!(inbox.settle(vec![cooldown.clone()], &[]).is_empty());
+        assert!(inbox.settle(vec![cooldown.clone()], &[], all).is_empty());
         // Other reasons replace the item and report it again
         let changed = InboxItem {
             reasons: vec![Reason::Unsigned, Reason::CooldownUnsupported],
             ..cooldown
         };
-        assert_eq!(inbox.settle(vec![changed.clone()], &[]), vec![changed]);
+        assert_eq!(inbox.settle(vec![changed.clone()], &[], all), vec![changed]);
         // Once npm enforces the limit, the package passes and its item goes
-        inbox.settle(Vec::new(), &[("npm".to_string(), "a".to_string())]);
+        inbox.settle(Vec::new(), &[("npm".to_string(), "a".to_string())], all);
         let left: Vec<String> = inbox.items.iter().map(|i| i.id()).collect();
         assert_eq!(left, vec!["npm:b"]);
+    }
+
+    #[test]
+    fn settle_drops_items_no_record_lists_any_more() {
+        let mut inbox = Inbox::default();
+        let machine = InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: String::new(),
+            },
+            ..item(MACHINE, "laptop")
+        };
+        inbox.items = vec![item("npm", "kept"), item("npm", "gone"), machine];
+        inbox.settle(Vec::new(), &[], |_, name| name == "kept");
+        let left: Vec<String> = inbox.items.iter().map(|i| i.id()).collect();
+        assert_eq!(left, vec!["npm:kept", "machine:laptop"]);
     }
 
     #[test]

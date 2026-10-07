@@ -35,10 +35,11 @@ pub fn handle_key(app: &mut App, mut picker: PkgImport, key: KeyEvent) -> Option
     let mut cmd = None;
     if let Some((manager_key, name)) = picker.confirm.take() {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => {
+            // Enter opens the question, so a second Enter must not answer it
+            KeyCode::Char('y') => {
                 cmd = app.start_install(manager_key, name, true);
             }
-            KeyCode::Char('n') | KeyCode::Esc => {}
+            KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => {}
             _ => picker.confirm = Some((manager_key, name)),
         }
     } else {
@@ -96,7 +97,7 @@ pub fn render(f: &mut Frame, app: &App, picker: &PkgImport) {
     picker_popup(
         f,
         app,
-        "Import package",
+        "Install from another machine",
         rows,
         picker.cursor,
         &[("⏎", "install"), ("esc", "close")],

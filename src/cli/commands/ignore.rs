@@ -42,7 +42,7 @@ pub async fn list() -> Result<()> {
 
     if !path.exists() {
         Output::info("No ignore patterns configured");
-        Output::info("Add patterns with: tether ignore add <pattern>");
+        Output::info("Add patterns with: tether ignore secrets add <pattern>");
         return Ok(());
     }
 
@@ -69,8 +69,7 @@ pub async fn remove(pattern: &str) -> Result<()> {
     let path = ignore_file_path()?;
 
     if !path.exists() {
-        Output::error("No ignore patterns configured");
-        return Ok(());
+        anyhow::bail!("No ignore patterns configured");
     }
 
     let content = std::fs::read_to_string(&path)?;
@@ -80,8 +79,7 @@ pub async fn remove(pattern: &str) -> Result<()> {
         .collect();
 
     if patterns.len() == content.lines().filter(|l| !l.is_empty()).count() {
-        Output::error(&format!("Pattern '{}' not found", pattern));
-        return Ok(());
+        anyhow::bail!("Pattern '{}' not found", pattern);
     }
 
     std::fs::write(&path, patterns.join("\n") + "\n")?;
@@ -174,7 +172,7 @@ pub async fn sync_list() -> Result<()> {
 
     if !has_ignored {
         Output::info("No files are ignored on this machine");
-        Output::info("Use 'tether ignore dotfile <file>' or 'tether ignore project <project> <path>' to ignore files");
+        Output::info("Use 'tether ignore files add <file>' or 'tether ignore files project <project> <path>' to keep files");
         return Ok(());
     }
 
@@ -205,12 +203,9 @@ pub async fn sync_remove(file: &str) -> Result<()> {
     let sync_path = SyncEngine::sync_path()?;
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
 
-    let mut machine_state = match crate::sync::signing::own_record(&sync_path, &state.machine_id)? {
-        Some(ms) => ms,
-        None => {
-            Output::error("No machine state found");
-            return Ok(());
-        }
+    let Some(mut machine_state) = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
+    else {
+        anyhow::bail!("No machine state found");
     };
 
     // Check if it's a project config (format: "project:path")
@@ -228,7 +223,7 @@ pub async fn sync_remove(file: &str) -> Result<()> {
                 return Ok(());
             }
         }
-        Output::error(&format!("'{}:{}' is not in the ignore list", project, path));
+        anyhow::bail!("'{}:{}' is not in the ignore list", project, path);
     } else {
         // It's a dotfile
         let len_before = machine_state.ignored_dotfiles.len();
@@ -239,8 +234,6 @@ pub async fn sync_remove(file: &str) -> Result<()> {
             Output::success(&format!("Unignored '{}'", file));
             return Ok(());
         }
-        Output::error(&format!("'{}' is not in the ignore list", file));
+        anyhow::bail!("'{}' is not in the ignore list", file);
     }
-
-    Ok(())
 }

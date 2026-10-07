@@ -1,5 +1,6 @@
 use super::app::{DaemonOp, InstallOp, Job};
 use crate::packages::inbox::InboxItem;
+use crate::sync::membership::Edit;
 use crossterm::event::{KeyEvent, MouseEvent};
 use std::collections::HashMap;
 
@@ -19,7 +20,10 @@ pub enum Msg {
     },
     DaemonOpStarted(DaemonOp),
     DaemonOpExited,
-    UninstallDone(Result<(), String>),
+    /// Ok with a message when the package uninstalled but its profiles did not save.
+    UninstallDone(Result<Option<String>, String>),
+    /// A package's profiles were saved and pushed: the toast text, or the error.
+    ProfilesSaved(Result<String, String>),
     InstallDone {
         op: InstallOp,
         result: Result<(), String>,
@@ -45,7 +49,8 @@ pub enum Msg {
         short_hash: String,
         result: Result<(), String>,
     },
-    /// A machine key was trusted or an item rejected: the toast text, or the error.
+    /// A machine key was trusted or untrusted, or an item rejected: the toast text, or the
+    /// error.
     InboxDone(Result<String, String>),
     /// Another machine's record was removed and committed, and whether this machine
     /// untrusted its key, or the error.
@@ -59,14 +64,21 @@ pub enum Msg {
 pub enum Cmd {
     Run(Job),
     Daemon(DaemonOp),
+    /// With `leave`, also take this machine's profile out of the package's members.
     Uninstall {
         manager_key: String,
         name: String,
+        leave: Option<Edit>,
+    },
+    /// Apply an edit to a package's members, and push.
+    SaveProfiles {
+        manager_key: String,
+        name: String,
+        edit: Edit,
     },
     /// With `osv_required`, an install that OSV cannot check waits for the user.
     Install {
         op: InstallOp,
-        machine_id: String,
         osv_required: bool,
     },
     /// Approve inbox items exactly as displayed, then install them one after another.
@@ -84,6 +96,18 @@ pub enum Cmd {
     },
     /// Reject an inbox item.
     Reject(Box<InboxItem>),
+    /// Trust the key that signs a machine's record, only while its fingerprint is the one
+    /// shown. `label` names the machine.
+    TrustMachine {
+        machine_id: String,
+        fingerprint: String,
+        label: String,
+    },
+    /// Remove a machine's key from the trust store.
+    Untrust {
+        machine_id: String,
+        label: String,
+    },
     /// Remove another machine's record as `tether machines remove` does, without the push.
     /// Only while the record is still an old id with this SHA-256, as the confirm showed it.
     RemoveMachine {
@@ -95,6 +119,11 @@ pub enum Cmd {
     CollectPackages {
         config: Box<crate::config::Config>,
         machine_id: String,
+    },
+    /// Copy a dotfile's backup over the file.
+    RestoreBackup {
+        path: String,
+        timestamp: String,
     },
     Restore {
         repo_path: String,

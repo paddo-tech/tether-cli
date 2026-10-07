@@ -55,7 +55,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
     // Leftmost on the right side, so its click region starts where the line does.
     let (pending, malicious) = super::security::pending(app);
-    let badge = format!(" ⚑ {} pending ", pending);
+    let badge = format!(" ⚑ Inbox {} ", pending);
     let badge_w = badge.chars().count() as u16;
     if pending > 0 {
         let bg = if malicious { t.error } else { t.warn };

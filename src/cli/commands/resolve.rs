@@ -1,15 +1,14 @@
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{ConflictResolution, ConflictState, FileConflict, SyncEngine};
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 pub async fn run(file: Option<&str>) -> Result<()> {
     let config = Config::load()?;
 
     if !config.has_personal_features() {
-        Output::warning("Resolve not available without personal features");
-        return Ok(());
+        anyhow::bail!("Resolve is not available without personal features");
     }
 
     // Hold the lock while prompting, so a daemon sync cannot overwrite the
@@ -19,6 +18,9 @@ pub async fn run(file: Option<&str>) -> Result<()> {
     let mut conflict_state = ConflictState::load()?;
 
     if conflict_state.conflicts.is_empty() {
+        if let Some(f) = file {
+            anyhow::bail!("No conflict found for '{}'", f);
+        }
         Output::success("No conflicts to resolve");
         return Ok(());
     }
@@ -49,10 +51,9 @@ pub async fn run(file: Option<&str>) -> Result<()> {
 
     if conflicts_to_resolve.is_empty() {
         if let Some(f) = file {
-            Output::error(&format!("No conflict found for '{}'", f));
-        } else {
-            Output::success("No conflicts to resolve");
+            anyhow::bail!("No conflict found for '{}'", f);
         }
+        Output::success("No conflicts to resolve");
         return Ok(());
     }
 

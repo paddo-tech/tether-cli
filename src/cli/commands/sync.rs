@@ -111,6 +111,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
     // This ensures config changes from other machines are applied before using config
     if config.security.encrypt_dotfiles && !dry_run {
         if let Some(new_config) = sync_tether_config(&sync_path, &home)? {
+            warn_changed_profile(&config, &new_config);
             config = new_config;
         }
     }
@@ -314,7 +315,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         )
         .await?;
 
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if crate::cli::Prompt::is_interactive() && !crate::cli::Prompt::assume_yes() {
             // A cancelled prompt defers the review; the sync must still save and push
             if let Err(e) = super::packages::review_inbox().await {
                 Output::warning(&format!("Inbox review stopped: {}", e));
@@ -384,13 +385,10 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
                                         crate::security::scan_for_secrets(&entry.path())
                                     {
                                         if !findings.is_empty() {
-                                            Output::error(&format!(
-                                                "Team push blocked: {} contains {} secret(s)",
+                                            anyhow::bail!(
+                                                "Team push blocked: {} contains {} secret(s). Remove sensitive data first",
                                                 entry.file_name().to_string_lossy(),
                                                 findings.len()
-                                            ));
-                                            anyhow::bail!(
-                                                "Cannot push secrets to team repo. Remove sensitive data first."
                                             );
                                         }
                                     }
@@ -421,11 +419,12 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         }
     }
 
-    if !dry_run {
-        state.mark_synced();
-        state.save()?;
+    if dry_run {
+        Output::info("Dry run: nothing changed");
+        return Ok(());
     }
-
+    state.mark_synced();
+    state.save()?;
     Output::success("Synced");
     Ok(())
 }
@@ -1448,28 +1447,15 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
             let remote_hash = crate::sha256_hex(&plaintext);
             let local_hash = local_content.as_ref().map(|c| crate::sha256_hex(c));
 
-            // Check if local has changed since last sync
-            let state = SyncState::load().ok();
-            let last_synced_hash = state
-                .as_ref()
-                .and_then(|s| s.files.get(".tether/config.toml"))
-                .map(|f| f.hash.as_str());
-
-            let local_changed = local_hash.as_deref() != last_synced_hash;
-            let remote_changed = Some(remote_hash.as_str()) != last_synced_hash;
-
-            // Only apply remote if:
-            // - Local hasn't changed (safe to overwrite) OR local doesn't exist yet
-            // - AND remote has changed OR local doesn't exist yet
-            let should_apply = (!local_changed || local_content.is_none())
-                && (remote_changed || local_content.is_none());
-
-            if should_apply {
-                // Apply remote config
+            let mut state = SyncState::load().ok();
+            if apply_remote_config(state.as_mut(), local_hash.as_deref(), &remote_hash) {
                 if let Some(parent) = local_config_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&local_config_path, &plaintext)?;
+                if let Some(state) = state {
+                    state.save()?;
+                }
 
                 // Reload config
                 let new_config = Config::load()?;
@@ -1483,6 +1469,53 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
     }
 
     Ok(None)
+}
+
+/// Whether the remote config.toml replaces the local one: only when the local file is
+/// missing, or unchanged since the last sync while the remote changed. Applying records the
+/// remote hash. Without it, the next remote change looks like a local edit, and the stale
+/// copy is exported over it.
+fn apply_remote_config(
+    state: Option<&mut SyncState>,
+    local_hash: Option<&str>,
+    remote_hash: &str,
+) -> bool {
+    let last_synced_hash = state
+        .as_ref()
+        .and_then(|s| s.files.get(".tether/config.toml"))
+        .map(|f| f.hash.clone());
+    let local_changed = local_hash != last_synced_hash.as_deref();
+    let remote_changed = Some(remote_hash) != last_synced_hash.as_deref();
+    let apply = local_hash.is_none() || (!local_changed && remote_changed);
+    if apply {
+        if let Some(state) = state {
+            state.record_remote_file(".tether/config.toml", remote_hash.to_string());
+        }
+    }
+    apply
+}
+
+/// A synced config.toml can change this machine's profile assignment, and the packages this
+/// machine installs with it: a user on another machine, or a 1.x machine that saved an
+/// older config.
+pub fn warn_changed_profile(old: &Config, new: &Config) {
+    let Ok(state) = SyncState::load() else {
+        return;
+    };
+    let Some(profile) = old.machine_profiles.get(&state.machine_id) else {
+        return;
+    };
+    if new.machine_profiles.get(&state.machine_id) != Some(profile) {
+        Output::warning(&format!(
+            "The synced config changed this machine's profile from {} to {}, so it now \
+             installs the packages of profile {}. If nobody meant to change it, run 'tether \
+             machines profile set {}'",
+            profile,
+            new.profile_name(&state.machine_id),
+            new.profile_name(&state.machine_id),
+            profile
+        ));
+    }
 }
 
 /// Export tether config to sync repo (always, independent of config file list)
@@ -2256,13 +2289,14 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
         }
     }
 
-    // Sync team project secrets to local projects
-    if !dry_run {
-        let mut state = SyncState::load()?;
-        sync_team_project_secrets(config, &home, &mut state)?;
-        state.save()?;
+    if dry_run {
+        Output::info("Dry run: nothing changed");
+        return Ok(());
     }
-
+    // Sync team project secrets to local projects
+    let mut state = SyncState::load()?;
+    sync_team_project_secrets(config, &home, &mut state)?;
+    state.save()?;
     Output::success("Team sync complete");
     Ok(())
 }
@@ -2399,5 +2433,26 @@ mod tests {
 
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn applied_remote_config_does_not_look_like_a_local_edit() {
+        let mut state: SyncState = serde_json::from_value(serde_json::json!({
+            "machine_id": "me",
+            "last_sync": "2026-01-01T00:00:00Z",
+            "files": {},
+            "packages": {},
+        }))
+        .unwrap();
+        state.update_file(".tether/config.toml", "a".to_string());
+        // Another machine pushed b; this machine's config is still a
+        assert!(apply_remote_config(Some(&mut state), Some("a"), "b"));
+        // Then c. Before, the stale hash a made b look like a local edit, and b was
+        // exported over c
+        assert!(apply_remote_config(Some(&mut state), Some("b"), "c"));
+        // A real local edit still wins
+        assert!(!apply_remote_config(Some(&mut state), Some("edited"), "d"));
+        // A missing local config always takes the remote one
+        assert!(apply_remote_config(Some(&mut state), None, "d"));
     }
 }

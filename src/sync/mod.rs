@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod engine;
 pub mod git;
 pub mod layers;
+pub mod membership;
 pub mod merge;
 pub mod packages;
 pub mod signing;
@@ -16,7 +17,8 @@ pub use backup::{
 };
 pub use conflict::{
     detect_conflict, notify_conflicts, notify_deferred_casks, notify_inbox,
-    notify_signature_failed, ConflictResolution, ConflictState, FileConflict, PendingConflict,
+    notify_membership_error, notify_signature_failed, ConflictResolution, ConflictState,
+    FileConflict, PendingConflict,
 };
 pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;

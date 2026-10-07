@@ -1,3 +1,4 @@
+use crate::cli::output::Colorize;
 use crate::cli::{Output, Prompt};
 use crate::config::Config;
 use crate::packages::inbox;
@@ -7,28 +8,57 @@ use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
 use comfy_table::{Attribute, Cell, Color};
-use owo_colors::OwoColorize;
 use std::path::Path;
 
-pub async fn list() -> Result<()> {
+/// The machine id `name` refers to: a machine id, or the hostname of exactly one machine.
+/// A name that matches neither is returned as given, so a command can act on an id that
+/// has no record, such as untrust.
+pub fn resolve(sync_path: &Path, name: &str) -> Result<String> {
+    resolve_in(&MachineState::list_all(sync_path).unwrap_or_default(), name)
+}
+
+fn resolve_in(machines: &[MachineState], name: &str) -> Result<String> {
+    if machines.iter().any(|m| m.machine_id == name) {
+        return Ok(name.to_string());
+    }
+    let host = |h: &str| h.trim_end_matches(".local").to_ascii_lowercase();
+    let ids: Vec<&str> = machines
+        .iter()
+        .filter(|m| host(&m.hostname) == host(name))
+        .map(|m| m.machine_id.as_str())
+        .collect();
+    match ids.as_slice() {
+        [] => Ok(name.to_string()),
+        [id] => Ok(id.to_string()),
+        _ => anyhow::bail!(
+            "Hostname {} names more than one machine: {}. Use a machine id",
+            name,
+            ids.join(", ")
+        ),
+    }
+}
+
+pub async fn list(json: bool) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
 
     let sync_path = SyncEngine::sync_path()?;
     let machines = MachineState::list_all(&sync_path)?;
 
+    let state = SyncState::load()?;
+    let current_machine = &state.machine_id;
+    let statuses = signing::record_statuses(&sync_path, current_machine)?;
+    if json {
+        return Output::json(&list_json(&config, &machines, &statuses, current_machine));
+    }
     if machines.is_empty() {
         Output::info("No machines synced yet");
         return Ok(());
     }
-
-    let state = SyncState::load()?;
-    let current_machine = &state.machine_id;
-    let statuses = signing::record_statuses(&sync_path, current_machine)?;
     let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, current_machine);
+    let old_builds = signing::old_builds(&machines, &statuses, current_machine);
 
     println!();
     println!("{}", "Synced Machines".bright_cyan().bold());
@@ -63,6 +93,8 @@ pub async fn list() -> Result<()> {
             Cell::new("(this machine)").fg(Color::Green)
         } else if old_ids.iter().any(|o| o.machine_id == machine.machine_id) {
             Cell::new("(may be an old id of this machine)").fg(Color::Yellow)
+        } else if old_builds.contains(&machine.machine_id) {
+            Cell::new("(on 1.x)").fg(Color::Yellow)
         } else {
             Cell::new("")
         };
@@ -108,7 +140,161 @@ pub async fn list() -> Result<()> {
         print_old_id_hints(&old_ids);
         println!();
     }
+    if !old_builds.is_empty() {
+        print_old_build_notes(&old_builds);
+        println!();
+    }
 
+    Ok(())
+}
+
+/// `machines list --json`. `record` is how this machine reads the record: trusted,
+/// untrusted, replayed or signature_failed. `signer` is the fingerprint whose signature
+/// verifies, or null.
+fn list_json(
+    config: &Config,
+    machines: &[MachineState],
+    statuses: &[(String, signing::RecordStatus, Option<String>)],
+    this: &str,
+) -> serde_json::Value {
+    use signing::RecordStatus;
+    serde_json::Value::Array(
+        machines
+            .iter()
+            .map(|m| {
+                let (status, signer) = statuses
+                    .iter()
+                    .find(|(id, _, _)| *id == m.machine_id)
+                    .map_or((RecordStatus::Untrusted, None), |(_, s, fp)| {
+                        (*s, fp.clone())
+                    });
+                serde_json::json!({
+                    "id": m.machine_id,
+                    "hostname": m.hostname,
+                    "profile": m.profile.as_deref().unwrap_or(config.profile_name(&m.machine_id)),
+                    "version": m.cli_version,
+                    "os": m.os,
+                    "last_sync": m.last_sync,
+                    "this_machine": m.machine_id == this,
+                    "record": match status {
+                        RecordStatus::Trusted => "trusted",
+                        RecordStatus::Untrusted => "untrusted",
+                        RecordStatus::Replayed => "replayed",
+                        RecordStatus::SignatureFailed => "signature_failed",
+                    },
+                    "signer": signer,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// One line per machine on 1.x, which a rolling upgrade leaves behind for a while.
+pub fn print_old_build_notes(ids: &[String]) {
+    for id in ids {
+        Output::warning(&format!("{} is {}", id, signing::OLD_BUILD_NOTE));
+    }
+}
+
+/// One machine's record, its key and how this machine trusts it.
+pub async fn show(name: Option<&str>) -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        anyhow::bail!("Machine management is not available in team-only mode");
+    }
+    let sync_path = SyncEngine::sync_path()?;
+    let this = SyncState::load()?.machine_id;
+    let name = name.unwrap_or(&this);
+    let id = resolve(&sync_path, name)?;
+    let machines = MachineState::list_all(&sync_path)?;
+    let Some(record) = machines.iter().find(|m| m.machine_id == id) else {
+        anyhow::bail!(
+            "Machine '{}' not found. Run 'tether machines list' to see the machines",
+            name
+        );
+    };
+    let (status, signer) = signing::record_statuses(&sync_path, &this)?
+        .into_iter()
+        .find(|(i, _, _)| *i == id)
+        .map_or((signing::RecordStatus::Untrusted, None), |(_, s, fp)| {
+            (s, fp)
+        });
+    let trusted = signing::TrustStore::load()?
+        .key_for(&id)
+        .map(signing::fingerprint);
+    let packages: usize = record.packages.values().map(Vec::len).sum();
+
+    Output::section(&format!("Machine {}", id));
+    println!();
+    Output::key_value(
+        "Machine",
+        &if id == this {
+            format!("{} (this machine)", id)
+        } else {
+            id.clone()
+        },
+    );
+    Output::key_value("Hostname", &record.hostname);
+    Output::key_value(
+        "Profile",
+        record
+            .profile
+            .as_deref()
+            .unwrap_or(config.profile_name(&id)),
+    );
+    Output::key_value(
+        "Version",
+        if record.cli_version.is_empty() {
+            "-"
+        } else {
+            &record.cli_version
+        },
+    );
+    Output::key_value("OS", &format!("{} {}", record.os, record.os_version));
+    Output::key_value(
+        "Last sync",
+        &record
+            .last_sync
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    );
+    Output::key_value("Record", status.label());
+    Output::key_value(
+        "Signed by",
+        signer.as_deref().unwrap_or("no valid signature"),
+    );
+    let trust = match (&trusted, &signer) {
+        _ if id == this => "this machine".to_string(),
+        (Some(t), Some(s)) if t == s => "trusted".to_string(),
+        (Some(t), _) => format!("trusted key is {}, which did not sign this record", t),
+        (None, _) => "not trusted".to_string(),
+    };
+    Output::key_value("Trust", &trust);
+    Output::key_value(
+        "Packages",
+        &format!(
+            "{} listed, {} removed",
+            packages,
+            record
+                .removed_packages
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        ),
+    );
+    Output::key_value("Dotfiles", &record.dotfiles.len().to_string());
+    println!();
+    if id == this {
+        Output::dim(
+            "Compare the 'Signed by' fingerprint with the one other machines show for this machine",
+        );
+    } else if let (None, Some(fp)) = (&trusted, &signer) {
+        Output::dim(&format!(
+            "After you compare the fingerprint on that machine: tether machines trust {} --fingerprint {}",
+            id, fp
+        ));
+    }
     Ok(())
 }
 
@@ -148,12 +334,11 @@ pub async fn profile_set(profile: &str) -> Result<()> {
     let mut config = Config::load()?;
 
     if !Config::is_safe_profile_name(profile) {
-        Output::error(&format!("Invalid profile name: '{}'", profile));
-        return Ok(());
+        anyhow::bail!("Invalid profile name: '{}'", profile);
     }
 
     if !config.profiles.contains_key(profile) {
-        Output::error(&format!(
+        anyhow::bail!(
             "Profile '{}' not found. Available profiles: {}",
             profile,
             if config.profiles.is_empty() {
@@ -166,8 +351,7 @@ pub async fn profile_set(profile: &str) -> Result<()> {
                     .collect::<Vec<_>>()
                     .join(", ")
             }
-        ));
-        return Ok(());
+        );
     }
 
     let state = SyncState::load()?;
@@ -202,27 +386,27 @@ pub async fn profile_unset() -> Result<()> {
 
 /// Rename this machine. Only a machine can sign its own record, so another machine's record
 /// is never moved: it would no longer verify under the new id.
-pub async fn rename(old: &str, new: &str) -> Result<()> {
+/// `old` is the deprecated form's first name, which must be this machine.
+pub async fn rename(old: Option<&str>, new: &str) -> Result<()> {
     let mut config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
 
     let sync_path = SyncEngine::sync_path()?;
     // No other writer may save this machine's record between its read and the save
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let mut state = SyncState::load()?;
+    let current = state.machine_id.clone();
+    let old = old.unwrap_or(&current);
     if state.machine_id != old {
-        Output::error(&format!(
+        anyhow::bail!(
             "Only machine '{}' can rename itself. Run 'tether machines rename' on that machine",
             old
-        ));
-        return Ok(());
+        );
     }
     if !valid_machine_id(new) {
-        Output::error("Machine names use letters, digits, '.', '_' and '-' only");
-        return Ok(());
+        anyhow::bail!("Machine names use letters, digits, '.', '_' and '-' only");
     }
     let machines_dir = sync_path.join("machines");
 
@@ -230,13 +414,11 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     let new_file = machines_dir.join(format!("{}.json", new));
 
     if !old_file.exists() {
-        Output::error(&format!("Machine '{}' not found", old));
-        return Ok(());
+        anyhow::bail!("Machine '{}' not found", old);
     }
 
     if new_file.exists() {
-        Output::error(&format!("Machine '{}' already exists", new));
-        return Ok(());
+        anyhow::bail!("Machine '{}' already exists", new);
     }
 
     signing::rename_own_record(&sync_path, old, new)?;
@@ -259,7 +441,7 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 
     Output::success(&format!("Renamed machine '{}' to '{}'", old, new));
     Output::info(&format!(
-        "Other machines trust this key only as '{}'. On each of them, run 'tether machines trust {} {}'",
+        "Other machines trust this key only as '{}'. On each of them, run 'tether machines trust {} --fingerprint {}'",
         old,
         new,
         signing::fingerprint(signing::load_or_create(new)?.public_key())
@@ -270,33 +452,27 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 pub async fn remove(name: &str, yes: bool) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
+    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
+    let name = resolved.as_str();
 
     if !valid_machine_id(name) {
-        Output::error(&format!("Invalid machine id '{}'", name));
-        return Ok(());
+        anyhow::bail!("Invalid machine id '{}'", name);
     }
 
     let state = SyncState::load()?;
 
     if state.machine_id == name {
-        Output::error("Cannot remove the current machine");
-        Output::info("Use this command from a different machine to remove this one");
-        return Ok(());
+        anyhow::bail!(
+            "Cannot remove the current machine. Run this command on another machine to remove this one"
+        );
     }
 
     let sync_path = SyncEngine::sync_path()?;
     // A sync may replace the record while the question is open, so only the record shown
     // is removed
-    let digest = match record_digest(&sync_path, name) {
-        Ok(digest) => digest,
-        Err(e) => {
-            Output::error(&e.to_string());
-            return Ok(());
-        }
-    };
+    let digest = record_digest(&sync_path, name)?;
 
     let record = MachineState::list_all(&sync_path)?
         .into_iter()
@@ -445,27 +621,29 @@ fn record_digest(sync_path: &Path, name: &str) -> Result<String> {
 pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
+    let resolved = resolve(&sync_path, name)?;
+    let name = resolved.as_str();
     let fingerprint = match fingerprint {
         Some(fingerprint) => fingerprint.to_string(),
         None => {
             let Some(current) = inbox::signing_fingerprint(&sync_path, name) else {
                 anyhow::bail!("Machine {} has no signed machine record", name);
             };
-            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            if !Prompt::is_interactive() || Prompt::assume_yes() {
                 anyhow::bail!(
-                    "Check the key on {}, then run 'tether machines trust {} {}'",
+                    "Run 'tether machines show {}' on that machine and compare the key, then run \
+                     'tether machines trust {} --fingerprint {}'",
                     name,
                     name,
                     current
                 );
             }
             Output::info(&format!("Machine {} signs with key {}", name, current));
-            if !crate::cli::Prompt::confirm(
-                "Trust this key? Compare it with 'tether machines list' on that machine",
+            if !Prompt::confirm(
+                "Trust this key? Compare it with 'tether machines show' on that machine",
                 false,
             )? {
                 return Ok(());
@@ -482,9 +660,10 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
 }
 
 pub async fn untrust(name: &str) -> Result<()> {
+    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
+    let name = resolved.as_str();
     if SyncState::load()?.machine_id == name {
-        Output::error("Cannot untrust the current machine");
-        return Ok(());
+        anyhow::bail!("Cannot untrust the current machine");
     }
     if inbox::untrust_machine(name)? {
         Output::success(&format!("Machine {} is no longer trusted", name));
@@ -494,16 +673,50 @@ pub async fn untrust(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn profile_create(name: &str) -> Result<()> {
+const PROFILE_MANAGERS: [&str; 6] = ["brew", "npm", "pnpm", "bun", "gem", "uv"];
+
+/// Create a profile. `from` copies an existing profile without asking. `managers` sets the
+/// package managers instead of asking. With `-y`, the wizard takes every default answer.
+pub async fn profile_create(
+    name: &str,
+    from: Option<&str>,
+    managers: Option<&[String]>,
+) -> Result<()> {
     let mut config = Config::load()?;
 
     if !Config::is_safe_profile_name(name) {
-        Output::error(&format!("Invalid profile name: '{}'", name));
-        return Ok(());
+        anyhow::bail!("Invalid profile name: '{}'", name);
     }
 
     if config.profiles.contains_key(name) {
-        Output::error(&format!("Profile '{}' already exists", name));
+        anyhow::bail!("Profile '{}' already exists", name);
+    }
+    if let Some(unknown) = managers
+        .unwrap_or_default()
+        .iter()
+        .find(|m| !PROFILE_MANAGERS.contains(&m.as_str()))
+    {
+        anyhow::bail!(
+            "Unknown package manager '{}'. Managers: {}",
+            unknown,
+            PROFILE_MANAGERS.join(", ")
+        );
+    }
+
+    if let Some(from) = from {
+        let Some(mut profile) = config.profiles.get(from).cloned() else {
+            anyhow::bail!("Profile '{}' not found", from);
+        };
+        if let Some(managers) = managers {
+            profile.packages = managers.to_vec();
+        }
+        config.profiles.insert(name.to_string(), profile);
+        config.save()?;
+        Output::success(&format!("Created profile '{}' from '{}'", name, from));
+        Output::info(&format!(
+            "Assign it on a machine: tether machines profile set {}",
+            name
+        ));
         return Ok(());
     }
 
@@ -545,7 +758,7 @@ pub async fn profile_create(name: &str) -> Result<()> {
         let path = &all_dotfiles[*idx];
         // Common files default to shared
         let default_shared = path == ".gitconfig" || path == ".gitignore_global";
-        let shared = Prompt::confirm(&format!("Share {} across profiles?", path), default_shared)?;
+        let shared = Prompt::question(&format!("Share {} across profiles?", path), default_shared)?;
         profile_dotfiles.push(crate::config::ProfileDotfileEntry::WithOptions {
             path: path.clone(),
             shared,
@@ -579,16 +792,20 @@ pub async fn profile_create(name: &str) -> Result<()> {
     };
     let dirs: Vec<String> = selected_dirs.iter().map(|i| all_dirs[*i].clone()).collect();
 
-    // Select package managers
-    let all_managers = ["brew", "npm", "pnpm", "bun", "gem", "uv"];
-    let manager_options: Vec<&str> = all_managers.to_vec();
-    let mgr_defaults: Vec<usize> = (0..all_managers.len()).collect();
-    let selected_managers =
-        Prompt::multi_select("Select package managers", manager_options, &mgr_defaults)?;
-    let packages: Vec<String> = selected_managers
-        .iter()
-        .map(|i| all_managers[*i].to_string())
-        .collect();
+    let packages: Vec<String> = match managers {
+        Some(managers) => managers.to_vec(),
+        None => {
+            let mgr_defaults: Vec<usize> = (0..PROFILE_MANAGERS.len()).collect();
+            Prompt::multi_select(
+                "Select package managers",
+                PROFILE_MANAGERS.to_vec(),
+                &mgr_defaults,
+            )?
+            .iter()
+            .map(|i| PROFILE_MANAGERS[*i].to_string())
+            .collect()
+        }
+    };
 
     let profile = crate::config::ProfileConfig {
         dotfiles: profile_dotfiles,
@@ -601,7 +818,7 @@ pub async fn profile_create(name: &str) -> Result<()> {
 
     Output::success(&format!("Created profile '{}'", name));
     Output::info(&format!(
-        "Assign to a machine: tether machines profile set {}",
+        "Assign it on a machine: tether machines profile set {}",
         name
     ));
     Ok(())
@@ -613,8 +830,7 @@ pub async fn profile_edit(name: &str) -> Result<()> {
     let profile = match config.profiles.get(name) {
         Some(p) => p.clone(),
         None => {
-            Output::error(&format!("Profile '{}' not found", name));
-            return Ok(());
+            anyhow::bail!("Profile '{}' not found", name);
         }
     };
 
@@ -664,7 +880,7 @@ pub async fn profile_edit(name: &str) -> Result<()> {
         let existing_shared = existing.map(|e| e.shared()).unwrap_or(false);
         let on_conflict = existing.map(|e| e.on_conflict()).unwrap_or_default();
         let default_shared = existing_shared || path == ".gitconfig" || path == ".gitignore_global";
-        let shared = Prompt::confirm(&format!("Share {} across profiles?", path), default_shared)?;
+        let shared = Prompt::question(&format!("Share {} across profiles?", path), default_shared)?;
         new_dotfiles.push(crate::config::ProfileDotfileEntry::WithOptions {
             path: path.clone(),
             shared,
@@ -674,19 +890,20 @@ pub async fn profile_edit(name: &str) -> Result<()> {
     }
 
     // Package managers
-    let all_managers = ["brew", "npm", "pnpm", "bun", "gem", "uv"];
-    let manager_options: Vec<&str> = all_managers.to_vec();
-    let mgr_defaults: Vec<usize> = all_managers
+    let mgr_defaults: Vec<usize> = PROFILE_MANAGERS
         .iter()
         .enumerate()
         .filter(|(_, m)| profile.packages.is_empty() || profile.packages.contains(&m.to_string()))
         .map(|(i, _)| i)
         .collect();
-    let selected_managers =
-        Prompt::multi_select("Select package managers", manager_options, &mgr_defaults)?;
+    let selected_managers = Prompt::multi_select(
+        "Select package managers",
+        PROFILE_MANAGERS.to_vec(),
+        &mgr_defaults,
+    )?;
     let packages: Vec<String> = selected_managers
         .iter()
-        .map(|i| all_managers[*i].to_string())
+        .map(|i| PROFILE_MANAGERS[*i].to_string())
         .collect();
 
     let updated = crate::config::ProfileConfig {
@@ -772,6 +989,28 @@ pub async fn profile_list() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_machine_is_named_by_id_or_a_unique_hostname() {
+        let machine = |id: &str, host: &str| {
+            let mut m = crate::sync::MachineState::new(id);
+            m.hostname = host.to_string();
+            m
+        };
+        let fleet = [
+            machine("a1", "laptop.local"),
+            machine("b2", "server"),
+            machine("c3", "twin"),
+            machine("d4", "twin"),
+        ];
+        let resolve = |name: &str| super::resolve_in(&fleet, name);
+        assert_eq!(resolve("b2").unwrap(), "b2");
+        assert_eq!(resolve("laptop").unwrap(), "a1");
+        assert_eq!(resolve("Laptop.local").unwrap(), "a1");
+        assert_eq!(resolve("server").unwrap(), "b2");
+        assert_eq!(resolve("gone").unwrap(), "gone");
+        assert!(resolve("twin").unwrap_err().to_string().contains("c3, d4"));
+    }
+
     #[test]
     fn removal_summary_names_the_record_it_removed() {
         let mut record = crate::sync::MachineState::new("old-mac");

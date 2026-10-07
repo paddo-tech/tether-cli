@@ -1,8 +1,8 @@
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::MergeConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -79,8 +79,6 @@ impl FileConflict {
 
     /// Prompt user for resolution
     pub fn prompt_resolution(&self) -> Result<ConflictResolution> {
-        use inquire::Select;
-
         let options = vec![
             "Keep local version",
             "Use remote version",
@@ -88,16 +86,17 @@ impl FileConflict {
             "Skip (decide later)",
         ];
 
-        let choice = Select::new(
+        // -y skips: it never picks a side of a conflict
+        let choice = crate::cli::Prompt::select(
             &format!("How do you want to resolve {}?", self.file_path),
             options,
-        )
-        .prompt()?;
+            3,
+        )?;
 
         Ok(match choice {
-            "Keep local version" => ConflictResolution::KeepLocal,
-            "Use remote version" => ConflictResolution::UseRemote,
-            "Launch merge tool" => ConflictResolution::Merged,
+            0 => ConflictResolution::KeepLocal,
+            1 => ConflictResolution::UseRemote,
+            2 => ConflictResolution::Merged,
             _ => ConflictResolution::Skip,
         })
     }
@@ -417,6 +416,14 @@ pub fn notify_signature_failed(ids: &[String]) -> Result<()> {
     notify(
         &format!("Record for {} fails its signature", ids.join(", ")),
         "Tether ignores it. Someone may have edited it in the repo",
+    )
+}
+
+/// Notify that the package profiles table does not read, so no synced package installs
+pub fn notify_membership_error() -> Result<()> {
+    notify(
+        "Synced packages are not installing",
+        "packages/profiles.toml in the sync repo does not read. Fix or delete it",
     )
 }
 

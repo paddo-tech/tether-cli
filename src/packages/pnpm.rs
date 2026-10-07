@@ -2,7 +2,7 @@ use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{
     command_error_message, validate_name, validate_version, Cooldown, Ecosystem, PackageInfo,
-    PackageManager,
+    PackageManager, Upgrade,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -131,31 +131,34 @@ impl PackageManager for PnpmManager {
         )
     }
 
+    /// Adds each planned target exactly. `pnpm update --latest` would pick the newest mature
+    /// release, which can be older than the installed one.
     async fn update_all(&self) -> Result<()> {
-        let packages = self.list_installed().await?;
-        if packages.is_empty() {
+        let upgrades = super::planned_upgrades(self).await?;
+        if upgrades.is_empty() {
             return Ok(());
         }
 
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let version = policy::tool_version("pnpm").await;
-        let held = super::inbox::hold_malicious_upgrades(self).await;
-        let names: Vec<String> = packages
+        let upgrades: Vec<Upgrade> = upgrades
             .into_iter()
-            .map(|p| p.name)
-            .filter(|name| !held.contains(name))
-            .filter(|name| match validate_name(Ecosystem::Npm, name) {
-                Ok(()) => true,
-                Err(e) => {
-                    crate::cli::Output::warning(&format!("Skipping pnpm entry: {}", e));
-                    false
+            .filter(|u| {
+                match validate_name(Ecosystem::Npm, &u.name)
+                    .and_then(|()| validate_version(Ecosystem::Npm, &u.target))
+                {
+                    Ok(()) => true,
+                    Err(e) => {
+                        crate::cli::Output::warning(&format!("Skipping pnpm entry: {}", e));
+                        false
+                    }
                 }
             })
             .collect();
-        let (scripted, plain): (Vec<String>, Vec<String>) = names
+        let (scripted, plain): (Vec<Upgrade>, Vec<Upgrade>) = upgrades
             .into_iter()
-            .partition(|name| package_policy.scripts_allowed(name));
+            .partition(|u| package_policy.scripts_allowed(&u.name));
         if !scripted.is_empty() && !policy::pnpm_can_allow_build(version) {
             policy::warn_scripts_unsupported_once("pnpm", "10.4");
         }
@@ -165,31 +168,25 @@ impl PackageManager for PnpmManager {
             let Some(first) = batch.first() else {
                 continue;
             };
-            let script_args = policy::pnpm_script_args(&package_policy, first, version, false);
-            if script_args.iter().any(|a| a == "--ignore-scripts")
-                && !policy::pnpm_update_accepts_ignore_scripts(version)
-            {
-                if policy::first_warning("pnpm update --ignore-scripts") {
-                    crate::cli::Output::warning(
-                        "Skipping pnpm update: pnpm 12.0.0 to 12.3.1 cannot update with install scripts off. Upgrade pnpm to 12.3.2 or later",
-                    );
-                }
-                continue;
-            }
-            // `pnpm add -g name@1.2.3` saves that exact version as the range, and a plain
-            // update never moves past it. `--latest` ignores the saved range and still
-            // applies the release-age limit.
+            // An allowlisted package's builds were approved when it was added, so it needs
+            // no flag here
+            let script_args =
+                policy::pnpm_script_args(&package_policy, &first.name, version, false);
+            let specs: Vec<String> = batch
+                .iter()
+                .map(|u| format!("{}@{}", u.name, u.target))
+                .collect();
             let output = command("pnpm")?
-                .args(["update", "-g", "--latest"])
+                .args(["add", "-g"])
                 .args(&cooldown)
                 .args(script_args)
-                .args(&batch)
+                .args(&specs)
                 .output()
                 .await?;
 
             if !output.status.success() {
                 return Err(anyhow::anyhow!(
-                    "pnpm update failed: {}",
+                    "pnpm add failed: {}",
                     command_error_message(&output)
                 ));
             }
@@ -198,16 +195,19 @@ impl PackageManager for PnpmManager {
         Ok(())
     }
 
-    /// `latest` is what `pnpm update -g --latest` installs; pnpm applies the release-age
-    /// limit to it.
-    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+    /// `pnpm add -g name@1.2.3` saves that exact version as the range, so `wanted` never
+    /// moves and the target is `latest`, to which pnpm applies the release-age limit.
+    async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
         let output = command("pnpm")?
             .args(["outdated", "-g", "--format", "json"])
             .args(self.cooldown_args().await)
             .output()
             .await?;
-        // pnpm exits 1 when something is outdated, so the JSON decides
-        super::npm::parse_outdated_json(&output.stdout, true)
+        // pnpm exits 1 when something is outdated, so the JSON decides. pnpm itself is not
+        // a synced package, as in `list_installed`.
+        let mut candidates = super::npm::parse_outdated_json(&output.stdout, true)?;
+        candidates.retain(|u| u.name != "pnpm");
+        Ok(candidates)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {

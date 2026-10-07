@@ -30,6 +30,13 @@ pub struct SyncState {
     /// warns once per record
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub warned_signatures: std::collections::HashSet<String>,
+    /// Whether a sync named the packages of other profiles that this machine does not install
+    #[serde(default)]
+    pub profile_notice_shown: bool,
+    /// The error that stops Tether reading the package profiles table, once notified, so the
+    /// daemon notifies once per error
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_error: Option<String>,
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -351,32 +358,6 @@ impl MachineState {
         Ok(machines)
     }
 
-    /// The newest version of each package that any machine runs, so a new machine
-    /// installs a release some machine already uses.
-    pub fn compute_union_versions(machines: &[Self]) -> HashMap<String, HashMap<String, String>> {
-        let mut union: HashMap<String, HashMap<String, String>> = HashMap::new();
-        for machine in machines {
-            for (manager, versions) in &machine.package_versions {
-                // Validation keeps versions only for managers with an ecosystem
-                let Some(ecosystem) =
-                    crate::packages::manager_for_key(manager).map(|m| m.ecosystem())
-                else {
-                    continue;
-                };
-                let pins = union.entry(manager.clone()).or_default();
-                for (name, version) in versions {
-                    let newer = pins.get(name).is_none_or(|current| {
-                        crate::packages::pin::compare_versions(ecosystem, version, current).is_gt()
-                    });
-                    if newer {
-                        pins.insert(name.clone(), version.clone());
-                    }
-                }
-            }
-        }
-        union
-    }
-
     /// Compute the union of packages across all machine states
     /// Returns a HashMap where each key is a package manager and value is all packages
     /// installed on ANY machine
@@ -501,6 +482,8 @@ impl SyncState {
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
+            profile_notice_shown: false,
+            membership_error: None,
         }
     }
 
@@ -679,25 +662,59 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_union_versions_takes_newest() {
-        let versions = |pairs: &[(&str, &str)]| {
-            HashMap::from([(
-                "npm".to_string(),
-                pairs
-                    .iter()
-                    .map(|(n, v)| (n.to_string(), v.to_string()))
-                    .collect(),
-            )])
-        };
-        let mut m1 = MachineState::new("m1");
-        m1.package_versions = versions(&[("a", "1.10.0"), ("b", "2.0.0")]);
-        let mut m2 = MachineState::new("m2");
-        m2.package_versions = versions(&[("a", "1.9.0"), ("c", "0.1.0")]);
+    fn a_record_from_2_0_parses_with_1x_shape() {
+        // The fields 1.11.10, 1.12.0 and 1.13.1 require in machines/<id>.json, with their
+        // types. All three have the same ones and accept unknown fields, so os,
+        // package_versions and generation must stay optional additions.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldCheckout {
+            path: PathBuf,
+            checkout_id: String,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldRecord {
+            machine_id: String,
+            hostname: String,
+            last_sync: DateTime<Utc>,
+            os_version: String,
+            cli_version: String,
+            files: HashMap<String, String>,
+            packages: HashMap<String, Vec<String>>,
+            removed_packages: HashMap<String, Vec<String>>,
+            dotfiles: Vec<String>,
+            ignored_dotfiles: Vec<String>,
+            project_configs: HashMap<String, Vec<String>>,
+            ignored_project_configs: HashMap<String, Vec<String>>,
+            checkouts: HashMap<String, Vec<OldCheckout>>,
+        }
 
-        let union = MachineState::compute_union_versions(&[m1, m2]);
-        assert_eq!(
-            union,
-            versions(&[("a", "1.10.0"), ("b", "2.0.0"), ("c", "0.1.0")])
+        let mut record = MachineState::new("m");
+        record.generation = 7;
+        record
+            .packages
+            .insert("npm".to_string(), vec!["left-pad".to_string()]);
+        record.package_versions.insert(
+            "npm".to_string(),
+            HashMap::from([("left-pad".to_string(), "1.0.0".to_string())]),
+        );
+        record.checkouts.insert(
+            "github.com/a/b".to_string(),
+            vec![CheckoutInfo {
+                path: PathBuf::from("/src/b"),
+                checkout_id: "abcd1234".to_string(),
+            }],
+        );
+        let tmp = tempfile::TempDir::new().unwrap();
+        record.save_to_repo(tmp.path()).unwrap();
+        let written = std::fs::read_to_string(tmp.path().join("machines/m.json")).unwrap();
+        let old: OldRecord = serde_json::from_str(&written).unwrap();
+        assert_eq!(old.packages["npm"], ["left-pad"]);
+        // 1.x lists records by the `json` extension, so it never reads a signature file
+        assert_ne!(
+            std::path::Path::new("machines/m.json.sig").extension(),
+            Some(std::ffi::OsStr::new("json"))
         );
     }
 

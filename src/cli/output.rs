@@ -1,10 +1,84 @@
 use comfy_table::{presets, ContentArrangement, Table};
-use owo_colors::OwoColorize;
-use std::sync::Mutex;
+use std::fmt::Display;
+use std::io::IsTerminal;
+use std::sync::{Mutex, OnceLock};
 
 pub struct Output;
 
 static CAPTURED: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// With `--json`, stdout carries only the JSON, so messages go to stderr.
+static JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Colour only when stdout is a terminal and `NO_COLOR` is unset or empty, so pipes, files
+/// and `NO_COLOR` get plain text.
+pub fn color_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        colors_wanted(
+            std::env::var_os("NO_COLOR").as_deref(),
+            std::io::stdout().is_terminal(),
+        )
+    })
+}
+
+fn colors_wanted(no_color: Option<&std::ffi::OsStr>, terminal: bool) -> bool {
+    no_color.is_none_or(|v| v.is_empty()) && terminal
+}
+
+/// The owo-colors methods the CLI uses, as plain text when [`color_enabled`] is false. CLI
+/// code imports this trait instead of `owo_colors::OwoColorize`.
+pub trait Colorize: Display {
+    fn bold(&self) -> String {
+        paint(self, |s| owo_colors::OwoColorize::bold(&s).to_string())
+    }
+    fn dimmed(&self) -> String {
+        paint(self, |s| owo_colors::OwoColorize::dimmed(&s).to_string())
+    }
+    fn red(&self) -> String {
+        paint(self, |s| owo_colors::OwoColorize::red(&s).to_string())
+    }
+    fn green(&self) -> String {
+        paint(self, |s| owo_colors::OwoColorize::green(&s).to_string())
+    }
+    fn yellow(&self) -> String {
+        paint(self, |s| owo_colors::OwoColorize::yellow(&s).to_string())
+    }
+    fn cyan(&self) -> String {
+        paint(self, |s| owo_colors::OwoColorize::cyan(&s).to_string())
+    }
+    fn bright_black(&self) -> String {
+        paint(self, |s| {
+            owo_colors::OwoColorize::bright_black(&s).to_string()
+        })
+    }
+    fn bright_blue(&self) -> String {
+        paint(self, |s| {
+            owo_colors::OwoColorize::bright_blue(&s).to_string()
+        })
+    }
+    fn bright_cyan(&self) -> String {
+        paint(self, |s| {
+            owo_colors::OwoColorize::bright_cyan(&s).to_string()
+        })
+    }
+    fn bright_white(&self) -> String {
+        paint(self, |s| {
+            owo_colors::OwoColorize::bright_white(&s).to_string()
+        })
+    }
+}
+
+impl<T: Display + ?Sized> Colorize for T {}
+
+fn paint<T: Display + ?Sized>(value: &T, style: impl FnOnce(String) -> String) -> String {
+    let text = value.to_string();
+    if color_enabled() {
+        style(text)
+    } else {
+        text
+    }
+}
 
 // Icon constants
 impl Output {
@@ -18,8 +92,26 @@ impl Output {
 }
 
 impl Output {
+    /// Print JSON on stdout, and send every message to stderr from now on.
+    pub fn json(value: &serde_json::Value) -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(value)?);
+        Ok(())
+    }
+
+    pub fn set_json(on: bool) {
+        JSON.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn line(text: String) {
+        if JSON.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("{}", text);
+        } else {
+            println!("{}", text);
+        }
+    }
+
     pub fn success(message: &str) {
-        println!("{} {}", Self::CHECK.green().bold(), message);
+        Self::line(format!("{} {}", Self::CHECK.green().bold(), message));
     }
 
     pub fn error(message: &str) {
@@ -27,7 +119,7 @@ impl Output {
     }
 
     pub fn info(message: &str) {
-        println!("{} {}", Self::INFO.bright_blue().bold(), message);
+        Self::line(format!("{} {}", Self::INFO.bright_blue().bold(), message));
     }
 
     /// While the dashboard owns the terminal, a warning goes to the log and waits for the
@@ -38,7 +130,11 @@ impl Output {
             queue.push(message.to_string());
             return;
         }
-        println!("{} {}", Self::WARN.yellow().bold(), message.yellow());
+        Self::line(format!(
+            "{} {}",
+            Self::WARN.yellow().bold(),
+            message.yellow()
+        ));
     }
 
     /// Hold warnings for the dashboard from now on, or print them again with `false`.
@@ -98,8 +194,17 @@ impl Output {
         }
     }
 
-    pub fn table_minimal() -> Table {
+    /// A table that styles its cells only when [`color_enabled`] is true.
+    pub fn table() -> Table {
         let mut table = Table::new();
+        if !color_enabled() {
+            table.force_no_tty();
+        }
+        table
+    }
+
+    pub fn table_minimal() -> Table {
+        let mut table = Self::table();
         table
             .load_preset(presets::UTF8_BORDERS_ONLY)
             .set_content_arrangement(ContentArrangement::Dynamic);
@@ -107,7 +212,7 @@ impl Output {
     }
 
     pub fn table_full() -> Table {
-        let mut table = Table::new();
+        let mut table = Self::table();
         table
             .load_preset(presets::UTF8_FULL)
             .set_content_arrangement(ContentArrangement::Dynamic);
@@ -179,4 +284,18 @@ pub fn relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
     dt.with_timezone(&chrono::Local)
         .format("%b %d %H:%M")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn colour_needs_a_terminal_and_no_no_color() {
+        assert!(colors_wanted(None, true));
+        assert!(colors_wanted(Some(OsStr::new("")), true));
+        assert!(!colors_wanted(Some(OsStr::new("1")), true));
+        assert!(!colors_wanted(None, false));
+    }
 }

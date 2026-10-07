@@ -26,6 +26,10 @@ env:
 jobs:
   build:
     runs-on: [self-hosted, macOS, ARM64]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      publish: ${{ steps.release_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -180,15 +184,76 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update Homebrew formula
-        if: steps.release_check.outputs.exists == 'false' && github.event.inputs.dry_run != 'true'
+      - name: Cleanup match keychain
+        if: always()
         env:
-          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
-          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          MATCH_KEYCHAIN_NAME: tether_match
         run: |
-          SHA_ARM=$(cat target/aarch64-apple-darwin/release/tether-aarch64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
-          SHA_X86=$(cat target/x86_64-apple-darwin/release/tether-x86_64-apple-darwin.tar.gz.sha256 | awk '{print $1}')
+          export PATH="$HOME/.gem/bin:$PATH"
+          bundle exec fastlane mac cleanup_keychain || true
+
+  linux:
+    needs: build
+    if: needs.build.outputs.publish == 'true' || github.event.inputs.dry_run == 'true'
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # musl links statically, so the binary runs on any distro whatever its glibc.
+    # The container holds the toolchain, so a self-hosted runner needs only Docker.
+    container: rust:1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        run: |
+          apt-get update
+          apt-get install -y musl-tools
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        working-directory: target/${{ matrix.target }}/release
+        run: |
+          tar -czf tether-${{ matrix.target }}.tar.gz tether
+          sha256sum tether-${{ matrix.target }}.tar.gz > tether-${{ matrix.target }}.tar.gz.sha256
+
+      - name: Upload to GitHub Release
+        if: needs.build.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          files: |
+            target/${{ matrix.target }}/release/tether-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/release/tether-${{ matrix.target }}.tar.gz.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  homebrew:
+    needs: [build, linux]
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          IS_PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          rm -rf /tmp/sha
+          gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256' --dir /tmp/sha
+          sha() { awk '{print $1}' "/tmp/sha/tether-$1.tar.gz.sha256"; }
+          SHA_ARM=$(sha aarch64-apple-darwin)
+          SHA_X86=$(sha x86_64-apple-darwin)
+          SHA_LINUX_ARM=$(sha aarch64-unknown-linux-musl)
+          SHA_LINUX_X86=$(sha x86_64-unknown-linux-musl)
 
           rm -rf /tmp/homebrew-tap
           git clone https://x-access-token:${COMMITTER_TOKEN}@github.com/paddo-tech/homebrew-tap.git /tmp/homebrew-tap
@@ -220,6 +285,17 @@ jobs:
             '    end' \
             '  end' \
             '' \
+            '  on_linux do' \
+            '    on_intel do' \
+            "      url \"https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-x86_64-unknown-linux-musl.tar.gz\"" \
+            "      sha256 \"${SHA_LINUX_X86}\"" \
+            '    end' \
+            '    on_arm do' \
+            "      url \"https://github.com/paddo-tech/tether-cli/releases/download/v${VERSION}/tether-aarch64-unknown-linux-musl.tar.gz\"" \
+            "      sha256 \"${SHA_LINUX_ARM}\"" \
+            '    end' \
+            '  end' \
+            '' \
             '  def install' \
             '    bin.install "tether"' \
             '  end' \
@@ -243,11 +319,3 @@ jobs:
           git add "$FORMULA_FILE"
           git commit -m "tether-cli ${VERSION}"
           git push
-
-      - name: Cleanup match keychain
-        if: always()
-        env:
-          MATCH_KEYCHAIN_NAME: tether_match
-        run: |
-          export PATH="$HOME/.gem/bin:$PATH"
-          bundle exec fastlane mac cleanup_keychain || true

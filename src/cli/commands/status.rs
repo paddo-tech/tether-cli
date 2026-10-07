@@ -1,25 +1,21 @@
 use crate::cli::output::relative_time;
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{signing, ConflictState, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
-pub async fn run() -> Result<()> {
+pub async fn run(json: bool) -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("Config version") {
-                Output::error(&msg);
-            } else {
-                Output::error("Tether is not initialized. Run 'tether init' first.");
-            }
-            return Ok(());
-        }
+        Err(e) if e.to_string().contains("Config version") => return Err(e),
+        Err(_) => anyhow::bail!("Tether is not initialized. Run 'tether init' first."),
     };
 
     let state = SyncState::load()?;
+    if json {
+        return Output::json(&status_json(&config, &state)?);
+    }
 
     Output::section("Tether Status");
     println!();
@@ -43,6 +39,23 @@ pub async fn run() -> Result<()> {
     };
     let daemon_badge = Output::badge(if is_running { "active" } else { "stopped" }, is_running);
     Output::key_value("Daemon", &format!("{}  {}", status_label, daemon_badge));
+
+    let inbox = crate::packages::inbox::list()?.len();
+    Output::key_value(
+        "Inbox",
+        &match inbox {
+            0 => "empty".to_string(),
+            n => format!("{} waiting. Review with 'tether packages inbox'", n),
+        },
+    );
+    let conflict_state = ConflictState::load().unwrap_or_default();
+    Output::key_value(
+        "Conflicts",
+        &match conflict_state.conflicts.len() {
+            0 => "none".to_string(),
+            n => format!("{}. Resolve with 'tether resolve'", n),
+        },
+    );
 
     // Features summary
     let mut enabled_features = Vec::new();
@@ -70,10 +83,15 @@ pub async fn run() -> Result<()> {
             println!();
             super::machines::print_old_id_hints(&old_ids);
         }
+        let statuses = signing::record_statuses(&sync_path, &state.machine_id)?;
+        let old_builds = signing::old_builds(&machines, &statuses, &state.machine_id);
+        if !old_builds.is_empty() {
+            println!();
+            super::machines::print_old_build_notes(&old_builds);
+        }
     }
 
     // Conflicts warning
-    let conflict_state = ConflictState::load().unwrap_or_default();
     if !conflict_state.conflicts.is_empty() {
         println!();
         println!("  {}", format!("{} Conflicts", Output::WARN).red().bold());
@@ -214,6 +232,15 @@ pub async fn run() -> Result<()> {
         println!();
         println!("  {}", "Packages".bright_cyan().bold());
         Output::divider();
+        match crate::sync::membership::Membership::load_current(&config) {
+            Ok(m) => println!(
+                "  Installs the packages of profile {}. Not installed here: {} package(s) of \
+                 other profiles",
+                m.profile,
+                m.excluded().len()
+            ),
+            Err(e) => Output::warning(&format!("{}. No synced package installs", e)),
+        }
         for (manager, pkg_state) in &state.packages {
             let time = pkg_state
                 .last_modified
@@ -234,6 +261,54 @@ pub async fn run() -> Result<()> {
 
     println!();
     Ok(())
+}
+
+/// `status --json`. Times are RFC 3339 in UTC.
+fn status_json(config: &Config, state: &SyncState) -> Result<serde_json::Value> {
+    let pid = read_daemon_pid()?.filter(|pid| is_process_running(*pid));
+    let features: Vec<&str> = [
+        ("dotfiles", config.features.personal_dotfiles),
+        ("packages", config.features.personal_packages),
+        ("team", config.features.team_dotfiles),
+        ("collab", config.features.collab_secrets),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
+    let mut files: Vec<_> = state.files.iter().collect();
+    files.sort_by_key(|(file, _)| *file);
+    let mut packages: Vec<_> = state.packages.iter().collect();
+    packages.sort_by_key(|(manager, _)| *manager);
+    let conflicts = ConflictState::load().unwrap_or_default().conflicts;
+    Ok(serde_json::json!({
+        "machine": state.machine_id,
+        "profile": config.profile_name(&state.machine_id),
+        "version": env!("CARGO_PKG_VERSION"),
+        "last_sync": state.last_sync,
+        "daemon": { "running": pid.is_some(), "pid": pid },
+        "features": features,
+        "inbox": crate::packages::inbox::list()?.len(),
+        "conflicts": conflicts
+            .iter()
+            .map(|c| serde_json::json!({ "file": c.file_path, "detected_at": c.detected_at }))
+            .collect::<Vec<_>>(),
+        "files": files
+            .iter()
+            .map(|(file, f)| serde_json::json!({
+                "file": file,
+                "synced": f.synced,
+                "last_modified": f.last_modified,
+            }))
+            .collect::<Vec<_>>(),
+        "packages": packages
+            .iter()
+            .map(|(manager, p)| serde_json::json!({
+                "manager": manager,
+                "last_sync": p.last_sync,
+                "last_modified": p.last_modified,
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 fn read_daemon_pid() -> Result<Option<u32>> {
