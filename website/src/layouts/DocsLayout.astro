@@ -4,8 +4,8 @@ interface Props { title: string; description?: string; }
 const { title, description } = Astro.props;
 const docSections = [
   { title: 'Get started', pages: [ ['Introduction', 'introduction'], ['Installation', 'installation'], ['Quick start', 'quick-start'], ['Upgrade to 2.0', 'upgrade'], ['Linux', 'linux'] ] },
-  { title: 'Understand Tether', pages: [ ['How it works', 'how-it-works'], ['Encryption', 'encryption'], ['Package security', 'package-security'], ['Machine trust', 'machine-trust'], ['Machine profiles', 'machine-profiles'] ] },
-  { title: 'Use Tether', pages: [ ['Dashboard', 'dashboard'], ['Commands', 'commands'], ['Configuration', 'configuration'], ['Feature toggles', 'feature-toggles'] ] },
+  { title: 'Understand Tether', pages: [ ['How it works', 'how-it-works'], ['Encryption', 'encryption'], ['Package security', 'package-security'], ['Machine trust', 'machine-trust'], ['Machine profiles', 'machine-profiles'], ['Packages per profile', 'package-profiles'] ] },
+  { title: 'Use Tether', pages: [ ['Dashboard', 'dashboard'], ['Commands', 'commands'], ['Scripts and -y', 'cmd-scripting'], ['Configuration', 'configuration'], ['Feature toggles', 'feature-toggles'] ] },
   { title: 'Connect your tools', pages: [ ['Package managers', 'package-managers'], ['Team sync', 'team-sync'], ['Troubleshooting', 'troubleshooting'] ] },
 ];
 ---

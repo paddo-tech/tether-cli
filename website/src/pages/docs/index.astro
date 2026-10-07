@@ -3,6 +3,96 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
 import FlowDiagram from '../../components/FlowDiagram.astro';
 import ProfileDiagram from '../../components/ProfileDiagram.astro';
+
+// Keep in step with src/dashboard/components/keymap.rs, the source of the footer and the ? help.
+// The labels of Reason::label in src/packages/inbox.rs.
+const inboxReasons = [
+  ['from another machine', 'No trusted machine record lists this exact version, or packages.auto_install_from_trusted is off'],
+  ['untrusted key', 'A validly signed record lists it, but this machine does not trust that key for that machine'],
+  ['untrusted tap', 'A tap outside the trusted taps, or a formula or cask from one'],
+  ['age not checked', 'The manager cannot enforce the release-age limit, and the registry check failed'],
+  ['too new', 'The manager cannot enforce the release-age limit, and the release is newer than the limit. The hold ends when it is old enough'],
+  ['malicious', 'OSV lists a MAL- advisory for this release. You cannot approve it'],
+  ['malicious upgrade', 'OSV lists a MAL- advisory for the upgrade target. The installed version stays. You cannot approve it'],
+  ['malicious releases', 'OSV lists a MAL- advisory for some release, and Tether could not find the release that would install. You can approve it after a warning'],
+  ['new machine key', 'A machine signs its record with a key this machine does not trust yet'],
+  ['key changed', 'A trusted machine signs with a different key. The old key stays trusted until you approve the new one'],
+  ['signature failed', 'The source machine is trusted, but its record fails its signature. Someone may have edited it in the repo'],
+  ['other OS version', 'The version that only machines on another OS list failed here. The item holds the release that suits this machine'],
+];
+
+const keyTables = [
+  { title: 'Every tab', keys: [
+    ['s', 'Sync now'],
+    ['d', 'Start the daemon, or stop it (asks)'],
+    ['r', 'Read the state again'],
+    ['Ctrl+K', 'Command palette: search actions, tabs, files, and packages'],
+    ['Tab, 1-6', 'Next tab, or go to a tab'],
+    ['?', 'Help: every key of the current screen'],
+    ['Esc', 'Close, collapse or go back. Never quits'],
+    ['q, Ctrl+C', 'Quit'],
+    ['click', 'Select; click again to open'],
+  ] },
+  { title: 'Overview', keys: [
+    ['Enter', 'Open the whole daemon log, read-only'],
+    ['j/k, ↑ ↓', 'Scroll the file list'],
+  ] },
+  { title: 'Daemon log', keys: [
+    ['j/k, ↑ ↓', 'Scroll one line'],
+    ['PgUp, PgDn', 'Scroll one page'],
+    ['g, Home / G, End', 'Go to the oldest / newest line'],
+    ['Esc', 'Close the log'],
+  ] },
+  { title: 'Files', keys: [
+    ['Enter', 'Expand a section, open file history, show a diff'],
+    ['Esc', 'Close the diff, then the history'],
+    ['j/k, ↑ ↓', 'Move'],
+    ['R', 'Restore the file to the selected commit (asks)'],
+    ['b', 'Restore the file from a backup (asks)'],
+    ['i', 'Import a dotfile from another profile'],
+    ['t', 'Turn sharing on or off for the file'],
+    ['x', 'Remove the file from this profile (asks)'],
+  ] },
+  { title: 'Packages', keys: [
+    ['Enter', 'Expand a manager; show a history diff'],
+    ['Esc', 'Close the diff, the history, then the list'],
+    ['j/k, ↑ ↓', 'Move'],
+    ['t', 'Share: pick the profiles that install the package'],
+    ['x', 'Uninstall the package (asks). Other profiles keep it'],
+    ['i', 'Install a package that another machine has'],
+    ['h', "Open the manager's manifest history"],
+    ['R', 'Roll back to the selected history entry (asks)'],
+  ] },
+  { title: 'Machines', keys: [
+    ['Enter', "Open or close the machine's details"],
+    ['Esc', 'Close the details'],
+    ['h/j/k/l, ← ↓ ↑ →', 'Move between cards'],
+    ['p', "Set this machine's profile (its own card only)"],
+    ['a', "Trust the machine's key (asks)"],
+    ['x', "Untrust the machine's key (asks)"],
+    ['D', 'Remove an old id of this machine (asks)'],
+  ] },
+  { title: 'Config', keys: [
+    ['Enter', 'Turn on or off, edit a value, or open a list'],
+    ['j/k, ↑ ↓', 'Move'],
+  ] },
+  { title: 'Config list', keys: [
+    ['a', 'Add an item; Enter saves it, Esc cancels'],
+    ['x, Delete', 'Remove the item (asks)'],
+    ['t', 'Dotfiles: create the file when it is missing'],
+    ['Esc', 'Back to the Config list'],
+    ['j/k, ↑ ↓', 'Move'],
+  ] },
+  { title: 'Security', keys: [
+    ['a', 'Approve and install; a machine key or a failed signature asks first'],
+    ['x', 'Reject (asks)'],
+    ['Enter', 'Open or close the details'],
+    ['Esc', 'Close the details'],
+    ['j/k, ↑ ↓', 'Move'],
+    ['A', 'Approve all safe packages (asks)'],
+    ['M', "Approve all from the item's machine (asks)"],
+  ] },
+];
 ---
 
 <DocsLayout
@@ -83,10 +173,10 @@ install -D -m 755 tether ~/.local/bin/tether`} />
 tether init --repo git@github.com:username/dotfiles.git`} />
     <p>Enter the same passphrase. Your configs sync automatically.</p>
     <h3>4. Trust Your Machines</h3>
-    <p>Each machine signs its package list with its own key. Packages from a machine you do not trust wait for approval. On each machine, read its own fingerprint:</p>
-    <Code code="tether machines list" />
+    <p>Each machine signs its package list with its own key. Packages from a machine you do not trust wait for approval. On each machine, read its own id and fingerprint:</p>
+    <Code code="tether machines show" />
     <p>On your other machines, trust that machine with the fingerprint you read:</p>
-    <Code code="tether machines trust <id> <fingerprint>" />
+    <Code code="tether machines trust <id> --fingerprint SHA256:..." />
     <p>See <a href="#machine-trust">Machine Trust</a> for details.</p>
   </section>
 
@@ -95,8 +185,11 @@ tether init --repo git@github.com:username/dotfiles.git`} />
   <!-- Upgrade -->
   <section id="upgrade">
     <h2>Upgrade to Tether 2.0</h2>
-    <p>Tether 2.0 adds signed machine records and checks synced packages before it installs them. After the upgrade, each machine must trust your other machines once. Until then, packages from those machines wait for approval.</p>
-    <p>You can upgrade one machine at a time. Machines on 1.13.1 keep working with the same repo during the upgrade.</p>
+    <p>Tether 2.0 adds signed machine records, checks synced packages before it installs them, and gives packages to profiles. After the upgrade, each machine must trust your other machines once. Until then, packages from those machines wait in the Inbox.</p>
+
+    <h3>Upgrade one machine at a time</h3>
+    <p>You do not have to upgrade all machines at once. Machines on 1.11.10, 1.12.0 and 1.13.1 can read the synced files that 2.0 writes. Upgrade one machine, sync it, and trust it. Then do the next machine.</p>
+    <p><code>tether status</code>, <code>tether machines list</code> and the dashboard Machines tab mark each machine that still runs 1.x as "on 1.x".</p>
 
     <h3>1. Upgrade a machine</h3>
     <Code code="brew upgrade tether-cli" />
@@ -107,14 +200,17 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     <p>The first sync makes the machine's signing key and signs its record.</p>
 
     <h3>3. Trust your upgraded machines</h3>
-    <p>On each upgraded machine, run <code>tether machines list</code>. Note the fingerprint in the row marked "(this machine)". Then, on your other upgraded machines, trust it:</p>
-    <Code code="tether machines trust <id> <fingerprint>" />
-    <p>You can also approve the "trust machine" item when <code>tether sync</code> asks, or on the dashboard Security tab.</p>
-    <p>A machine that still runs 1.13.1 has no signed record. Its packages wait in the inbox as "from another machine". Upgrade that machine, sync it, and trust it. The next sync then installs its packages.</p>
+    <p>On each upgraded machine, read its id and full fingerprint:</p>
+    <Code code="tether machines show" />
+    <p>Then, on your other upgraded machines, trust it with that fingerprint:</p>
+    <Code code="tether machines trust <id> --fingerprint SHA256:..." />
+    <p>You can also approve the "new machine key" item when <code>tether sync</code> asks, or press <code>a</code> on the dashboard Security tab.</p>
+    <p>A machine on 1.x has no signed record. Its packages wait in the Inbox as "from another machine". Upgrade that machine, sync it, and trust it. The next sync then installs its packages.</p>
 
     <h3>4. Review held packages</h3>
-    <Code code="tether packages inbox" />
-    <p>After you trust a machine, the next sync installs the packages its record lists. Packages that fail a check stay in the inbox.</p>
+    <Code code={`tether packages inbox
+tether packages approve --all --from <machine>   # after you review the list`} />
+    <p>After you trust a machine, the next sync installs the packages its record lists. Packages that fail a check stay in the Inbox.</p>
 
     <h3>5. Check your settings</h3>
     <ul>
@@ -122,15 +218,31 @@ tether init --repo git@github.com:username/dotfiles.git`} />
       <li>Add packages that need install scripts to <code>packages.allow_scripts</code></li>
       <li>Change <code>packages.min_release_age_days</code> if 7 days does not suit you</li>
       <li>Remove records that <code>tether machines list</code> marks as an old id of this machine</li>
+      <li>Check that each machine has the profile you want. Packages now go only to the profiles that have them. See <a href="#package-profiles">Packages per profile</a></li>
+    </ul>
+
+    <h3>Machines on 1.x during the upgrade</h3>
+    <ul>
+      <li>A machine on 1.x does not run the new checks. It still installs every synced package without them</li>
+      <li>A machine on 1.x ignores profiles. It installs the packages of every profile</li>
+      <li>A machine on 1.x can push its copy of <code>config.toml</code> back and forth with other machines after any config change. It can also revert one profile assignment. A sync on 2.0 then warns that this machine's profile changed, and names the command that restores it</li>
+      <li>Set profiles before machines on 1.x join, or after they upgrade</li>
+      <li>A 1.13.2 patch release for this config problem may follow. If it is available, upgrade machines that stay on 1.x to it</li>
     </ul>
 
     <h3>What changed</h3>
     <ul>
       <li>Synced packages no longer install on their own unless a trusted machine record lists that exact version</li>
-      <li>Packages from untrusted Homebrew taps now wait in the inbox. Before, Tether skipped them with a warning</li>
-      <li>Packages for managers that cannot enforce the release-age limit now wait in the inbox. This covers gem and older npm, pnpm and bun</li>
+      <li>A machine installs only the packages of its own profile. Nothing is uninstalled. The first sync names packages that no longer come to this machine, with the command that shares them</li>
+      <li>Packages from untrusted Homebrew taps now wait in the Inbox. Before, Tether skipped them with a warning</li>
+      <li>Packages for managers that cannot enforce the release-age limit now wait in the Inbox. This covers gem and older npm, pnpm and bun</li>
       <li>Tether no longer runs <code>brew update</code>. Run it yourself to update Homebrew</li>
-      <li><code>tether machines rename</code> renames only the machine it runs on</li>
+      <li><code>tether upgrade</code> asks first, lists what it changes, and never downgrades a package</li>
+      <li><code>tether packages</code> now lists packages. <code>tether packages uninstall</code> replaces <code>remove</code>, which stays as an alias</li>
+      <li><code>tether ignore secrets</code> and <code>tether ignore files</code> replace the old <code>tether ignore</code> forms, which still work</li>
+      <li><code>tether machines rename &lt;NEW&gt;</code> renames only the machine it runs on</li>
+      <li><code>-y</code> answers every prompt: it confirms, and takes the default answer of each question. Without a terminal, <code>approve</code> and <code>trust</code> still need <code>--expect</code> or <code>--fingerprint</code></li>
+      <li>Every failed command exits with status 1 and prints one <code>Error:</code> line</li>
       <li>The Config tab no longer shows the <code>sync_versions</code> settings. Tether still writes them as <code>false</code>, because 1.x builds need them to read the synced config</li>
       <li>The dashboard shows a machine as online when its record is at most 90 minutes old</li>
     </ul>
@@ -156,7 +268,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
     <ul>
       <li>Tether does not install Homebrew casks on Linux</li>
       <li>Tether skips gems that ship with Ruby or with Debian. On a Ruby from ruby-build or rbenv, Tether cannot identify these gems</li>
-      <li>Machine records name their OS. When only Macs list a version, Linux tries it first. If it fails, Tether holds the newest release that suits Linux in the inbox as "another OS pins a version that fails here". Approve it to install exactly that release</li>
+      <li>Machine records name their OS. When only Macs list a version, Linux tries it first. If it fails, Tether holds the newest release that suits Linux in the Inbox as "other OS version". Approve it to install exactly that release</li>
     </ul>
 
     <h3>Merge tool</h3>
@@ -217,6 +329,7 @@ tether init --repo git@github.com:username/dotfiles.git`} />
 ├── configs/         # App configs (tether config, etc.)
 ├── projects/        # Project-local configs
 ├── manifests/       # Package manifests
+├── packages/        # profiles.toml: the profiles each package belongs to
 └── machines/        # Per-machine records (<id>.json) and signatures (<id>.json.sig)`} />
   </section>
 
@@ -244,17 +357,17 @@ tether init --repo git@github.com:username/dotfiles.git`} />
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Overview</td>
           <td class="py-2 pr-4 font-mono text-xs">1</td>
-          <td class="py-2">Dotfiles, packages, machines, recent activity, and a chart of sync commits per day</td>
+          <td class="py-2">Dotfiles, packages, machines, recent activity, a chart of sync commits per day, and the daemon log</td>
         </tr>
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Files</td>
           <td class="py-2 pr-4 font-mono text-xs">2</td>
-          <td class="py-2">Browse synced dotfiles with file history, diffs with line numbers, and restore</td>
+          <td class="py-2">Synced dotfiles with file history, diffs with line numbers, restore from a commit or a backup, and sharing</td>
         </tr>
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Packages</td>
           <td class="py-2 pr-4 font-mono text-xs">3</td>
-          <td class="py-2">Collapsible package manager sections, manifest history, failed installs, and uninstall with confirmation</td>
+          <td class="py-2">Packages by manager with the profiles of each package, manifest history, failed installs, install, and uninstall</td>
         </tr>
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Machines</td>
@@ -269,93 +382,53 @@ tether init --repo git@github.com:username/dotfiles.git`} />
         <tr class="border-b border-surface/50">
           <td class="py-2 pr-4 font-mono text-xs">Security</td>
           <td class="py-2 pr-4 font-mono text-xs">6</td>
-          <td class="py-2">The approval inbox: held packages with their reasons, source machine, commit, and OSV advisories, machine keys that wait for trust, and the trusted machines</td>
+          <td class="py-2">The Inbox: held packages with their reasons, source machine, commit, and OSV advisories, machine keys that wait for trust, and the trusted machines</td>
         </tr>
       </tbody>
     </table>
-    <p>A machine is online when its record is at most 90 minutes old. An idle machine updates its record once an hour. After 24 hours without an update, the card shows the machine as stale.</p>
+    <p>A machine is online when its record is at most 90 minutes old. An idle machine updates its record once an hour. After 24 hours without an update, the card shows the machine as stale. A machine that still runs 1.x shows "on 1.x".</p>
+    <p>The header shows this machine, its profile, the daemon state, and a spinner while a sync runs. When items wait for approval, the header shows <code>⚑ Inbox &lt;count&gt;</code>. The badge is red when an item is malicious.</p>
 
     <h3>Themes</h3>
     <p>On a terminal with true color, the dashboard uses Catppuccin Mocha or Latte. It picks one from the terminal background. Other terminals get a 16-color theme. To choose a theme, set <code>dashboard.theme</code>:</p>
     <Code code="tether config set dashboard.theme mocha   # mocha, latte, ansi, or auto" />
 
-    <h3>Keybindings</h3>
-    <p>You can also click a tab, a row, or a key hint, and scroll lists with the mouse wheel.</p>
-    <table class="w-full text-sm">
-      <thead>
-        <tr class="border-b border-surface">
-          <th class="text-left py-2 pr-4">Key</th>
-          <th class="text-left py-2">Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">Ctrl+K</td>
-          <td class="py-2">Search actions, tabs, files, and packages</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">s</td>
-          <td class="py-2">Trigger a manual sync</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">d</td>
-          <td class="py-2">Toggle daemon start/stop</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">r</td>
-          <td class="py-2">Refresh dashboard data</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">?</td>
-          <td class="py-2">Show help overlay with all keybindings</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">1-6</td>
-          <td class="py-2">Switch to tab by number</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">Tab</td>
-          <td class="py-2">Next tab</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">↑ ↓ / j k</td>
-          <td class="py-2">Navigate within lists (on the Machines tab, also ← → / h l)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">Enter</td>
-          <td class="py-2">Expand/collapse sections, confirm actions</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">h</td>
-          <td class="py-2">Show manifest history (Packages tab)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">p</td>
-          <td class="py-2">Open profile picker (Machines tab)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">D</td>
-          <td class="py-2">Remove a record that may be an old id of this machine (Machines tab)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">a</td>
-          <td class="py-2">Approve and install a package, or trust a machine key (Security tab)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">x</td>
-          <td class="py-2">Reject a package, tap, or key (Security tab)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">A</td>
-          <td class="py-2">Approve all packages that are not malicious (Security tab)</td>
-        </tr>
-        <tr class="border-b border-surface/50">
-          <td class="py-2 pr-4 font-mono text-xs">q / Esc / Ctrl+c</td>
-          <td class="py-2">Quit dashboard</td>
-        </tr>
-      </tbody>
-    </table>
-    <p>Approval questions and the old-record removal question ignore keys for 0.4 seconds after they open. Thus a key that you typed for another screen cannot answer them. Enter cancels them.</p>
+    <h3 id="dashboard-keys">Keys</h3>
+    <p>The footer shows the most important keys of the current tab. When it has no room for all of them, it shows <code>? more</code>. Press <code>?</code> to see every key of the current screen. You can also click a tab, a row, or a key hint, and scroll lists with the mouse wheel.</p>
+    <ul>
+      <li><code>Enter</code> opens: a section, a history, a diff, details, or a value to edit</li>
+      <li><code>Esc</code> closes, collapses or goes back. It never quits. Press <code>q</code> or <code>Ctrl+C</code> to quit</li>
+      <li><code>x</code> removes, uninstalls, rejects or untrusts. It always asks first</li>
+    </ul>
+    {keyTables.map(table => (
+      <Fragment>
+        <h4>{table.title}</h4>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-surface">
+              <th class="text-left py-2 pr-4 w-48">Key</th>
+              <th class="text-left py-2">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {table.keys.map(([key, action]) => (
+              <tr class="border-b border-surface/50">
+                <td class="py-2 pr-4 font-mono text-xs whitespace-nowrap">{key}</td>
+                <td class="py-2">{action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Fragment>
+    ))}
+
+    <h3>Questions</h3>
+    <p>These actions ask first: restore, rollback, uninstall, remove, reject, trust, untrust, approve all, stop the daemon, and an approval that needs a second look, such as a machine key, a failed signature, or a package that OSV could not check.</p>
+    <ul>
+      <li>A question ignores keys for 0.4 seconds after it opens. Until then, it shows dim buttons with a countdown. A key that you typed for another screen cannot answer it</li>
+      <li>After that, only <code>y</code> accepts</li>
+      <li><code>n</code>, <code>Esc</code> and <code>Enter</code> cancel. A click on the tab under the question does not accept it</li>
+    </ul>
   </section>
 
   <hr class="my-12 border-surface" />
@@ -363,6 +436,18 @@ tether init --repo git@github.com:username/dotfiles.git`} />
   <!-- Commands -->
   <section id="commands">
     <h2>Commands</h2>
+    <p>Run <code>tether &lt;command&gt; --help</code> for the options of each command.</p>
+
+    <h3 id="cmd-scripting">Options for every command and for scripts</h3>
+    <ul>
+      <li><code>-y</code>, <code>--yes</code> — Answer every prompt: confirm the action, and take the default answer of each question. Without a terminal and without <code>-y</code>, a prompt fails with a message that names <code>-y</code></li>
+      <li><code>-y</code> on its own never approves an Inbox item or trusts a key. Without a terminal, <code>packages approve</code> and <code>reject</code> need <code>--expect</code>, and <code>machines trust</code> needs <code>--fingerprint</code>. Only <code>packages approve --all</code> takes <code>-y</code> as its confirmation, and it still leaves machine keys in the Inbox. It does not pick an answer for a question that has no safe default</li>
+      <li><strong>Exit status</strong> — 0 on success. A failed command prints one <code>Error: ...</code> line on stderr and exits with 1. An unknown command or option exits with 2</li>
+      <li><strong>Colour</strong> — Tether prints no colour codes when stdout is not a terminal, such as a pipe or a file, or when <code>NO_COLOR</code> is set</li>
+      <li><strong><code>--json</code></strong> — <code>status</code>, <code>machines list</code>, <code>packages list</code> and <code>packages inbox</code> print one JSON value on stdout. Messages go to stderr. The flag is experimental in 2.0: field names can still change</li>
+      <li><strong>Machine arguments</strong> — Each command that takes a machine accepts its id, or a hostname that names exactly one machine</li>
+      <li><strong>Package ids</strong> — A package id is <code>manager:name</code>, such as <code>npm:typescript</code>. Managers: <code>brew_formulae</code> (or <code>brew</code>), <code>brew_casks</code> (or <code>cask</code>), <code>brew_taps</code>, <code>npm</code>, <code>pnpm</code>, <code>bun</code>, <code>gem</code>, <code>uv</code></li>
+    </ul>
 
     <h3 id="cmd-dashboard">tether / tether dashboard</h3>
     <p>Launch the interactive TUI dashboard. See <a href="#dashboard">Dashboard</a> above for details.</p>
@@ -370,72 +455,86 @@ tether init --repo git@github.com:username/dotfiles.git`} />
 
     <h3 id="cmd-init">tether init</h3>
     <p>Initialize Tether on this machine.</p>
-    <Code code="tether init [--repo <URL>] [--no-daemon]" />
+    <Code code="tether init [--repo <URL>] [--no-daemon] [--team-only]" />
     <ul>
       <li><code>--repo &lt;URL&gt;</code> — Git repository URL (interactive if omitted)</li>
-      <li><code>--no-daemon</code> — Don't start daemon after init</li>
+      <li><code>--no-daemon</code> — Do not start the daemon after init</li>
+      <li><code>--team-only</code> — Skip personal dotfiles and packages, and use team sync only</li>
     </ul>
 
     <h3 id="cmd-sync">tether sync</h3>
     <p>Manually trigger a sync.</p>
-    <Code code="tether sync [--dry-run] [--force]" />
+    <Code code="tether sync [--dry-run] [--force] [--rediscover]" />
     <ul>
-      <li><code>--dry-run</code> — Show what would be synced</li>
+      <li><code>--dry-run</code> — Show what would be synced. It ends with "Dry run: nothing changed"</li>
       <li><code>--force</code> — Skip conflict prompts</li>
+      <li><code>--rediscover</code> — Ask again about file imports that you dismissed</li>
     </ul>
-    <p>In a terminal, <code>tether sync</code> asks about packages and machine keys that wait for approval. The daemon holds them and sends one notification for each new batch.</p>
+    <p>In a terminal, <code>tether sync</code> asks about packages and machine keys in the Inbox. The daemon holds them and sends one notification for each new batch.</p>
 
     <h3 id="cmd-status">tether status</h3>
-    <p>Show current sync status, daemon state, and synced files.</p>
-    <Code code="tether status" />
+    <p>Show the sync status, the daemon state, this machine's profile, and the synced files. It counts the items that wait in the Inbox and the files that have conflicts. It also names each machine that still runs 1.x.</p>
+    <Code code="tether status [--json]" />
 
     <h3 id="cmd-diff">tether diff</h3>
     <p>Show differences between machines.</p>
-    <Code code="tether diff [--machine <NAME>]" />
+    <Code code="tether diff [--machine <MACHINE>]" />
     <ul>
-      <li><code>--machine &lt;NAME&gt;</code> — Compare with specific machine</li>
+      <li><code>--machine &lt;MACHINE&gt;</code> — Compare with this machine (id or hostname)</li>
     </ul>
 
     <h3 id="cmd-daemon">tether daemon</h3>
     <p>Control the background daemon.</p>
-    <Code code="tether daemon <start|stop|restart|logs|install|uninstall>" />
+    <Code code={`tether daemon start
+tether daemon stop
+tether daemon restart
+tether daemon status
+tether daemon logs [-f] [-n <LINES>]
+tether daemon install
+tether daemon uninstall`} />
     <ul>
-      <li><code>start</code> — Start the daemon</li>
-      <li><code>stop</code> — Stop the daemon</li>
-      <li><code>restart</code> — Restart the daemon</li>
-      <li><code>logs</code> — View last 50 log lines</li>
+      <li><code>status</code> — Show whether the daemon runs, whether its login service is installed, and the last sync and upgrade</li>
+      <li><code>logs</code> — Print the end of the daemon log. <code>-n &lt;LINES&gt;</code> sets the number of lines (default 50). <code>-f</code> keeps printing lines as the daemon writes them</li>
       <li><code>install</code> — Install the login service: launchd on macOS, a systemd user service on Linux</li>
       <li><code>uninstall</code> — Remove the login service</li>
     </ul>
 
     <h3 id="cmd-machines">tether machines</h3>
-    <p>Manage machines, machine trust, and profiles in the sync network.</p>
-    <Code code="tether machines <list|rename|remove|trust|untrust|profile>" />
+    <p>List, show, trust and remove machines, and manage profiles.</p>
+    <Code code={`tether machines list [--json]
+tether machines show [MACHINE]
+tether machines rename <NEW>
+tether machines remove <MACHINE>
+tether machines trust <MACHINE> [--fingerprint SHA256:...]
+tether machines untrust <MACHINE>
+tether machines profile <set|unset|create|edit|list>`} />
     <ul>
-      <li><code>list</code> — List all machines with profile, version, last sync, key fingerprint, and trust state. It also marks records that may be an old id of this machine</li>
-      <li><code>rename &lt;OLD&gt; &lt;NEW&gt;</code> — Rename this machine. Tether signs its record again under the new id. Other machines must trust the new id</li>
-      <li><code>remove &lt;NAME&gt;</code> — Remove a machine record and its trusted key on this machine. With <code>-y</code>, Tether removes it without a question</li>
-      <li><code>trust &lt;NAME&gt; [FINGERPRINT]</code> — Trust a machine's signing key if its fingerprint matches. Without a fingerprint, Tether shows the current one and asks</li>
-      <li><code>untrust &lt;NAME&gt;</code> — Stop trusting a machine's signing key</li>
-      <li><code>profile set &lt;PROFILE&gt;</code> — Assign a profile to this machine</li>
-      <li><code>profile unset</code> — Remove profile assignment</li>
-      <li><code>profile create &lt;NAME&gt;</code> — Create a new profile</li>
-      <li><code>profile edit &lt;NAME&gt;</code> — Edit profile dotfile/package config</li>
+      <li><code>list</code> — List all machines with profile, version, last sync, key fingerprint, and trust state. It marks machines on 1.x, and records that may be an old id of this machine</li>
+      <li><code>show [MACHINE]</code> — Show one machine: profile, versions, record status, full key fingerprint, and trust. Without a machine, it shows this machine</li>
+      <li><code>rename &lt;NEW&gt;</code> — Rename this machine. Tether signs its record again under the new id. Other machines must trust the new id. The old form <code>rename &lt;OLD&gt; &lt;NEW&gt;</code> still works in 2.0 with a warning, and fails when OLD is not this machine</li>
+      <li><code>remove &lt;MACHINE&gt;</code> — Remove a machine record and its trusted key on this machine. With <code>-y</code>, Tether removes it without a question and prints what it removed</li>
+      <li><code>trust &lt;MACHINE&gt; --fingerprint SHA256:...</code> — Trust a machine's signing key if its fingerprint matches. Without a fingerprint, Tether shows the current one and asks, in a terminal only</li>
+      <li><code>untrust &lt;MACHINE&gt;</code> — Stop trusting a machine's signing key</li>
+      <li><code>profile set &lt;PROFILE&gt;</code> — Assign a profile to this machine. Each machine sets only its own profile</li>
+      <li><code>profile unset</code> — Remove the profile assignment of this machine</li>
+      <li><code>profile create &lt;PROFILE&gt; [--from &lt;PROFILE&gt;] [--managers &lt;LIST&gt;]</code> — Create a profile. In a terminal, it asks about each dotfile, folder and package manager. <code>-y</code> takes every default. <code>--from</code> copies a profile without questions. <code>--managers</code> sets its package managers, such as <code>brew,npm</code></li>
+      <li><code>profile edit &lt;PROFILE&gt;</code> — Edit a profile</li>
       <li><code>profile list</code> — List all profiles and assignments</li>
     </ul>
 
     <h3 id="cmd-ignore">tether ignore</h3>
-    <p>Manage ignore patterns and per-machine exclusions.</p>
-    <Code code={`# Secret scanning patterns
-tether ignore add <PATTERN>
-tether ignore list
-tether ignore remove <PATTERN>
+    <p>Manage secret scanning patterns, and files this machine keeps.</p>
+    <Code code={`# Patterns the secret scanner skips
+tether ignore secrets add <PATTERN>
+tether ignore secrets list
+tether ignore secrets remove <PATTERN>
 
-# Per-machine file exclusions
-tether ignore dotfile <FILE>
-tether ignore project <PROJECT> <PATH>
-tether ignore sync-list
-tether ignore sync-remove <FILE>`} />
+# Files this machine keeps: a sync does not overwrite them
+tether ignore files add <FILE>
+tether ignore files project <PROJECT> <PATH>
+tether ignore files list
+tether ignore files remove <FILE>      # sync the file again`} />
+    <p>The 1.x forms <code>ignore add|list|remove</code> and <code>ignore dotfile|project|sync-list|sync-remove</code> still work.</p>
 
     <h3 id="cmd-config">tether config</h3>
     <p>Manage configuration.</p>
@@ -447,9 +546,9 @@ tether config features              # List feature toggles
 tether config features enable <F>   # Enable a feature
 tether config features disable <F>  # Disable a feature`} />
     <ul>
-      <li><code>get &lt;KEY&gt;</code> — Get config value (supports nested keys like <code>packages.brew.enabled</code>)</li>
-      <li><code>set &lt;KEY&gt; &lt;VALUE&gt;</code> — Set config value</li>
-      <li><code>edit</code> — Open config in editor</li>
+      <li><code>get &lt;KEY&gt;</code> — Get a config value. Use nested keys such as <code>packages.brew.enabled</code></li>
+      <li><code>set &lt;KEY&gt; &lt;VALUE&gt;</code> — Set a config value. Tether reads the value as TOML, so arrays work: <code>'["azure/kubelogin"]'</code>. A bare word stays a string. Tether refuses a key that the config does not have</li>
+      <li><code>edit</code> — Open the config in your editor. It needs a terminal</li>
       <li><code>dotfiles</code> — Interactive UI for managing synced files</li>
       <li><code>features</code> — Manage feature toggles (see <a href="#feature-toggles">Feature Toggles</a>)</li>
     </ul>
@@ -460,8 +559,10 @@ tether config features disable <F>  # Disable a feature`} />
 tether team setup                     # Interactive wizard
 tether team add <URL>                 # Add team repo
 tether team list                      # List teams
+tether team switch <NAME>             # Switch active team
 tether team status                    # Show status
 tether team enable/disable            # Toggle sync
+tether team remove [NAME]             # Remove team sync
 
 # Organization mapping
 tether team orgs add <ORG>            # Map GitHub org to team
@@ -469,15 +570,26 @@ tether team orgs list                 # List mapped orgs
 tether team orgs remove <ORG>         # Unmap org
 
 # Team secrets (age encryption)
-tether team secrets add-recipient <KEY>   # Add member's public key
-tether team secrets list-recipients       # List recipients
-tether team secrets set <NAME>            # Set a secret
-tether team secrets get <NAME>            # Get a secret
-tether team secrets list                  # List all secrets
+tether team secrets add-recipient <KEY>     # Add member's public key
+tether team secrets list-recipients         # List recipients
+tether team secrets remove-recipient <NAME> # Remove a recipient
+tether team secrets set <NAME>              # Set a secret
+tether team secrets get <NAME>              # Get a secret
+tether team secrets list                    # List all secrets
+tether team secrets remove <NAME>           # Remove a secret
+
+# Team files
+tether team files list                # List synced team files
+tether team files diff [FILE]         # Diff local and team version
+tether team files reset [FILE]        # Reset to the team version
+tether team files promote <FILE>      # Promote a local file to the team repo
+tether team files ignore <FILE>       # Keep a file personal
+tether team files unignore <FILE>     # Sync a file with the team again
 
 # Project secrets
 tether team projects add <FILE>       # Share project secret
 tether team projects list             # List shared secrets
+tether team projects remove <FILE>    # Remove a project secret
 tether team projects migrate          # Auto-migrate to team
 tether team projects purge-personal   # Remove personal copies`} />
 
@@ -495,12 +607,15 @@ tether team projects purge-personal   # Remove personal copies`} />
     <Code code="tether lock" />
 
     <h3 id="cmd-upgrade">tether upgrade</h3>
-    <p>Upgrade all installed packages across enabled package managers.</p>
-    <Code code="tether upgrade" />
+    <p>Upgrade installed packages to the newest release that the release-age limit allows.</p>
+    <Code code="tether upgrade [--dry-run]" />
     <ul>
+      <li>Tether lists what it will change and asks first. Without a terminal, it needs <code>-y</code></li>
+      <li><code>--dry-run</code> lists what an upgrade would change, and which packages stay because the release-age limit allows only an older version. It changes nothing</li>
+      <li>An upgrade never downgrades a package. It installs only a target newer than the installed version, at that exact version</li>
       <li>npm, pnpm, bun and uv upgrades skip releases newer than <code>packages.min_release_age_days</code></li>
-      <li>Tether checks each npm, pnpm, bun, uv and gem upgrade target against OSV. A target with a <code>MAL-</code> advisory waits in the inbox, and the installed version stays</li>
-      <li>Tether asks before it upgrades a manager that cannot enforce the release-age limit. Without a terminal, it skips that manager</li>
+      <li>Tether checks each npm, pnpm, bun, uv and gem upgrade target against OSV. A target with a <code>MAL-</code> advisory waits in the Inbox, and the installed version stays</li>
+      <li>Tether asks before it upgrades a manager that cannot enforce the release-age limit. Without a terminal, or with <code>-y</code>, it skips that manager</li>
       <li>Homebrew upgrades include only outdated packages from trusted taps. Tether does not run <code>brew update</code>. Run it yourself to update Homebrew</li>
     </ul>
 
@@ -510,15 +625,15 @@ tether team projects purge-personal   # Remove personal copies`} />
 
     <h3 id="cmd-restore">tether restore</h3>
     <p>Restore files from backup or git history.</p>
-    <Code code={`tether restore list              # List available backups
-tether restore file              # Interactive restore
-tether restore file --from <TS>  # Restore from specific timestamp
-tether restore git <FILE>        # Restore a dotfile from git history`} />
+    <Code code={`tether restore list                  # List available backups
+tether restore file                  # Interactive restore
+tether restore file <FILE> --from <TS>  # Restore from a specific backup
+tether restore git <FILE> [--commit <SHA>]  # Restore a dotfile from git history`} />
 
     <h3 id="cmd-rollback">tether rollback</h3>
-    <p>Roll back a package manager's installed packages to a manifest commit.</p>
+    <p>Roll back a package manager's installed packages to a manifest commit. The managers are npm, pnpm, bun, gem and uv. Homebrew is not supported.</p>
     <Code code="tether rollback packages <MANAGER> <COMMIT>" />
-    <p>Tether lists each package and version it would install, and asks before it changes anything. Without a terminal, it needs <code>-y</code>. A snapshot version other than the newest trusted version installs only when you confirm it in a terminal. <code>-y</code> does not confirm it. Packages that fail a check wait in the inbox.</p>
+    <p>Tether lists each package and version it would install, and asks before it changes anything. Without a terminal, it needs <code>-y</code>. A snapshot version other than the newest trusted version installs only when you confirm it in a terminal. <code>-y</code> does not confirm it. Packages that fail a check wait in the Inbox.</p>
 
     <h3 id="cmd-identity">tether identity</h3>
     <p>Manage age identity for team secrets encryption.</p>
@@ -529,27 +644,39 @@ tether identity lock     # Clear cached key
 tether identity reset    # Generate new (destroys old)`} />
 
     <h3 id="cmd-packages">tether packages</h3>
-    <p>List installed packages across all managers with interactive multi-select uninstall. Review the approval inbox.</p>
-    <Code code={`tether packages                          # Interactive mode
-tether packages --list                   # Non-interactive list
-tether packages inbox                    # List held packages, taps, and keys
-tether packages approve <ID> [EXPECTED]  # Approve and install, or trust a key
-tether packages reject <ID> [EXPECTED]   # Stop offering that version, tap, or key`} />
+    <p>List, install, share and uninstall packages, and decide on the Inbox.</p>
+    <Code code={`tether packages [list] [--json]                       # List installed packages
+tether packages install <ID>                          # Install a package another machine lists
+tether packages share <ID> --to <PROFILES>            # Add profiles to a package
+tether packages unshare <ID> --from <PROFILES>        # Take profiles off a package
+tether packages uninstall [ID]                        # Uninstall here (alias: remove)
+tether packages inbox [--json]                        # List held packages, taps, and keys
+tether packages approve <ID> [--expect <VERSION|TAP|KEY>]
+tether packages approve --all [--from <MACHINE>]
+tether packages reject <ID> [--expect <VERSION|TAP|KEY>]`} />
     <ul>
-      <li><code>--list</code> — Print packages and failed installs without interactive UI</li>
-      <li><code>-y</code> — Skip confirmation prompts</li>
-      <li><code>&lt;ID&gt;</code> — The item id from <code>inbox</code>, such as <code>npm:typescript</code> or <code>machine:work-laptop</code></li>
-      <li><code>[EXPECTED]</code> — The version, Homebrew tap, or key fingerprint you reviewed. It is required without a terminal. Tether refuses the decision when the item changed</li>
+      <li><code>list</code> — List installed packages by manager, with the profiles each belongs to and this machine's profile. A package that only this profile has shows "this profile only". It also shows failed installs. A bare <code>tether packages</code> lists too</li>
+      <li><code>install &lt;ID&gt;</code> — Install a package that another machine lists, as the dashboard's Import does. OSV checks the release first. A package that waits in the Inbox needs <code>approve</code> instead</li>
+      <li><code>share &lt;ID&gt; --to &lt;PROFILES&gt;</code> — Add profiles to the package, so machines in those profiles install it. Separate profiles with commas</li>
+      <li><code>unshare &lt;ID&gt; --from &lt;PROFILES&gt;</code> — Take profiles off the package, so machines in those profiles stop installing it. Nothing is uninstalled. Machines keep any copy they have</li>
+      <li><code>uninstall [ID]</code> — Uninstall the package here, and take this machine's profile off it. Other profiles keep it. Without a package, pick packages in a terminal. <code>remove</code> is an alias</li>
+      <li><code>inbox</code> — List the Inbox: packages, taps and machine keys that wait for your approval, grouped by source machine and reason</li>
+      <li><code>approve &lt;ID&gt;</code> — Install the package, or trust the machine key. <code>machine:&lt;id&gt;</code> works as <code>tether machines trust &lt;id&gt;</code></li>
+      <li><code>approve --all [--from &lt;MACHINE&gt;]</code> — Approve and install every package in the Inbox, or every package from one machine. It lists the packages and asks first. Without a terminal, it needs <code>-y</code>. It leaves machine keys, malicious packages and packages whose record fails its signature in the Inbox. It approves only the packages it listed</li>
+      <li><code>reject &lt;ID&gt;</code> — Stop offering that version, tap, or key</li>
+      <li><code>--expect &lt;VERSION|TAP|KEY&gt;</code> — The version, Homebrew tap, or key fingerprint you reviewed, as <code>packages inbox</code> shows it. It is required without a terminal. Tether refuses the decision when the item changed</li>
     </ul>
+    <p>The 1.x forms still work: <code>packages remove</code>, and <code>approve &lt;ID&gt; &lt;EXPECTED&gt;</code> without <code>--expect</code>.</p>
 
     <h3 id="cmd-collab">tether collab</h3>
     <p>Share project secrets with GitHub collaborators (requires write access).</p>
     <Code code={`tether collab init              # Initialize collab for current project
 tether collab join <URL>        # Join existing collab
 tether collab add <FILE>        # Add secret file (e.g., .env)
+tether collab add-project <PATH> # Add another project to a collab
 tether collab refresh           # Re-encrypt for current collaborators
 tether collab list              # List all collabs
-tether collab remove            # Remove a collab`} />
+tether collab remove [NAME]     # Remove a collab`} />
   </section>
 
   <hr class="my-12 border-surface" />
@@ -683,7 +810,8 @@ args = ["{local}", "{remote}", "{merged}"]   # The default when args is missing`
 
     <h3>Creating Profiles</h3>
     <Code code={`tether machines profile create work
-tether machines profile create server`} />
+tether machines profile create server --from work --managers brew,npm`} />
+    <p>In a terminal, <code>profile create</code> asks about each dotfile, folder and package manager. <code>--from</code> copies a profile without questions. <code>--managers</code> sets the package managers of the profile.</p>
 
     <h3>Assigning a Profile</h3>
     <Code code={`# Assign to current machine
@@ -694,7 +822,51 @@ tether machines profile list`} />
 
     <h3>Editing Profile Config</h3>
     <Code code="tether machines profile edit work" />
-    <p>Each profile has its own dotfile and package lists. Dotfiles are stored under <code>profiles/&lt;name&gt;/</code> in the sync repo.</p>
+    <p>Each profile has its own dotfiles, folders and package managers. Dotfiles are stored under <code>profiles/&lt;name&gt;/</code> in the sync repo. A machine without a profile counts as profile <code>dev</code>.</p>
+
+    <h3 id="package-profiles">Packages per profile</h3>
+    <p>Each package belongs to one or more profiles. A machine installs a synced package only when its own profile is one of them. So a server does not get the desktop apps of your laptops.</p>
+    <ul>
+      <li>By default, a package belongs to the profiles of the trusted machines whose signed records list it</li>
+      <li><code>tether packages share &lt;ID&gt; --to &lt;PROFILES&gt;</code> adds profiles. Machines in those profiles then install the package</li>
+      <li><code>tether packages unshare &lt;ID&gt; --from &lt;PROFILES&gt;</code> takes profiles off. Nothing is uninstalled. Machines keep any copy they have</li>
+      <li><code>tether packages uninstall &lt;ID&gt;</code> uninstalls the package on this machine, then takes this machine's profile off it. Other profiles keep it. Other machines in this profile stop new installs of it, but keep any copy they have. If the uninstall fails, the profiles do not change</li>
+      <li><code>uninstall</code> does not remove Homebrew taps. A formula or cask from a tap brings its tap to the profiles that have it</li>
+      <li>On the dashboard Packages tab, each package shows its profiles. Press <code>t</code> to pick them in a checklist. <code>x</code> uninstalls and leaves the other profiles enrolled</li>
+      <li>A sync drops Inbox items for packages that leave this machine's profile</li>
+    </ul>
+    <p>Tether keeps these choices in <code>packages/profiles.toml</code> in the sync repo. An entry in this file replaces the default for that package.</p>
+    <Code lang="toml" code={`[profiles]
+"npm:typescript" = ["dev", "server"]`} />
+    <ul>
+      <li>Each change starts from the remote branch, adds or removes only the profiles you named, and pushes. Changes from two machines both stay, also for the same package</li>
+      <li>A change does not start while the sync repo has changes that are not pushed</li>
+      <li>Anyone who can push can edit this file. A package still installs on its own only when a trusted, signed record lists it</li>
+      <li>If <code>packages/profiles.toml</code> exists but Tether cannot read it, a sync installs no synced packages and warns. The daemon notifies once. <code>share</code>, <code>unshare</code> and <code>uninstall</code> stop with an error until you fix or delete the file</li>
+    </ul>
+
+    <h3 id="keep-servers-clean">How to keep servers clean</h3>
+    <p>This example gives your servers only the command-line tools they need.</p>
+    <Code code={`# Once, on any machine: create the profile
+tether machines profile create server --managers brew,npm
+
+# On each server: use the profile
+tether machines profile set server
+
+# Send a tool to the servers
+tether packages share npm:typescript --to server
+
+# On a server: remove a package it got before 2.0. Laptops keep it
+tether packages uninstall npm:some-desktop-tool`} />
+    <p>After <code>profile set server</code>, the server stops new installs of packages that only your laptops list. It keeps the packages it has. Run <code>tether packages list</code> on the server to see each package and its profiles.</p>
+
+    <h3 id="profiles-1x">Profiles and machines on 1.x</h3>
+    <ul>
+      <li>Only machines on 2.0 apply package profiles. A machine on 1.x installs the packages of every profile</li>
+      <li>A machine on 1.x can revert a profile assignment in <code>config.toml</code>. A sync on 2.0 then warns that this machine's profile changed, and names the command that restores it</li>
+      <li>Machines on 1.x can push <code>config.toml</code> back and forth after any config change</li>
+      <li>So set profiles before machines on 1.x join, or after they upgrade</li>
+    </ul>
 
     <h3>Cross-Profile Discovery</h3>
     <p>When syncing, Tether detects dotfiles in other profiles and offers to adopt them into yours via an interactive prompt.</p>
@@ -776,15 +948,15 @@ cask "1password"`} />
     <p>The Brewfile has no versions, because Homebrew installs only the current release. Taps outside <code>homebrew/*</code> must be in <code>packages.brew.trusted_taps</code>. See <a href="#package-security">Package Security</a>.</p>
 
     <h3>npm</h3>
-    <p>Syncs global npm packages. Each line records the version that a machine installed.</p>
+    <p>Syncs global npm packages. The manifest has one package name per line, as in 1.x, so machines on 1.x read it as before.</p>
     <Code code={`# Manifest: manifests/npm.txt
-typescript@5.6.3
-eslint@9.14.0
+typescript
+eslint
 prettier`} />
-    <p>A line without a version still works. Tether then installs the newest release that passes the release-age limit.</p>
+    <p>Versions live in the signed machine records, not in the manifests. Pre-release 2.0 builds wrote lines such as <code>name@1.2.3</code>. Tether still reads such a line as its name, and the next write drops the version.</p>
 
     <h3>pnpm / bun / gem</h3>
-    <p>One package per line. pnpm and bun use <code>name@1.2.3</code>, as npm does. gem uses <code>name:1.2.3</code>.</p>
+    <p>One package name per line, as for npm.</p>
 
     <h3>uv (Python)</h3>
     <p>Syncs global Python tools installed via <a href="https://github.com/astral-sh/uv" target="_blank" rel="noopener noreferrer" class="text-primary hover:underline">uv</a>.</p>
@@ -792,15 +964,15 @@ prettier`} />
 tether config set packages.uv.enabled true
 
 # Manifest: manifests/uv.txt
-ruff==0.7.2
+ruff
 black
 mypy`} />
 
     <h3>Versions</h3>
-    <p>A version must be a concrete release: semver for npm, pnpm and bun, PEP 440 for uv, and a RubyGems version for gem. Tether skips a line with a dist-tag such as <code>latest</code>, or with a range, and shows a warning.</p>
-    <p>When machines have different versions, the manifest keeps the newest one by the rules of each ecosystem. A sync installs the newest version that a trusted machine record lists.</p>
-    <p>A sync merges into the manifests. It adds or updates lines only from this machine's record and the records it trusts. It keeps the lines of other machines. It removes a line only when no machine record in the repo lists that package. A pin moves only to a newer version, or off a version that no record lists.</p>
-    <p>A package that fails to install waits 24 hours before Tether tries it again, or until its version changes. <code>tether packages --list</code> and the dashboard Packages tab show failed installs.</p>
+    <p>Each machine record lists the installed version of each npm, pnpm, bun, uv and gem package. A version must be a concrete release: semver for npm, pnpm and bun, PEP 440 for uv, and a RubyGems version for gem. Tether drops a record entry with a dist-tag such as <code>latest</code>, or with a range.</p>
+    <p>When records differ, the newest version wins, by the rules of each ecosystem. A sync installs the newest version that a trusted machine record lists. Without a trusted version, a package installs the newest release that passes the release-age limit.</p>
+    <p>A sync merges into the manifests. It adds lines only from this machine's record and the records it trusts. It keeps the lines of other machines. It removes a line only when no machine record in the repo lists that package.</p>
+    <p>A package that fails to install waits 24 hours before Tether tries it again, or until its version changes. <code>tether packages list</code> and the dashboard Packages tab show failed installs.</p>
   </section>
 
   <hr class="my-12 border-surface" />
@@ -812,7 +984,7 @@ mypy`} />
     <FlowDiagram label="BEFORE A SYNCED PACKAGE INSTALLS" caption="Tether runs these checks again on every sync, for new and held packages." steps={[
       { icon: 'key', title: 'Trusted record', detail: 'A trusted machine lists this version' },
       { icon: 'shield', title: 'Policy checks', detail: 'Name · Tap · Release age · OSV' },
-      { icon: 'box', title: 'Install or hold', detail: 'Hold it in the inbox if a check fails' },
+      { icon: 'box', title: 'Install or hold', detail: 'Hold it in the Inbox if a check fails' },
     ]} />
 
     <h3>Checks by package manager</h3>
@@ -861,7 +1033,7 @@ mypy`} />
 
     <h3>OSV checks</h3>
     <p>Tether finds the release that would install: the newest stable release older than the release-age limit. It checks that release against OSV and installs it pinned. Thus the release that OSV checked is the release that installs.</p>
-    <p>Sometimes Tether cannot find that release, for example from a registry that needs a login. OSV then checks all releases, and only <code>MAL-</code> advisories count. The package waits as "malicious releases, install version unknown". You can approve it after a warning.</p>
+    <p>Sometimes Tether cannot find that release, for example from a registry that needs a login. OSV then checks all releases, and only <code>MAL-</code> advisories count. The package waits in the Inbox as "malicious releases". Unlike a malicious release that would install, you can approve it, after a warning.</p>
     <p>A network failure does not block a sync. The dashboard and <code>tether packages approve</code> ask before they install without an OSV result. Tether uses <code>curl</code> with a 10-second limit.</p>
 
     <h3>Install scripts</h3>
@@ -881,19 +1053,39 @@ mypy`} />
       <li>The daemon does not auto-upgrade a manager that cannot enforce the release-age limit</li>
     </ul>
 
-    <h3 id="approval-inbox">Approval inbox</h3>
-    <p>Held packages, taps, and machine keys wait in <code>~/.tether/inbox.json</code>. The inbox stays on this machine and never syncs.</p>
+    <h3 id="approval-inbox">The Inbox</h3>
+    <p>Held packages, taps, and machine keys wait in the Inbox, in <code>~/.tether/inbox.json</code>. The Inbox stays on this machine and never syncs. <code>tether status</code> counts its items, and the dashboard header shows <code>⚑ Inbox &lt;count&gt;</code>.</p>
     <Code code={`tether packages inbox
-tether packages approve npm:typescript 5.6.3
-tether packages reject npm:typescript 5.6.3`} />
+tether packages approve npm:typescript --expect 5.6.3
+tether packages reject npm:typescript --expect 5.6.3
+tether packages approve --all --from work-laptop`} />
+    <p>In a terminal, <code>approve</code> and <code>reject</code> show the item and ask. Without a terminal, name the version, tap or key fingerprint you reviewed with <code>--expect</code>.</p>
+    <p>Each item shows one or more reasons:</p>
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="border-b border-surface">
+          <th class="text-left py-2 pr-4 w-48">Reason</th>
+          <th class="text-left py-2">Meaning</th>
+        </tr>
+      </thead>
+      <tbody>
+        {inboxReasons.map(([label, meaning]) => (
+          <tr class="border-b border-surface/50">
+            <td class="py-2 pr-4 font-mono text-xs whitespace-nowrap">{label}</td>
+            <td class="py-2">{meaning}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
     <ul>
       <li>An approval covers that version only. For Homebrew, it covers only the tap that the name resolved to</li>
       <li>A rejected version, tap, or key is not offered again</li>
       <li>A release with a <code>MAL-</code> advisory cannot be approved</li>
       <li>Approving a package from an untrusted tap does not trust the tap</li>
       <li>Tether refuses a decision when the item changed after you saw it, and shows the item again</li>
+      <li>Approve all, "Install all" and <code>M</code> on the Security tab leave machine keys, malicious packages and packages with a failed signature for their own decision. They approve only the items that their question listed</li>
     </ul>
-    <p>In a terminal, <code>tether sync</code> asks about held items. You can review each one, install all, or decide later. "Install all" leaves machine keys and packages with a failed signature for their own decision. On the dashboard, use the Security tab.</p>
+    <p>The Inbox groups items by source machine and reason. In a terminal, <code>tether sync</code> asks about held items. You can review each one, install all, install all from one machine, or decide later. On the dashboard, use the Security tab.</p>
     <p>To hold packages from trusted machines too, set <code>packages.auto_install_from_trusted = false</code>.</p>
   </section>
 
@@ -906,12 +1098,13 @@ tether packages reject npm:typescript 5.6.3`} />
     <p>Each machine keeps its own trust list in <code>~/.tether/trusted_keys</code>. The list never syncs. It starts with this machine's own key.</p>
 
     <h3>Trust a machine</h3>
-    <p>A new machine key waits in the inbox as "trust machine". Before you trust it, compare its fingerprint. On the new machine, find the row marked "(this machine)":</p>
-    <Code code="tether machines list" />
+    <p>A new machine key waits in the Inbox as "new machine key". Before you trust it, compare its fingerprint. On the new machine, read its id and full fingerprint:</p>
+    <Code code="tether machines show" />
     <p>On each of your other machines, trust it with that fingerprint:</p>
-    <Code code={`tether machines trust work-laptop SHA256:...
+    <Code code={`tether machines trust work-laptop --fingerprint SHA256:...
 # or
-tether packages approve machine:work-laptop SHA256:...`} />
+tether packages approve machine:work-laptop --expect SHA256:...`} />
+    <p>On the dashboard Machines tab, press <code>a</code> on a machine's card to trust its key, or <code>x</code> to untrust it. Both ask first.</p>
     <p>Tether trusts the key only if the fingerprint matches. Without a fingerprint, it shows the current one and asks, in a terminal only. To stop trusting a machine:</p>
     <Code code="tether machines untrust work-laptop" />
 
@@ -928,7 +1121,7 @@ tether packages approve machine:work-laptop SHA256:...`} />
       <li><strong>Changed key</strong> — When a trusted machine signs with a different key, Tether warns you. It does not trust that record until you approve the new key</li>
       <li><strong>Failed signature</strong> — Tether ignores a record that fails its signature and warns: "Record for &lt;id&gt; fails its signature"</li>
       <li><strong>Replay</strong> — Each record has a generation that increases with every save. An older signed record from the same key, such as one from git history, does not count</li>
-      <li><strong>Renamed machines</strong> — Trust never moves to another machine id on its own. A renamed machine waits in the inbox as a new machine</li>
+      <li><strong>Renamed machines</strong> — Trust never moves to another machine id on its own. A renamed machine waits in the Inbox as a new machine</li>
       <li><strong>Your own record</strong> — This machine builds its record from <code>~/.tether/machine.json</code>, not from the repo copy</li>
     </ul>
     <p><code>tether machines list</code> and the dashboard Machines cards show each record as a sync reads it. A record that a sync ignores shows "replayed (ignored)" or "signature failed (ignored)".</p>
@@ -962,7 +1155,7 @@ tether packages approve machine:work-laptop SHA256:...`} />
       <li>Generic patterns (<code>API_KEY=</code>, <code>password=</code>)</li>
     </ul>
     <p>Add ignore patterns for false positives:</p>
-    <Code code="tether ignore add 'EXAMPLE_KEY='" />
+    <Code code="tether ignore secrets add 'EXAMPLE_KEY='" />
 
     <h3>Unlocking</h3>
     <p>If the daemon can't decrypt (key not cached), run:</p>
@@ -1038,8 +1231,9 @@ tether team remove         # Remove team completely`} />
     <h2>Troubleshooting</h2>
 
     <h3>Daemon not running</h3>
-    <Code code={`tether daemon start
-tether daemon logs`} />
+    <Code code={`tether daemon status
+tether daemon start
+tether daemon logs -f`} />
 
     <h3>Sync conflicts</h3>
     <Code code="tether resolve" />
@@ -1058,7 +1252,7 @@ tether unlock
 ls ~/.tether/sync/encryption.key.age`} />
 
     <h3>A package from another machine does not install</h3>
-    <p>The package probably waits in the approval inbox. The inbox shows the reason for each item.</p>
+    <p>The package probably waits in the Inbox, or it is not in this machine's profile. The Inbox shows the reason for each item, and <code>tether packages list</code> shows the profiles of each package.</p>
     <Code code={`tether packages inbox
 tether machines list   # Is the source machine trusted?`} />
     <p>If the source machine is not trusted, see <a href="#machine-trust">Machine Trust</a>. A package that failed to install waits 24 hours before Tether tries it again.</p>
@@ -1066,12 +1260,15 @@ tether machines list   # Is the source machine trusted?`} />
     <h3>"Record for &lt;id&gt; fails its signature"</h3>
     <p>Someone edited that machine's record in the repo, or deleted its <code>.sig</code> file. Tether ignores the record until that machine signs a valid one. Run <code>tether sync</code> on that machine, then check <code>tether machines list</code>.</p>
 
-    <h3>"Machine key changed" in the inbox</h3>
-    <p>A trusted machine signed its record with a different key. This is expected after you reinstall Tether on that machine. Compare the fingerprint with <code>tether machines list</code> on that machine before you approve it.</p>
+    <h3>"key changed" in the Inbox</h3>
+    <p>A trusted machine signed its record with a different key. This is expected after you reinstall Tether on that machine. Compare the fingerprint with <code>tether machines show</code> on that machine before you approve it.</p>
+
+    <h3>"Cannot read packages/profiles.toml"</h3>
+    <p>The file in the sync repo does not read as TOML. Until you fix it, a sync installs no synced packages, and <code>share</code>, <code>unshare</code> and <code>uninstall</code> stop with an error. Fix the file in the sync repo, or delete it. Without the file, each package belongs to the profiles of the trusted machines that list it.</p>
 
     <h3>"Secret detected" blocking sync</h3>
     <p>Either remove the secret or add an ignore pattern:</p>
-    <Code code="tether ignore add 'MY_SAFE_PATTERN='" />
+    <Code code="tether ignore secrets add 'MY_SAFE_PATTERN='" />
 
     <h3>Reset everything</h3>
     <Code code={`tether daemon stop
