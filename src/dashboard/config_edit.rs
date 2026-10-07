@@ -241,13 +241,25 @@ pub fn get_value(config: &Config, idx: usize) -> String {
     }
 }
 
-/// Validate and set a text field. Returns false if validation fails or save errors.
-pub fn set_value(config: &mut Config, idx: usize, val: &str) -> bool {
+/// Why an edit was refused or did not save, as the dashboard shows it.
+pub type EditResult = Result<(), String>;
+
+fn save(config: &Config) -> EditResult {
+    config
+        .save()
+        .map_err(|e| format!("Config not saved: {}", e))
+}
+
+/// Validate and set a text field.
+pub fn set_value(config: &mut Config, idx: usize, val: &str) -> EditResult {
     let f = &fields()[idx];
     match f.key {
         "interval" => {
             if !is_valid_interval(val) {
-                return false;
+                return Err(format!(
+                    "{} needs a number and s, m or h, such as 5m",
+                    f.label
+                ));
             }
             config.sync.interval = val.to_string();
         }
@@ -256,20 +268,25 @@ pub fn set_value(config: &mut Config, idx: usize, val: &str) -> bool {
                 "last-write-wins" => ConflictStrategy::LastWriteWins,
                 "manual" => ConflictStrategy::Manual,
                 "machine-priority" => ConflictStrategy::MachinePriority,
-                _ => return false,
+                _ => {
+                    return Err(format!(
+                        "{} is last-write-wins, manual or machine-priority",
+                        f.label
+                    ))
+                }
             };
         }
         "min_release_age_days" => match val.trim().parse() {
             Ok(days) => config.packages.min_release_age_days = days,
-            Err(_) => return false,
+            Err(_) => return Err(format!("{} needs a whole number", f.label)),
         },
-        _ => return false,
+        _ => return Err(format!("{} is not a text field", f.label)),
     }
-    config.save().is_ok()
+    save(config)
 }
 
-/// Toggle a bool field. Returns false if save errors.
-pub fn toggle(config: &mut Config, idx: usize) -> bool {
+/// Toggle a bool field.
+pub fn toggle(config: &mut Config, idx: usize) -> EditResult {
     let f = &fields()[idx];
     match f.key {
         "personal_dotfiles" => {
@@ -298,9 +315,9 @@ pub fn toggle(config: &mut Config, idx: usize) -> bool {
         "project_configs.enabled" => {
             config.project_configs.enabled = !config.project_configs.enabled
         }
-        _ => return false,
+        _ => return Err(format!("{} is not an on/off field", f.label)),
     }
-    config.save().is_ok()
+    save(config)
 }
 
 /// Get items for a List field
@@ -336,64 +353,70 @@ fn list_mut<'a>(config: &'a mut Config, key: &str) -> Option<&'a mut Vec<String>
     })
 }
 
-/// Add an item to a List field. Returns false on empty, duplicate, or save failure.
-pub fn add_list_item(config: &mut Config, key: &str, value: &str) -> bool {
+/// Add an item to a List field.
+pub fn add_list_item(config: &mut Config, key: &str, value: &str) -> EditResult {
     let value = value.trim();
     if value.is_empty() {
-        return false;
+        return Err("Type a value first".into());
     }
     let Some(list) = list_mut(config, key) else {
-        return false;
+        return Err(format!("{} is not a list", key));
     };
     if list.iter().any(|v| v == value) {
-        return false;
+        return Err(format!("{} is in the list already", value));
     }
     list.push(value.to_string());
-    config.save().is_ok()
+    save(config)
 }
 
-/// Remove an item from a List field by index. Returns false on out-of-bounds or save failure.
-pub fn remove_list_item(config: &mut Config, key: &str, index: usize) -> bool {
+/// Remove an item from a List field by index.
+pub fn remove_list_item(config: &mut Config, key: &str, index: usize) -> EditResult {
     let Some(list) = list_mut(config, key) else {
-        return false;
+        return Err(format!("{} is not a list", key));
     };
     if index >= list.len() {
-        return false;
+        return Err("Nothing to remove".into());
     }
     list.remove(index);
-    config.save().is_ok()
+    save(config)
 }
 
-/// Add a dotfile entry. Returns false on unsafe path, duplicate, or save failure.
-pub fn add_dotfile(config: &mut Config, path: &str, create_if_missing: bool) -> bool {
+/// Add a dotfile entry.
+pub fn add_dotfile(config: &mut Config, path: &str, create_if_missing: bool) -> EditResult {
     let path = path.trim();
-    if path.is_empty() || !is_safe_dotfile_path(path) {
-        return false;
+    if path.is_empty() {
+        return Err("Type a path first".into());
+    }
+    if !is_safe_dotfile_path(path) {
+        return Err(format!(
+            "{} must be a path in your home folder, without ..",
+            path
+        ));
     }
     if config.dotfiles.files.iter().any(|e| e.path() == path) {
-        return false;
+        return Err(format!("{} is in the list already", path));
     }
     config.dotfiles.files.push(DotfileEntry::WithOptions {
         path: path.to_string(),
         create_if_missing,
         on_conflict: Default::default(),
     });
-    config.save().is_ok()
+    save(config)
 }
 
-/// Remove a dotfile by index. Returns false on out-of-bounds or save failure.
-pub fn remove_dotfile(config: &mut Config, index: usize) -> bool {
+/// Remove a dotfile by index.
+pub fn remove_dotfile(config: &mut Config, index: usize) -> EditResult {
     if index >= config.dotfiles.files.len() {
-        return false;
+        return Err("Nothing to remove".into());
     }
     config.dotfiles.files.remove(index);
-    config.save().is_ok()
+    save(config)
 }
 
-/// Toggle create_if_missing for a dotfile entry. Returns false on failure.
-pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> bool {
+/// Toggle create_if_missing for a dotfile entry.
+pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> EditResult {
     if index >= config.dotfiles.files.len() {
-        return false;
+        return Err("No dotfile selected".into());
     }
     let entry = &config.dotfiles.files[index];
     let path = entry.path().to_string();
@@ -404,21 +427,32 @@ pub fn toggle_dotfile_create(config: &mut Config, index: usize) -> bool {
         create_if_missing: new_create,
         on_conflict,
     };
-    config.save().is_ok()
+    save(config)
 }
 
-/// Toggle shared flag for a profile dotfile by path. Returns false on failure.
-pub fn toggle_profile_dotfile_shared(config: &mut Config, machine_id: &str, path: &str) -> bool {
+/// The profile this machine uses, for an edit to its dotfiles.
+fn machine_profile<'a>(
+    config: &'a mut Config,
+    machine_id: &str,
+) -> Result<&'a mut crate::config::ProfileConfig, String> {
+    let name = config.profile_name(machine_id).to_string();
+    config
+        .profiles
+        .get_mut(&name)
+        .ok_or_else(|| format!("Profile {} is not in the config", name))
+}
+
+/// Toggle shared flag for a profile dotfile by path.
+pub fn toggle_profile_dotfile_shared(
+    config: &mut Config,
+    machine_id: &str,
+    path: &str,
+) -> EditResult {
     use crate::config::ProfileDotfileEntry;
 
-    let profile_name = config.profile_name(machine_id).to_string();
-    let profile = match config.profiles.get_mut(&profile_name) {
-        Some(p) => p,
-        None => return false,
-    };
-    let entry = match profile.dotfiles.iter_mut().find(|e| e.path() == path) {
-        Some(e) => e,
-        None => return false,
+    let profile = machine_profile(config, machine_id)?;
+    let Some(entry) = profile.dotfiles.iter_mut().find(|e| e.path() == path) else {
+        return Err(format!("{} is not in this profile", path));
     };
     let new_shared = !entry.shared();
     let entry_path = entry.path().to_string();
@@ -428,40 +462,32 @@ pub fn toggle_profile_dotfile_shared(config: &mut Config, machine_id: &str, path
         create_if_missing: entry.create_if_missing(),
         on_conflict: entry.on_conflict(),
     };
-    config.save().is_ok()
+    save(config)
 }
 
-/// Add a dotfile to the machine's profile. Returns false on duplicate or save failure.
-pub fn add_profile_dotfile(config: &mut Config, machine_id: &str, path: &str) -> bool {
+/// Add a dotfile to the machine's profile.
+pub fn add_profile_dotfile(config: &mut Config, machine_id: &str, path: &str) -> EditResult {
     use crate::config::ProfileDotfileEntry;
 
-    let profile_name = config.profile_name(machine_id).to_string();
-    let profile = match config.profiles.get_mut(&profile_name) {
-        Some(p) => p,
-        None => return false,
-    };
+    let profile = machine_profile(config, machine_id)?;
     if profile.dotfiles.iter().any(|e| e.path() == path) {
-        return false;
+        return Err(format!("{} is in this profile already", path));
     }
     profile
         .dotfiles
         .push(ProfileDotfileEntry::Simple(path.to_string()));
-    config.save().is_ok()
+    save(config)
 }
 
-/// Remove a dotfile from the machine's profile by path. Returns false if not found or save failure.
-pub fn remove_profile_dotfile(config: &mut Config, machine_id: &str, path: &str) -> bool {
-    let profile_name = config.profile_name(machine_id).to_string();
-    let profile = match config.profiles.get_mut(&profile_name) {
-        Some(p) => p,
-        None => return false,
-    };
+/// Remove a dotfile from the machine's profile by path.
+pub fn remove_profile_dotfile(config: &mut Config, machine_id: &str, path: &str) -> EditResult {
+    let profile = machine_profile(config, machine_id)?;
     let before = profile.dotfiles.len();
     profile.dotfiles.retain(|e| e.path() != path);
     if profile.dotfiles.len() == before {
-        return false;
+        return Err(format!("{} is not in this profile", path));
     }
-    config.save().is_ok()
+    save(config)
 }
 
 /// Validate interval format: number followed by s/m/h (e.g. "5m", "30s", "1h")
@@ -471,4 +497,38 @@ fn is_valid_interval(val: &str) -> bool {
     }
     let (num, unit) = val.split_at(val.len() - 1);
     matches!(unit, "s" | "m" | "h") && num.parse::<u32>().is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index(key: &str) -> usize {
+        fields().iter().position(|f| f.key == key).unwrap()
+    }
+
+    #[test]
+    fn invalid_values_are_refused_with_the_reason() {
+        let mut config = Config::default();
+        let before = config.sync.interval.clone();
+        assert_eq!(
+            set_value(&mut config, index("interval"), "often"),
+            Err("Sync interval needs a number and s, m or h, such as 5m".to_string())
+        );
+        assert_eq!(config.sync.interval, before);
+        assert!(set_value(&mut config, index("strategy"), "newest")
+            .unwrap_err()
+            .contains("last-write-wins"));
+        assert!(set_value(&mut config, index("min_release_age_days"), "-1")
+            .unwrap_err()
+            .contains("whole number"));
+        assert!(add_dotfile(&mut config, "../etc/passwd", true)
+            .unwrap_err()
+            .contains("without .."));
+        config.packages.allow_scripts.push("esbuild".into());
+        assert_eq!(
+            add_list_item(&mut config, "allow_scripts", "esbuild"),
+            Err("esbuild is in the list already".to_string())
+        );
+    }
 }

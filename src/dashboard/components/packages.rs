@@ -39,6 +39,8 @@ impl PackagesTabState {
 pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match key.code {
         KeyCode::Enter => toggle_row(app),
+        KeyCode::Char('x') => confirm_uninstall(app),
+        KeyCode::Esc => collapse(app),
         KeyCode::Char('R') => {
             if app.uninstalling.is_none() && app.installing.is_none() {
                 confirm_rollback(app);
@@ -69,7 +71,42 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     KeyOutcome::Handled(None)
 }
 
-/// Expand a manager's package list, ask to uninstall a package, or toggle a history diff.
+/// Close the innermost open part: a history diff, the history, then the package list.
+fn collapse(app: &mut App) {
+    let pt = &mut app.packages;
+    if pt.history_commit.is_some() {
+        pt.history_commit = None;
+        pt.history_diff.clear();
+    } else if pt.history_manager.is_some() {
+        pt.history_manager = None;
+        pt.history.clear();
+    } else {
+        pt.expanded = None;
+    }
+    let len = build_rows(&app.state, &app.packages).len();
+    clamp_cursor(&mut app.packages.cursor, len);
+}
+
+/// Ask before uninstalling the package at the cursor.
+fn confirm_uninstall(app: &mut App) {
+    let rows = build_rows(&app.state, &app.packages);
+    let Some(PkgRow::Package { manager_key, name }) = rows.get(app.packages.cursor) else {
+        return;
+    };
+    if app.uninstalling.is_some() || app.installing.is_some() || app.running.is_some() {
+        app.flash_info("Wait for the running job to finish");
+    } else if manager_key == "brew_taps" {
+        app.flash_info("Tether does not uninstall taps");
+    } else {
+        app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
+            manager_key: manager_key.clone(),
+            name: name.clone(),
+            arming: Default::default(),
+        }));
+    }
+}
+
+/// Expand a manager's package list or toggle a history diff. Enter never uninstalls.
 fn toggle_row(app: &mut App) {
     let rows = build_rows(&app.state, &app.packages);
     match rows.get(app.packages.cursor) {
@@ -81,18 +118,6 @@ fn toggle_row(app: &mut App) {
             }
             let len = build_rows(&app.state, &app.packages).len();
             clamp_cursor(&mut app.packages.cursor, len);
-        }
-        Some(PkgRow::Package { manager_key, name }) => {
-            if app.uninstalling.is_none()
-                && app.installing.is_none()
-                && app.running.is_none()
-                && manager_key != "brew_taps"
-            {
-                app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
-                    manager_key: manager_key.clone(),
-                    name: name.clone(),
-                }));
-            }
         }
         Some(PkgRow::HistoryEntry { commit_hash, .. }) => {
             if app.packages.history_commit.as_deref() == Some(commit_hash.as_str()) {
@@ -106,7 +131,7 @@ fn toggle_row(app: &mut App) {
             let len = build_rows(&app.state, &app.packages).len();
             clamp_cursor(&mut app.packages.cursor, len);
         }
-        Some(PkgRow::DiffRow { .. } | PkgRow::Failed { .. }) | None => {}
+        Some(PkgRow::Package { .. } | PkgRow::DiffRow { .. } | PkgRow::Failed { .. }) | None => {}
     }
 }
 
@@ -126,7 +151,10 @@ fn confirm_rollback(app: &mut App) {
     if crate::packages::manager_for_key(&manager).is_none() {
         app.flash_error(format!("Rollback is not supported for {}", manager));
     } else if let Some(plan) = repo::rollback_plan(&app.state, &manager, commit_hash, short_hash) {
-        app.overlays.push(Overlay::Confirm(Confirm::Rollback(plan)));
+        app.overlays.push(Overlay::Confirm(Confirm::Rollback {
+            plan,
+            arming: Default::default(),
+        }));
     } else {
         app.flash_error(format!(
             "Could not read the {} manifest at {}",

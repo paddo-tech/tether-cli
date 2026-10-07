@@ -40,8 +40,9 @@ fn import(app: &mut App, path: &str) {
     let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
         return;
     };
-    if !config_edit::add_profile_dotfile(config, &ss.machine_id, path) {
-        app.flash_error("import failed");
+    if let Err(e) = config_edit::add_profile_dotfile(config, &ss.machine_id, path) {
+        app.flash_error(e);
+        app.reload_state();
         return;
     }
     if let Ok(mut sync_state) = crate::sync::SyncState::load() {

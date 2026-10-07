@@ -95,7 +95,7 @@ impl DashboardState {
         let mut inbox = Inbox::load().unwrap_or_default();
         inbox::sort_by_group(&mut inbox.items);
         let (daemon_pid, daemon_running) = Self::check_daemon();
-        let activity_lines = Self::read_activity_log();
+        let activity_lines = Self::read_log_tail(8192, 20);
 
         Self {
             config,
@@ -183,7 +183,8 @@ impl DashboardState {
         (None, false)
     }
 
-    fn read_activity_log() -> Vec<String> {
+    /// The last `max_lines` whole lines in the last `max_bytes` of the daemon log.
+    pub fn read_log_tail(max_bytes: u64, max_lines: usize) -> Vec<String> {
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
         let log_path = match Config::config_dir() {
@@ -206,7 +207,7 @@ impl DashboardState {
             return Vec::new();
         }
 
-        let read_size = 8192u64.min(file_size);
+        let read_size = max_bytes.min(file_size);
         let mut reader = BufReader::new(file);
         if reader.seek(SeekFrom::End(-(read_size as i64))).is_err() {
             return Vec::new();
@@ -219,7 +220,7 @@ impl DashboardState {
         }
 
         let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-        let start = lines.len().saturating_sub(20);
+        let start = lines.len().saturating_sub(max_lines);
         lines[start..].to_vec()
     }
 }

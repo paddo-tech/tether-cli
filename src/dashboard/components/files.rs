@@ -41,8 +41,16 @@ impl FilesTabState {
 pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match key.code {
         KeyCode::Enter => toggle_row(app),
+        KeyCode::Esc => collapse(app),
         KeyCode::Char('t') => toggle_shared(app),
         KeyCode::Char('R') => confirm_restore(app),
+        KeyCode::Char('b') => {
+            if let Some(FileRow::File { path, .. }) =
+                build_rows(&app.state, &app.files).get(app.files.cursor)
+            {
+                super::backup_picker::open(app, path);
+            }
+        }
         KeyCode::Char('x') => confirm_remove(app),
         KeyCode::Char('i') => open_import(app),
         KeyCode::Char('j') | KeyCode::Down => {
@@ -55,6 +63,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         _ => return KeyOutcome::Ignored,
     }
     KeyOutcome::Handled(None)
+}
+
+/// Close the innermost open part: a history diff, then the file's history.
+fn collapse(app: &mut App) {
+    let ft = &mut app.files;
+    if ft.expanded_commit.is_some() {
+        ft.expanded_commit = None;
+        ft.expanded_diff.clear();
+    } else {
+        ft.expanded_file = None;
+        ft.expanded_history.clear();
+    }
+    let len = build_rows(&app.state, &app.files).len();
+    clamp_cursor(&mut app.files.cursor, len);
 }
 
 /// Expand/collapse sections, files, history diffs and deleted lists.
@@ -128,15 +150,18 @@ fn toggle_shared(app: &mut App) {
     let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
         return;
     };
-    if config_edit::toggle_profile_dotfile_shared(config, &ss.machine_id, path) {
-        let shared = if config.is_dotfile_shared(&ss.machine_id, path) {
-            "on"
-        } else {
-            "off"
-        };
-        app.flash_success(format!("{} shared: {}", path, shared));
-        app.reload_state();
+    match config_edit::toggle_profile_dotfile_shared(config, &ss.machine_id, path) {
+        Ok(()) => {
+            let shared = if config.is_dotfile_shared(&ss.machine_id, path) {
+                "on"
+            } else {
+                "off"
+            };
+            app.flash_success(format!("{} shared: {}", path, shared));
+        }
+        Err(e) => app.flash_error(e),
     }
+    app.reload_state();
 }
 
 fn confirm_restore(app: &mut App) {
@@ -159,6 +184,7 @@ fn confirm_restore(app: &mut App) {
         dotfile,
         commit: commit_hash.clone(),
         short_hash: short_hash.clone(),
+        arming: Default::default(),
     }));
 }
 
@@ -177,8 +203,10 @@ fn confirm_remove(app: &mut App) {
         })
         .unwrap_or(false);
     if is_personal {
-        app.overlays
-            .push(Overlay::Confirm(Confirm::RemoveFile { path: path.clone() }));
+        app.overlays.push(Overlay::Confirm(Confirm::RemoveFile {
+            path: path.clone(),
+            arming: Default::default(),
+        }));
     }
 }
 

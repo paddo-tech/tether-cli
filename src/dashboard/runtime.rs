@@ -181,6 +181,47 @@ impl Runtime {
                     |e| Some(Msg::InboxDone(Err(e))),
                 );
             }
+            Cmd::TrustMachine {
+                machine_id,
+                fingerprint,
+                label,
+            } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::sync::SyncEngine::sync_path()
+                                .and_then(|sync_path| {
+                                    crate::packages::inbox::trust_machine(
+                                        &sync_path,
+                                        &machine_id,
+                                        &fingerprint,
+                                    )
+                                })
+                                .map(|t| format!("Trusted {} ({})", label, t.fingerprint))
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::Untrust { machine_id, label } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::packages::inbox::untrust_machine(&machine_id)
+                                .map(|removed| {
+                                    if removed {
+                                        format!("{} is no longer trusted", label)
+                                    } else {
+                                        format!("{} was not trusted", label)
+                                    }
+                                })
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
             Cmd::RemoveMachine { machine_id, digest } => {
                 let failed_id = machine_id.clone();
                 self.spawn(
@@ -229,6 +270,17 @@ impl Runtime {
                     },
                     |_| None,
                 );
+            }
+            Cmd::RestoreBackup { path, timestamp } => {
+                // Runs inline, like a restore from a commit
+                let result = crate::sync::restore_file(&timestamp, "dotfiles", &path)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                let _ = self.tx.send(Msg::RestoreDone {
+                    dotfile: path,
+                    short_hash: format!("its backup from {}", timestamp),
+                    result,
+                });
             }
             Cmd::Restore {
                 repo_path,

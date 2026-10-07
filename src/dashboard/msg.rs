@@ -49,7 +49,8 @@ pub enum Msg {
         short_hash: String,
         result: Result<(), String>,
     },
-    /// A machine key was trusted or an item rejected: the toast text, or the error.
+    /// A machine key was trusted or untrusted, or an item rejected: the toast text, or the
+    /// error.
     InboxDone(Result<String, String>),
     /// Another machine's record was removed and committed, and whether this machine
     /// untrusted its key, or the error.
@@ -96,6 +97,18 @@ pub enum Cmd {
     },
     /// Reject an inbox item.
     Reject(Box<InboxItem>),
+    /// Trust the key that signs a machine's record, only while its fingerprint is the one
+    /// shown. `label` names the machine.
+    TrustMachine {
+        machine_id: String,
+        fingerprint: String,
+        label: String,
+    },
+    /// Remove a machine's key from the trust store.
+    Untrust {
+        machine_id: String,
+        label: String,
+    },
     /// Remove another machine's record as `tether machines remove` does, without the push.
     /// Only while the record is still an old id with this SHA-256, as the confirm showed it.
     RemoveMachine {
@@ -107,6 +120,11 @@ pub enum Cmd {
     CollectPackages {
         config: Box<crate::config::Config>,
         machine_id: String,
+    },
+    /// Copy a dotfile's backup over the file.
+    RestoreBackup {
+        path: String,
+        timestamp: String,
     },
     Restore {
         repo_path: String,

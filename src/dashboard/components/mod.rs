@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod backup_picker;
 pub mod config;
 pub mod confirm;
 pub mod diff;
@@ -6,6 +7,8 @@ pub mod file_import;
 pub mod files;
 pub mod header;
 pub mod help;
+pub mod keymap;
+pub mod log_view;
 pub mod machines;
 pub mod overview;
 pub mod package_profiles;
