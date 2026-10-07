@@ -74,6 +74,15 @@ impl Prompt {
         Ok(Confirm::new(message).with_default(default).prompt()?)
     }
 
+    /// A review that approves or trusts something. `-y` never answers it, so it needs a
+    /// terminal.
+    pub fn review(message: &str) -> Result<bool> {
+        if !Self::is_interactive() {
+            return Err(Self::needs_terminal(message, false));
+        }
+        Ok(Confirm::new(message).with_default(false).prompt()?)
+    }
+
     pub fn input(message: &str, default: Option<&str>) -> Result<String> {
         if let Some(answer) = Self::unattended(message, default)? {
             return Ok(answer);

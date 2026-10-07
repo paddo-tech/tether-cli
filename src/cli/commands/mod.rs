@@ -208,9 +208,14 @@ pub enum PackagesAction {
         /// shows it. Required without a terminal
         #[arg(long, value_name = "VERSION|TAP|KEY")]
         expect: Option<String>,
+        /// Approve a package whose source record fails its signature, without a terminal.
+        /// Needs --expect too. In a terminal, Tether asks instead
+        #[arg(long, conflicts_with = "all")]
+        allow_signature_failed: bool,
         /// Approve and install every package in the inbox, except packages OSV lists as
-        /// malicious, packages whose record fails its signature, and machine keys. Asks
-        /// first; without a terminal, needs -y
+        /// malicious, packages whose record fails its signature, packages without a version
+        /// or tap to name, and machine keys. Asks first; without a terminal, needs -y. This
+        /// is the only command where -y approves inbox items
         #[arg(long)]
         all: bool,
         /// With --all, only the items from this machine (id or hostname)
@@ -947,12 +952,18 @@ impl Cli {
                     id,
                     expected,
                     expect,
+                    allow_signature_failed,
                     all,
                     from,
                 }) => match id {
                     _ if *all => packages::approve_all(from.as_deref()).await,
                     Some(id) => {
-                        packages::approve(id, expected.as_deref().or(expect.as_deref())).await
+                        packages::approve(
+                            id,
+                            expected.as_deref().or(expect.as_deref()),
+                            *allow_signature_failed,
+                        )
+                        .await
                     }
                     None => unreachable!("clap requires an id without --all"),
                 },

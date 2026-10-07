@@ -261,10 +261,81 @@ fn approve_all_lists_what_it_covers_and_needs_y_without_a_terminal() {
         &["packages", "approve", "npm:left-pad", "--expect", "2.0.0"],
         "is now 1.0.0",
     );
+    // -y does not approve a single item
+    fails(
+        h.path(),
+        &["-y", "packages", "approve", "npm:left-pad"],
+        "--expect 1.0.0",
+    );
     tether(h.path())
         .args(["packages", "approve"])
         .assert()
         .code(2);
+}
+
+#[test]
+fn items_without_a_binding_or_with_a_failed_signature_need_a_review() {
+    use tether::packages::inbox::{Inbox, InboxItem, Kind, Reason};
+    let h = home();
+    let item = |name: &str, version: Option<&str>, reason: Reason| InboxItem {
+        kind: Kind::Package,
+        manager: "npm".to_string(),
+        name: name.to_string(),
+        version: version.map(str::to_string),
+        tap: None,
+        source_machine: Some("other".to_string()),
+        commit: None,
+        signer: None,
+        reasons: vec![reason],
+        advisories: Vec::new(),
+        first_seen: chrono::Utc::now(),
+    };
+    let inbox = Inbox {
+        items: vec![
+            item("unpinned", None, Reason::Unsigned),
+            item("forged", Some("1.0.0"), Reason::SignatureFailed),
+        ],
+        ..Inbox::default()
+    };
+    std::fs::write(
+        h.path().join(".tether/inbox.json"),
+        serde_json::to_string(&inbox).unwrap(),
+    )
+    .unwrap();
+    // No registry can resolve the release here, so nothing binds the unpinned item
+    for args in [
+        &["packages", "approve", "npm:unpinned"][..],
+        &["-y", "packages", "approve", "npm:unpinned"],
+        &["packages", "reject", "npm:unpinned"],
+    ] {
+        fails(h.path(), args, "needs a review in a terminal");
+    }
+    fails(
+        h.path(),
+        &["packages", "approve", "npm:unpinned", "--expect", "1.0.0"],
+        "has no version, tap or key to name",
+    );
+    // approve --all covers neither
+    tether(h.path())
+        .args(["-y", "packages", "approve", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "2 item(s) need their own decision",
+        ))
+        .stdout(predicate::str::contains("No packages to approve"));
+    // A failed signature needs an explicit flag without a terminal, even with --expect
+    fails(
+        h.path(),
+        &["packages", "approve", "npm:forged", "--expect", "1.0.0"],
+        "--allow-signature-failed",
+    );
+    tether(h.path())
+        .args(["packages", "approve", "npm:forged", "--expect", "1.0.0"])
+        .arg("--allow-signature-failed")
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("--allow-signature-failed").not());
 }
 
 #[test]

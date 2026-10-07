@@ -158,9 +158,27 @@ impl InboxItem {
     }
 
     /// Whether one answer for many items may approve it. A machine key, a malicious
-    /// package and a package from a record that fails its signature each need their own.
+    /// package, a package from a record that fails its signature and a package without a
+    /// binding each need their own.
     pub fn bulk_approvable(&self) -> bool {
-        self.kind == Kind::Package && !self.malicious() && !self.signature_failed()
+        self.kind == Kind::Package
+            && !self.malicious()
+            && !self.signature_failed()
+            && self.binding().is_some()
+    }
+
+    /// What a sync can replace under the item's id and a review must name: the key
+    /// fingerprint, the version, the tap of a formula or cask, or a tap's own name. None for
+    /// a package without a version or tap, such as one from a 1.x record.
+    pub fn binding(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::TrustMachine { fingerprint, .. } => Some(fingerprint),
+            Kind::Package => self
+                .version
+                .as_deref()
+                .or(self.tap.as_deref())
+                .or((self.manager == "brew_taps").then_some(self.name.as_str())),
+        }
     }
 
     /// The machine an item comes from: the machine a key belongs to, or the machine whose
@@ -857,6 +875,16 @@ pub async fn hold_malicious_upgrades(
         Output::warning(&format!("Could not hold malicious upgrades: {}", e));
     }
     held
+}
+
+/// The release an unpinned install of a package would pick now, under the release-age limit.
+/// None for Homebrew, or when the registry cannot tell.
+pub async fn release_to_install(manager_key: &str, name: &str) -> Option<String> {
+    let manager = manager_for_key(manager_key)?;
+    let min_age = super::PackagePolicy::load().min_release_age_days;
+    resolve::resolve_version(manager_key, manager.ecosystem(), name, min_age)
+        .await
+        .ok()
 }
 
 /// OSV could not check the release that would install, and the caller needs an answer before

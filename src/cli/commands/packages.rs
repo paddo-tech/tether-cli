@@ -502,86 +502,125 @@ fn inbox_item_json(item: &InboxItem) -> serde_json::Value {
         "from": item.from_machine(),
         "reasons": item.reasons,
         "advisories": item.advisories,
-        "expect": binding(item),
+        "expect": item.binding(),
         "bulk_approvable": item.bulk_approvable(),
         "first_seen": item.first_seen,
     })
 }
 
-/// What a sync can replace under an item's id and the user must confirm: the key
-/// fingerprint, the version, or the Homebrew tap.
-fn binding(item: &InboxItem) -> Option<&str> {
-    match &item.kind {
-        Kind::TrustMachine { fingerprint, .. } => Some(fingerprint),
-        Kind::Package => item.version.as_deref().or(item.tap.as_deref()),
+fn check_expected(item: &InboxItem, binding: Option<&str>, expected: &str) -> Result<()> {
+    match binding {
+        Some(binding) if binding == expected => Ok(()),
+        Some(binding) => anyhow::bail!(
+            "{} is now {}, not {}. Review it with 'tether packages inbox'",
+            item.id(),
+            binding,
+            expected
+        ),
+        None => anyhow::bail!(
+            "{} has no version, tap or key to name, so --expect cannot bind it. Review it in a \
+             terminal",
+            item.id()
+        ),
     }
 }
 
-fn check_expected(item: &InboxItem, expected: &str) -> Result<()> {
-    if binding(item) != Some(expected) {
-        anyhow::bail!(
-            "{} is now {}, not {}. Review it with 'tether packages inbox'",
-            item.id(),
-            binding(item).unwrap_or("unpinned"),
-            expected
-        );
-    }
-    Ok(())
+/// An inbox item as the user reviewed it, and the version that installs. An unpinned
+/// package binds to the release it would install now, which the review shows.
+struct Reviewed {
+    item: InboxItem,
+    version: Option<String>,
 }
 
 /// The item `id` as the user reviewed it: shown and confirmed in a terminal, or checked
 /// against the version, tap or key they named. So a replacement that a sync queued under
-/// the same id is not decided on. None when the user declines.
-fn reviewed(
+/// the same id is not decided on. `-y` never answers the review. An item without anything
+/// to name needs a terminal. None when the user declines.
+async fn reviewed(
     id: &str,
     expected: Option<&str>,
     action: &str,
     question: &str,
-) -> Result<Option<InboxItem>> {
+) -> Result<Option<Reviewed>> {
     let item = inbox::Inbox::load()?.find(id)?.clone();
+    // Only an approval installs, so only an approval binds the release that installs
+    let resolved = match (&item.kind, &item.version) {
+        (Kind::Package, None) if action == "approve" => {
+            inbox::release_to_install(&item.manager, &item.name).await
+        }
+        _ => None,
+    };
+    let binding = item.binding().or(resolved.as_deref()).map(str::to_string);
     match expected {
-        Some(expected) => check_expected(&item, expected)?,
-        None if Prompt::is_interactive() && !Prompt::assume_yes() => {
+        Some(expected) => check_expected(&item, binding.as_deref(), expected)?,
+        None if Prompt::is_interactive() => {
             Output::info(&describe(&item));
-            if !Prompt::confirm(question, false)? {
+            match (&resolved, binding.is_some()) {
+                (Some(version), _) => Output::info(&format!("Installs version {}", version)),
+                (None, false) => Output::warning(&format!(
+                    "{} has no version or tap, so Tether cannot show what installs",
+                    item.id()
+                )),
+                (None, true) => {}
+            }
+            if !Prompt::review(question)? {
                 return Ok(None);
             }
         }
-        None => {
-            if let Some(binding) = binding(&item) {
-                anyhow::bail!(
-                    "Check {}, then run 'tether packages {} {} --expect {}'",
-                    describe(&item),
-                    action,
-                    item.id(),
-                    binding
-                );
-            }
-        }
+        None => match binding {
+            Some(binding) => anyhow::bail!(
+                "Check {}, then run 'tether packages {} {} --expect {}'",
+                describe(&item),
+                action,
+                item.id(),
+                binding
+            ),
+            None => anyhow::bail!(
+                "{} has no version, tap or key to name, so it needs a review in a terminal. \
+                 Run 'tether packages {} {}' in a terminal",
+                describe(&item),
+                action,
+                item.id()
+            ),
+        },
     }
-    Ok(Some(item))
+    let version = item.version.clone().or(resolved);
+    Ok(Some(Reviewed { item, version }))
 }
 
 /// Approve a held package and install it now, or trust a held machine key. The sync lock
 /// keeps the daemon from installing the same package while this install runs.
-pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
+pub async fn approve(id: &str, expected: Option<&str>, allow_signature_failed: bool) -> Result<()> {
     if let Some(machine) = id.strip_prefix("machine:") {
         return super::machines::trust(machine, expected).await;
     }
-    let Some(item) = reviewed(id, expected, "approve", "Approve this item?")? else {
+    let Some(Reviewed { item, version }) =
+        reviewed(id, expected, "approve", "Approve this item?").await?
+    else {
         return Ok(());
     };
-    // Naming the version on the command line already confirms it
-    if expected.is_none() && item.signature_failed() && !confirm_signature_failed(&item)? {
-        return Ok(());
+    if item.signature_failed() {
+        if Prompt::is_interactive() {
+            if !confirm_signature_failed(&item)? {
+                return Ok(());
+            }
+        } else if !allow_signature_failed {
+            anyhow::bail!(
+                "{} comes from {}, whose record fails its signature. Approve it in a terminal, \
+                 or pass --allow-signature-failed with --expect",
+                item.id(),
+                item.source_machine.as_deref().unwrap_or("another machine")
+            );
+        }
     }
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     Output::info(&format!("Approving {}", describe(&item)));
-    approve_locked(&item).await
+    approve_locked(&item, version.as_deref()).await
 }
 
 /// A package whose source machine's record fails its signature may be a forged manifest
-/// line, so the user types its version or tap and answers a second question.
+/// line, so the user types its version or tap and answers a second question. `-y` answers
+/// neither.
 fn confirm_signature_failed(item: &InboxItem) -> Result<bool> {
     Output::warning(&format!(
         "{} comes from {}, whose record fails its signature. Someone may have edited it in \
@@ -589,20 +628,21 @@ fn confirm_signature_failed(item: &InboxItem) -> Result<bool> {
         item.name,
         item.source_machine.as_deref().unwrap_or("another machine")
     ));
-    if let Some(binding) = binding(item) {
+    if let Some(binding) = item.binding() {
         if Prompt::input(&format!("Type {} to approve it", binding), None)?.trim() != binding {
             Output::info(&format!("Not approved: {}", item.id()));
             return Ok(false);
         }
     }
-    Prompt::question("Approve it anyway?", false)
+    Prompt::review("Approve it anyway?")
 }
 
-/// Approve exactly the item shown to the user. The caller holds the sync lock.
-async fn approve_locked(shown: &InboxItem) -> Result<()> {
-    let mut version = None;
+/// Approve exactly the item shown to the user, and install `version`, the release the
+/// review bound. The caller holds the sync lock.
+async fn approve_locked(shown: &InboxItem, version: Option<&str>) -> Result<()> {
+    let mut version = version.map(str::to_string);
     if shown.kind == Kind::Package {
-        match osv_checked(&shown.manager, &shown.name, shown.version.as_deref()).await? {
+        match osv_checked(&shown.manager, &shown.name, version.as_deref()).await? {
             Some(checked) => version = checked,
             None => return Ok(()),
         }
@@ -621,7 +661,7 @@ async fn approve_locked(shown: &InboxItem) -> Result<()> {
             version,
             ..item.clone()
         },
-        true,
+        Prompt::is_interactive(),
     )
     .await?;
     Output::success(&format!("Installed {}", item.name));
@@ -676,7 +716,8 @@ pub async fn approve_all(from: Option<&str>) -> Result<()> {
     if !held.is_empty() {
         Output::info(&format!(
             "{} item(s) need their own decision and stay in the inbox: machine keys, packages \
-             OSV lists as malicious, and packages whose record fails its signature",
+             OSV lists as malicious, packages whose record fails its signature, and packages \
+             without a version or tap to name",
             held.len()
         ));
     }
@@ -697,7 +738,7 @@ pub async fn approve_all(from: Option<&str>) -> Result<()> {
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let mut failed = 0;
     for item in &approvable {
-        if let Err(e) = approve_locked(item).await {
+        if let Err(e) = approve_locked(item, item.version.as_deref()).await {
             Output::warning(&format!("{}: {:#}", item.id(), e));
             failed += 1;
         }
@@ -714,7 +755,8 @@ pub async fn approve_all(from: Option<&str>) -> Result<()> {
 
 /// Reject a held item so later syncs do not offer that version, tap or key again.
 pub async fn reject(id: &str, expected: Option<&str>) -> Result<()> {
-    let Some(item) = reviewed(id, expected, "reject", "Reject this item?")? else {
+    let Some(Reviewed { item, .. }) = reviewed(id, expected, "reject", "Reject this item?").await?
+    else {
         return Ok(());
     };
     reject_shown(&item)
@@ -745,7 +787,7 @@ fn group_line(group: &inbox::Group) -> String {
 /// signature needs its own answer, so callers pass only bulk-approvable items.
 async fn approve_each(items: Vec<InboxItem>) {
     for item in items {
-        if let Err(e) = approve_locked(&item).await {
+        if let Err(e) = approve_locked(&item, item.version.as_deref()).await {
             Output::warning(&format!("{}: {}", item.name, e));
         }
     }
@@ -805,10 +847,10 @@ pub async fn review_inbox() -> Result<()> {
         let choice = options[Prompt::select(&describe(&item), options.clone(), options.len() - 1)?];
         let result = match choice {
             "Install" if item.signature_failed() => match confirm_signature_failed(&item) {
-                Ok(true) => approve_locked(&item).await,
+                Ok(true) => approve_locked(&item, item.version.as_deref()).await,
                 other => other.map(|_| ()),
             },
-            "Install" | "Trust" => approve_locked(&item).await,
+            "Install" | "Trust" => approve_locked(&item, item.version.as_deref()).await,
             "Reject" => reject_shown(&item),
             _ => Ok(()),
         };
@@ -839,22 +881,56 @@ mod tests {
             advisories: Vec::new(),
             first_seen: chrono::Utc::now(),
         };
-        assert!(check_expected(&item, "1.0.0").is_ok());
+        let check = |item: &InboxItem, expected| check_expected(item, item.binding(), expected);
+        assert!(check(&item, "1.0.0").is_ok());
         // A sync replaced the version under the same id
         item.version = Some("1.0.1".to_string());
-        assert!(check_expected(&item, "1.0.0").is_err());
+        assert!(check(&item, "1.0.0").is_err());
 
         item.manager = "brew_formulae".to_string();
         item.version = None;
         item.tap = Some("evil/tap".to_string());
-        assert!(check_expected(&item, "good/tap").is_err());
-        assert!(check_expected(&item, "evil/tap").is_ok());
+        assert!(check(&item, "good/tap").is_err());
+        assert!(check(&item, "evil/tap").is_ok());
 
         item.kind = Kind::TrustMachine {
             public_key: String::new(),
             fingerprint: "SHA256:new".to_string(),
         };
-        assert!(check_expected(&item, "SHA256:old").is_err());
-        assert!(check_expected(&item, "SHA256:new").is_ok());
+        assert!(check(&item, "SHA256:old").is_err());
+        assert!(check(&item, "SHA256:new").is_ok());
+    }
+
+    #[test]
+    fn an_item_without_a_binding_needs_its_own_review() {
+        let mut item = InboxItem {
+            kind: Kind::Package,
+            manager: "brew_taps".to_string(),
+            name: "x/y".to_string(),
+            version: None,
+            tap: None,
+            source_machine: Some("other".to_string()),
+            commit: None,
+            signer: None,
+            reasons: vec![Reason::UntrustedTap],
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        };
+        // A tap binds to its own name
+        assert_eq!(item.binding(), Some("x/y"));
+        assert!(item.bulk_approvable());
+
+        // An unpinned package binds only to the release a review resolves
+        item.manager = "npm".to_string();
+        item.name = "held".to_string();
+        item.reasons = vec![Reason::Unsigned];
+        assert_eq!(item.binding(), None);
+        assert!(!item.bulk_approvable());
+        assert!(check_expected(&item, None, "1.0.0")
+            .unwrap_err()
+            .to_string()
+            .contains("Review it in a terminal"));
+        assert!(check_expected(&item, Some("1.0.1"), "1.0.0").is_err());
+        assert!(check_expected(&item, Some("1.0.0"), "1.0.0").is_ok());
     }
 }
