@@ -313,8 +313,8 @@ pub enum MachineAction {
     /// Show one machine: profile, versions, record status, and its full key fingerprint and
     /// trust
     Show {
-        /// Machine id or hostname
-        machine: String,
+        /// Machine id or hostname. Without it, this machine
+        machine: Option<String>,
     },
     /// Rename this machine: 'tether machines rename <NEW>'. The form '<OLD> <NEW>' still
     /// works in 2.0 and is deprecated
@@ -798,7 +798,7 @@ impl Cli {
             },
             Commands::Machines { action } => match action {
                 MachineAction::List { json } => machines::list(*json).await,
-                MachineAction::Show { machine } => machines::show(machine).await,
+                MachineAction::Show { machine } => machines::show(machine.as_deref()).await,
                 MachineAction::Rename { name, new } => match new {
                     Some(new) => {
                         crate::cli::Output::warning(

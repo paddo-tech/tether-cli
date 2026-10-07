@@ -285,7 +285,7 @@ fn explain(reason: Reason) -> &'static str {
             "The machine this came from is trusted, but its record fails its signature. Someone may have edited the record or the manifest in the repo. Do not approve unless you know why the signature fails."
         }
         Reason::KeyChanged => {
-            "SIGNING KEY CHANGED. This machine was trusted with a different key. If you did not set it up again, someone may be signing as it. Run 'tether machines list' on that machine and compare the fingerprint before you trust it."
+            "SIGNING KEY CHANGED. This machine was trusted with a different key. If you did not set it up again, someone may be signing as it. Run 'tether machines show' on that machine and compare the fingerprint before you trust it."
         }
         Reason::OtherOsVersion => {
             "Only machines on another OS list the newest trusted version, and it failed to install here. This is the newest release that suits this machine. No trusted machine lists it, so it installs only when you approve it."

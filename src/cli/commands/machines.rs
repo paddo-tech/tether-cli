@@ -197,14 +197,15 @@ pub fn print_old_build_notes(ids: &[String]) {
 }
 
 /// One machine's record, its key and how this machine trusts it.
-pub async fn show(name: &str) -> Result<()> {
+pub async fn show(name: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
-    let id = resolve(&sync_path, name)?;
     let this = SyncState::load()?.machine_id;
+    let name = name.unwrap_or(&this);
+    let id = resolve(&sync_path, name)?;
     let machines = MachineState::list_all(&sync_path)?;
     let Some(record) = machines.iter().find(|m| m.machine_id == id) else {
         anyhow::bail!(

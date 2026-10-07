@@ -604,7 +604,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 );
             }
             msg.push_str(
-                "Compare this fingerprint with the one 'tether machines list' shows on that \
+                "Compare this fingerprint with the one 'tether machines show' shows on that \
                  machine. Trust the key? Package changes it signs then install without approval.",
             );
             let lines = [
