@@ -1477,15 +1477,17 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
             path
         ));
     }
-    // The merged config holds every remote change, so this remote is the next merge's base
-    crate::sync::atomic_write(&base_path, &remote)?;
+    // The merged config holds every remote change, so this remote is the next merge's base.
+    // The base follows the local write: a failed write must not mark remote changes as merged
     if !merged.changed {
+        crate::sync::atomic_write(&base_path, &remote)?;
         return Ok(None);
     }
     crate::sync::atomic_write(
         &local_config_path,
         toml::to_string_pretty(&merged.config)?.as_bytes(),
     )?;
+    crate::sync::atomic_write(&base_path, &remote)?;
     Ok(Some(Config::load()?))
 }
 
@@ -1589,6 +1591,10 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
         let key = crate::security::get_encryption_key()?;
         let encrypted = crate::security::encrypt(&content, &key)?;
         std::fs::write(&dest, encrypted)?;
+        // The repo now holds this config, so it is the next merge's base. With the pulled
+        // remote as base, a kept conflict reads as a local edit forever and two machines
+        // export their values in turn
+        crate::sync::atomic_write(&config_base_path(home), &content)?;
         state.update_file(".tether/config.toml", hash);
     }
 

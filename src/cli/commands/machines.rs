@@ -661,7 +661,6 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
-    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let signed = resolve_for_trust(&sync_path, name)
         .ok()
         .filter(|id| inbox::signing_fingerprint(&sync_path, id).is_some());
@@ -669,6 +668,7 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         Some(id) => id,
         None => {
             // A new machine's record may have arrived after this machine's last sync
+            let _sync_lock = crate::sync::acquire_sync_lock(true)?;
             Output::info("Pulling latest changes...");
             GitBackend::open(&sync_path)?.pull()?;
             resolve_for_trust(&sync_path, name)?
