@@ -687,6 +687,51 @@ struct BrewImport<'a> {
 /// Import brew packages (formulae, casks, taps).
 /// Casks are installed individually to detect which need password.
 /// Returns (deferred_casks, installed_any) - list of casks needing password and whether any packages were installed.
+/// Keep the Brewfile entries this machine may install: not removed here, in this machine's
+/// scope, and valid. A tap stays when it is in scope or a kept formula or cask names it, so
+/// casks that this machine never installs bring no taps.
+fn select_brew(
+    brew_packages: &mut BrewfilePackages,
+    machine_state: &MachineState,
+    scope: &Membership,
+    import_casks: bool,
+    gated: &mut Gated,
+) {
+    let removed = |manager: &str| -> HashSet<String> {
+        machine_state
+            .removed_packages
+            .get(manager)
+            .map(|v| v.iter().cloned().collect())
+            .unwrap_or_default()
+    };
+    let (removed_formulae, removed_casks, removed_taps) = (
+        removed("brew_formulae"),
+        removed("brew_casks"),
+        removed("brew_taps"),
+    );
+    brew_packages
+        .formulae
+        .retain(|p| !removed_formulae.contains(p) && scope.includes("brew_formulae", p));
+    brew_packages
+        .casks
+        .retain(|p| !removed_casks.contains(p) && scope.includes("brew_casks", p));
+    brew_packages.retain_valid();
+    if !import_casks {
+        // Drop pending inbox items for casks this machine never installs
+        gated.passed.extend(
+            brew_packages
+                .casks
+                .drain(..)
+                .map(|cask| ("brew_casks".to_string(), cask)),
+        );
+    }
+    gated.needed_taps = needed_taps(brew_packages);
+    brew_packages.taps.retain(|p| {
+        !removed_taps.contains(p)
+            && (scope.includes("brew_taps", p) || gated.needed_taps.contains(&p.to_lowercase()))
+    });
+}
+
 async fn import_brew(
     manifests_dir: &Path,
     machine_state: &MachineState,
@@ -716,47 +761,14 @@ async fn import_brew(
         Err(_) => return (Vec::new(), false),
     };
 
-    // Parse the Brewfile
     let mut brew_packages = BrewfilePackages::parse(&manifest);
-
-    // Filter out removed packages
-    let removed_formulae: HashSet<_> = machine_state
-        .removed_packages
-        .get("brew_formulae")
-        .map(|v| v.iter().collect())
-        .unwrap_or_default();
-    let removed_casks: HashSet<_> = machine_state
-        .removed_packages
-        .get("brew_casks")
-        .map(|v| v.iter().collect())
-        .unwrap_or_default();
-    let removed_taps: HashSet<_> = machine_state
-        .removed_packages
-        .get("brew_taps")
-        .map(|v| v.iter().collect())
-        .unwrap_or_default();
-
-    brew_packages
-        .formulae
-        .retain(|p| !removed_formulae.contains(p) && scope.includes("brew_formulae", p));
-    brew_packages
-        .casks
-        .retain(|p| !removed_casks.contains(p) && scope.includes("brew_casks", p));
-    gated.needed_taps = needed_taps(&brew_packages);
-    brew_packages.taps.retain(|p| {
-        !removed_taps.contains(p)
-            && (scope.includes("brew_taps", p) || gated.needed_taps.contains(&p.to_lowercase()))
-    });
-    brew_packages.retain_valid();
-    if !import_casks {
-        // Drop pending inbox items for casks this machine never installs
-        gated.passed.extend(
-            brew_packages
-                .casks
-                .drain(..)
-                .map(|cask| ("brew_casks".to_string(), cask)),
-        );
-    }
+    select_brew(
+        &mut brew_packages,
+        machine_state,
+        scope,
+        import_casks,
+        gated,
+    );
 
     let policy = PackagePolicy::load();
     let local_taps: HashSet<String> = brew
@@ -808,7 +820,10 @@ async fn import_brew(
     for deferred in previously_deferred.iter().filter(|_| import_casks) {
         if !local_casks.contains(deferred.as_str())
             && !casks_to_try.contains(deferred)
-            && !removed_casks.contains(deferred)
+            && !machine_state
+                .removed_packages
+                .get("brew_casks")
+                .is_some_and(|removed| removed.contains(deferred))
             && scope.includes("brew_casks", deferred)
         {
             casks_to_try.push(deferred.clone());
@@ -2693,5 +2708,35 @@ mod tests {
         assert_eq!(scope.excluded(), vec!["brew_casks:zoom"]);
         notify_excluded(&scope, &mut shown);
         assert!(shown);
+    }
+
+    #[test]
+    fn casks_this_machine_skips_bring_no_taps() {
+        let linux = MachineState::new("linux");
+        let mut mac = MachineState::new("mac");
+        mac.packages
+            .insert("brew_casks".to_string(), vec!["evil/tap/app".to_string()]);
+        let scope = Membership::new(
+            &Config::default(),
+            &Default::default(),
+            &linux,
+            &[(&mac, true)],
+        );
+        let brewfile = "tap \"evil/tap\"\ncask \"evil/tap/app\"\n";
+
+        let mut packages = BrewfilePackages::parse(brewfile);
+        let mut gated = Gated::default();
+        select_brew(&mut packages, &linux, &scope, false, &mut gated);
+        assert!(packages.taps.is_empty() && packages.casks.is_empty());
+        assert!(gated.needed_taps.is_empty());
+        assert_eq!(
+            gated.passed,
+            [("brew_casks".to_string(), "evil/tap/app".to_string())]
+        );
+
+        let mut packages = BrewfilePackages::parse(brewfile);
+        let mut gated = Gated::default();
+        select_brew(&mut packages, &linux, &scope, true, &mut gated);
+        assert_eq!(packages.taps, ["evil/tap"]);
     }
 }
