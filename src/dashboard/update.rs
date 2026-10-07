@@ -1382,6 +1382,37 @@ mod tests {
     }
 
     #[test]
+    fn the_import_picker_hides_held_packages() {
+        use crate::packages::inbox::{InboxItem, Kind, Reason};
+        let mut app = app();
+        let mut other = crate::sync::MachineState::new("other");
+        other.packages.insert(
+            "npm".to_string(),
+            vec!["held".to_string(), "free".to_string()],
+        );
+        app.state.machines.push(other);
+        app.state.inbox.items.push(InboxItem {
+            kind: Kind::Package,
+            manager: "npm".to_string(),
+            name: "held".to_string(),
+            version: Some("1.0.0".to_string()),
+            tap: None,
+            source_machine: Some("other".to_string()),
+            commit: None,
+            signer: None,
+            reasons: vec![Reason::SignatureFailed],
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        });
+        packages::open_import(&mut app);
+        let Some(Overlay::PkgImport(picker)) = app.overlays.last() else {
+            panic!("the picker opens");
+        };
+        let names: Vec<&str> = picker.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["free"]);
+    }
+
+    #[test]
     fn install_confirm_draws_over_the_picker() {
         use crate::dashboard::components::pkg_import::{PkgImport, PkgImportItem};
         use ratatui::{backend::TestBackend, Terminal};

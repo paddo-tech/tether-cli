@@ -202,7 +202,9 @@ pub fn open_import(app: &mut App) {
             for pkg in packages {
                 let has = current_set.map(|s| s.contains(pkg)).unwrap_or(false);
                 let was_removed = removed_set.map(|s| s.contains(pkg)).unwrap_or(false);
-                if !has && !was_removed {
+                // A held package needs approval on the Security tab, not an install here
+                let held = app.state.inbox.is_pending(manager_key, pkg);
+                if !has && !was_removed && !held {
                     pkg_map
                         .entry((manager_key.clone(), pkg.clone()))
                         .or_default()
