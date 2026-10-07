@@ -1,5 +1,5 @@
 use super::{centered, clamp_cursor, files, manager_label, popup, security};
-use crate::dashboard::app::{App, Hit, Job, Overlay};
+use crate::dashboard::app::{App, DaemonOp, Hit, Job, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
@@ -129,6 +129,10 @@ pub enum Confirm {
         item: Option<Box<crate::packages::inbox::InboxItem>>,
         arming: Arming,
     },
+    /// Stop the daemon, which syncs this machine every few minutes.
+    StopDaemon {
+        arming: Arming,
+    },
     /// Stop trusting a machine's key.
     Untrust {
         machine_id: String,
@@ -181,7 +185,8 @@ impl Confirm {
             | Confirm::ApproveSignatureFailed { arming, .. }
             | Confirm::Reject { arming, .. }
             | Confirm::Trust { arming, .. }
-            | Confirm::Untrust { arming, .. } => arming,
+            | Confirm::Untrust { arming, .. }
+            | Confirm::StopDaemon { arming } => arming,
         }
     }
 }
@@ -316,6 +321,9 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveSignatureFailed { item, .. } => security::approve(app, *item),
         Confirm::Reject { item, .. } => Some(Cmd::Reject(item)),
+        Confirm::StopDaemon { .. } => {
+            (app.daemon_op == DaemonOp::None).then_some(Cmd::Daemon(DaemonOp::Stopping))
+        }
         Confirm::Trust {
             machine_id,
             label,
@@ -495,6 +503,14 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 approve_all_line(item)
             ),
             t.error,
+        ),
+        Confirm::StopDaemon { .. } => render_popup(
+            f,
+            app,
+            wait,
+            "Stop daemon",
+            "Stop the daemon? This machine then syncs only when you sync it.",
+            t.warn,
         ),
         Confirm::Reject { item, .. } => {
             let what = match &item.kind {

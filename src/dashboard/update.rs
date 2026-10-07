@@ -278,16 +278,17 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
 pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
     match action {
         Action::Sync => return app.sync_cmd(),
-        Action::ToggleDaemon => {
-            if app.daemon_op == DaemonOp::None {
-                let op = if app.state.daemon_running {
-                    DaemonOp::Stopping
-                } else {
-                    DaemonOp::Starting
-                };
-                return Some(Cmd::Daemon(op));
+        // Starting is harmless; stopping ends the automatic sync, so it asks
+        Action::ToggleDaemon if app.daemon_op == DaemonOp::None => {
+            if !app.state.daemon_running {
+                return Some(Cmd::Daemon(DaemonOp::Starting));
             }
+            app.overlays
+                .push(Overlay::Confirm(confirm::Confirm::StopDaemon {
+                    arming: Default::default(),
+                }));
         }
+        Action::ToggleDaemon => {}
         Action::Refresh => app.reload_state(),
         Action::Help => {
             if app.help_open() {
@@ -648,6 +649,24 @@ mod tests {
         ));
         update(&mut app, Msg::DaemonOpStarted(DaemonOp::Starting));
         assert!(key(&mut app, KeyCode::Char('d')).is_none());
+    }
+
+    #[test]
+    fn daemon_key_asks_before_it_stops() {
+        let mut app = app();
+        app.state.daemon_running = true;
+        assert!(key(&mut app, KeyCode::Char('d')).is_none());
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::StopDaemon { .. }))
+        ));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('d'));
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Daemon(DaemonOp::Stopping))
+        ));
     }
 
     #[test]
