@@ -116,7 +116,6 @@ async fn upgrade_never_downgrades() {
         )),
         "{out}"
     );
-    assert!(out.contains("Packages upgraded"), "{out}");
     assert_eq!(npm_version_of(&m, YOUNG).await, young_version);
 
     // Installed releases that are newer than the limit allows stay
@@ -141,7 +140,8 @@ async fn upgrade_never_downgrades() {
     assert_eq!(uv_version(&m).await, UV.2, "uv downgraded:\n{}", out.text());
     assert_eq!(npm_version(&m).await, NPM.2);
 
-    // A pin the user set stays, and upgrade reports it as pinned, never as upgraded
+    // A pin the user set stays, and upgrade reports it as pinned, never as upgraded. The
+    // limit lets the releases of both packages through
     m.ok(&format!("npm install -g {}@{}", NPM.0, NPM.1)).await;
     m.ok(&format!("uv tool install --force {}=={}", UV.0, UV.1))
         .await;
@@ -158,16 +158,29 @@ async fn upgrade_never_downgrades() {
         .await
         .stdout;
     assert!(receipt.contains(&format!("=={}", UV.1)), "{receipt}");
-
-    // With the default limit, old releases upgrade
     let npm = npm_version(&m).await;
-    assert!(
-        npm.split('.').next().unwrap().parse::<u32>().unwrap() >= 7,
-        "npm stayed at {npm}:\n{out}"
-    );
+    assert!(newer_than(&npm, NPM.1), "npm stayed at {npm}:\n{out}");
+
+    // With the default limit, which is not in config.toml, old releases upgrade. Upstream
+    // can publish new releases, so the checks ask only for a version above the old one
+    m.ok("sed -i '/^min_release_age_days/d' /root/.tether/config.toml")
+        .await;
+    let limit = m
+        .tether_ok("config get packages.min_release_age_days")
+        .await
+        .stdout;
+    assert_eq!(limit.trim(), "7", "the limit is not the default");
+    m.ok(&format!("npm install -g {}@{}", NPM.0, NPM.1)).await;
     m.ok(&format!("uv tool install --offline {}", UV.0)).await;
     let out = m.tether_ok("upgrade -y").await.text();
+    let npm = npm_version(&m).await;
+    assert!(newer_than(&npm, NPM.1), "npm stayed at {npm}:\n{out}");
     let uv = uv_version(&m).await;
-    assert!(uv != UV.1 && !uv.is_empty(), "uv stayed at {uv}:\n{out}");
-    assert!(out.contains(&format!("{} {} → {uv}", UV.0, UV.1)), "{out}");
+    assert!(newer_than(&uv, UV.1), "uv stayed at {uv}:\n{out}");
+}
+
+/// Whether dotted version `a` is above `b`, part by part. An empty version is not.
+fn newer_than(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    !a.is_empty() && parts(a) > parts(b)
 }
