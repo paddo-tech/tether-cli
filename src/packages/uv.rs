@@ -160,11 +160,10 @@ impl PackageManager for UvManager {
 
     /// Upgrades only the tools whose newest allowed release is newer than the installed one,
     /// since `uv tool upgrade --exclude-newer` can resolve an older release.
-    async fn update_all(&self) -> Result<()> {
-        let names: Vec<String> = super::planned_upgrades(self)
-            .await?
-            .into_iter()
-            .map(|u| u.name)
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+        let names: Vec<&str> = planned
+            .iter()
+            .map(|u| u.name.as_str())
             .filter(|name| validate_name(Ecosystem::Python, name).is_ok())
             .collect();
         if names.is_empty() {

@@ -178,16 +178,11 @@ impl PackageManager for BunManager {
     /// `bun update -g` updates only the first package, so each planned target is added
     /// exactly. A plain `bun add -g name` would pick the newest mature release, which can
     /// be older than the installed one.
-    async fn update_all(&self) -> Result<()> {
-        let upgrades = super::planned_upgrades(self).await?;
-        if upgrades.is_empty() {
-            return Ok(());
-        }
-
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
 
-        for upgrade in upgrades {
+        for upgrade in planned {
             if let Err(e) = validate_name(Ecosystem::Npm, &upgrade.name)
                 .and_then(|()| validate_version(Ecosystem::Npm, &upgrade.target))
             {

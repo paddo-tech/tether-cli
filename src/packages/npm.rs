@@ -54,6 +54,19 @@ fn no_mature_release(stdout: &[u8]) -> bool {
         .is_ok_and(|v| v["error"]["code"] == "ENOVERSIONS")
 }
 
+/// The upgrade of one package from its own `npm outdated` run: held when it has no release
+/// old enough.
+fn outdated_one(package: &PackageInfo, stdout: &[u8]) -> Result<Vec<Upgrade>> {
+    if no_mature_release(stdout) {
+        return Ok(vec![Upgrade::held(
+            &package.name,
+            package.version.as_deref(),
+            Hold::NoMatureRelease,
+        )]);
+    }
+    parse_outdated_json(stdout, false)
+}
+
 pub struct NpmManager;
 
 impl NpmManager {
@@ -165,18 +178,13 @@ impl PackageManager for NpmManager {
 
     /// Installs each planned target exactly. `npm update -g` would install `wanted`, which
     /// the release-age limit can set below the installed version.
-    async fn update_all(&self) -> Result<()> {
-        let upgrades = super::planned_upgrades(self).await?;
-        if upgrades.is_empty() {
-            return Ok(());
-        }
-
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let major = self.version().await.map_or(0, |((major, _, _), _)| major);
 
-        let upgrades: Vec<Upgrade> = upgrades
-            .into_iter()
+        let upgrades: Vec<Upgrade> = planned
+            .iter()
             .filter(|u| {
                 match validate_name(Ecosystem::Npm, &u.name)
                     .and_then(|()| validate_version(Ecosystem::Npm, &u.target))
@@ -188,6 +196,7 @@ impl PackageManager for NpmManager {
                     }
                 }
             })
+            .cloned()
             .collect();
         let (scripted, plain): (Vec<Upgrade>, Vec<Upgrade>) = upgrades
             .into_iter()
@@ -241,22 +250,24 @@ impl PackageManager for NpmManager {
         // synced package, as in `list_installed`.
         let mut candidates = if no_mature_release(&output.stdout) {
             let mut candidates = Vec::new();
+            // One package that fails its check is skipped, so the others still upgrade
             for package in self.list_installed().await? {
-                validate_name(Ecosystem::Npm, &package.name)?;
+                if let Err(e) = validate_name(Ecosystem::Npm, &package.name) {
+                    crate::cli::Output::warning(&format!("Skipping npm entry: {}", e));
+                    continue;
+                }
                 let output = command("npm")?
                     .args(["outdated", "-g", "--json"])
                     .args(&cooldown)
                     .arg(&package.name)
                     .output()
                     .await?;
-                if no_mature_release(&output.stdout) {
-                    candidates.push(Upgrade::held(
-                        &package.name,
-                        package.version.as_deref(),
-                        Hold::NoMatureRelease,
-                    ));
-                } else {
-                    candidates.extend(parse_outdated_json(&output.stdout, false)?);
+                match outdated_one(&package, &output.stdout) {
+                    Ok(found) => candidates.extend(found),
+                    Err(e) => crate::cli::Output::warning(&format!(
+                        "npm: could not check {}: {}",
+                        package.name, e
+                    )),
                 }
             }
             candidates
@@ -333,5 +344,18 @@ mod tests {
         assert!(no_mature_release(stdout));
         assert!(!no_mature_release(br#"{"error": {"code": "E404"}}"#));
         assert!(!no_mature_release(b"{}"));
+    }
+
+    #[test]
+    fn one_package_check_holds_or_fails_only_that_package() {
+        let package = PackageInfo {
+            name: "corepack".to_string(),
+            version: Some("0.30.0".to_string()),
+        };
+        let held = outdated_one(&package, br#"{"error": {"code": "ENOVERSIONS"}}"#).unwrap();
+        assert_eq!(held[0].hold, Some(Hold::NoMatureRelease));
+        // The caller warns and goes on with the next package
+        assert!(outdated_one(&package, br#"{"error": {"code": "E404", "summary": "x"}}"#).is_err());
+        assert!(outdated_one(&package, b"{}").unwrap().is_empty());
     }
 }

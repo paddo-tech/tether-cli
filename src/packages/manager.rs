@@ -20,6 +20,8 @@ pub struct Upgrade {
     pub current: Option<String>,
     pub target: String,
     pub hold: Option<Hold>,
+    /// A Homebrew cask, which brew upgrades with `--cask`
+    pub cask: bool,
 }
 
 /// Why an upgrade leaves a package alone.
@@ -38,6 +40,7 @@ impl Upgrade {
             current: current.map(str::to_string),
             target: target.to_string(),
             hold: None,
+            cask: false,
         }
     }
 
@@ -49,7 +52,8 @@ impl Upgrade {
     }
 
     /// The release-age limit can make the target older than the installed version, and an
-    /// upgrade must never downgrade. An unknown installed version cannot prove the target newer.
+    /// upgrade must never downgrade. An unknown installed version cannot prove the target
+    /// newer, except for Homebrew, which has no release-age limit.
     pub fn moves_forward(&self, ecosystem: Ecosystem) -> bool {
         self.hold.is_none() && self.order(ecosystem) == Some(Ordering::Greater)
     }
@@ -61,13 +65,19 @@ impl Upgrade {
     /// The target against the installed version, by the ecosystem's own rules: a PEP 440
     /// `1.0.dev1` is older than `1.0a1`, and a Homebrew revision `_1` is newer than its release.
     fn order(&self, ecosystem: Ecosystem) -> Option<Ordering> {
-        let current = self.current.as_deref()?;
         match ecosystem {
-            Ecosystem::Brew | Ecosystem::BrewTap => compare_brew_versions(&self.target, current),
+            // brew lists only packages it finds outdated, and never installs an older release.
+            // A cask whose version is `latest` cannot compare, and brew still upgrades it.
+            Ecosystem::Brew | Ecosystem::BrewTap => Some(
+                self.current
+                    .as_deref()
+                    .and_then(|current| compare_brew_versions(&self.target, current))
+                    .unwrap_or(Ordering::Greater),
+            ),
             _ => Some(super::pin::compare_versions(
                 ecosystem,
                 &self.target,
-                current,
+                self.current.as_deref()?,
             )),
         }
     }
@@ -139,10 +149,10 @@ pub fn compare_brew_versions(a: &str, b: &str) -> Option<Ordering> {
     )
 }
 
-/// The upgrades `update_all` installs: candidates whose target is newer than the installed
-/// version, without the ones OSV lists as malicious. A candidate whose target is older
-/// stays at its installed version with a warning. A held package stays too; `tether upgrade`
-/// prints why in its plan, so here it goes to the daemon log only.
+/// The upgrades a plan lists: candidates whose target is newer than the installed version.
+/// A candidate whose target is older stays at its installed version with a warning. A held
+/// package stays too; `tether upgrade` prints why in its plan, so here it goes to the daemon
+/// log only.
 pub async fn planned_upgrades(manager: &dyn PackageManager) -> Result<Vec<Upgrade>> {
     let (forward, kept): (Vec<Upgrade>, Vec<Upgrade>) = manager
         .upgrade_candidates()
@@ -161,11 +171,29 @@ pub async fn planned_upgrades(manager: &dyn PackageManager) -> Result<Vec<Upgrad
             upgrade.target
         ));
     }
-    let held = super::inbox::hold_malicious_upgrades(manager, &forward).await;
-    Ok(forward
+    Ok(forward)
+}
+
+/// Plan the upgrades and install them, as the daemon's daily update does. A failed plan
+/// upgrades nothing.
+pub async fn update_all(manager: &dyn PackageManager) -> Result<()> {
+    manager.refresh().await?;
+    let planned = planned_upgrades(manager).await?;
+    install_upgrades(manager, planned).await
+}
+
+/// Install exactly the planned upgrades, without the ones whose target OSV lists as
+/// malicious. Those go to the inbox and stay at their installed version.
+pub async fn install_upgrades(manager: &dyn PackageManager, planned: Vec<Upgrade>) -> Result<()> {
+    let held = super::inbox::hold_malicious_upgrades(manager, &planned).await;
+    let planned: Vec<Upgrade> = planned
         .into_iter()
         .filter(|u| !held.contains(&u.name))
-        .collect())
+        .collect();
+    if planned.is_empty() {
+        return Ok(());
+    }
+    manager.upgrade(&planned).await
 }
 
 /// Compare digit runs as numbers, so `rc.10` sorts after `rc.9`.
@@ -306,8 +334,19 @@ pub trait PackageManager: Send + Sync {
         Ok(())
     }
 
-    /// Update all installed packages to latest versions
-    async fn update_all(&self) -> Result<()>;
+    /// Refresh the data the outdated check reads, before a plan.
+    async fn refresh(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Install exactly these upgrades, each at its target version. Callers pass a planned,
+    /// non-empty list: an upgrade command without names would upgrade every package.
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()>;
+
+    /// Installed packages with their versions, for the report after an upgrade.
+    async fn installed_versions(&self) -> Result<Vec<PackageInfo>> {
+        self.list_installed().await
+    }
 
     /// Packages the manager's outdated check lists, with the version an upgrade would
     /// install. A target can be older than the installed version; `update_all` skips those.
@@ -334,6 +373,82 @@ pub trait PackageManager: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// A manager that records the upgrades it is asked to install.
+    struct Fake {
+        candidates: Option<Vec<Upgrade>>,
+        upgraded: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl PackageManager for Fake {
+        async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
+            Ok(Vec::new())
+        }
+        async fn install(&self, _: &PackageInfo) -> Result<()> {
+            Ok(())
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &str {
+            "fake"
+        }
+        // Homebrew has no OSV ecosystem, so no OSV request leaves the test
+        fn ecosystem(&self) -> Ecosystem {
+            Ecosystem::Brew
+        }
+        async fn cooldown(&self) -> Cooldown {
+            Cooldown::Off
+        }
+        async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+            self.upgraded
+                .lock()
+                .unwrap()
+                .push(planned.iter().map(|u| u.name.clone()).collect());
+            Ok(())
+        }
+        async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
+            self.candidates
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("outdated check failed"))
+        }
+        async fn uninstall(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_plan_upgrades_nothing() {
+        let fake = Fake {
+            candidates: None,
+            upgraded: Mutex::new(Vec::new()),
+        };
+        assert!(update_all(&fake).await.is_err());
+        // Before, gem ran `gem update` without names here, which updates every gem
+        assert!(fake.upgraded.lock().unwrap().is_empty());
+
+        let fake = Fake {
+            candidates: Some(Vec::new()),
+            upgraded: Mutex::new(Vec::new()),
+        };
+        update_all(&fake).await.unwrap();
+        assert!(fake.upgraded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_the_planned_upgrades_install() {
+        let fake = Fake {
+            candidates: Some(vec![
+                Upgrade::new("a", Some("1.0"), "2.0"),
+                Upgrade::new("b", Some("2.0"), "1.0"),
+            ]),
+            upgraded: Mutex::new(Vec::new()),
+        };
+        update_all(&fake).await.unwrap();
+        assert_eq!(*fake.upgraded.lock().unwrap(), vec![vec!["a".to_string()]]);
+    }
 
     #[test]
     fn versions_compare_numerically_with_prereleases_first() {
@@ -384,5 +499,8 @@ mod tests {
         assert!(Upgrade::new("a", Some("1.0"), "1.0.rc2").is_downgrade(gem));
         let brew = Ecosystem::Brew;
         assert!(Upgrade::new("a", Some("1.2.3"), "1.2.3_1").moves_forward(brew));
+        // brew lists only outdated packages, so a `latest` cask upgrades and shows in the plan
+        assert!(Upgrade::new("a", Some("latest"), "latest").moves_forward(brew));
+        assert!(Upgrade::new("a", None, "2.0").moves_forward(brew));
     }
 }

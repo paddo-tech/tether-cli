@@ -675,7 +675,7 @@ impl DaemonServer {
             }
             log::info!("Updating {} packages...", manager.name());
             let hash_before = manager.compute_manifest_hash().await.ok();
-            if let Err(e) = manager.update_all().await {
+            if let Err(e) = crate::packages::update_all(manager.as_ref()).await {
                 log::error!("{} update failed: {}", manager.name(), e);
             } else {
                 let hash_after = manager.compute_manifest_hash().await.ok();

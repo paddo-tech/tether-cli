@@ -143,29 +143,15 @@ impl PackageManager for GemManager {
         }
     }
 
-    async fn update_all(&self) -> Result<()> {
-        let packages = self.list_installed().await?;
-        if packages.is_empty() {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+        let names: Vec<&str> = planned
+            .iter()
+            .map(|u| u.name.as_str())
+            .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
+            .collect();
+        // Without names gem updates every gem, unplanned and unchecked by OSV
+        if names.is_empty() {
             return Ok(());
-        }
-
-        // `gem update` never installs an older version, so a failed outdated check updates
-        // every gem, like a failed OSV request. Without names gem updates every gem.
-        let mut names = Vec::new();
-        match super::planned_upgrades(self).await {
-            Ok(upgrades) => {
-                names = upgrades
-                    .into_iter()
-                    .map(|u| u.name)
-                    .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
-                    .collect();
-                if names.is_empty() {
-                    return Ok(());
-                }
-            }
-            Err(e) => {
-                crate::cli::Output::warning(&format!("gem upgrades not checked against OSV: {}", e))
-            }
         }
         let output = command("gem")?
             .arg("update")

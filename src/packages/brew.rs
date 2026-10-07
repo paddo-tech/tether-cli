@@ -179,23 +179,26 @@ impl BrewInfoEntry {
 /// Outdated, unpinned formulae and casks from trusted taps, fully qualified, so an upgrade
 /// never pulls a new release from a tap the user has not trusted.
 fn trusted_upgrades(info: BrewInfo, policy: &PackagePolicy) -> (Vec<Upgrade>, Vec<Upgrade>) {
-    let pick = |entries: Vec<BrewInfoEntry>| {
+    let pick = |entries: Vec<BrewInfoEntry>, cask: bool| {
         entries
             .into_iter()
             .filter(|e| e.outdated && !e.pinned)
             .filter_map(|e| {
                 let tap = e.tap.as_deref().filter(|tap| policy.tap_trusted(tap))?;
                 let name = format!("{}/{}", tap, normalize_formula_name(&e.full_name));
-                Some(Upgrade::new(
-                    &name,
-                    e.installed_version(),
-                    e.target_version().as_deref().unwrap_or("newer"),
-                ))
+                Some(Upgrade {
+                    cask,
+                    ..Upgrade::new(
+                        &name,
+                        e.installed_version(),
+                        e.target_version().as_deref().unwrap_or("newer"),
+                    )
+                })
             })
             .filter(|u| validate_name(Ecosystem::Brew, &u.name).is_ok())
             .collect()
     };
-    (pick(info.formulae), pick(info.casks))
+    (pick(info.formulae, false), pick(info.casks, true))
 }
 
 /// A brew command that loads only the formulae and casks named on it. Without these, brew
@@ -263,6 +266,36 @@ fn installed_casks(caskroom: &std::path::Path) -> Vec<(String, Option<String>)> 
         })
         .collect();
     installed.sort();
+    installed
+}
+
+/// Each package directory under a Cellar or Caskroom, with the version of its newest keg
+/// directory, and `suffix` added to its name.
+fn keg_versions(root: &std::path::Path, suffix: &str) -> Vec<PackageInfo> {
+    let Ok(packages) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut installed: Vec<PackageInfo> = packages
+        .filter_map(|e| e.ok())
+        .filter(|package| package.path().is_dir())
+        .map(|package| {
+            let version = std::fs::read_dir(package.path())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok())
+                .filter(|keg| keg.path().is_dir())
+                .map(|keg| keg.file_name().to_string_lossy().to_string())
+                .filter(|keg| !keg.starts_with('.'))
+                .max_by(|a, b| {
+                    super::manager::compare_brew_versions(a, b).unwrap_or_else(|| a.cmp(b))
+                });
+            PackageInfo {
+                name: format!("{}{}", package.file_name().to_string_lossy(), suffix),
+                version,
+            }
+        })
+        .collect();
+    installed.sort_by(|a, b| a.name.cmp(&b.name));
     installed
 }
 
@@ -888,12 +921,11 @@ impl PackageManager for BrewManager {
         Ok(())
     }
 
-    async fn update_all(&self) -> Result<()> {
+    /// `brew update` would load every installed formula and cask after it fetches the taps,
+    /// so git updates the trusted taps, and the outdated check refreshes the API data.
+    async fn refresh(&self) -> Result<()> {
         let policy = self.policy();
         let repository = PathBuf::from(self.run_brew(&["--repository"]).await?.trim());
-
-        // `brew update` would load every installed formula and cask after it fetches the taps,
-        // so git updates the trusted taps and brew refreshes its API data for the core taps.
         for tap in installed_taps(&repository.join("Library/Taps")) {
             if !policy.tap_trusted(&tap.0) {
                 continue;
@@ -912,18 +944,18 @@ impl PackageManager for BrewManager {
                 ));
             }
         }
+        Ok(())
+    }
 
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
         let mut failures = Vec::new();
-        for (kind, outdated) in self.trusted_outdated(&policy).await? {
-            // One failed kind must not stop the other kind's upgrades
-            let upgrades = match outdated {
-                Ok(upgrades) => upgrades,
-                Err(e) => {
-                    failures.push(e);
-                    continue;
-                }
-            };
-            let names: Vec<String> = upgrades.into_iter().map(|u| u.name).collect();
+        // One failed kind must not stop the other kind's upgrades
+        for (kind, cask) in [("--formula", false), ("--cask", true)] {
+            let names: Vec<&str> = planned
+                .iter()
+                .filter(|u| u.cask == cask)
+                .map(|u| u.name.as_str())
+                .collect();
             if names.is_empty() {
                 continue;
             }
@@ -932,25 +964,37 @@ impl PackageManager for BrewManager {
                 .args(&names)
                 .output()
                 .await?;
-
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 failures.push(format!("brew upgrade {} failed: {}", kind, stderr.trim()));
             }
         }
-
         if !failures.is_empty() {
             return Err(anyhow::anyhow!(failures.join("; ")));
         }
         Ok(())
     }
 
+    /// A kind whose check fails is skipped with a warning, so the other kind still upgrades.
     async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
         let mut upgrades = Vec::new();
         for (_, outdated) in self.trusted_outdated(&self.policy()).await? {
-            upgrades.extend(outdated.map_err(|e| anyhow::anyhow!(e))?);
+            match outdated {
+                Ok(outdated) => upgrades.extend(outdated),
+                Err(e) => crate::cli::Output::warning(&e),
+            }
         }
         Ok(upgrades)
+    }
+
+    /// Every installed formula and cask with the version of its newest keg, read from the
+    /// Cellar and the Caskroom, so no Ruby runs. A cask is named `<token> (cask)`.
+    async fn installed_versions(&self) -> Result<Vec<PackageInfo>> {
+        let cellar = PathBuf::from(self.run_brew(&["--cellar"]).await?.trim());
+        let caskroom = PathBuf::from(self.run_brew(&["--caskroom"]).await?.trim());
+        let mut installed = keg_versions(&cellar, "");
+        installed.extend(keg_versions(&caskroom, " (cask)"));
+        Ok(installed)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -990,6 +1034,31 @@ impl PackageManager for BrewManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keg_directories_give_the_installed_version() {
+        let root = tempfile::tempdir().unwrap();
+        for keg in ["wget/1.24.5", "wget/1.25.0", "wget/1.25.0_1", "jq/1.7.1"] {
+            std::fs::create_dir_all(root.path().join(keg)).unwrap();
+        }
+        std::fs::create_dir_all(root.path().join("firefox/.metadata")).unwrap();
+        std::fs::create_dir_all(root.path().join("firefox/latest")).unwrap();
+        let versions = |suffix| {
+            keg_versions(root.path(), suffix)
+                .into_iter()
+                .map(|p| (p.name, p.version.unwrap_or_default()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            versions(""),
+            [
+                ("firefox".to_string(), "latest".to_string()),
+                ("jq".to_string(), "1.7.1".to_string()),
+                ("wget".to_string(), "1.25.0_1".to_string()),
+            ]
+        );
+        assert_eq!(versions(" (cask)")[0].0, "firefox (cask)");
+    }
 
     #[test]
     fn approved_items_install_from_the_reviewed_tap() {
