@@ -464,27 +464,20 @@ pub fn record_statuses(
 pub const OLD_BUILD_NOTE: &str = "on 1.x: installs without the new checks; its packages wait in \
                                   the inbox until it upgrades and you trust it";
 
-/// Other machines that run a build before 2.0 or have no signed record. Such a machine
-/// installs synced packages without the trust, release-age and OSV checks, and its record
-/// grants no trust here.
-pub fn old_builds(
-    machines: &[MachineState],
-    statuses: &[(String, RecordStatus, Option<String>)],
-    this_machine: &str,
-) -> Vec<String> {
+/// Other machines whose record names a build before 2.0, or no version. Such a machine
+/// installs synced packages without the trust, release-age and OSV checks. The signature
+/// does not count here: a 2.x record that fails its signature is not a 1.x machine, and
+/// `record_statuses` reports its signature state.
+pub fn old_builds(machines: &[MachineState], this_machine: &str) -> Vec<String> {
     machines
         .iter()
         .filter(|m| m.machine_id != this_machine)
         .filter(|m| {
-            let signed = statuses
-                .iter()
-                .any(|(id, _, fp)| *id == m.machine_id && fp.is_some());
-            let major = m
-                .cli_version
+            m.cli_version
                 .split('.')
                 .next()
-                .and_then(|v| v.parse::<u64>().ok());
-            !signed || major.is_none_or(|major| major < 2)
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_none_or(|major| major < 2)
         })
         .map(|m| m.machine_id.clone())
         .collect()
@@ -768,29 +761,21 @@ mod tests {
     }
 
     #[test]
-    fn old_builds_are_machines_before_2_0_or_without_a_signature() {
+    fn old_builds_go_by_version_not_signature() {
         let machine = |id: &str, version: &str| MachineState {
             cli_version: version.to_string(),
             ..MachineState::new(id)
         };
+        // "unsigned" and "tampered" have no signature that verifies, and claim 2.x
         let machines = [
             machine("this", "1.13.1"),
             machine("old", "1.13.1"),
             machine("blank", ""),
             machine("beta", "2.0.0-beta.1"),
             machine("unsigned", "2.0.0"),
+            machine("tampered", "2.1.0"),
         ];
-        let signed = |id: &str| (id.to_string(), RecordStatus::Untrusted, Some("fp".into()));
-        let statuses = [
-            signed("old"),
-            signed("blank"),
-            signed("beta"),
-            ("unsigned".to_string(), RecordStatus::Untrusted, None),
-        ];
-        assert_eq!(
-            old_builds(&machines, &statuses, "this"),
-            ["old", "blank", "unsigned"]
-        );
+        assert_eq!(old_builds(&machines, "this"), ["old", "blank"]);
     }
 
     fn write_record(dir: &Path, file_id: &str, record: &MachineState) {

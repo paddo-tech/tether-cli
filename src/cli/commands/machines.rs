@@ -58,7 +58,7 @@ pub async fn list(json: bool) -> Result<()> {
         return Ok(());
     }
     let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, current_machine);
-    let old_builds = signing::old_builds(&machines, &statuses, current_machine);
+    let old_builds = signing::old_builds(&machines, current_machine);
 
     println!();
     println!("{}", "Synced Machines".bright_cyan().bold());

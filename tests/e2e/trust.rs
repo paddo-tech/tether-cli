@@ -65,6 +65,10 @@ async fn trust() {
     assert_eq!(b.installed("npm", "evil").await, None);
     let list = b.tether_ok("machines list").await.text();
     assert!(list.contains("signature failed (ignored)"), "{list}");
+    // The tampered record still claims a 2.x build, so a is not a 1.x machine
+    assert!(!list.contains("on 1.x"), "{list}");
+    let status = b.tether_ok("status").await.text();
+    assert!(!status.contains("on 1.x"), "{status}");
 
     // a signs a new record over the tampered one, and b trusts it again
     a.seed("npm", "beta", "1.0.0").await;

@@ -17,7 +17,7 @@ pub struct DashboardState {
     pub old_ids: Vec<signing::OldId>,
     /// How a sync reads each record, by machine id
     pub record_status: Vec<(String, signing::RecordStatus)>,
-    /// Other machines on 1.x, or without a signed record
+    /// Other machines whose record names a 1.x build or no version
     pub old_builds: Vec<String>,
     /// The profiles each package belongs to, as a sync reads the records
     pub membership: Option<crate::sync::membership::Membership>,
@@ -50,7 +50,7 @@ impl DashboardState {
         };
         let old_builds = sync_state
             .as_ref()
-            .map(|s| signing::old_builds(&machines, &statuses, &s.machine_id))
+            .map(|s| signing::old_builds(&machines, &s.machine_id))
             .unwrap_or_default();
         let record_status: Vec<(String, signing::RecordStatus)> = statuses
             .into_iter()
