@@ -1,8 +1,8 @@
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::MergeConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use owo_colors::OwoColorize;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 

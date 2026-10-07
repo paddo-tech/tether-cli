@@ -1,3 +1,4 @@
+use crate::cli::output::Colorize;
 use crate::cli::{Output, Prompt};
 use crate::config::Config;
 use crate::packages::inbox;
@@ -7,7 +8,6 @@ use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
 use comfy_table::{Attribute, Cell, Color};
-use owo_colors::OwoColorize;
 use std::path::Path;
 
 pub async fn list() -> Result<()> {

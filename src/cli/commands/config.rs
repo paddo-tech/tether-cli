@@ -1,7 +1,7 @@
 use crate::cli::{Output, Prompt};
 use crate::config::{Config, DotfileEntry, FeaturesConfig};
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, Table};
+use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color};
 use inquire::Select as InquireSelect;
 
 pub async fn get(key: &str) -> Result<()> {
@@ -278,14 +278,14 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
 }
 
 fn render_entry_table(title: &str, entries: &[String]) {
-    use owo_colors::OwoColorize;
+    use crate::cli::output::Colorize;
 
     if entries.is_empty() {
         println!("{}", format!("{}: (none)", title).bright_black());
         return;
     }
 
-    let mut table = Table::new();
+    let mut table = Output::table();
     table.load_preset(UTF8_FULL).set_header(vec![
         Cell::new(format!("{} ({})", title, entries.len()))
             .add_attribute(Attribute::Bold)
@@ -306,14 +306,14 @@ fn render_entry_table(title: &str, entries: &[String]) {
 }
 
 fn render_dotfile_table(title: &str, entries: &[DotfileEntry]) {
-    use owo_colors::OwoColorize;
+    use crate::cli::output::Colorize;
 
     if entries.is_empty() {
         println!("{}", format!("{}: (none)", title).bright_black());
         return;
     }
 
-    let mut table = Table::new();
+    let mut table = Output::table();
     table.load_preset(UTF8_FULL).set_header(vec![
         Cell::new(format!("{} ({})", title, entries.len()))
             .add_attribute(Attribute::Bold)
@@ -441,7 +441,7 @@ fn manage_dotfile_list(
 
 /// List all features and their status
 pub async fn features_list() -> Result<()> {
-    use owo_colors::OwoColorize;
+    use crate::cli::output::Colorize;
 
     let config = Config::load()?;
 

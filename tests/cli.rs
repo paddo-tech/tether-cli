@@ -125,3 +125,23 @@ fn status_without_init_exits_1() {
     let h = tempfile::tempdir().unwrap();
     fails(h.path(), &["status"], "not initialized");
 }
+
+#[test]
+fn piped_output_has_no_colour() {
+    let h = home();
+    for args in [
+        &["config", "features"][..],
+        &["machines", "profile", "list"],
+        &["config", "get", "nope"],
+    ] {
+        let out = tether(h.path()).args(args).output().unwrap();
+        let text = [out.stdout, out.stderr].concat();
+        assert!(!text.is_empty(), "{:?} printed nothing", args);
+        assert!(
+            !text.contains(&0x1b),
+            "{:?} printed ANSI codes: {}",
+            args,
+            String::from_utf8_lossy(&text)
+        );
+    }
+}

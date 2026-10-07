@@ -1,9 +1,9 @@
 use crate::cli::output::relative_time;
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{signing, ConflictState, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 pub async fn run() -> Result<()> {
     let config = match Config::load() {

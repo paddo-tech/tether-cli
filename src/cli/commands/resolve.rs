@@ -1,8 +1,8 @@
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{ConflictResolution, ConflictState, FileConflict, SyncEngine};
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 pub async fn run(file: Option<&str>) -> Result<()> {
     let config = Config::load()?;

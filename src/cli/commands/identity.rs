@@ -1,5 +1,5 @@
+use crate::cli::output::Colorize;
 use anyhow::Result;
-use owo_colors::OwoColorize;
 
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;

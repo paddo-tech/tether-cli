@@ -2059,7 +2059,7 @@ pub async fn files_list() -> Result<()> {
         return Ok(());
     }
 
-    let mut table = comfy_table::Table::new();
+    let mut table = Output::table();
     table.set_header(vec![
         Cell::new("File").add_attribute(Attribute::Bold),
         Cell::new("Status").add_attribute(Attribute::Bold),

@@ -1,9 +1,9 @@
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use comfy_table::{Attribute, Cell, Color};
-use owo_colors::OwoColorize;
 use std::collections::{HashMap, HashSet};
 
 pub async fn run(machine: Option<&str>) -> Result<()> {
