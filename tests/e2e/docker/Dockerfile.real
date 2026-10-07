@@ -1,0 +1,12 @@
+# A machine with real npm, uv and curl, for tests that install from the public registries.
+FROM node:24-bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini git expect openssh-client python3 python3-pip curl libssl3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --no-cache-dir --break-system-packages uv
+COPY init.exp /e2e/
+RUN git config --system user.name e2e && git config --system user.email e2e@example.invalid
+ENV HOME=/root TERM=xterm-256color PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WORKDIR /root
+# tini reaps processes that exit after their parent, such as a stopped daemon
+ENTRYPOINT ["/usr/bin/tini", "--"]

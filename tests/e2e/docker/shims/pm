@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fake brew, npm, pnpm, bun, gem, ruby, uv and curl for the fleet test.
+"""Fake brew, npm, pnpm, bun, gem, ruby, uv and curl for the e2e suite.
 
 Installed packages live in /state/pkgs/<key> as "name version" lines, seeded per
 machine. Every call is appended to /state/calls.jsonl with the round it ran in, and
@@ -222,7 +222,7 @@ def curl(args):
         return json.dumps({"releases": {REGISTRY_VERSION: [{"yanked": False, "upload_time_iso_8601": OLD_RELEASE}]}})
     if "rubygems.org/api/v1/versions/" in url:
         return json.dumps([{"number": REGISTRY_VERSION, "prerelease": False}])
-    sys.stderr.write(f"curl: (6) fleet test has no network: {url}\n")
+    sys.stderr.write(f"curl: (6) e2e shim has no network: {url}\n")
     sys.exit(6)
 
 
