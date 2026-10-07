@@ -1187,32 +1187,43 @@ async fn import_simple_manager(
             }
             Err(e) if foreign.contains(&name) => {
                 let error = e.to_string();
-                let first_line = error.lines().next().unwrap_or_default();
+                let first_line = error_line(&error);
+                let min_age = PackagePolicy::load().min_release_age_days;
                 match fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await {
                     Ok(Fallback::Installed(version)) => {
                         installed_any = true;
                         failures.remove(&InstallFailure::key(def.state_key, &name));
+                        let why = if too_new(def.ecosystem, asked.as_deref(), &version, min_age) {
+                            format!("is newer than the release-age limit of {} days", min_age)
+                        } else {
+                            format!(
+                                "a machine on another OS lists and which failed here: {}",
+                                first_line
+                            )
+                        };
                         Output::info(&format!(
-                            "Installed {} {} as approved, instead of {}, which a machine on \
-                             another OS lists and which failed here: {}",
+                            "Installed {} {} as approved, instead of {}, which {}",
                             name,
                             version,
                             asked.as_deref().unwrap_or("the pinned version"),
-                            first_line
+                            why
                         ));
                     }
                     Ok(Fallback::Held(item)) => {
-                        record_failure(
-                            failures,
-                            def.state_key,
-                            &name,
-                            asked.as_deref(),
-                            &format!(
-                                "{}; holding {} for approval",
-                                first_line,
-                                item.version.as_deref().unwrap_or_default()
-                            ),
-                        );
+                        let older = item.version.as_deref().unwrap_or_default();
+                        let message = if too_new(def.ecosystem, asked.as_deref(), older, min_age) {
+                            format!(
+                                "{} {} is newer than the release-age limit of {} days. The \
+                                 older release {} waits in the inbox for approval",
+                                name,
+                                asked.as_deref().unwrap_or_default(),
+                                min_age,
+                                older
+                            )
+                        } else {
+                            format!("{}; holding {} for approval", first_line, older)
+                        };
+                        record_failure(failures, def.state_key, &name, asked.as_deref(), &message);
                         // The held item replaces the pass the failed version got
                         gated
                             .passed
@@ -1238,6 +1249,32 @@ async fn import_simple_manager(
         }
     }
     installed_any
+}
+
+/// The fallback is the newest release older than the release-age limit, so a pinned
+/// version above it is too new for the limit.
+fn too_new(ecosystem: Ecosystem, pinned: Option<&str>, fallback: &str, min_age: u32) -> bool {
+    min_age > 0
+        && pinned.is_some_and(|p| {
+            crate::packages::pin::compare_versions(ecosystem, p, fallback)
+                == std::cmp::Ordering::Greater
+        })
+}
+
+/// The line of a manager's error that says what failed. Managers print progress first,
+/// such as bun's "Resolving dependencies".
+fn error_line(error: &str) -> &str {
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find(|l| l.to_ascii_lowercase().contains("error"))
+        .or(lines.last())
+        .copied()
+        .unwrap_or_default()
 }
 
 /// What happened to the release that suits this machine.
@@ -1781,6 +1818,22 @@ fn write_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_age_rejection_reads_as_such() {
+        assert!(too_new(Ecosystem::Npm, Some("2.0.0"), "1.9.0", 7));
+        assert!(!too_new(Ecosystem::Npm, Some("1.9.0"), "1.9.0", 7));
+        assert!(!too_new(Ecosystem::Npm, Some("2.0.0"), "1.9.0", 0));
+        assert!(!too_new(Ecosystem::Npm, None, "1.9.0", 7));
+        assert_eq!(
+            error_line("bun command failed: Resolving dependencies\nerror: No version matching"),
+            "error: No version matching"
+        );
+        assert_eq!(
+            error_line("bun command failed: Resolving dependencies\nResolved, downloaded\n"),
+            "Resolved, downloaded"
+        );
+    }
 
     #[test]
     fn excluded_notice_counts_instead_of_naming() {
