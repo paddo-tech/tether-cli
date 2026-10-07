@@ -711,18 +711,12 @@ impl Default for DaemonServer {
 mod tests {
     use super::*;
 
+    // One test owns the process-wide flag; two tests writing it in parallel raced
     #[test]
-    fn test_daemon_mode_flag_default_false() {
-        // Reset to known state (other tests may have set it)
-        DAEMON_MODE.store(false, Ordering::Relaxed);
+    fn test_daemon_mode_flag() {
         assert!(!is_daemon_mode());
-    }
-
-    #[test]
-    fn test_daemon_mode_flag_set_true() {
         DAEMON_MODE.store(true, Ordering::Relaxed);
         assert!(is_daemon_mode());
-        // Reset
         DAEMON_MODE.store(false, Ordering::Relaxed);
     }
 
