@@ -85,6 +85,8 @@ impl DaemonServer {
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
             sync_timer.tick().await;
+            // Before this line a SIGHUP still stops the process, so scripts wait for it
+            log::info!("Signal handlers ready");
 
             loop {
                 tokio::select! {
@@ -104,6 +106,7 @@ impl DaemonServer {
                         if let Err(e) = self.run_sync().await {
                             log::error!("Sync failed: {}", e);
                         }
+                        log::info!("SIGHUP sync finished");
                     },
                 };
             }

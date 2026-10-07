@@ -85,17 +85,16 @@ async fn inbox_notifications(m: &Machine) -> Vec<String> {
         .collect()
 }
 
-/// Makes the running daemon sync now, and waits until that sync ends.
+/// Makes the running daemon sync now, and waits until the daemon logs that the `n`th such
+/// sync ended.
 async fn daemon_sync(m: &Machine, n: usize) {
     m.ok("kill -HUP $(cat /root/.tether/daemon.pid)").await;
-    wait_for_log(m, "Received SIGHUP", n).await;
-    // The sync holds the sync lock from just after that line until it ends
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    m.ok("flock /root/.tether/sync.lock true").await;
+    wait_for_log(m, "SIGHUP sync finished", n).await;
 }
 
 async fn wait_for_log(m: &Machine, line: &str, count: usize) {
-    for _ in 0..300 {
+    // A sync can take a while in a loaded Docker host
+    for _ in 0..600 {
         let log = m.read("/root/.tether/daemon.log").await;
         if log.matches(line).count() >= count {
             return;
@@ -120,7 +119,8 @@ async fn notify_send_once_per_inbox_batch() {
     assert_eq!(a.init(&lab).await.code, 0);
     assert_eq!(b.init(&lab).await.code, 0);
     b.tether_ok("daemon start").await;
-    wait_for_log(&b, "Daemon starting", 1).await;
+    // A SIGHUP before the handlers are ready would stop the daemon
+    wait_for_log(&b, "Signal handlers ready", 1).await;
 
     a.seed("npm", "first", "1.0.0").await;
     a.tether_ok("sync").await;
