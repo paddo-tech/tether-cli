@@ -15,7 +15,7 @@ pub mod validate;
 pub use brew::{normalize_formula_name, BrewManager, BrewfilePackages};
 pub use bun::BunManager;
 pub use gem::GemManager;
-pub use manager::{PackageInfo, PackageManager};
+pub use manager::{planned_upgrades, PackageInfo, PackageManager, Upgrade};
 pub use npm::NpmManager;
 pub use pnpm::PnpmManager;
 pub use policy::{Cooldown, PackagePolicy};

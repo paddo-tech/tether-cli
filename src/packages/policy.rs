@@ -180,11 +180,6 @@ pub fn pnpm_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Coo
     }
 }
 
-/// pnpm 12.0.0 to 12.3.1 reject `update --ignore-scripts` (pnpm/pnpm#14512).
-pub fn pnpm_update_accepts_ignore_scripts(version: Option<((u64, u64, u64), bool)>) -> bool {
-    !matches!(version, Some((v, _)) if ((12, 0, 0)..(12, 3, 2)).contains(&v))
-}
-
 /// bun added `minimumReleaseAge` (seconds) in 1.3.0.
 pub fn bun_cooldown(days: u32, version: Option<((u64, u64, u64), bool)>) -> Cooldown {
     if days == 0 {
@@ -361,15 +356,6 @@ mod tests {
         assert_eq!(pnpm_cooldown(7, v("11.0.0")), strict);
         assert_eq!(pnpm_cooldown(7, v("12.2.1")), strict);
         assert_eq!(pnpm_cooldown(7, v("12.8.1")), strict);
-    }
-
-    #[test]
-    fn pnpm_update_ignore_scripts_gap() {
-        assert!(pnpm_update_accepts_ignore_scripts(v("11.6.0")));
-        assert!(!pnpm_update_accepts_ignore_scripts(v("12.0.0")));
-        assert!(!pnpm_update_accepts_ignore_scripts(v("12.3.1")));
-        assert!(pnpm_update_accepts_ignore_scripts(v("12.3.2")));
-        assert!(pnpm_update_accepts_ignore_scripts(v("12.8.1")));
     }
 
     #[test]

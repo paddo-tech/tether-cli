@@ -1,4 +1,4 @@
-use super::{manager_for_key, osv, resolve, BrewManager, PackageInfo, PackageManager};
+use super::{manager_for_key, osv, resolve, BrewManager, PackageInfo, PackageManager, Upgrade};
 use crate::cli::Output;
 use crate::sync::signing::{self, TrustStore};
 use anyhow::{bail, Result};
@@ -795,23 +795,18 @@ pub fn queue_machine_keys(sync_path: &Path, this_machine: &str) -> Result<Vec<In
 }
 
 /// Names whose upgrade target OSV lists as malicious. They go to the inbox, and
-/// `update_all` leaves them at the installed version. Like a failed OSV request, a manager
-/// that cannot list its upgrade targets does not stop upgrades.
-pub async fn hold_malicious_upgrades(manager: &dyn PackageManager) -> Vec<String> {
+/// `update_all` leaves them at the installed version.
+pub async fn hold_malicious_upgrades(
+    manager: &dyn PackageManager,
+    upgrades: &[Upgrade],
+) -> Vec<String> {
     if osv::ecosystem_name(manager.ecosystem()).is_none() {
         return Vec::new();
     }
-    let candidates = match manager.upgrade_candidates().await {
-        Ok(candidates) => candidates,
-        Err(e) => {
-            Output::warning(&format!(
-                "{} upgrades not checked against OSV: {}",
-                manager.name(),
-                e
-            ));
-            return Vec::new();
-        }
-    };
+    let candidates: Vec<(String, String)> = upgrades
+        .iter()
+        .map(|u| (u.name.clone(), u.target.clone()))
+        .collect();
     let pins: Vec<(String, Option<String>)> = candidates
         .iter()
         .map(|(name, version)| (name.clone(), Some(version.clone())))

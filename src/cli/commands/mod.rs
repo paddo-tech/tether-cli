@@ -120,8 +120,13 @@ pub enum Commands {
     /// Clear cached encryption key
     Lock,
 
-    /// Upgrade all installed packages
-    Upgrade,
+    /// Upgrade installed packages to the newest release the release-age limit allows. Never
+    /// downgrades. Asks first in a terminal; without one, needs -y
+    Upgrade {
+        /// List what would change without upgrading
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// List and manage installed packages
     Packages {
@@ -599,6 +604,7 @@ impl Cli {
     }
 
     pub async fn run(&self) -> Result<()> {
+        crate::cli::Prompt::set_assume_yes(self.yes);
         match &self.command {
             None | Some(Commands::Dashboard) => {
                 tokio::task::spawn_blocking(crate::dashboard::run).await?
@@ -734,7 +740,7 @@ impl Cli {
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
-            Commands::Upgrade => upgrade::run().await,
+            Commands::Upgrade { dry_run } => upgrade::run(*dry_run).await,
             Commands::Packages { list, action } => match action {
                 None => packages::run(*list, self.yes).await,
                 Some(PackagesAction::Inbox) => packages::inbox_list().await,

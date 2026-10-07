@@ -1,6 +1,8 @@
 use super::command;
 use super::policy::{self, PackagePolicy};
-use super::{validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager};
+use super::{
+    validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -18,7 +20,7 @@ fn parse_package_version(s: &str) -> (String, Option<String>) {
 /// Name and `Latest` version from the `bun outdated` table, which has no JSON form, for
 /// each package whose `Latest` differs from `Current`. `bun add -g` installs `Latest`.
 /// bun marks a version that the release-age limit held back with ` *`.
-fn parse_outdated_table(stdout: &str) -> Vec<(String, String)> {
+fn parse_outdated_table(stdout: &str) -> Vec<Upgrade> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -34,7 +36,7 @@ fn parse_outdated_table(stdout: &str) -> Vec<(String, String)> {
             }
             let latest = latest.trim_end_matches('*').trim();
             (name != "Package" && !latest.is_empty() && latest != *current)
-                .then(|| (name.to_string(), latest.to_string()))
+                .then(|| Upgrade::new(name, Some(current), latest))
         })
         .collect()
 }
@@ -173,44 +175,46 @@ impl PackageManager for BunManager {
         )
     }
 
+    /// `bun update -g` updates only the first package, so each planned target is added
+    /// exactly. A plain `bun add -g name` would pick the newest mature release, which can
+    /// be older than the installed one.
     async fn update_all(&self) -> Result<()> {
-        let packages = self.list_installed().await?;
-        if packages.is_empty() {
+        let upgrades = super::planned_upgrades(self).await?;
+        if upgrades.is_empty() {
             return Ok(());
         }
 
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
-        let held = super::inbox::hold_malicious_upgrades(self).await;
 
-        // bun update -g is broken (only updates first package)
-        // Workaround: reinstall each package to get latest version
-        for pkg in packages {
-            if held.contains(&pkg.name) {
-                continue;
-            }
-            if let Err(e) = validate_name(Ecosystem::Npm, &pkg.name) {
+        for upgrade in upgrades {
+            if let Err(e) = validate_name(Ecosystem::Npm, &upgrade.name)
+                .and_then(|()| validate_version(Ecosystem::Npm, &upgrade.target))
+            {
                 crate::cli::Output::warning(&format!("Skipping bun entry: {}", e));
                 continue;
             }
             let output = command("bun")?
                 .args(["add", "-g"])
                 .args(&cooldown)
-                .args(policy::bun_script_args(&package_policy, &pkg.name))
-                .arg(&pkg.name)
+                .args(policy::bun_script_args(&package_policy, &upgrade.name))
+                .arg(format!("{}@{}", upgrade.name, upgrade.target))
                 .output()
                 .await?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                crate::cli::Output::warning(&format!("Failed to update {}: {}", pkg.name, stderr));
+                crate::cli::Output::warning(&format!(
+                    "Failed to update {}: {}",
+                    upgrade.name, stderr
+                ));
             }
         }
 
         Ok(())
     }
 
-    async fn upgrade_candidates(&self) -> Result<Vec<(String, String)>> {
+    async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
         let output = command("bun")?
             .args(["outdated", "-g"])
             .args(self.cooldown_args().await)
@@ -297,8 +301,8 @@ Note: The * indicates that version isn't true latest due to minimum release age
         assert_eq!(
             parse_outdated_table(stdout),
             vec![
-                ("cowsay".to_string(), "1.6.0".to_string()),
-                ("@scope/held".to_string(), "2.1.0".to_string())
+                Upgrade::new("cowsay", Some("1.4.0"), "1.6.0"),
+                Upgrade::new("@scope/held", Some("2.0.0"), "2.1.0")
             ]
         );
         assert!(parse_outdated_table("bun outdated v1.4.2 (744846f84)\n").is_empty());
