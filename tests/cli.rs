@@ -339,6 +339,62 @@ fn items_without_a_binding_or_with_a_failed_signature_need_a_review() {
 }
 
 #[test]
+fn install_runs_the_gates_of_a_sync() {
+    use tether::packages::inbox::{Inbox, InboxItem, Kind, Reason};
+    let h = home();
+    let machines = h.path().join(".tether/sync/machines");
+    std::fs::create_dir_all(&machines).unwrap();
+    let mut other = tether::sync::MachineState::new("other");
+    other
+        .packages
+        .insert("npm".to_string(), vec!["left-pad".to_string()]);
+    other
+        .packages
+        .insert("brew_taps".to_string(), vec!["evil/tap".to_string()]);
+    std::fs::write(
+        machines.join("other.json"),
+        serde_json::to_string(&other).unwrap(),
+    )
+    .unwrap();
+    let inbox_path = h.path().join(".tether/inbox.json");
+    let inbox = Inbox {
+        items: vec![InboxItem {
+            kind: Kind::Package,
+            manager: "npm".to_string(),
+            name: "left-pad".to_string(),
+            version: Some("1.0.0".to_string()),
+            tap: None,
+            source_machine: Some("other".to_string()),
+            commit: None,
+            signer: None,
+            reasons: vec![Reason::TooNew],
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        }],
+        ..Inbox::default()
+    };
+    std::fs::write(&inbox_path, serde_json::to_string(&inbox).unwrap()).unwrap();
+    // A package held for any reason needs approval
+    fails(
+        h.path(),
+        &["packages", "install", "npm:left-pad"],
+        "waits in the inbox",
+    );
+    // A tap that is not trusted goes to the inbox instead
+    fails(
+        h.path(),
+        &["packages", "install", "brew_taps:evil/tap"],
+        "not trusted",
+    );
+    let inbox: Inbox =
+        serde_json::from_str(&std::fs::read_to_string(&inbox_path).unwrap()).unwrap();
+    assert!(inbox
+        .items
+        .iter()
+        .any(|i| i.id() == "brew_taps:evil/tap" && i.reasons == [Reason::UntrustedTap]));
+}
+
+#[test]
 fn daemon_status_and_logs() {
     let h = home();
     tether(h.path())

@@ -973,22 +973,134 @@ pub async fn check_osv(
     }
 }
 
-/// Install a package another machine lists, at `version` that the caller checked with
-/// [`check_osv`], as `tether packages install` and the dashboard's Import do. The caller
-/// holds the sync lock: a sync uninstalls a package this machine removed, so the install
-/// also takes it off that list, and no sync may save the record meanwhile.
+/// What a manual install puts on this machine: the release, and the tap of a formula or cask.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ManualInstall {
+    pub version: Option<String>,
+    pub tap: Option<String>,
+}
+
+/// The gates of a sync for a package that the user installs by hand, as `tether packages
+/// install` and the dashboard's Import do. The user chose the package, so no trusted record
+/// must list it. Every other gate applies: a package the inbox holds, for any reason, needs
+/// approval; a rejected version or tap stays rejected; a tap or a formula or cask from a tap
+/// that is not trusted goes to the inbox; the release is the one a sync resolves under the
+/// release-age limit; and [`check_osv`] checks it. The caller holds the sync lock, so no
+/// sync changes the inbox between these checks and the install.
+pub async fn check_manual_install(
+    manager_key: &str,
+    name: &str,
+    osv_required: bool,
+) -> Result<ManualInstall> {
+    use crate::sync::membership::canonical_id;
+    let inbox = Inbox::load()?;
+    let id = canonical_id(manager_key, name);
+    if inbox
+        .items
+        .iter()
+        .any(|i| i.kind == Kind::Package && canonical_id(&i.manager, &i.name) == id)
+    {
+        bail!(
+            "{} waits in the inbox. Review it with 'tether packages inbox', then run 'tether \
+             packages approve {}'",
+            id,
+            id
+        );
+    }
+    let policy = super::PackagePolicy::load();
+    let untrusted_tap = |tap: Option<String>| -> Result<()> {
+        add(vec![InboxItem {
+            kind: Kind::Package,
+            manager: manager_key.to_string(),
+            name: name.to_string(),
+            version: None,
+            tap: tap.clone(),
+            source_machine: None,
+            commit: None,
+            signer: None,
+            reasons: vec![Reason::UntrustedTap],
+            advisories: Vec::new(),
+            first_seen: Utc::now(),
+        }])?;
+        bail!(
+            "{} is from tap {}, which is not trusted. It waits in the inbox: review it with \
+             'tether packages inbox'",
+            id,
+            tap.as_deref().unwrap_or(name)
+        )
+    };
+    match manager_key {
+        "brew_taps" => {
+            if inbox.is_rejected(manager_key, name, None, None) {
+                bail!("You rejected tap {}", name);
+            }
+            if !policy.tap_trusted(name) {
+                untrusted_tap(None)?;
+            }
+            Ok(ManualInstall::default())
+        }
+        "brew_formulae" | "brew_casks" => {
+            let cask = manager_key == "brew_casks";
+            let Some(tap) = BrewManager::new().tap_for(name, cask).await else {
+                bail!("Cannot find the tap of {}", name);
+            };
+            if inbox.is_rejected(manager_key, name, None, Some(&tap)) {
+                bail!("You rejected {} from tap {}", name, tap);
+            }
+            if !policy.brew_allowed(manager_key, name, &tap) {
+                untrusted_tap(Some(tap.clone()))?;
+            }
+            Ok(ManualInstall {
+                version: None,
+                tap: Some(tap),
+            })
+        }
+        _ => {
+            let version = check_osv(manager_key, name, None, osv_required).await?;
+            let Some(manager) = manager_for_key(manager_key) else {
+                bail!("Unknown package manager {}", manager_key);
+            };
+            // As a sync, a manager that cannot enforce the limit installs only a release
+            // whose age Tether checked
+            if version.is_none()
+                && policy.min_release_age_days > 0
+                && manager.cooldown().await == super::Cooldown::Unsupported
+            {
+                bail!(
+                    "Tether could not check the release age of {}, and this {} cannot enforce \
+                     packages.min_release_age_days",
+                    name,
+                    manager.name()
+                );
+            }
+            if inbox.is_rejected(manager_key, name, version.as_deref(), None) {
+                bail!(
+                    "You rejected {} {}",
+                    name,
+                    version.as_deref().unwrap_or_default()
+                );
+            }
+            Ok(ManualInstall { version, tap: None })
+        }
+    }
+}
+
+/// Install a package another machine lists, as [`check_manual_install`] found it. The
+/// caller holds the sync lock: a sync uninstalls a package this machine removed, so the
+/// install also takes it off that list, and no sync may save the record meanwhile.
+/// `interactive` lets a cask ask for a password.
 pub async fn install_from_machine(
     manager: &str,
     name: &str,
-    version: Option<String>,
+    checked: ManualInstall,
     interactive: bool,
 ) -> Result<()> {
     let item = InboxItem {
         kind: Kind::Package,
         manager: manager.to_string(),
         name: name.to_string(),
-        version,
-        tap: None,
+        version: checked.version,
+        tap: checked.tap,
         source_machine: None,
         commit: None,
         signer: None,

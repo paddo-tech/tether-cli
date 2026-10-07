@@ -106,10 +106,10 @@ impl Runtime {
                                 return Msg::OsvUnreachable { op, error };
                             }
                             Err(Blocked::Refused(e)) => Err(e),
-                            Ok(version) => crate::packages::inbox::install_from_machine(
+                            Ok(checked) => crate::packages::inbox::install_from_machine(
                                 &op.manager_key,
                                 &op.name,
-                                version,
+                                checked,
                                 false,
                             )
                             .await
@@ -408,11 +408,15 @@ enum Blocked {
     OsvUnreachable(String),
 }
 
-/// The checks of `inbox::check_osv`, and the version to install. Unlike a sync, a dashboard
-/// install is not checked against trusted records, so when `osv_required` a release OSV
-/// could not check blocks it until the user agrees.
-async fn install_check(op: &InstallOp, osv_required: bool) -> Result<Option<String>, Blocked> {
-    crate::packages::inbox::check_osv(&op.manager_key, &op.name, None, osv_required)
+/// The gates of `inbox::check_manual_install`, as `tether packages install` runs them, and
+/// what to install. Unlike a sync, a dashboard install is not checked against trusted
+/// records, so when `osv_required` a release OSV could not check blocks it until the user
+/// agrees.
+async fn install_check(
+    op: &InstallOp,
+    osv_required: bool,
+) -> Result<crate::packages::inbox::ManualInstall, Blocked> {
+    crate::packages::inbox::check_manual_install(&op.manager_key, &op.name, osv_required)
         .await
         .map_err(|e| match e.downcast::<OsvUnchecked>() {
             Ok(unchecked) => Blocked::OsvUnreachable(unchecked.error),

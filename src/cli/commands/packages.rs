@@ -299,22 +299,13 @@ pub fn unshare(id: &str, from: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Install a package another machine lists, as the dashboard's Import does: OSV checks the
-/// release that would install, and nothing is checked against trusted records. A package
-/// in the inbox needs approval instead, so its review is not skipped.
+/// Install a package another machine lists, as the dashboard's Import does. Nothing is
+/// checked against trusted records, but every other gate of a sync applies, under the sync
+/// lock: see [`inbox::check_manual_install`].
 pub async fn install(id: &str) -> Result<()> {
     let (manager, name) = split_id(id)?;
     let canonical = membership::canonical_id(manager, name);
-    if inbox::list()?.iter().any(|i| {
-        i.kind == Kind::Package && membership::canonical_id(&i.manager, &i.name) == canonical
-    }) {
-        anyhow::bail!(
-            "{} waits in the inbox. Review it with 'tether packages inbox', then run \
-             'tether packages approve {}'",
-            id,
-            canonical
-        );
-    }
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let sync_path = crate::sync::SyncEngine::sync_path()?;
     let machine_id = crate::sync::SyncState::load()?.machine_id;
     let lists = |m: &crate::sync::MachineState| {
@@ -324,9 +315,6 @@ pub async fn install(id: &str) -> Result<()> {
                 .any(|n| membership::canonical_id(manager, n) == canonical)
         })
     };
-    if installed_here(manager, name).await? {
-        anyhow::bail!("{} is already installed here", id);
-    }
     let records = crate::sync::MachineState::list_all(&sync_path)?;
     let sources: Vec<&str> = records
         .iter()
@@ -336,16 +324,35 @@ pub async fn install(id: &str) -> Result<()> {
     if sources.is_empty() {
         anyhow::bail!("No other machine lists {}", id);
     }
-    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
-    let Some(version) = osv_checked(manager, name, None).await? else {
-        return Ok(());
+    if installed_here(manager, name).await? {
+        anyhow::bail!("{} is already installed here", id);
+    }
+    let checked = match inbox::check_manual_install(manager, name, true).await {
+        Ok(checked) => checked,
+        Err(e) => match e.downcast::<inbox::OsvUnchecked>() {
+            Ok(unchecked) if Prompt::is_interactive() && !Prompt::assume_yes() => {
+                Output::warning(&unchecked.to_string());
+                if !Prompt::question("Install it without the malicious-package check?", false)? {
+                    return Ok(());
+                }
+                inbox::check_manual_install(manager, name, false).await?
+            }
+            Ok(unchecked) => return Err(unchecked.into()),
+            Err(e) => return Err(e),
+        },
     };
     Output::info(&format!(
-        "Installing {} from {}",
+        "Installing {}{} from {}",
         canonical,
+        checked
+            .version
+            .as_deref()
+            .map(|v| format!(" {}", v))
+            .unwrap_or_default(),
         sources.join(", ")
     ));
-    inbox::install_from_machine(manager, name, version, true).await?;
+    // A cask that needs a password fails without a terminal instead of waiting
+    inbox::install_from_machine(manager, name, checked, Prompt::is_interactive()).await?;
     Output::success(&format!("Installed {}", canonical));
     Ok(())
 }
@@ -355,6 +362,7 @@ pub async fn install(id: &str) -> Result<()> {
 async fn installed_here(manager: &str, name: &str) -> Result<bool> {
     let brew = BrewManager::new();
     let names: Vec<String> = match manager {
+        "brew_formulae" | "brew_casks" | "brew_taps" if !brew.is_available().await => Vec::new(),
         "brew_formulae" => brew
             .list_installed()
             .await?
