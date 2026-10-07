@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.1] - 2026-10-07
+
 ### Added
 
 - New commands: `tether packages list` (bare `tether packages` lists too), `tether packages install <manager:name>` to install a package another machine lists, as the dashboard's Import does, `tether packages unshare <manager:name> --from <profile>` to take a profile off a package without uninstalling anything, and `tether packages approve --all [--from <machine>]`. `approve --all` lists the packages it covers and leaves machine keys, malicious packages, packages whose record fails its signature and packages without a version or tap to name in the inbox. It asks first, and needs `-y` without a terminal. It is the only command where `-y` approves inbox items. It approves exactly the listed items, so a package that a sync queues meanwhile waits for its own decision. `packages install` takes the sync lock first, then applies the checks of a sync, except the trusted records: a package that waits in the inbox for any reason needs `approve`, a rejected release or tap stays rejected, a tap or a formula or cask from a tap that is not trusted goes to the inbox, and the release is the newest one older than `packages.min_release_age_days`. A cask that needs a password fails without a terminal. The dashboard's Import runs the same checks and does not list packages that wait in the inbox
