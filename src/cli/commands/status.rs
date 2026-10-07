@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::sync::{signing, ConflictState, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 
-pub async fn run() -> Result<()> {
+pub async fn run(json: bool) -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
         Err(e) if e.to_string().contains("Config version") => return Err(e),
@@ -13,6 +13,9 @@ pub async fn run() -> Result<()> {
     };
 
     let state = SyncState::load()?;
+    if json {
+        return Output::json(&status_json(&config, &state)?);
+    }
 
     Output::section("Tether Status");
     println!();
@@ -258,6 +261,54 @@ pub async fn run() -> Result<()> {
 
     println!();
     Ok(())
+}
+
+/// `status --json`. Times are RFC 3339 in UTC.
+fn status_json(config: &Config, state: &SyncState) -> Result<serde_json::Value> {
+    let pid = read_daemon_pid()?.filter(|pid| is_process_running(*pid));
+    let features: Vec<&str> = [
+        ("dotfiles", config.features.personal_dotfiles),
+        ("packages", config.features.personal_packages),
+        ("team", config.features.team_dotfiles),
+        ("collab", config.features.collab_secrets),
+    ]
+    .into_iter()
+    .filter_map(|(name, on)| on.then_some(name))
+    .collect();
+    let mut files: Vec<_> = state.files.iter().collect();
+    files.sort_by_key(|(file, _)| *file);
+    let mut packages: Vec<_> = state.packages.iter().collect();
+    packages.sort_by_key(|(manager, _)| *manager);
+    let conflicts = ConflictState::load().unwrap_or_default().conflicts;
+    Ok(serde_json::json!({
+        "machine": state.machine_id,
+        "profile": config.profile_name(&state.machine_id),
+        "version": env!("CARGO_PKG_VERSION"),
+        "last_sync": state.last_sync,
+        "daemon": { "running": pid.is_some(), "pid": pid },
+        "features": features,
+        "inbox": crate::packages::inbox::list()?.len(),
+        "conflicts": conflicts
+            .iter()
+            .map(|c| serde_json::json!({ "file": c.file_path, "detected_at": c.detected_at }))
+            .collect::<Vec<_>>(),
+        "files": files
+            .iter()
+            .map(|(file, f)| serde_json::json!({
+                "file": file,
+                "synced": f.synced,
+                "last_modified": f.last_modified,
+            }))
+            .collect::<Vec<_>>(),
+        "packages": packages
+            .iter()
+            .map(|(manager, p)| serde_json::json!({
+                "manager": manager,
+                "last_sync": p.last_sync,
+                "last_modified": p.last_modified,
+            }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 fn read_daemon_pid() -> Result<Option<u32>> {

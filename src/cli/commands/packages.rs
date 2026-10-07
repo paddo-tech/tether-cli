@@ -50,16 +50,19 @@ async fn installed() -> Vec<Installed> {
 }
 
 /// List installed packages by manager key, with the profiles each belongs to.
-pub async fn list() -> Result<()> {
+pub async fn list(json: bool) -> Result<()> {
     let installed = installed().await;
+    let membership = crate::config::Config::load()
+        .and_then(|config| Membership::load_current(&config))
+        .ok();
+    if json {
+        return Output::json(&list_json(&installed, membership.as_ref()));
+    }
     print_install_failures();
     if installed.is_empty() {
         Output::info("No packages found");
         return Ok(());
     }
-    let membership = crate::config::Config::load()
-        .and_then(|config| Membership::load_current(&config))
-        .ok();
     if let Some(m) = &membership {
         Output::info(&format!(
             "This machine installs the packages of profile {}",
@@ -84,6 +87,55 @@ pub async fn list() -> Result<()> {
         "A package id is manager:name, such as npm:typescript. Run 'tether packages share <id> --to <profile>' to add a profile",
     );
     Ok(())
+}
+
+/// `packages list --json`: `profile` is this machine's profile, or null without a sync repo.
+/// Each package has `id`, `manager`, `name`, `version` and `profiles`.
+fn list_json(installed: &[Installed], membership: Option<&Membership>) -> serde_json::Value {
+    let packages: Vec<serde_json::Value> = installed
+        .iter()
+        .flat_map(|g| {
+            g.packages.iter().map(move |p| {
+                let profiles: Vec<String> = membership.map_or_else(Vec::new, |m| {
+                    let members = m.members(g.key, &p.name);
+                    if members.is_empty() {
+                        vec![m.profile.clone()]
+                    } else {
+                        members.into_iter().collect()
+                    }
+                });
+                serde_json::json!({
+                    "id": format!("{}:{}", g.key, p.name),
+                    "manager": g.key,
+                    "name": p.name,
+                    "version": p.version,
+                    "profiles": profiles,
+                })
+            })
+        })
+        .collect();
+    let failures: Vec<serde_json::Value> = crate::sync::SyncState::load()
+        .map(|s| {
+            let mut failures: Vec<_> = s.install_failures.into_iter().collect();
+            failures.sort_by(|a, b| a.0.cmp(&b.0));
+            failures
+                .into_iter()
+                .map(|(id, f)| {
+                    serde_json::json!({
+                        "id": id,
+                        "version": f.version,
+                        "attempted": f.attempted,
+                        "error": f.error,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "profile": membership.map(|m| m.profile.clone()),
+        "packages": packages,
+        "install_failures": failures,
+    })
 }
 
 /// Pick installed packages to uninstall, in a terminal. Each one is uninstalled as by
@@ -423,8 +475,13 @@ fn describe(item: &InboxItem) -> String {
 }
 
 /// List packages waiting for approval.
-pub async fn inbox_list() -> Result<()> {
+pub async fn inbox_list(json: bool) -> Result<()> {
     let items = inbox::list()?;
+    if json {
+        return Output::json(&serde_json::Value::Array(
+            items.iter().map(inbox_item_json).collect(),
+        ));
+    }
     if items.is_empty() {
         Output::info("No packages wait for approval");
         return Ok(());
@@ -442,6 +499,30 @@ pub async fn inbox_list() -> Result<()> {
         "Run 'tether packages approve <id> --expect <version, tap or key>', 'tether packages approve --all', or 'tether packages reject <id> --expect <version, tap or key>'",
     );
     Ok(())
+}
+
+/// One `packages inbox --json` item. `expect` is what `approve --expect` takes, and
+/// `bulk_approvable` whether `approve --all` covers it.
+fn inbox_item_json(item: &InboxItem) -> serde_json::Value {
+    let fingerprint = match &item.kind {
+        Kind::TrustMachine { fingerprint, .. } => Some(fingerprint.as_str()),
+        Kind::Package => None,
+    };
+    serde_json::json!({
+        "id": item.id(),
+        "kind": if fingerprint.is_some() { "machine_key" } else { "package" },
+        "manager": item.manager,
+        "name": item.name,
+        "version": item.version,
+        "tap": item.tap,
+        "fingerprint": fingerprint,
+        "from": item.from_machine(),
+        "reasons": item.reasons,
+        "advisories": item.advisories,
+        "expect": binding(item),
+        "bulk_approvable": item.bulk_approvable(),
+        "first_seen": item.first_seen,
+    })
 }
 
 /// What a sync can replace under an item's id and the user must confirm: the key

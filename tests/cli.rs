@@ -222,6 +222,14 @@ fn approve_all_lists_what_it_covers_and_needs_y_without_a_terminal() {
         serde_json::to_string(&inbox).unwrap(),
     )
     .unwrap();
+    let items = json(h.path(), &["packages", "inbox", "--json"]);
+    assert_eq!(items[0]["id"], "npm:left-pad");
+    assert_eq!(items[0]["expect"], "1.0.0");
+    assert_eq!(items[0]["bulk_approvable"], true);
+    assert_eq!(items[0]["reasons"], serde_json::json!(["unsigned"]));
+    assert_eq!(items[1]["kind"], "machine_key");
+    assert_eq!(items[1]["expect"], "SHA256:x");
+    assert_eq!(items[1]["bulk_approvable"], false);
     tether(h.path())
         .args(["packages", "approve", "--all"])
         .assert()
@@ -291,6 +299,50 @@ fn rename_with_two_names_is_deprecated_and_checks_this_machine() {
         .stdout(predicate::str::contains("deprecated"))
         .stderr(predicate::str::contains("can rename itself"));
     fails(h.path(), &["machines", "show", "nope"], "not found");
+}
+
+fn json(home: &Path, args: &[&str]) -> serde_json::Value {
+    let out = tether(home).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{:?} printed no JSON ({}): {}",
+            args,
+            e,
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
+}
+
+#[test]
+fn json_output_has_the_documented_fields() {
+    let h = home();
+    let status = json(h.path(), &["status", "--json"]);
+    for field in [
+        "machine",
+        "profile",
+        "version",
+        "daemon",
+        "inbox",
+        "conflicts",
+    ] {
+        assert!(status.get(field).is_some(), "status has no {}", field);
+    }
+    assert_eq!(status["inbox"], 0);
+    let list = json(h.path(), &["packages", "list", "--json"]);
+    assert_eq!(list["packages"], serde_json::json!([]));
+    assert!(list.get("profile").is_some());
+    assert_eq!(
+        json(h.path(), &["packages", "inbox", "--json"]),
+        serde_json::json!([])
+    );
+    let machines = json(h.path(), &["machines", "list", "--json"]);
+    assert!(machines.is_array());
 }
 
 #[test]

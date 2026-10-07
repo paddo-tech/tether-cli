@@ -70,7 +70,11 @@ pub enum Commands {
     },
 
     /// Show current sync status
-    Status,
+    Status {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Show differences between machines
     Diff {
@@ -179,9 +183,17 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum PackagesAction {
     /// List installed packages by manager, with the profiles each belongs to
-    List,
+    List {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
     /// List packages and machine keys waiting in the inbox for approval
-    Inbox,
+    Inbox {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
     /// Approve a held package and install it
     Approve {
         /// Item id (manager:name) or a package name. machine:<id> trusts that machine's key,
@@ -292,7 +304,11 @@ pub enum DaemonAction {
 #[derive(Subcommand)]
 pub enum MachineAction {
     /// List all machines
-    List,
+    List {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
     /// Show one machine: profile, versions, record status, and its full key fingerprint and
     /// trust
     Show {
@@ -691,6 +707,22 @@ impl Cli {
 
     pub async fn run(&self) -> Result<()> {
         crate::cli::Prompt::set_assume_yes(self.yes);
+        crate::cli::Output::set_json(matches!(
+            &self.command,
+            Some(
+                Commands::Status { json: true }
+                    | Commands::Machines {
+                        action: MachineAction::List { json: true }
+                    }
+                    | Commands::Packages {
+                        action: Some(
+                            PackagesAction::List { json: true }
+                                | PackagesAction::Inbox { json: true }
+                        ),
+                        ..
+                    }
+            )
+        ));
         match &self.command {
             None | Some(Commands::Dashboard) => {
                 tokio::task::spawn_blocking(crate::dashboard::run).await?
@@ -712,7 +744,7 @@ impl Cli {
                 force,
                 rediscover,
             } => sync::run(*dry_run, *force, *rediscover).await,
-            Commands::Status => status::run().await,
+            Commands::Status { json } => status::run(*json).await,
             Commands::Diff { machine } => diff::run(machine.as_deref()).await,
             Commands::Daemon { action } => match action {
                 DaemonAction::Start => daemon::start().await,
@@ -725,7 +757,7 @@ impl Cli {
                 DaemonAction::Run => daemon::run_daemon().await,
             },
             Commands::Machines { action } => match action {
-                MachineAction::List => machines::list().await,
+                MachineAction::List { json } => machines::list(*json).await,
                 MachineAction::Show { machine } => machines::show(machine).await,
                 MachineAction::Rename { name, new } => match new {
                     Some(new) => {
@@ -847,8 +879,9 @@ impl Cli {
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade { dry_run } => upgrade::run(*dry_run).await,
             Commands::Packages { list: _, action } => match action {
-                None | Some(PackagesAction::List) => packages::list().await,
-                Some(PackagesAction::Inbox) => packages::inbox_list().await,
+                None => packages::list(false).await,
+                Some(PackagesAction::List { json }) => packages::list(*json).await,
+                Some(PackagesAction::Inbox { json }) => packages::inbox_list(*json).await,
                 Some(PackagesAction::Approve {
                     id,
                     expected,

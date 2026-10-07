@@ -38,7 +38,7 @@ fn resolve_in(machines: &[MachineState], name: &str) -> Result<String> {
     }
 }
 
-pub async fn list() -> Result<()> {
+pub async fn list(json: bool) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
         anyhow::bail!("Machine management is not available in team-only mode");
@@ -47,14 +47,16 @@ pub async fn list() -> Result<()> {
     let sync_path = SyncEngine::sync_path()?;
     let machines = MachineState::list_all(&sync_path)?;
 
+    let state = SyncState::load()?;
+    let current_machine = &state.machine_id;
+    let statuses = signing::record_statuses(&sync_path, current_machine)?;
+    if json {
+        return Output::json(&list_json(&config, &machines, &statuses, current_machine));
+    }
     if machines.is_empty() {
         Output::info("No machines synced yet");
         return Ok(());
     }
-
-    let state = SyncState::load()?;
-    let current_machine = &state.machine_id;
-    let statuses = signing::record_statuses(&sync_path, current_machine)?;
     let old_ids = signing::old_ids_of_this_machine(&sync_path, &machines, current_machine);
     let old_builds = signing::old_builds(&machines, &statuses, current_machine);
 
@@ -144,6 +146,47 @@ pub async fn list() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `machines list --json`. `record` is how this machine reads the record: trusted,
+/// untrusted, replayed or signature_failed. `signer` is the fingerprint whose signature
+/// verifies, or null.
+fn list_json(
+    config: &Config,
+    machines: &[MachineState],
+    statuses: &[(String, signing::RecordStatus, Option<String>)],
+    this: &str,
+) -> serde_json::Value {
+    use signing::RecordStatus;
+    serde_json::Value::Array(
+        machines
+            .iter()
+            .map(|m| {
+                let (status, signer) = statuses
+                    .iter()
+                    .find(|(id, _, _)| *id == m.machine_id)
+                    .map_or((RecordStatus::Untrusted, None), |(_, s, fp)| {
+                        (*s, fp.clone())
+                    });
+                serde_json::json!({
+                    "id": m.machine_id,
+                    "hostname": m.hostname,
+                    "profile": m.profile.as_deref().unwrap_or(config.profile_name(&m.machine_id)),
+                    "version": m.cli_version,
+                    "os": m.os,
+                    "last_sync": m.last_sync,
+                    "this_machine": m.machine_id == this,
+                    "record": match status {
+                        RecordStatus::Trusted => "trusted",
+                        RecordStatus::Untrusted => "untrusted",
+                        RecordStatus::Replayed => "replayed",
+                        RecordStatus::SignatureFailed => "signature_failed",
+                    },
+                    "signer": signer,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// One line per machine on 1.x, which a rolling upgrade leaves behind for a while.

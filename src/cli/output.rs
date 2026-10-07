@@ -7,6 +7,9 @@ pub struct Output;
 
 static CAPTURED: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
+/// With `--json`, stdout carries only the JSON, so messages go to stderr.
+static JSON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Colour only when stdout is a terminal and `NO_COLOR` is unset or empty, so pipes, files
 /// and `NO_COLOR` get plain text.
 pub fn color_enabled() -> bool {
@@ -89,8 +92,26 @@ impl Output {
 }
 
 impl Output {
+    /// Print JSON on stdout, and send every message to stderr from now on.
+    pub fn json(value: &serde_json::Value) -> anyhow::Result<()> {
+        println!("{}", serde_json::to_string_pretty(value)?);
+        Ok(())
+    }
+
+    pub fn set_json(on: bool) {
+        JSON.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn line(text: String) {
+        if JSON.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("{}", text);
+        } else {
+            println!("{}", text);
+        }
+    }
+
     pub fn success(message: &str) {
-        println!("{} {}", Self::CHECK.green().bold(), message);
+        Self::line(format!("{} {}", Self::CHECK.green().bold(), message));
     }
 
     pub fn error(message: &str) {
@@ -98,7 +119,7 @@ impl Output {
     }
 
     pub fn info(message: &str) {
-        println!("{} {}", Self::INFO.bright_blue().bold(), message);
+        Self::line(format!("{} {}", Self::INFO.bright_blue().bold(), message));
     }
 
     /// While the dashboard owns the terminal, a warning goes to the log and waits for the
@@ -109,7 +130,11 @@ impl Output {
             queue.push(message.to_string());
             return;
         }
-        println!("{} {}", Self::WARN.yellow().bold(), message.yellow());
+        Self::line(format!(
+            "{} {}",
+            Self::WARN.yellow().bold(),
+            message.yellow()
+        ));
     }
 
     /// Hold warnings for the dashboard from now on, or print them again with `false`.
