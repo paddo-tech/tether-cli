@@ -96,17 +96,27 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
             .split('.')
             .map(|p| p.parse::<u64>().ok())
             .collect::<Option<Vec<u64>>>()?;
-        Some((parts, v[end..].trim_start_matches(['-', '.', '_'])))
+        Some((parts, &v[end..]))
     }
-    fn suffix_rank(s: &str) -> u8 {
-        match s {
+    /// Rank and text of the suffix. A Homebrew revision such as `_1` sorts after the release.
+    fn suffix(raw: &str) -> (u8, &str) {
+        if let Some(rev) = raw
+            .strip_prefix('_')
+            .filter(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return (2, rev);
+        }
+        let s = raw.trim_start_matches(['-', '.', '_']);
+        let rank = match s {
             "" => 1,
             s if s.starts_with("post") => 2,
             _ => 0,
-        }
+        };
+        (rank, s)
     }
-    let (core_a, suffix_a) = split(a)?;
-    let (core_b, suffix_b) = split(b)?;
+    let (core_a, raw_a) = split(a)?;
+    let (core_b, raw_b) = split(b)?;
+    let ((rank_a, suffix_a), (rank_b, suffix_b)) = (suffix(raw_a), suffix(raw_b));
     for i in 0..core_a.len().max(core_b.len()) {
         let x = core_a.get(i).copied().unwrap_or(0);
         let y = core_b.get(i).copied().unwrap_or(0);
@@ -115,8 +125,8 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
         }
     }
     Some(
-        suffix_rank(suffix_a)
-            .cmp(&suffix_rank(suffix_b))
+        rank_a
+            .cmp(&rank_b)
             .then_with(|| natural_cmp(suffix_a, suffix_b)),
     )
 }
@@ -327,6 +337,9 @@ mod tests {
         assert!(lt("1.0rc1", "1.0"));
         assert!(lt("1.0", "1.0.post1"));
         assert!(lt("5.0", "v6.1"));
+        assert!(lt("1.2.3", "1.2.3_1"));
+        assert!(lt("1.2.3_1", "1.2.3_2"));
+        assert!(lt("1.2.3_9", "1.2.4"));
         assert_eq!(compare_versions("1.0", "1.0.0"), Some(Ordering::Equal));
         assert_eq!(compare_versions("1.0.0+b1", "1.0.0"), Some(Ordering::Equal));
         assert_eq!(compare_versions("latest", "1.0.0"), None);

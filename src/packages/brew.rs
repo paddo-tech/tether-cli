@@ -145,6 +145,10 @@ struct BrewInfoEntry {
     installed: serde_json::Value,
     /// Formula only
     versions: Option<BrewVersions>,
+    /// Formula only. A revision bump rebuilds the same stable version, and its keg is
+    /// named `<stable>_<revision>`
+    #[serde(default)]
+    revision: u32,
     /// Cask only
     version: Option<String>,
 }
@@ -163,11 +167,12 @@ impl BrewInfoEntry {
         }
     }
 
-    fn target_version(&self) -> Option<&str> {
-        self.versions
-            .as_ref()
-            .and_then(|v| v.stable.as_deref())
-            .or(self.version.as_deref())
+    fn target_version(&self) -> Option<String> {
+        match self.versions.as_ref().and_then(|v| v.stable.as_deref()) {
+            Some(stable) if self.revision > 0 => Some(format!("{}_{}", stable, self.revision)),
+            Some(stable) => Some(stable.to_string()),
+            None => self.version.clone(),
+        }
     }
 }
 
@@ -184,7 +189,7 @@ fn trusted_upgrades(info: BrewInfo, policy: &PackagePolicy) -> (Vec<Upgrade>, Ve
                 Some(Upgrade::new(
                     &name,
                     e.installed_version(),
-                    e.target_version().unwrap_or("newer"),
+                    e.target_version().as_deref().unwrap_or("newer"),
                 ))
             })
             .filter(|u| validate_name(Ecosystem::Brew, &u.name).is_ok())

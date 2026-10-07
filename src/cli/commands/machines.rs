@@ -660,7 +660,13 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
 }
 
 pub async fn untrust(name: &str) -> Result<()> {
-    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
+    // A trusted id with no record, such as the old id of a renamed machine, is never
+    // read as another machine's hostname
+    let resolved = if signing::TrustStore::load()?.key_for(name).is_some() {
+        name.to_string()
+    } else {
+        resolve(&SyncEngine::sync_path()?, name)?
+    };
     let name = resolved.as_str();
     if SyncState::load()?.machine_id == name {
         anyhow::bail!("Cannot untrust the current machine");
