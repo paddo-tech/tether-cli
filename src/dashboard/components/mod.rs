@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod backup_picker;
 pub mod config;
 pub mod confirm;
 pub mod diff;

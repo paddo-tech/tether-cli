@@ -44,6 +44,13 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         KeyCode::Esc => collapse(app),
         KeyCode::Char('t') => toggle_shared(app),
         KeyCode::Char('R') => confirm_restore(app),
+        KeyCode::Char('b') => {
+            if let Some(FileRow::File { path, .. }) =
+                build_rows(&app.state, &app.files).get(app.files.cursor)
+            {
+                super::backup_picker::open(app, path);
+            }
+        }
         KeyCode::Char('x') => confirm_remove(app),
         KeyCode::Char('i') => open_import(app),
         KeyCode::Char('j') | KeyCode::Down => {

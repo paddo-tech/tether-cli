@@ -1,7 +1,8 @@
 use super::app::{App, Overlay, Tab};
 use super::components::{
-    backdrop, config, confirm, file_import, files, header, help, log_view, machines, overview,
-    package_profiles, packages, palette, pkg_import, profile_picker, security, tabs, toast,
+    backdrop, backup_picker, config, confirm, file_import, files, header, help, log_view, machines,
+    overview, package_profiles, packages, palette, pkg_import, profile_picker, security, tabs,
+    toast,
 };
 use ratatui::{prelude::*, widgets::Block};
 
@@ -57,6 +58,7 @@ pub fn view(f: &mut Frame, app: &App) {
             Overlay::PackageProfiles(p) => package_profiles::render(f, app, p),
             Overlay::Palette(p) => palette::render(f, app, p),
             Overlay::Log(l) => log_view::render(f, app, l),
+            Overlay::BackupPicker(p) => backup_picker::render(f, app, p),
         }
     }
 

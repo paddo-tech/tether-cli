@@ -165,6 +165,13 @@ const FILES: &[Binding] = &[
         2,
     ),
     b(
+        &[Char('b')],
+        "b",
+        "backups",
+        "Restore the file from a backup (asks)",
+        5,
+    ),
+    b(
         &[Char('i')],
         "i",
         "import",

@@ -1,8 +1,8 @@
 use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
 use super::components::palette::{self, Palette, Target};
 use super::components::{
-    config, confirm, file_import, files, log_view, machines, overview, package_profiles, packages,
-    pkg_import, profile_picker, security,
+    backup_picker, config, confirm, file_import, files, log_view, machines, overview,
+    package_profiles, packages, pkg_import, profile_picker, security,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -216,6 +216,7 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
             Overlay::ProfilePicker(p) => profile_picker::handle_key(app, p, key),
             Overlay::PackageProfiles(p) => package_profiles::handle_key(app, p, key),
             Overlay::Log(l) => log_view::handle_key(app, l, key),
+            Overlay::BackupPicker(p) => backup_picker::handle_key(app, p, key),
             Overlay::Palette(p) => match palette::handle_key(app, p, key) {
                 Some(target) => run_target(app, target),
                 None => None,
@@ -471,6 +472,7 @@ fn click_item(app: &mut App, i: usize) -> Option<Cmd> {
         Overlay::PkgImport(p) if p.confirm.is_none() => &mut p.cursor,
         Overlay::ProfilePicker(p) => &mut p.cursor,
         Overlay::PackageProfiles(p) => &mut p.cursor,
+        Overlay::BackupPicker(p) => &mut p.cursor,
         _ => return None,
     };
     if *cursor == i {
@@ -867,6 +869,42 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         assert!(app.overlays.is_empty());
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn backup_restores_only_after_y() {
+        use crate::dashboard::components::backup_picker::BackupPicker;
+
+        let mut app = app();
+        app.active_tab = Tab::Files;
+        app.overlays.push(Overlay::BackupPicker(BackupPicker {
+            path: ".zshrc".into(),
+            backups: vec!["2026-10-03T14-55-00".into(), "2026-10-01T09-00-00".into()],
+            cursor: 0,
+        }));
+        key(&mut app, KeyCode::Char('j'));
+        // Enter picks the backup and asks; a second Enter cancels
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::RestoreBackup { .. }))
+        ));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+
+        app.overlays.push(Overlay::Confirm(Confirm::RestoreBackup {
+            path: ".zshrc".into(),
+            timestamp: "2026-10-01T09-00-00".into(),
+            arming: Default::default(),
+        }));
+        let Some(Cmd::RestoreBackup { path, timestamp }) = armed_key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected a restore command");
+        };
+        assert_eq!(
+            (path.as_str(), timestamp.as_str()),
+            (".zshrc", "2026-10-01T09-00-00")
+        );
     }
 
     #[test]

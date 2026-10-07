@@ -62,6 +62,12 @@ pub enum Confirm {
         short_hash: String,
         arming: Arming,
     },
+    /// Copy a dotfile's backup over the file, as `tether restore` does.
+    RestoreBackup {
+        path: String,
+        timestamp: String,
+        arming: Arming,
+    },
     Rollback {
         plan: RollbackPlan,
         arming: Arming,
@@ -184,6 +190,7 @@ impl Confirm {
             Confirm::Uninstall { arming, .. }
             | Confirm::Restore { arming, .. }
             | Confirm::Rollback { arming, .. }
+            | Confirm::RestoreBackup { arming, .. }
             | Confirm::RemoveFile { arming, .. }
             | Confirm::InstallWithoutOsv { arming, .. }
             | Confirm::ApproveWithoutOsv { arming, .. }
@@ -292,6 +299,9 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             commit,
             short_hash,
         }),
+        Confirm::RestoreBackup {
+            path, timestamp, ..
+        } => Some(Cmd::RestoreBackup { path, timestamp }),
         Confirm::Rollback { plan, .. } => {
             if app.running.is_some() {
                 app.flash_error("Another tether command is still running");
@@ -405,6 +415,20 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             wait,
             "Restore",
             &format!("Restore {} to {}?", dotfile, short_hash),
+            t.warn,
+        ),
+        Confirm::RestoreBackup {
+            path, timestamp, ..
+        } => render_popup(
+            f,
+            app,
+            wait,
+            "Restore from backup",
+            &format!(
+                "Overwrite ~/{} with its backup from {}? The next sync pushes it to your \
+                 other machines.",
+                path, timestamp
+            ),
             t.warn,
         ),
         Confirm::Rollback { plan, .. } => render_popup(

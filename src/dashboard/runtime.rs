@@ -271,6 +271,17 @@ impl Runtime {
                     |_| None,
                 );
             }
+            Cmd::RestoreBackup { path, timestamp } => {
+                // Runs inline, like a restore from a commit
+                let result = crate::sync::restore_file(&timestamp, "dotfiles", &path)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                let _ = self.tx.send(Msg::RestoreDone {
+                    dotfile: path,
+                    short_hash: format!("its backup from {}", timestamp),
+                    result,
+                });
+            }
             Cmd::Restore {
                 repo_path,
                 dotfile,

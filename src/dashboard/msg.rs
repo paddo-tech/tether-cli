@@ -121,6 +121,11 @@ pub enum Cmd {
         config: Box<crate::config::Config>,
         machine_id: String,
     },
+    /// Copy a dotfile's backup over the file.
+    RestoreBackup {
+        path: String,
+        timestamp: String,
+    },
     Restore {
         repo_path: String,
         dotfile: String,

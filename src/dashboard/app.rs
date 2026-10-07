@@ -1,3 +1,4 @@
+use super::components::backup_picker::BackupPicker;
 use super::components::config::ConfigTabState;
 use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
@@ -106,6 +107,7 @@ pub enum Overlay {
     PackageProfiles(PackageProfiles),
     Palette(Palette),
     Log(LogView),
+    BackupPicker(BackupPicker),
 }
 
 impl Overlay {
