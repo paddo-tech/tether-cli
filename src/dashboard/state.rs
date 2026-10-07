@@ -102,7 +102,9 @@ impl DashboardState {
         let mut inbox = Inbox::load().unwrap_or_default();
         inbox::sort_by_group(&mut inbox.items);
         let (daemon_pid, daemon_running) = Self::check_daemon();
-        let activity_lines = Self::read_log_tail(8192, 20);
+        let activity_lines = Self::daemon_log_path()
+            .map(|path| Self::read_log_tail(&path, 8192, 20))
+            .unwrap_or_default();
 
         Self {
             config,
@@ -191,16 +193,19 @@ impl DashboardState {
         (None, false)
     }
 
-    /// The last `max_lines` whole lines in the last `max_bytes` of the daemon log.
-    pub fn read_log_tail(max_bytes: u64, max_lines: usize) -> Vec<String> {
+    pub fn daemon_log_path() -> Option<std::path::PathBuf> {
+        Config::config_dir().ok().map(|d| d.join("daemon.log"))
+    }
+
+    /// The last `max_lines` whole lines in the last `max_bytes` of the log at `log_path`.
+    pub fn read_log_tail(
+        log_path: &std::path::Path,
+        max_bytes: u64,
+        max_lines: usize,
+    ) -> Vec<String> {
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        let log_path = match Config::config_dir() {
-            Ok(d) => d.join("daemon.log"),
-            Err(_) => return Vec::new(),
-        };
-
-        let file = match std::fs::File::open(&log_path) {
+        let file = match std::fs::File::open(log_path) {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };

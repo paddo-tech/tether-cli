@@ -16,7 +16,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         }
         KeyCode::Enter => {
             app.overlays
-                .push(Overlay::Log(super::log_view::LogView::open()));
+                .push(Overlay::Log(super::log_view::LogView::open(
+                    app.daemon_log.as_deref(),
+                )));
         }
         _ => return KeyOutcome::Ignored,
     }

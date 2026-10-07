@@ -168,6 +168,8 @@ pub struct App {
     pub config: ConfigTabState,
     pub security: SecurityTabState,
     pub uninstalling: Option<(String, String)>,
+    /// The daemon log the log view reads
+    pub daemon_log: Option<std::path::PathBuf>,
     /// The uninstall waits for a sync to finish before it starts.
     pub uninstall_waiting: bool,
     pub installing: Option<InstallOp>,
@@ -206,6 +208,7 @@ impl App {
             config: ConfigTabState::default(),
             security: SecurityTabState::default(),
             uninstalling: None,
+            daemon_log: DashboardState::daemon_log_path(),
             uninstall_waiting: false,
             installing: None,
             next_op_id: 0,

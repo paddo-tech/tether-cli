@@ -354,7 +354,10 @@ pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
             app.active_tab = Tab::Security;
             security::confirm_approve_all(app);
         }
-        Action::DaemonLog => app.overlays.push(Overlay::Log(log_view::LogView::open())),
+        Action::DaemonLog => {
+            let view = log_view::LogView::open(app.daemon_log.as_deref());
+            app.overlays.push(Overlay::Log(view));
+        }
     }
     None
 }
@@ -573,7 +576,10 @@ mod tests {
             membership_error: None,
             own_fingerprint: None,
         };
-        App::new(state, HashMap::new())
+        let mut app = App::new(state, HashMap::new());
+        // Tests never read this user's daemon log
+        app.daemon_log = None;
+        app
     }
 
     fn last_toast(app: &App) -> Option<(ToastKind, &str)> {
@@ -956,9 +962,16 @@ mod tests {
         use crate::dashboard::components::log_view::LogView;
         use ratatui::{backend::TestBackend, Terminal};
 
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("daemon.log");
+        std::fs::write(&log, "first\nlast line\n").unwrap();
         let mut app = app();
+        app.daemon_log = Some(log);
         key(&mut app, KeyCode::Enter);
-        assert!(matches!(app.overlays.last(), Some(Overlay::Log(_))));
+        let Some(Overlay::Log(view)) = app.overlays.last() else {
+            panic!("expected the log view");
+        };
+        assert_eq!(view.lines, ["first", "last line"]);
         app.overlays.clear();
         assert!(palette::entries(&app)
             .iter()

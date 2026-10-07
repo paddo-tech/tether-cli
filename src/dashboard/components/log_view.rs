@@ -21,9 +21,12 @@ pub struct LogView {
 }
 
 impl LogView {
-    pub fn open() -> Self {
+    /// The log at `path`; no lines without one.
+    pub fn open(path: Option<&std::path::Path>) -> Self {
         Self {
-            lines: DashboardState::read_log_tail(TAIL_BYTES, usize::MAX)
+            lines: path
+                .map(|p| DashboardState::read_log_tail(p, TAIL_BYTES, usize::MAX))
+                .unwrap_or_default()
                 .iter()
                 .map(|l| strip_ansi(l))
                 .collect(),
