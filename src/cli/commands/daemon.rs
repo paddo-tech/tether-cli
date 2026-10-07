@@ -173,18 +173,16 @@ fn service_path() -> Result<Option<PathBuf>> {
 }
 
 /// Print the last `lines` lines of the log, then, with `follow`, each line the daemon adds
-/// until Ctrl-C. A log that shrinks was rotated or cleared, so it is read again from the start.
+/// until Ctrl-C. See [`LogFollower`] for rotation.
 pub async fn logs(lines: usize, follow: bool) -> Result<()> {
-    use std::io::{Read, Seek, SeekFrom};
-
     let log_path = DaemonPaths::new()?.log;
     if !log_path.exists() && !follow {
         Output::info("No daemon logs yet");
         return Ok(());
     }
 
-    let content = fs::read(&log_path).unwrap_or_default();
-    let text = String::from_utf8_lossy(&content);
+    let mut follower = LogFollower::open(log_path);
+    let text = follower.poll()?;
     let all: Vec<&str> = text.lines().collect();
     for line in &all[all.len().saturating_sub(lines)..] {
         println!("{line}");
@@ -193,26 +191,134 @@ pub async fn logs(lines: usize, follow: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut offset = content.len() as u64;
     loop {
         sleep(Duration::from_millis(500)).await;
-        let Ok(mut file) = fs::File::open(&log_path) else {
-            continue;
+        let added = follower.poll()?;
+        if !added.is_empty() {
+            print!("{added}");
+            io::Write::flush(&mut io::stdout())?;
+        }
+    }
+}
+
+/// Bytes before the read position that a poll compares, to see that the file was not
+/// truncated and filled again between two polls.
+const ANCHOR_LEN: usize = 64;
+
+/// Reads what is added to a log, as `tail -F` does. The daemon rotates its log by copy and
+/// truncate, so the file keeps its identity: a file shorter than the read position, or whose
+/// bytes before that position changed, was rotated and is read from the start. A log
+/// replaced by another file (another inode) is read to its end, then the new file from the
+/// start. A UTF-8 character split across two reads is kept until it is complete.
+struct LogFollower {
+    path: PathBuf,
+    file: Option<fs::File>,
+    identity: Option<(u64, u64)>,
+    /// The last bytes read, up to [`ANCHOR_LEN`]
+    anchor: Vec<u8>,
+    /// An incomplete UTF-8 sequence at the end of the last read
+    carry: Vec<u8>,
+}
+
+#[cfg(unix)]
+fn file_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_identity(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
+impl LogFollower {
+    fn open(path: PathBuf) -> Self {
+        let mut follower = Self {
+            path,
+            file: None,
+            identity: None,
+            anchor: Vec::new(),
+            carry: Vec::new(),
         };
+        follower.reopen();
+        follower
+    }
+
+    fn reopen(&mut self) {
+        self.file = fs::File::open(&self.path).ok();
+        self.identity = self
+            .file
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .and_then(|m| file_identity(&m));
+        self.anchor.clear();
+    }
+
+    /// The text added since the last poll.
+    fn poll(&mut self) -> Result<String> {
+        let mut text = self.read_current()?;
+        let replaced = fs::metadata(&self.path)
+            .ok()
+            .is_some_and(|m| self.file.is_none() || file_identity(&m) != self.identity);
+        if replaced {
+            text.push_str(&String::from_utf8_lossy(&std::mem::take(&mut self.carry)));
+            self.reopen();
+            text.push_str(&self.read_current()?);
+        }
+        Ok(text)
+    }
+
+    fn read_current(&mut self) -> Result<String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let Some(file) = self.file.as_mut() else {
+            return Ok(String::new());
+        };
+        let pos = file.stream_position()?;
         let len = file.metadata()?.len();
-        if len < offset {
-            offset = 0;
+        let rotated = len < pos || {
+            let mut before = vec![0; self.anchor.len()];
+            file.seek(SeekFrom::Start(pos - before.len() as u64))?;
+            file.read_exact(&mut before)?;
+            before != self.anchor
+        };
+        if rotated {
+            file.seek(SeekFrom::Start(0))?;
+            self.anchor.clear();
+            self.carry.clear();
         }
-        if len == offset {
-            continue;
-        }
-        file.seek(SeekFrom::Start(offset))?;
         let mut added = Vec::new();
         file.read_to_end(&mut added)?;
-        offset += added.len() as u64;
-        print!("{}", String::from_utf8_lossy(&added));
-        io::Write::flush(&mut io::stdout())?;
+        self.anchor.extend_from_slice(&added);
+        let excess = self.anchor.len().saturating_sub(ANCHOR_LEN);
+        self.anchor.drain(..excess);
+        Ok(decode(&mut self.carry, &added))
     }
+}
+
+/// Decode `carry` and `bytes` as UTF-8, and keep an incomplete sequence at the end in `carry`
+/// for the next read. Invalid bytes become U+FFFD.
+fn decode(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
+    carry.extend_from_slice(bytes);
+    let complete = match std::str::from_utf8(carry) {
+        Ok(_) => carry.len(),
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => {
+            // An invalid byte: keep only a trailing incomplete sequence, at most 3 bytes
+            let tail = (1..=3.min(carry.len()))
+                .find(|&n| {
+                    let start = carry.len() - n;
+                    std::str::from_utf8(&carry[start..])
+                        .err()
+                        .is_some_and(|e| e.valid_up_to() == 0 && e.error_len().is_none())
+                })
+                .unwrap_or(0);
+            carry.len() - tail
+        }
+    };
+    let text = String::from_utf8_lossy(&carry[..complete]).into_owned();
+    carry.drain(..complete);
+    text
 }
 
 pub async fn run_daemon() -> Result<()> {
@@ -696,6 +802,51 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/opt/$X/100%% y/tether\" daemon run\n"));
         assert!(unit.contains("Environment=\"PATH=/x$HOME:/y\\\\z\\\"\"\n"));
         assert!(unit.contains("StandardOutput=append:/home/a%%b c/daemon.log\n"));
+    }
+
+    #[test]
+    fn log_follower_survives_rotation_and_split_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.log");
+        let append = |bytes: &[u8]| {
+            use std::io::Write;
+            let mut f = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(bytes).unwrap();
+        };
+        append(b"first\n");
+        let mut follower = LogFollower::open(path.clone());
+        assert_eq!(follower.poll().unwrap(), "first\n");
+
+        // "é" is two bytes, split across two writes
+        append(b"caf\xc3");
+        assert_eq!(follower.poll().unwrap(), "caf");
+        append(b"\xa9\n");
+        assert_eq!(follower.poll().unwrap(), "\u{e9}\n");
+
+        // Copy and truncate, then more lines than before: the size alone does not show it
+        fs::write(&path, b"").unwrap();
+        append(b"rotated and now much longer\n");
+        assert_eq!(follower.poll().unwrap(), "rotated and now much longer\n");
+
+        // Replaced by a new file: the old file's last lines come first
+        append(b"last old line\n");
+        fs::rename(&path, dir.path().join("daemon.log.1")).unwrap();
+        append(b"new file\n");
+        assert_eq!(follower.poll().unwrap(), "last old line\nnew file\n");
+        assert_eq!(follower.poll().unwrap(), "");
+    }
+
+    #[test]
+    fn decode_keeps_only_an_incomplete_tail() {
+        let mut carry = Vec::new();
+        assert_eq!(decode(&mut carry, b"a\xff b\xe2\x82"), "a\u{fffd} b");
+        assert_eq!(carry, b"\xe2\x82");
+        assert_eq!(decode(&mut carry, b"\xac"), "\u{20ac}");
+        assert!(carry.is_empty());
     }
 
     #[test]
