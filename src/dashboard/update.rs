@@ -563,6 +563,7 @@ mod tests {
             old_builds: Vec::new(),
             membership: None,
             membership_error: None,
+            own_fingerprint: None,
         };
         App::new(state, HashMap::new())
     }
@@ -2084,6 +2085,66 @@ mod tests {
             .unwrap();
         assert!(screen(&terminal)
             .contains("trusted  SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"));
+    }
+
+    #[test]
+    fn this_machine_shows_its_own_key_and_ignored_records_warn_on_trust() {
+        use crate::sync::signing::RecordStatus;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = machines_app();
+        // The trust store lists another key for this machine; the card shows the key file's
+        app.state
+            .trusted
+            .push(crate::packages::inbox::TrustedMachine {
+                machine_id: "me".into(),
+                fingerprint: "SHA256:store".into(),
+            });
+        app.state.own_fingerprint = Some("SHA256:keyfile".into());
+        key(&mut app, KeyCode::Enter);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("SHA256:keyfile"));
+        assert!(!text.contains("SHA256:store"));
+        key(&mut app, KeyCode::Esc);
+
+        // laptop signs with a new key, and its record fails the trusted key's signature
+        app.state
+            .record_status
+            .push(("laptop".into(), RecordStatus::SignatureFailed));
+        app.state.inbox.items.push(InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: "SHA256:new".into(),
+            },
+            manager: "machine".into(),
+            name: "laptop".into(),
+            version: None,
+            tap: None,
+            source_machine: Some("laptop".into()),
+            commit: None,
+            signer: None,
+            reasons: vec![Reason::KeyChanged],
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        });
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Char('a'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::Trust {
+                ignored: Some(RecordStatus::SignatureFailed),
+                ..
+            }))
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("THIS RECORD IS IGNORED"));
     }
 
     #[test]

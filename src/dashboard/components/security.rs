@@ -69,6 +69,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
                 None
             } else if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
                 app.overlays.push(Overlay::Confirm(Confirm::Trust {
+                    ignored: super::machines::ignored_record(app, &item.name),
                     machine_id: item.name.clone(),
                     label: machine_name(app, &item.name),
                     fingerprint: fingerprint.clone(),

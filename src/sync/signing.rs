@@ -43,6 +43,12 @@ fn existing_public_key() -> Option<PublicKey> {
         .map(|k| k.public_key().clone())
 }
 
+/// The fingerprint of this machine's signing key, read from the key file. None before
+/// Tether made the key.
+pub fn own_fingerprint() -> Option<String> {
+    existing_public_key().map(|k| fingerprint(&k))
+}
+
 pub fn fingerprint(key: &PublicKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }

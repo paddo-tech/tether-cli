@@ -140,6 +140,7 @@ fn confirm_trust(app: &mut App) {
                 return;
             };
             Confirm::Trust {
+                ignored: ignored_record(app, &id),
                 machine_id: id,
                 label,
                 fingerprint: fingerprint.clone(),
@@ -161,6 +162,7 @@ fn confirm_trust(app: &mut App) {
                 return;
             };
             Confirm::Trust {
+                ignored: ignored_record(app, &id),
                 machine_id: id,
                 label,
                 fingerprint,
@@ -171,6 +173,17 @@ fn confirm_trust(app: &mut App) {
         }
     };
     app.overlays.push(Overlay::Confirm(confirm));
+}
+
+/// The status of a machine's record when a sync ignores it, as replayed or failing its
+/// signature. Trusting a key for such a machine gets the loud warning.
+pub fn ignored_record(app: &App, machine_id: &str) -> Option<RecordStatus> {
+    app.state
+        .record_status
+        .iter()
+        .find(|(id, _)| id == machine_id)
+        .map(|(_, status)| *status)
+        .filter(|s| matches!(s, RecordStatus::Replayed | RecordStatus::SignatureFailed))
 }
 
 /// Ask before removing the selected machine's key from the trust store.
@@ -519,8 +532,9 @@ fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String
         .iter()
         .find(|k| k.machine_id == m.machine_id)
         .map(|k| k.fingerprint.clone());
+    // The key file, not the trust store: a record signed by another key must not show as ours
     if m.machine_id == app.machine_id() {
-        return ("this machine", t.accent, trusted);
+        return ("this machine", t.accent, app.state.own_fingerprint.clone());
     }
     let pending = app.state.inbox.items.iter().find_map(|i| match &i.kind {
         Kind::TrustMachine { fingerprint, .. } if i.name == m.machine_id => {

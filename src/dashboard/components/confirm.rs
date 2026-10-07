@@ -142,6 +142,8 @@ pub enum Confirm {
         fingerprint: String,
         /// The machine was trusted with another key
         changed: bool,
+        /// A sync ignores the machine's record, as replayed or failing its signature
+        ignored: Option<crate::sync::signing::RecordStatus>,
         item: Option<Box<crate::packages::inbox::InboxItem>>,
         arming: Arming,
     },
@@ -612,9 +614,17 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             label,
             fingerprint,
             changed,
+            ignored,
             ..
         } => {
             let mut msg = String::new();
+            if let Some(status) = ignored {
+                msg.push_str(&format!(
+                    "THIS RECORD IS IGNORED: {}. Someone may have edited it or restored an old \
+                     copy in the repo. Do not trust it unless you know why. ",
+                    status.label()
+                ));
+            }
             if *changed {
                 msg.push_str(
                     "THE KEY CHANGED. This machine was trusted with another key. If you did not \
@@ -638,7 +648,11 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 &lines,
                 0,
                 &std::cell::Cell::new(lines.len()),
-                if *changed { t.error } else { t.warn },
+                if *changed || ignored.is_some() {
+                    t.error
+                } else {
+                    t.warn
+                },
             )
         }
         Confirm::Untrust {

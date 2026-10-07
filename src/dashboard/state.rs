@@ -24,6 +24,8 @@ pub struct DashboardState {
     /// Why the package profiles table does not read. Membership is then unknown, never
     /// implicit
     pub membership_error: Option<String>,
+    /// This machine's signing key fingerprint, from the key file
+    pub own_fingerprint: Option<String>,
 }
 
 impl DashboardState {
@@ -66,7 +68,12 @@ impl DashboardState {
                 membership_error = Some(e.to_string());
                 None
             }
-            None => Some(Default::default()),
+            None => {
+                membership_error = Some(
+                    "Tether has no sync repo on this machine. Run 'tether init' first".to_string(),
+                );
+                None
+            }
         };
         let membership = match (&config, &sync_state, &table) {
             (Some(config), Some(s), Some(table)) => {
@@ -113,6 +120,7 @@ impl DashboardState {
             old_builds,
             membership,
             membership_error,
+            own_fingerprint: signing::own_fingerprint(),
         }
     }
 
