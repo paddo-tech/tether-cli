@@ -41,7 +41,7 @@ impl ListEditState {
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     if app.config.list_edit.is_some() {
-        list_edit_key(app, key);
+        return list_edit_key(app, key);
     } else if app.config.editing {
         text_edit_key(app, key);
     } else {
@@ -59,8 +59,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     KeyOutcome::Handled(None)
 }
 
-/// Apply a config edit, or show why it was refused or did not save. A failed save can
-/// leave the edit in memory only, so the config is read again from disk.
+/// Apply a config edit, or show why it was refused or did not save. A failed save would
+/// leave the edit in memory only, so the config goes back to what it was.
 fn edit_config(
     app: &mut App,
     edit: impl FnOnce(&mut crate::config::Config) -> config_edit::EditResult,
@@ -68,13 +68,12 @@ fn edit_config(
     let Some(config) = app.state.config.as_mut() else {
         return false;
     };
+    let before = config.clone();
     match edit(config) {
         Ok(()) => true,
         Err(e) => {
+            *config = before;
             app.flash_error(e);
-            if let Ok(config) = crate::config::Config::load() {
-                app.state.config = Some(config);
-            }
             false
         }
     }
@@ -103,9 +102,11 @@ pub fn remove_list_item(app: &mut App, index: usize, item: &str) {
     }
 }
 
-fn list_edit_key(app: &mut App, key: KeyEvent) {
+/// While an item is typed every key goes to it; otherwise unknown keys reach the global
+/// keymap.
+fn list_edit_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     let Some(le) = app.config.list_edit.as_mut() else {
-        return;
+        return KeyOutcome::Ignored;
     };
     if le.adding {
         match key.code {
@@ -139,7 +140,7 @@ fn list_edit_key(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         }
-        return;
+        return KeyOutcome::Handled(None);
     }
 
     match key.code {
@@ -172,8 +173,9 @@ fn list_edit_key(app: &mut App, key: KeyEvent) {
             edit_config(app, |c| config_edit::toggle_dotfile_create(c, cursor));
             refresh_list_edit(app);
         }
-        _ => {}
+        _ => return KeyOutcome::Ignored,
     }
+    KeyOutcome::Handled(None)
 }
 
 fn text_edit_key(app: &mut App, key: KeyEvent) {

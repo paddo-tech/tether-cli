@@ -32,7 +32,7 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub fn title(&self) -> &str {
+    pub fn title(&self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Files => "Files",

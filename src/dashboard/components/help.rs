@@ -1,102 +1,72 @@
+use super::keymap::{self, Binding};
 use super::{centered, popup};
 use crate::dashboard::app::{App, Hit, Tab};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{prelude::*, widgets::Paragraph};
 
-type Hint = (&'static str, &'static str, KeyEvent);
-
-const fn k(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
+fn hint_width(b: &Binding) -> u16 {
+    (b.short_key().chars().count() + b.hint.chars().count() + 3) as u16
 }
 
-const FILES: &[Hint] = &[
-    ("⏎", "expand/diff", k(KeyCode::Enter)),
-    ("i", "import", k(KeyCode::Char('i'))),
-    ("t", "shared", k(KeyCode::Char('t'))),
-    ("R", "restore", k(KeyCode::Char('R'))),
-    ("x", "remove", k(KeyCode::Char('x'))),
-];
-const PACKAGES: &[Hint] = &[
-    ("⏎", "expand", k(KeyCode::Enter)),
-    ("x", "uninstall", k(KeyCode::Char('x'))),
-    ("i", "import", k(KeyCode::Char('i'))),
-    ("t", "profiles", k(KeyCode::Char('t'))),
-    ("h", "history", k(KeyCode::Char('h'))),
-    ("R", "rollback", k(KeyCode::Char('R'))),
-];
-const MACHINES: &[Hint] = &[
-    ("⏎", "details", k(KeyCode::Enter)),
-    ("p", "profile", k(KeyCode::Char('p'))),
-    ("D", "remove old id", k(KeyCode::Char('D'))),
-];
-const CONFIG: &[Hint] = &[("⏎", "edit", k(KeyCode::Enter))];
-const SECURITY: &[Hint] = &[
-    ("a", "approve", k(KeyCode::Char('a'))),
-    ("x", "reject", k(KeyCode::Char('x'))),
-    ("A", "approve all", k(KeyCode::Char('A'))),
-    ("M", "approve machine", k(KeyCode::Char('M'))),
-    ("⏎", "details", k(KeyCode::Enter)),
-];
+/// Key hints from the keymap: the active tab's on the left, global ones on the right, and
+/// `? more` last. The most important keys that fit show; help lists the rest. Each hint
+/// is clickable.
+pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
+    let t = &app.theme;
+    let (_, tab) = keymap::active(app);
+    let tab: &[Binding] = if app.active_tab == Tab::Security && app.state.inbox.items.is_empty() {
+        &[]
+    } else {
+        tab
+    };
+    let mut candidates: Vec<&Binding> = tab
+        .iter()
+        .chain(keymap::GLOBAL)
+        .filter(|b| b.prio > 0)
+        .collect();
+    candidates.sort_by_key(|b| b.prio);
+    let mut room = area.width.saturating_sub(hint_width(&keymap::HELP) + 1);
+    let mut shown: Vec<&Binding> = Vec::new();
+    for b in candidates {
+        let w = hint_width(b);
+        if w <= room {
+            room -= w;
+            shown.push(b);
+        }
+    }
+    let shown = |b: &Binding| shown.iter().any(|s| std::ptr::eq(*s, b));
 
-fn tab_hints(tab: Tab) -> &'static [Hint] {
-    match tab {
-        Tab::Overview => &[],
-        Tab::Files => FILES,
-        Tab::Packages => PACKAGES,
-        Tab::Machines => MACHINES,
-        Tab::Config => CONFIG,
-        Tab::Security => SECURITY,
+    let draw = |f: &mut Frame, b: &Binding, x: u16| {
+        let w = hint_width(b);
+        let rect = Rect::new(x, area.y, w.min(area.right().saturating_sub(x)), 1);
+        f.render_widget(
+            Line::from(vec![
+                Span::styled(format!(" {}", b.short_key()), t.key_hint()),
+                Span::styled(format!(" {} ", b.hint), Style::default().fg(t.muted)),
+            ]),
+            rect,
+        );
+        if let Some(event) = b.event() {
+            app.add_hit(rect, Hit::Key(event));
+        }
+        w
+    };
+    let mut x = area.x;
+    for b in tab.iter().filter(|b| shown(b)) {
+        x += draw(f, b, x);
+    }
+    let global: Vec<&Binding> = keymap::GLOBAL.iter().filter(|b| shown(b)).collect();
+    let global_w: u16 =
+        global.iter().map(|b| hint_width(b)).sum::<u16>() + hint_width(&keymap::HELP);
+    let mut x = area.right().saturating_sub(global_w + 1).max(x);
+    for b in global {
+        x += draw(f, b, x);
+    }
+    if x + hint_width(&keymap::HELP) <= area.right() {
+        draw(f, &keymap::HELP, x);
     }
 }
 
-const GLOBAL: &[Hint] = &[
-    ("s", "sync", k(KeyCode::Char('s'))),
-    ("d", "daemon", k(KeyCode::Char('d'))),
-    ("r", "refresh", k(KeyCode::Char('r'))),
-    (
-        "^K",
-        "commands",
-        KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-    ),
-    ("?", "help", k(KeyCode::Char('?'))),
-    ("q", "quit", k(KeyCode::Char('q'))),
-];
-
-/// Key hints: the active tab's on the left, global ones on the right. Each hint is clickable.
-pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
-    let t = &app.theme;
-    let draw = |f: &mut Frame, hints: &[Hint], mut x: u16, limit: u16| {
-        for (key, desc, code) in hints {
-            let w = (key.chars().count() + desc.len() + 3) as u16;
-            if x + w > limit {
-                break;
-            }
-            let rect = Rect::new(x, area.y, w, 1);
-            f.render_widget(
-                Line::from(vec![
-                    Span::styled(format!(" {}", key), t.key_hint()),
-                    Span::styled(format!(" {} ", desc), Style::default().fg(t.muted)),
-                ]),
-                rect,
-            );
-            app.add_hit(rect, Hit::Key(*code));
-            x += w;
-        }
-    };
-    let global_w: u16 = GLOBAL
-        .iter()
-        .map(|(k, d, _)| (k.chars().count() + d.len() + 3) as u16)
-        .sum();
-    let right_start = area.right().saturating_sub(global_w + 1).max(area.x);
-    let hints = if app.active_tab == Tab::Security && app.state.inbox.items.is_empty() {
-        &[]
-    } else {
-        tab_hints(app.active_tab)
-    };
-    draw(f, hints, area.x, right_start);
-    draw(f, GLOBAL, right_start, area.right());
-}
-
+/// Every global key and every key of what is on screen, from the keymap.
 pub fn render_overlay(f: &mut Frame, app: &App) {
     let t = &app.theme;
     let area = f.area();
@@ -110,67 +80,48 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         return;
     }
 
-    let tabs = format!("Tab / 1-{}", Tab::all().len());
-    let section =
-        |s: &'static str| Line::from(Span::styled(s, Style::default().fg(t.accent).bold()));
-    let key = |k: &str, d: &'static str| {
-        Line::from(vec![
-            Span::styled(format!("  {:<11}", k), t.key_hint()),
-            Span::styled(d, Style::default().fg(t.text)),
-        ])
+    let section = |s: &str| {
+        Line::from(Span::styled(
+            s.to_string(),
+            Style::default().fg(t.accent).bold(),
+        ))
     };
-    let left = vec![
-        section("Global"),
-        key("Ctrl+K", "Command palette"),
-        key("s", "Sync now"),
-        key("d", "Start/stop daemon"),
-        key("r", "Refresh"),
-        key(&tabs, "Next tab / switch tab"),
-        key("j/k ↑↓", "Move"),
-        key("Enter", "Expand / edit"),
-        key("?", "Toggle help"),
-        key("Esc", "Close / collapse"),
-        key("q", "Quit"),
-        key("Ctrl+C", "Force quit"),
-        key("click", "Select; again to open"),
-        Line::from(""),
-        section("Security"),
-        key("a", "Approve, or trust key"),
-        key("x", "Reject"),
-        key("A", "Approve all safe items"),
-        key("M", "Approve all from its machine"),
-        key("Enter", "Details"),
-    ];
-    let right = vec![
-        section("Files"),
-        key("Enter", "Open history, diff"),
-        key("i", "Import from profile"),
-        key("t", "Toggle shared"),
-        key("R", "Restore to commit"),
-        key("x", "Remove from profile"),
-        Line::from(""),
-        section("Packages"),
-        key("Enter", "Expand"),
-        key("x", "Uninstall"),
-        key("i", "Import from machines"),
-        key("h", "Manifest history"),
-        key("R", "Roll back to entry"),
-        Line::from(""),
-        section("Config list"),
-        key("a / x", "Add / remove item"),
-        key("t", "Toggle create"),
-        Line::from(""),
-        section("Machines"),
-        key("D", "Remove old id record"),
-    ];
+    let lines = |bindings: &[Binding]| -> Vec<Line<'static>> {
+        let key_w = bindings
+            .iter()
+            .map(|b| b.key.chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
+        bindings
+            .iter()
+            .map(|b| {
+                Line::from(vec![
+                    Span::styled(format!("  {:<key_w$}", b.key), t.key_hint()),
+                    Span::styled(b.help, Style::default().fg(t.text)),
+                ])
+            })
+            .collect()
+    };
+    let (title, active) = keymap::active(app);
+    let mut left = vec![section("Global")];
+    left.extend(lines(keymap::GLOBAL));
+    let mut right = vec![section(title)];
+    right.extend(lines(active));
 
-    // One blank row above and below the longest column.
-    let two_col = area.width >= 78 && area.height >= 24;
-    let height = if two_col { 24 } else { 43 }.min(area.height.saturating_sub(2));
-    let width = if two_col { 80 } else { 44 }.min(area.width.saturating_sub(4));
-    let rect = centered(area, width, height);
+    let widest = |col: &[Line]| col.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let (lw, rw) = (widest(&left), widest(&right));
+    let two_col = lw + rw + 8 <= area.width.saturating_sub(4);
+    let (width, rows) = if two_col {
+        (lw + rw + 8, left.len().max(right.len()))
+    } else {
+        (lw.max(rw) + 4, left.len() + right.len() + 1)
+    };
+    // One blank row above and below the content
+    let height = (rows as u16 + 4).min(area.height.saturating_sub(2));
+    let rect = centered(area, width.min(area.width.saturating_sub(4)), height);
     app.add_hit(rect, Hit::Block);
-    let block = popup(f, rect, "Keyboard shortcuts", t.accent, t);
+    let block = popup(f, rect, "Keys", t.accent, t);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let inner = Rect {
@@ -179,15 +130,14 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         ..inner
     };
     if two_col {
-        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .spacing(2)
-            .split(inner);
-        f.render_widget(Paragraph::new(left), cols[0]);
-        f.render_widget(Paragraph::new(right), cols[1]);
+        let [l, r] = Layout::horizontal([Constraint::Length(lw), Constraint::Min(0)])
+            .spacing(4)
+            .areas(inner);
+        f.render_widget(Paragraph::new(left), l);
+        f.render_widget(Paragraph::new(right), r);
     } else {
-        let mut all = left;
-        all.push(Line::from(""));
-        all.extend(right);
-        f.render_widget(Paragraph::new(all), inner);
+        left.push(Line::from(""));
+        left.extend(right);
+        f.render_widget(Paragraph::new(left), inner);
     }
 }

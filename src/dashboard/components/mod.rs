@@ -6,6 +6,7 @@ pub mod file_import;
 pub mod files;
 pub mod header;
 pub mod help;
+pub mod keymap;
 pub mod machines;
 pub mod overview;
 pub mod package_profiles;

@@ -56,7 +56,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     let c = &mut app.machines.cursor;
     match key.code {
         KeyCode::Enter => toggle_expand(app),
-        KeyCode::Esc if app.machines.expanded.is_some() => app.machines.expanded = None,
+        KeyCode::Esc => app.machines.expanded = None,
         KeyCode::Char('p') => {
             clamp_cursor(&mut app.machines.cursor, len);
             match app.state.machines.get(app.machines.cursor) {

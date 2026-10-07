@@ -58,7 +58,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
             app.security.detail = !app.security.detail;
             None
         }
-        KeyCode::Esc if app.security.detail => {
+        KeyCode::Esc => {
             app.security.detail = false;
             None
         }

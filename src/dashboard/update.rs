@@ -201,18 +201,11 @@ fn on_tick(app: &mut App) -> Option<Cmd> {
     None
 }
 
-/// Keys go to the top modal overlay, then the active tab, then the global keymap.
+/// Keys go to the Ctrl keys, the top modal overlay, then the active tab, then the global
+/// keymap.
 fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if ctrl && key.code == KeyCode::Char('c') {
-        request_quit(app);
-        return None;
-    }
-    if ctrl && key.code == KeyCode::Char('k') && !app.overlays.last().is_some_and(Overlay::is_modal)
-    {
-        let entries = palette::entries(app);
-        app.overlays.push(Overlay::Palette(Palette::new(entries)));
-        return None;
+    if let KeyOutcome::Handled(cmd) = ctrl_key(app, key) {
+        return cmd;
     }
 
     if app.overlays.last().is_some_and(Overlay::is_modal) {
@@ -236,43 +229,73 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
         return None;
     }
 
-    let outcome = match app.active_tab {
+    if let KeyOutcome::Handled(cmd) = tab_key(app, key) {
+        return cmd;
+    }
+    match global_key(app, key) {
+        KeyOutcome::Handled(cmd) => cmd,
+        KeyOutcome::Ignored => None,
+    }
+}
+
+/// Ctrl-C quits and Ctrl-K opens the palette, before a tab can read them as plain keys.
+fn ctrl_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return KeyOutcome::Ignored;
+    }
+    match key.code {
+        KeyCode::Char('c') => request_quit(app),
+        KeyCode::Char('k') if !app.overlays.last().is_some_and(Overlay::is_modal) => {
+            let entries = palette::entries(app);
+            app.overlays.push(Overlay::Palette(Palette::new(entries)));
+        }
+        _ => return KeyOutcome::Ignored,
+    }
+    KeyOutcome::Handled(None)
+}
+
+fn tab_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    match app.active_tab {
         Tab::Overview => overview::handle_key(app, key),
         Tab::Files => files::handle_key(app, key),
         Tab::Packages => packages::handle_key(app, key),
         Tab::Machines => machines::handle_key(app, key),
         Tab::Config => config::handle_key(app, key),
         Tab::Security => security::handle_key(app, key),
-    };
-    if let KeyOutcome::Handled(cmd) = outcome {
-        return cmd;
     }
+}
 
-    match key.code {
+fn global_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    let cmd = match key.code {
+        KeyCode::Esc => {
+            app.overlays.retain(|o| !matches!(o, Overlay::Help));
+            None
+        }
         KeyCode::Char('q') => {
             if app.help_open() {
                 app.overlays.retain(|o| !matches!(o, Overlay::Help));
             } else {
                 request_quit(app);
             }
+            None
         }
-        KeyCode::Char('s') => return run_action(app, Action::Sync),
-        KeyCode::Char('d') => return run_action(app, Action::ToggleDaemon),
-        KeyCode::Char('r') => return run_action(app, Action::Refresh),
+        KeyCode::Char('s') => run_action(app, Action::Sync),
+        KeyCode::Char('d') => run_action(app, Action::ToggleDaemon),
+        KeyCode::Char('r') => run_action(app, Action::Refresh),
         KeyCode::Tab => {
             let tabs = Tab::all();
             let current = tabs.iter().position(|t| *t == app.active_tab).unwrap_or(0);
             app.active_tab = tabs[(current + 1) % tabs.len()];
+            None
         }
-        KeyCode::Char(c @ '1'..='9') => {
-            if let Some(tab) = Tab::all().get(c as usize - '1' as usize) {
-                app.active_tab = *tab;
-            }
+        KeyCode::Char(c @ '1'..='9') if c as usize - ('1' as usize) < Tab::all().len() => {
+            app.active_tab = Tab::all()[c as usize - '1' as usize];
+            None
         }
-        KeyCode::Char('?') => return run_action(app, Action::Help),
-        _ => {}
-    }
-    None
+        KeyCode::Char('?') => run_action(app, Action::Help),
+        _ => return KeyOutcome::Ignored,
+    };
+    KeyOutcome::Handled(cmd)
 }
 
 pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
@@ -698,6 +721,113 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         assert!(app.config.list_edit.is_none());
         assert!(!app.should_quit);
+    }
+
+    /// Keys a handler takes, among every printable key and the common special keys.
+    fn handled(
+        fixture: impl Fn() -> App,
+        handler: fn(&mut App, KeyEvent) -> KeyOutcome,
+        modifiers: KeyModifiers,
+    ) -> BTreeSet<String> {
+        use KeyCode::*;
+        let mut codes: Vec<KeyCode> = (' '..='~').map(Char).collect();
+        codes.extend([
+            Enter, Esc, Tab, BackTab, Backspace, Delete, Up, Down, Left, Right, PageUp, PageDown,
+            Home, End,
+        ]);
+        codes
+            .into_iter()
+            .filter(|code| {
+                let mut app = fixture();
+                matches!(
+                    handler(&mut app, KeyEvent::new(*code, modifiers)),
+                    KeyOutcome::Handled(_)
+                )
+            })
+            .map(|code| format!("{:?}", code))
+            .collect()
+    }
+
+    fn listed(
+        bindings: &[crate::dashboard::components::keymap::Binding],
+        ctrl: bool,
+    ) -> BTreeSet<String> {
+        bindings
+            .iter()
+            .filter(|b| b.ctrl == ctrl)
+            .flat_map(|b| b.codes.iter().map(|code| format!("{:?}", code)))
+            .collect()
+    }
+
+    /// The footer and help come from the keymap, so it must list exactly the keys each
+    /// handler takes.
+    #[test]
+    fn keymap_lists_exactly_the_handled_keys() {
+        use crate::dashboard::components::keymap;
+
+        for tab in Tab::all() {
+            let fixture = || {
+                let mut app = app();
+                app.active_tab = *tab;
+                app
+            };
+            assert_eq!(
+                handled(fixture, tab_key, KeyModifiers::NONE),
+                listed(keymap::tab(*tab), false),
+                "{:?}",
+                tab
+            );
+        }
+        let list_fixture = || {
+            let mut app = app();
+            let mut config = crate::config::Config::default();
+            // An empty list, so no probed key can save the config
+            config.dotfiles.files.clear();
+            app.state.config = Some(config);
+            app.active_tab = Tab::Config;
+            app.config.selected = crate::dashboard::config_edit::fields()
+                .iter()
+                .position(|f| f.key == "dotfiles.files")
+                .unwrap();
+            key(&mut app, KeyCode::Enter);
+            assert!(app.config.list_edit.is_some());
+            app
+        };
+        assert_eq!(
+            handled(list_fixture, tab_key, KeyModifiers::NONE),
+            listed(keymap::CONFIG_LIST, false)
+        );
+        assert_eq!(
+            handled(app, global_key, KeyModifiers::NONE),
+            listed(keymap::GLOBAL, false)
+        );
+        assert_eq!(
+            handled(app, ctrl_key, KeyModifiers::CONTROL),
+            listed(keymap::GLOBAL, true)
+        );
+    }
+
+    #[test]
+    fn footer_keeps_the_help_key_and_the_first_keys_at_every_width() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        for tab in Tab::all() {
+            app.active_tab = *tab;
+            for w in [60, 100, 120, 160] {
+                let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
+                terminal
+                    .draw(|f| crate::dashboard::view::view(f, &app))
+                    .unwrap();
+                let footer: String = (0..w)
+                    .map(|x| terminal.backend().buffer()[(x, 29)].symbol().to_string())
+                    .collect();
+                assert!(footer.contains("? more"), "{:?} at {}: {}", tab, w, footer);
+                if w >= 100 {
+                    assert!(footer.contains("s sync") && footer.contains("q quit"));
+                }
+            }
+        }
     }
 
     #[test]
