@@ -641,15 +641,19 @@ async fn fleet() {
     let k: Vec<String> = lost
         .iter()
         .map(|m| {
-            let warned = f.syncs.iter().any(|s| {
+            // warn_changed_profile in src/cli/commands/sync.rs
+            let warned = f.syncs.iter().find(|s| {
                 s.machine == *m
                     && s.text
-                        .contains("no longer puts this machine in profile server")
+                        .contains("The synced config changed this machine's profile from server")
             });
-            format!(
-                "{m} lost its server profile ({} the warning)",
-                if warned { "with" } else { "without" }
-            )
+            match warned {
+                Some(s) => format!(
+                    "{m} lost its server profile; its sync in round {} warned about it",
+                    s.round
+                ),
+                None => format!("{m} lost its server profile, and no sync of it warned"),
+            }
         })
         .collect();
 
