@@ -395,6 +395,50 @@ fn install_runs_the_gates_of_a_sync() {
 }
 
 #[test]
+fn list_other_profiles_names_what_this_profile_skips() {
+    let h = home();
+    let sync = h.path().join(".tether/sync");
+    std::fs::create_dir_all(sync.join("machines")).unwrap();
+    let key =
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap();
+    let mut server = tether::sync::MachineState::new("server1");
+    server.profile = Some("server".to_string());
+    server
+        .packages
+        .insert("npm".to_string(), vec!["pm2".to_string()]);
+    tether::sync::signing::save_record(&sync, &server).unwrap();
+    tether::sync::signing::sign_record(&sync, "server1", &key).unwrap();
+    let public = key.public_key();
+    std::fs::write(
+        h.path().join(".tether/trusted_keys"),
+        format!(
+            "version = 1\n[machines.server1]\npublic_key = \"{}\"\nfingerprint = \"{}\"\n",
+            public.to_openssh().unwrap(),
+            tether::sync::signing::fingerprint(public)
+        ),
+    )
+    .unwrap();
+
+    let list = json(
+        h.path(),
+        &["packages", "list", "--other-profiles", "--json"],
+    );
+    assert_eq!(list["profile"], "dev");
+    assert_eq!(
+        list["packages"],
+        serde_json::json!([{
+            "id": "npm:pm2", "manager": "npm", "name": "pm2", "profiles": ["server"]
+        }])
+    );
+    tether(h.path())
+        .args(["packages", "list", "--other-profiles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pm2  (server)"));
+}
+
+#[test]
 fn daemon_status_and_logs() {
     let h = home();
     tether(h.path())

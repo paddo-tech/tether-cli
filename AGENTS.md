@@ -41,7 +41,7 @@ Never run Tether or a package manager against your own `~/.tether` or your own m
 | `config` | Manage configuration and feature toggles |
 | `daemon` | Control the background daemon: `start`, `stop`, `restart`, `status`, `logs -f -n`, `install`, `uninstall` |
 | `machines` | `list` (`--json`), `show`, `rename <NEW>`, `remove`, `trust --fingerprint`, `untrust`, `profile` |
-| `packages` | `list` (`--json`, also bare `packages`), `inbox` (`--json`), `approve [--all] [--from] [--expect]`, `reject`, `install`, `share --to`, `unshare --from`, `uninstall` (alias `remove`) |
+| `packages` | `list` (`--json`, `--other-profiles`, also bare `packages`), `inbox` (`--json`), `approve [--all] [--from] [--expect]`, `reject`, `install`, `share --to`, `unshare --from`, `uninstall` (alias `remove`) |
 | `ignore` | `secrets add/list/remove` (secret scanning), `files add/project/list/remove` (files this machine keeps) |
 | `team` | Manage team sync (dotfiles, secrets, projects) |
 | `resolve` | Resolve file conflicts |

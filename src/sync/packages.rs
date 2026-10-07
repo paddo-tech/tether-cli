@@ -247,19 +247,52 @@ fn notify_excluded(scope: &Membership, shown: &mut bool) {
     if *shown {
         return;
     }
+    if let Some(notice) = excluded_notice(scope) {
+        Output::warning(&notice);
+        *shown = true;
+    }
+}
+
+/// Counts, not names: a machine that joins a large fleet can miss hundreds of packages.
+fn excluded_notice(scope: &Membership) -> Option<String> {
     let excluded = scope.excluded();
     if excluded.is_empty() {
-        return;
+        return None;
     }
-    Output::warning(&format!(
-        "This machine (profile {}) installs only the packages of its profile. It does not \
-         install these packages from other profiles: {}. To install one here, run 'tether \
-         packages share <manager:name> --to {}'",
+    let mut managers: HashMap<&str, usize> = HashMap::new();
+    let mut profiles: HashMap<String, usize> = HashMap::new();
+    for id in &excluded {
+        let Some((manager, name)) = id.split_once(':') else {
+            continue;
+        };
+        *managers.entry(manager).or_default() += 1;
+        for profile in scope.members(manager, name) {
+            *profiles.entry(profile).or_default() += 1;
+        }
+    }
+    let counts = |map: HashMap<&str, usize>| {
+        let mut counts: Vec<(&str, usize)> = map.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        counts
+            .iter()
+            .map(|(name, n)| format!("{} {}", name, n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let profiles = counts(profiles.iter().map(|(p, n)| (p.as_str(), *n)).collect());
+    Some(format!(
+        "This machine (profile {}) installs only the packages of its profile. {} package{} of \
+         other profiles {} not install here. By manager: {}. By profile: {}. Run 'tether \
+         packages list --other-profiles' to see them, and 'tether packages share \
+         <manager:name> --to {}' to install one here",
         scope.profile,
-        excluded.join(", "),
+        excluded.len(),
+        if excluded.len() == 1 { "" } else { "s" },
+        if excluded.len() == 1 { "does" } else { "do" },
+        counts(managers),
+        profiles,
         scope.profile
-    ));
-    *shown = true;
+    ))
 }
 
 /// The ids of failing records not reported before. `warned` keeps only records that still
@@ -1748,6 +1781,48 @@ fn write_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excluded_notice_counts_instead_of_naming() {
+        let mut config = Config::default();
+        config.machine_profiles.insert("me".into(), "server".into());
+        let me = MachineState::new("me");
+        let mut dev = MachineState::new("dev1");
+        let mut laptop = MachineState::new("laptop1");
+        dev.profile = Some("dev".into());
+        laptop.profile = Some("laptop".into());
+        for i in 0..200 {
+            dev.packages
+                .entry("brew_formulae".into())
+                .or_default()
+                .push(format!("formula-{i}"));
+        }
+        dev.packages
+            .insert("npm".into(), vec!["shared".into(), "only-dev".into()]);
+        laptop.packages.insert("npm".into(), vec!["shared".into()]);
+        let scope = Membership::new(
+            &config,
+            &Default::default(),
+            &me,
+            &[(&dev, true), (&laptop, true)],
+        );
+        let notice = excluded_notice(&scope).unwrap();
+        assert!(notice.contains("202 packages of other profiles do not install here"));
+        assert!(
+            notice.contains("By manager: brew_formulae 200, npm 2."),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("By profile: dev 202, laptop 1."),
+            "{notice}"
+        );
+        assert!(notice.contains("'tether packages list --other-profiles'"));
+        assert!(notice.contains("--to server"));
+        assert!(!notice.contains("formula-1"), "{notice}");
+
+        let alone = Membership::new(&config, &Default::default(), &me, &[]);
+        assert_eq!(excluded_notice(&alone), None);
+    }
 
     #[test]
     fn manifests_are_names_only() {
