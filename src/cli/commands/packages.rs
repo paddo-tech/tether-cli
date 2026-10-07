@@ -213,6 +213,137 @@ pub fn share(id: &str, to: &[String]) -> Result<()> {
     Ok(())
 }
 
+pub fn unshare(id: &str, from: &[String]) -> Result<()> {
+    let (manager, name) = split_id(id)?;
+    let config = crate::config::Config::load()?;
+    let members = Membership::load_current(&config)?.members(manager, name);
+    if let Some(other) = from.iter().find(|p| !members.contains(p.as_str())) {
+        anyhow::bail!(
+            "{} does not belong to profile {}. Its profiles: {}",
+            id,
+            other,
+            members.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    let edit = Edit {
+        remove: from.iter().cloned().collect(),
+        ..Edit::default()
+    };
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    let Some(members) = membership::save_edit(&config, manager, name, &edit)? else {
+        anyhow::bail!(
+            "A package keeps at least one profile. To drop {} everywhere, run 'tether packages \
+             uninstall {}' on a machine of each profile",
+            id,
+            id
+        );
+    };
+    Output::success(&format!(
+        "{} now belongs to: {}. Machines in {} stop installing it, but keep any copy they have",
+        membership::canonical_id(manager, name),
+        members.into_iter().collect::<Vec<_>>().join(", "),
+        from.join(", ")
+    ));
+    Ok(())
+}
+
+/// Install a package another machine lists, as the dashboard's Import does: OSV checks the
+/// release that would install, and nothing is checked against trusted records. A package
+/// in the inbox needs approval instead, so its review is not skipped.
+pub async fn install(id: &str) -> Result<()> {
+    let (manager, name) = split_id(id)?;
+    let canonical = membership::canonical_id(manager, name);
+    if inbox::list()?.iter().any(|i| {
+        i.kind == Kind::Package && membership::canonical_id(&i.manager, &i.name) == canonical
+    }) {
+        anyhow::bail!(
+            "{} waits in the inbox. Review it with 'tether packages inbox', then run \
+             'tether packages approve {}'",
+            id,
+            canonical
+        );
+    }
+    let sync_path = crate::sync::SyncEngine::sync_path()?;
+    let machine_id = crate::sync::SyncState::load()?.machine_id;
+    let lists = |m: &crate::sync::MachineState| {
+        m.packages.get(manager).is_some_and(|names| {
+            names
+                .iter()
+                .any(|n| membership::canonical_id(manager, n) == canonical)
+        })
+    };
+    let records = crate::sync::MachineState::list_all(&sync_path)?;
+    if records
+        .iter()
+        .any(|m| m.machine_id == machine_id && lists(m))
+    {
+        anyhow::bail!("{} is already installed here", id);
+    }
+    let sources: Vec<&str> = records
+        .iter()
+        .filter(|m| m.machine_id != machine_id && lists(m))
+        .map(|m| m.machine_id.as_str())
+        .collect();
+    if sources.is_empty() {
+        anyhow::bail!("No other machine lists {}", id);
+    }
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    let Some(version) = osv_checked(manager, name, None).await? else {
+        return Ok(());
+    };
+    Output::info(&format!(
+        "Installing {} from {}",
+        canonical,
+        sources.join(", ")
+    ));
+    inbox::install(
+        &InboxItem {
+            kind: Kind::Package,
+            manager: manager.to_string(),
+            name: name.to_string(),
+            version,
+            tap: None,
+            source_machine: None,
+            commit: None,
+            signer: None,
+            reasons: Vec::new(),
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        },
+        true,
+    )
+    .await?;
+    forget_removal(&sync_path, &machine_id, manager, name)?;
+    Output::success(&format!("Installed {}", canonical));
+    Ok(())
+}
+
+/// A sync uninstalls a package this machine removed, so an install takes it off that list.
+fn forget_removal(
+    sync_path: &std::path::Path,
+    machine_id: &str,
+    manager: &str,
+    name: &str,
+) -> Result<()> {
+    let Some(mut record) = crate::sync::signing::own_record(sync_path, machine_id)? else {
+        return Ok(());
+    };
+    let Some(removed) = record.removed_packages.get_mut(manager) else {
+        return Ok(());
+    };
+    let before = removed.len();
+    removed.retain(|n| {
+        membership::canonical_id(manager, n) != membership::canonical_id(manager, name)
+    });
+    if removed.len() == before {
+        return Ok(());
+    }
+    if removed.is_empty() {
+        record.removed_packages.remove(manager);
+    }
+    crate::sync::signing::save_record(sync_path, &record)
+}
+
 pub async fn remove(id: &str) -> Result<()> {
     let (manager, name) = split_id(id)?;
     if manager == "brew_taps" {
@@ -308,7 +439,7 @@ pub async fn inbox_list() -> Result<()> {
         }
     }
     Output::dim(
-        "Run 'tether packages approve <id> <version, tap or key>' or 'tether packages reject <id> <version, tap or key>'",
+        "Run 'tether packages approve <id> --expect <version, tap or key>', 'tether packages approve --all', or 'tether packages reject <id> --expect <version, tap or key>'",
     );
     Ok(())
 }
@@ -355,7 +486,7 @@ fn reviewed(
         None => {
             if let Some(binding) = binding(&item) {
                 anyhow::bail!(
-                    "Check {}, then run 'tether packages {} {} {}'",
+                    "Check {}, then run 'tether packages {} {} --expect {}'",
                     describe(&item),
                     action,
                     item.id(),
@@ -370,6 +501,9 @@ fn reviewed(
 /// Approve a held package and install it now, or trust a held machine key. The sync lock
 /// keeps the daemon from installing the same package while this install runs.
 pub async fn approve(id: &str, expected: Option<&str>) -> Result<()> {
+    if let Some(machine) = id.strip_prefix("machine:") {
+        return super::machines::trust(machine, expected).await;
+    }
     let Some(item) = reviewed(id, expected, "approve", "Approve this item?")? else {
         return Ok(());
     };
@@ -404,7 +538,7 @@ fn confirm_signature_failed(item: &InboxItem) -> Result<bool> {
 async fn approve_locked(shown: &InboxItem) -> Result<()> {
     let mut version = None;
     if shown.kind == Kind::Package {
-        match osv_checked(shown).await? {
+        match osv_checked(&shown.manager, &shown.name, shown.version.as_deref()).await? {
             Some(checked) => version = checked,
             None => return Ok(()),
         }
@@ -434,8 +568,12 @@ async fn approve_locked(shown: &InboxItem) -> Result<()> {
 /// could not check the release that would install, a terminal user may install it anyway.
 /// Without a terminal the approval fails, so nothing installs unchecked. None when the user
 /// declines.
-async fn osv_checked(item: &InboxItem) -> Result<Option<Option<String>>> {
-    let e = match inbox::check_osv(&item.manager, &item.name, item.version.as_deref(), true).await {
+async fn osv_checked(
+    manager: &str,
+    name: &str,
+    version: Option<&str>,
+) -> Result<Option<Option<String>>> {
+    let e = match inbox::check_osv(manager, name, version, true).await {
         Ok(version) => return Ok(Some(version)),
         Err(e) => e,
     };
@@ -450,6 +588,62 @@ async fn osv_checked(item: &InboxItem) -> Result<Option<Option<String>>> {
     } else {
         Ok(None)
     }
+}
+
+/// Approve and install every package one answer may cover, as listed when asked. A sync
+/// that queues more meanwhile does not add to them. With `from`, only items from that
+/// machine.
+pub async fn approve_all(from: Option<&str>) -> Result<()> {
+    let from = match from {
+        Some(m) => Some(super::machines::resolve(
+            &crate::sync::SyncEngine::sync_path()?,
+            m,
+        )?),
+        None => None,
+    };
+    let mut items = inbox::list()?;
+    inbox::sort_by_group(&mut items);
+    let (approvable, held): (Vec<InboxItem>, Vec<InboxItem>) = items
+        .into_iter()
+        .filter(|i| from.as_deref().is_none_or(|m| i.from_machine() == Some(m)))
+        .partition(InboxItem::bulk_approvable);
+    if !held.is_empty() {
+        Output::info(&format!(
+            "{} item(s) need their own decision and stay in the inbox: machine keys, packages \
+             OSV lists as malicious, and packages whose record fails its signature",
+            held.len()
+        ));
+    }
+    if approvable.is_empty() {
+        Output::info("No packages to approve");
+        return Ok(());
+    }
+    Output::section("Packages to approve and install");
+    for item in &approvable {
+        Output::list_item(&describe(item));
+    }
+    if !Prompt::confirm(
+        &format!("Approve and install these {} packages?", approvable.len()),
+        false,
+    )? {
+        return Ok(());
+    }
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    let mut failed = 0;
+    for item in &approvable {
+        if let Err(e) = approve_locked(item).await {
+            Output::warning(&format!("{}: {:#}", item.id(), e));
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!(
+            "{} of {} packages were not installed",
+            failed,
+            approvable.len()
+        );
+    }
+    Ok(())
 }
 
 /// Reject a held item so later syncs do not offer that version, tap or key again.

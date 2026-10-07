@@ -184,17 +184,43 @@ pub enum PackagesAction {
     Inbox,
     /// Approve a held package and install it
     Approve {
-        /// Item id (manager:name) or a package name
-        id: String,
-        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a terminal
+        /// Item id (manager:name) or a package name. machine:<id> trusts that machine's key,
+        /// as 'tether machines trust' does
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        /// Same as --expect
+        #[arg(conflicts_with = "expect", hide = true)]
         expected: Option<String>,
+        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a
+        /// terminal
+        #[arg(long)]
+        expect: Option<String>,
+        /// Approve and install every package in the inbox, except packages OSV lists as
+        /// malicious, packages whose record fails its signature, and machine keys. Asks
+        /// first; without a terminal, needs -y
+        #[arg(long)]
+        all: bool,
+        /// With --all, only the items from this machine (id or hostname)
+        #[arg(long, requires = "all")]
+        from: Option<String>,
     },
     /// Reject a held package or key so syncs stop offering that version, tap or key
     Reject {
         /// Item id (manager:name) or a package name
         id: String,
-        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a terminal
+        /// Same as --expect
+        #[arg(conflicts_with = "expect", hide = true)]
         expected: Option<String>,
+        /// The version, Homebrew tap or key fingerprint you reviewed. Required without a
+        /// terminal
+        #[arg(long)]
+        expect: Option<String>,
+    },
+    /// Install a package that another machine lists, as the dashboard's Import does. OSV
+    /// checks the release first. A package that waits in the inbox needs 'approve' instead
+    Install {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: String,
     },
     /// Add profiles to a package's members, so machines in those profiles install it
     Share {
@@ -203,6 +229,15 @@ pub enum PackagesAction {
         /// Profiles to add, separated by commas
         #[arg(long, value_delimiter = ',', required = true)]
         to: Vec<String>,
+    },
+    /// Take profiles out of a package's members, so machines in those profiles stop
+    /// installing it. Nothing is uninstalled; machines keep any copy they have
+    Unshare {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: String,
+        /// Profiles to take out, separated by commas
+        #[arg(long, value_delimiter = ',', required = true)]
+        from: Vec<String>,
     },
     /// Uninstall a package here and take this machine's profile out of its members. Without
     /// a package, pick packages to uninstall in a terminal
@@ -764,13 +799,27 @@ impl Cli {
             Commands::Packages { list: _, action } => match action {
                 None | Some(PackagesAction::List) => packages::list().await,
                 Some(PackagesAction::Inbox) => packages::inbox_list().await,
-                Some(PackagesAction::Approve { id, expected }) => {
-                    packages::approve(id, expected.as_deref()).await
-                }
-                Some(PackagesAction::Reject { id, expected }) => {
-                    packages::reject(id, expected.as_deref()).await
-                }
+                Some(PackagesAction::Approve {
+                    id,
+                    expected,
+                    expect,
+                    all,
+                    from,
+                }) => match id {
+                    _ if *all => packages::approve_all(from.as_deref()).await,
+                    Some(id) => {
+                        packages::approve(id, expected.as_deref().or(expect.as_deref())).await
+                    }
+                    None => unreachable!("clap requires an id without --all"),
+                },
+                Some(PackagesAction::Reject {
+                    id,
+                    expected,
+                    expect,
+                }) => packages::reject(id, expected.as_deref().or(expect.as_deref())).await,
+                Some(PackagesAction::Install { id }) => packages::install(id).await,
                 Some(PackagesAction::Share { id, to }) => packages::share(id, to),
+                Some(PackagesAction::Unshare { id, from }) => packages::unshare(id, from),
                 Some(PackagesAction::Uninstall { id: Some(id) }) => packages::remove(id).await,
                 Some(PackagesAction::Uninstall { id: None }) => packages::pick_uninstall().await,
             },

@@ -187,6 +187,73 @@ fn bare_packages_lists_and_uninstall_needs_a_package() {
 }
 
 #[test]
+fn approve_all_lists_what_it_covers_and_needs_y_without_a_terminal() {
+    use tether::packages::inbox::{Inbox, InboxItem, Kind, Reason};
+    let h = home();
+    let item = |manager: &str, name: &str, kind: Kind| InboxItem {
+        kind,
+        manager: manager.to_string(),
+        name: name.to_string(),
+        version: Some("1.0.0".to_string()),
+        tap: None,
+        source_machine: Some("other".to_string()),
+        commit: None,
+        signer: None,
+        reasons: vec![Reason::Unsigned],
+        advisories: Vec::new(),
+        first_seen: chrono::Utc::now(),
+    };
+    let inbox = Inbox {
+        items: vec![
+            item("npm", "left-pad", Kind::Package),
+            item(
+                "machine",
+                "other",
+                Kind::TrustMachine {
+                    public_key: String::new(),
+                    fingerprint: "SHA256:x".to_string(),
+                },
+            ),
+        ],
+        ..Inbox::default()
+    };
+    std::fs::write(
+        h.path().join(".tether/inbox.json"),
+        serde_json::to_string(&inbox).unwrap(),
+    )
+    .unwrap();
+    tether(h.path())
+        .args(["packages", "approve", "--all"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("npm:left-pad 1.0.0"))
+        .stdout(predicate::str::contains(
+            "1 item(s) need their own decision",
+        ))
+        .stderr(predicate::str::contains("Pass -y"));
+    tether(h.path())
+        .args(["packages", "approve", "--all", "--from", "nobody"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No packages to approve"));
+    // Approving one item needs the reviewed version without a terminal
+    fails(
+        h.path(),
+        &["packages", "approve", "npm:left-pad"],
+        "--expect 1.0.0",
+    );
+    fails(
+        h.path(),
+        &["packages", "approve", "npm:left-pad", "--expect", "2.0.0"],
+        "is now 1.0.0",
+    );
+    tether(h.path())
+        .args(["packages", "approve"])
+        .assert()
+        .code(2);
+}
+
+#[test]
 fn piped_output_has_no_colour() {
     let h = home();
     for args in [

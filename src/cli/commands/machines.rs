@@ -10,6 +10,34 @@ use chrono::Local;
 use comfy_table::{Attribute, Cell, Color};
 use std::path::Path;
 
+/// The machine id `name` refers to: a machine id, or the hostname of exactly one machine.
+/// A name that matches neither is returned as given, so a command can act on an id that
+/// has no record, such as untrust.
+pub fn resolve(sync_path: &Path, name: &str) -> Result<String> {
+    resolve_in(&MachineState::list_all(sync_path).unwrap_or_default(), name)
+}
+
+fn resolve_in(machines: &[MachineState], name: &str) -> Result<String> {
+    if machines.iter().any(|m| m.machine_id == name) {
+        return Ok(name.to_string());
+    }
+    let host = |h: &str| h.trim_end_matches(".local").to_ascii_lowercase();
+    let ids: Vec<&str> = machines
+        .iter()
+        .filter(|m| host(&m.hostname) == host(name))
+        .map(|m| m.machine_id.as_str())
+        .collect();
+    match ids.as_slice() {
+        [] => Ok(name.to_string()),
+        [id] => Ok(id.to_string()),
+        _ => anyhow::bail!(
+            "Hostname {} names more than one machine: {}. Use a machine id",
+            name,
+            ids.join(", ")
+        ),
+    }
+}
+
 pub async fn list() -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
@@ -806,6 +834,28 @@ pub async fn profile_list() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_machine_is_named_by_id_or_a_unique_hostname() {
+        let machine = |id: &str, host: &str| {
+            let mut m = crate::sync::MachineState::new(id);
+            m.hostname = host.to_string();
+            m
+        };
+        let fleet = [
+            machine("a1", "laptop.local"),
+            machine("b2", "server"),
+            machine("c3", "twin"),
+            machine("d4", "twin"),
+        ];
+        let resolve = |name: &str| super::resolve_in(&fleet, name);
+        assert_eq!(resolve("b2").unwrap(), "b2");
+        assert_eq!(resolve("laptop").unwrap(), "a1");
+        assert_eq!(resolve("Laptop.local").unwrap(), "a1");
+        assert_eq!(resolve("server").unwrap(), "b2");
+        assert_eq!(resolve("gone").unwrap(), "gone");
+        assert!(resolve("twin").unwrap_err().to_string().contains("c3, d4"));
+    }
+
     #[test]
     fn removal_summary_names_the_record_it_removed() {
         let mut record = crate::sync::MachineState::new("old-mac");
