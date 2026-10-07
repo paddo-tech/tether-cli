@@ -1656,10 +1656,8 @@ fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> Result<(
 
 /// Purge project files from git history using git filter-repo
 fn purge_from_git_history(sync_path: &std::path::Path, projects: &[String]) -> Result<()> {
-    use std::process::Command;
-
     // Check if git-filter-repo is available
-    let filter_repo_check = Command::new("git")
+    let filter_repo_check = crate::sync::git::git_command()
         .args(["filter-repo", "--version"])
         .output();
 
@@ -1677,7 +1675,7 @@ fn purge_from_git_history(sync_path: &std::path::Path, projects: &[String]) -> R
         args.push("--invert-paths".to_string());
     }
 
-    let output = Command::new("git")
+    let output = crate::sync::git::git_command()
         .current_dir(sync_path)
         .args(&args)
         .output()?;
@@ -1692,9 +1690,7 @@ fn purge_from_git_history(sync_path: &std::path::Path, projects: &[String]) -> R
 
 /// Force push the sync repo after history rewrite
 fn force_push_sync_repo(sync_path: &std::path::Path) -> Result<()> {
-    use std::process::Command;
-
-    let output = Command::new("git")
+    let output = crate::sync::git::git_command()
         .current_dir(sync_path)
         .args(["push", "--force-with-lease"])
         .output()?;
@@ -1712,8 +1708,6 @@ fn force_push_sync_repo(sync_path: &std::path::Path) -> Result<()> {
 
 /// Fallback to git filter-branch if git-filter-repo isn't available
 fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) -> Result<()> {
-    use std::process::Command;
-
     // Build the filter command
     let mut rm_commands = Vec::new();
     for project in projects {
@@ -1724,7 +1718,7 @@ fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) ->
     }
     let filter_cmd = rm_commands.join(" && ");
 
-    let output = Command::new("git")
+    let output = crate::sync::git::git_command()
         .current_dir(sync_path)
         .args([
             "filter-branch",
@@ -1745,7 +1739,7 @@ fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) ->
     }
 
     // Clean up refs
-    let _ = Command::new("git")
+    let _ = crate::sync::git::git_command()
         .current_dir(sync_path)
         .args(["for-each-ref", "--format=%(refname)", "refs/original/"])
         .output()
@@ -1753,7 +1747,7 @@ fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) ->
             if o.status.success() {
                 let refs = String::from_utf8_lossy(&o.stdout);
                 for r in refs.lines() {
-                    let _ = Command::new("git")
+                    let _ = crate::sync::git::git_command()
                         .current_dir(sync_path)
                         .args(["update-ref", "-d", r])
                         .output();
@@ -1761,12 +1755,12 @@ fn purge_with_filter_branch(sync_path: &std::path::Path, projects: &[String]) ->
             }
         });
 
-    let _ = Command::new("git")
+    let _ = crate::sync::git::git_command()
         .current_dir(sync_path)
         .args(["reflog", "expire", "--expire=now", "--all"])
         .output();
 
-    let _ = Command::new("git")
+    let _ = crate::sync::git::git_command()
         .current_dir(sync_path)
         .args(["gc", "--prune=now"])
         .output();

@@ -264,7 +264,7 @@ pub async fn commit_activity(days: usize) -> Vec<u64> {
         return Vec::new();
     };
     let since = format!("--since={}.days", days);
-    let log = tokio::process::Command::new("git")
+    let log = tokio::process::Command::from(crate::sync::git::git_command())
         .args(["log", &since, "--format=%at"])
         .current_dir(&sync_path)
         .kill_on_drop(true)

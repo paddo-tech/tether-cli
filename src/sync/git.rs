@@ -6,6 +6,27 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Config for every git command Tether runs. Rebase and stash write commits with the
+/// committer from git config, and a new machine may have none, so Tether gives the
+/// identity its git2 commits use. Rebased commits stay unsigned, so a user's
+/// `commit.gpgsign` cannot ask for a passphrase or fail a run without a terminal.
+pub fn identity_args() -> [String; 6] {
+    [
+        "-c".to_string(),
+        format!("user.name={}", crate::sync::local_hostname()),
+        "-c".to_string(),
+        "user.email=tether@local".to_string(),
+        "-c".to_string(),
+        "commit.gpgsign=false".to_string(),
+    ]
+}
+
+pub fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(identity_args());
+    cmd
+}
+
 fn write_signed(
     repo: &Repository,
     key: &ssh_key::PrivateKey,
@@ -42,7 +63,7 @@ impl GitBackend {
 
     /// Check if the repository has any commits
     fn has_commits(&self) -> bool {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["rev-parse", "HEAD"])
             .current_dir(&self.repo_path)
             .output();
@@ -55,7 +76,7 @@ impl GitBackend {
 
     /// Check if remote branch exists
     fn remote_branch_exists(&self, branch: &str) -> bool {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["ls-remote", "--heads", "origin", branch])
             .current_dir(&self.repo_path)
             .stdin(Stdio::inherit())
@@ -72,7 +93,7 @@ impl GitBackend {
         let path_str = path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
-        let output = Command::new("git")
+        let output = git_command()
             .args(["clone", url, path_str])
             .stdin(Stdio::inherit())
             .output()?;
@@ -224,7 +245,7 @@ impl GitBackend {
     }
 
     fn git(&self, args: &[&str]) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(args)
             .current_dir(&self.repo_path)
             .output()?;
@@ -241,9 +262,16 @@ impl GitBackend {
             || self.repo_path.join(".git/rebase-apply").exists()
     }
 
+    /// True when the index has unmerged paths, as a stopped rebase leaves on a conflict
+    fn has_conflicts(&self) -> bool {
+        Repository::open(&self.repo_path)
+            .and_then(|repo| repo.index())
+            .is_ok_and(|index| index.has_conflicts())
+    }
+
     /// Abort any in-progress rebase
     fn abort_rebase(&self) -> Result<()> {
-        Command::new("git")
+        git_command()
             .args(["rebase", "--abort"])
             .current_dir(&self.repo_path)
             .output()?;
@@ -252,7 +280,7 @@ impl GitBackend {
 
     /// Fetch origin/main without changing the local branch.
     pub fn fetch(&self) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["fetch", "origin", "main"])
             .current_dir(&self.repo_path)
             .stdin(Stdio::inherit())
@@ -271,7 +299,7 @@ impl GitBackend {
 
     /// Reset local branch to match remote
     pub fn reset_to_remote(&self) -> Result<()> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["reset", "--hard", "origin/main"])
             .current_dir(&self.repo_path)
             .output()?;
@@ -297,7 +325,7 @@ impl GitBackend {
 
         // Fetch first, then rebase explicitly onto origin/main
         // This avoids "Cannot rebase onto multiple branches" errors
-        let fetch_output = Command::new("git")
+        let fetch_output = git_command()
             .args(["fetch", "origin", "main"])
             .current_dir(&self.repo_path)
             .stdin(Stdio::inherit())
@@ -308,12 +336,23 @@ impl GitBackend {
             return Err(anyhow::anyhow!("Failed to fetch changes: {}", error));
         }
 
-        let rebase_output = Command::new("git")
+        let rebase_output = git_command()
             .args(["rebase", "--autostash", "origin/main"])
             .current_dir(&self.repo_path)
             .output()?;
 
         if !rebase_output.status.success() {
+            // Only a content conflict discards local commits. Any other failure, such as
+            // a hook or a lock, keeps them for the next sync.
+            if !self.has_conflicts() {
+                let error = String::from_utf8_lossy(&rebase_output.stderr);
+                self.abort_rebase()?;
+                if self.is_rebase_in_progress() {
+                    self.git(&["rebase", "--quit"])?;
+                    self.git(&["checkout", "main"])?;
+                }
+                anyhow::bail!("Failed to rebase onto origin/main: {}", error.trim());
+            }
             // Conflict: reset to remote. SyncState::discard_unpushed rolls back
             // the discarded files' hashes, so the next sync re-checks them.
             // Team and collab repos have no such re-export, so keep the local
@@ -363,7 +402,7 @@ impl GitBackend {
         if !self.has_commits() {
             return false;
         }
-        let output = Command::new("git")
+        let output = git_command()
             .args(["rev-list", "--count", "origin/main..HEAD"])
             .current_dir(&self.repo_path)
             .output();
@@ -382,7 +421,7 @@ impl GitBackend {
         };
 
         for attempt in 1..=3 {
-            let output = Command::new("git")
+            let output = git_command()
                 .args(&args)
                 .current_dir(&self.repo_path)
                 .stdin(Stdio::inherit())
@@ -408,7 +447,10 @@ impl GitBackend {
                 let backoff_ms = 400 + attempt as u64 * 400 + jitter_ms;
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 // A retry after a reset would push nothing and report success
-                if self.pull()? {
+                if self
+                    .pull()
+                    .map_err(|e| anyhow::anyhow!("Push rejected, and pulling failed: {}", e))?
+                {
                     return Err(anyhow::anyhow!(
                         "Push rejected and local changes conflicted with remote changes"
                     ));
@@ -429,7 +471,7 @@ impl GitBackend {
     /// Check if the current user has write access to the remote repository
     pub fn has_write_access(&self) -> Result<bool> {
         // Try a dry-run push to check write permissions
-        let output = Command::new("git")
+        let output = git_command()
             .args(["push", "--dry-run", "origin", "HEAD"])
             .current_dir(&self.repo_path)
             .stdin(Stdio::inherit())
@@ -460,7 +502,7 @@ impl GitBackend {
 
     /// Check if there are uncommitted changes in the repository
     pub fn has_changes(&self) -> Result<bool> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["status", "--porcelain"])
             .current_dir(&self.repo_path)
             .output()?;
@@ -471,7 +513,7 @@ impl GitBackend {
     /// Get commit history for a specific file in the repo
     pub fn file_log(&self, repo_path: &str, limit: usize) -> Result<Vec<FileLogEntry>> {
         let limit_arg = format!("-{}", limit);
-        let output = Command::new("git")
+        let output = git_command()
             .args([
                 "log",
                 "--format=%H|%h|%aI|%an|%s",
@@ -504,7 +546,7 @@ impl GitBackend {
             anyhow::bail!("Invalid commit hash: {}", commit);
         }
         let spec = format!("{}:{}", commit, repo_path);
-        let output = Command::new("git")
+        let output = git_command()
             .args(["show", &spec])
             .current_dir(&self.repo_path)
             .output()?;
@@ -571,7 +613,7 @@ impl GitBackend {
 
     /// Resolve the parent commit hash, returning None for root commits.
     fn resolve_parent(&self, commit: &str) -> Option<String> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["rev-parse", &format!("{}^", commit)])
             .current_dir(&self.repo_path)
             .output()
@@ -601,7 +643,7 @@ impl GitBackend {
 
     /// List all tracked files under a prefix in the repo
     pub fn list_tracked_files(&self, prefix: &str) -> Result<Vec<String>> {
-        let output = Command::new("git")
+        let output = git_command()
             .args(["ls-tree", "-r", "--name-only", "HEAD", "--", prefix])
             .current_dir(&self.repo_path)
             .output()?;
@@ -657,7 +699,7 @@ pub fn get_remote_url(repo_path: &Path) -> Result<String> {
     let path_str = repo_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Path contains invalid UTF-8"))?;
-    let output = Command::new("git")
+    let output = git_command()
         .args(["-C", path_str, "config", "--get", "remote.origin.url"])
         .output()?;
 
@@ -733,7 +775,7 @@ pub fn is_gitignored(file_path: &Path) -> Result<bool> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("File path contains invalid UTF-8"))?;
 
-    let output = Command::new("git")
+    let output = git_command()
         .args(["-C", dir_str, "check-ignore", file_str])
         .output()?;
 
@@ -1013,14 +1055,133 @@ mod tests {
         a.commit("base", "a").unwrap();
         a.push().unwrap();
         let b = GitBackend::clone(remote.to_str().unwrap(), &tmp.join("b")).unwrap();
-        for clone in [&a, &b] {
-            git(&clone.repo_path, &["config", "user.name", "test"]);
-            git(
-                &clone.repo_path,
-                &["config", "user.email", "test@example.com"],
+        (a, b)
+    }
+
+    const NO_IDENTITY: &str = "TETHER_TEST_NO_GIT_IDENTITY";
+
+    /// Runs the test `name` again in a child process whose git has no identity: no system
+    /// config, and a HOME whose gitconfig forbids guessing one from the hostname.
+    fn run_without_git_identity(name: &str) {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            "[user]\n\tuseConfigOnly = true\n",
+        )
+        .unwrap();
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", name, "--test-threads=1"])
+            .env(NO_IDENTITY, "1")
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        for var in [
+            "GIT_CONFIG_GLOBAL",
+            "GIT_AUTHOR_NAME",
+            "GIT_AUTHOR_EMAIL",
+            "GIT_COMMITTER_NAME",
+            "GIT_COMMITTER_EMAIL",
+            "EMAIL",
+        ] {
+            cmd.env_remove(var);
+        }
+        let out = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "{}\n{}",
+            stdout,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn assert_no_git_identity(dir: &Path) {
+        let ident = Command::new("git")
+            .args(["var", "GIT_COMMITTER_IDENT"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(!ident.status.success(), "git has an identity");
+    }
+
+    fn discarded_branches(dir: &Path) -> String {
+        git(
+            dir,
+            &[
+                "branch",
+                "--list",
+                "tether-discarded-*",
+                "--format=%(refname:short)",
+            ],
+        )
+    }
+
+    #[test]
+    fn test_rejected_push_rebases_without_git_identity() {
+        if std::env::var_os(NO_IDENTITY).is_none() {
+            return run_without_git_identity(
+                "sync::git::tests::test_rejected_push_rebases_without_git_identity",
             );
         }
-        (a, b)
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, b) = two_clones(tmp.path());
+        assert_no_git_identity(&b.repo_path);
+        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
+        a.commit("a", "a").unwrap();
+        a.push().unwrap();
+
+        std::fs::write(b.repo_path.join("other"), "from b").unwrap();
+        b.commit("b", "b").unwrap();
+        // An uncommitted change makes the rebase write an autostash commit too
+        std::fs::write(b.repo_path.join("other"), "uncommitted").unwrap();
+        b.push().unwrap();
+
+        assert!(!b.has_unpushed_commits());
+        assert_eq!(discarded_branches(&b.repo_path), "");
+        let read = |dir: &Path, file: &str| std::fs::read_to_string(dir.join(file)).unwrap();
+        assert_eq!(read(&b.repo_path, "shared"), "from a");
+        assert_eq!(read(&b.repo_path, "other"), "uncommitted");
+        assert!(!a.pull().unwrap());
+        assert_eq!(read(&a.repo_path, "other"), "from b");
+    }
+
+    #[test]
+    fn test_rebase_failure_without_conflict_keeps_local_commits() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, b) = two_clones(tmp.path());
+        std::fs::write(a.repo_path.join("shared"), "from a").unwrap();
+        a.commit("a", "a").unwrap();
+        a.push().unwrap();
+
+        std::fs::write(b.repo_path.join("other"), "from b").unwrap();
+        b.commit("b", "b").unwrap();
+        let local = git(&b.repo_path, &["rev-parse", "HEAD"]);
+        let hook = b.repo_path.join(".git/hooks/pre-rebase");
+        std::fs::write(&hook, "#!/bin/sh\necho hook says no >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let error = b.pull().unwrap_err().to_string();
+        assert!(error.contains("hook says no"), "{error}");
+        let error = b.push().unwrap_err().to_string();
+        assert!(
+            error.contains("Push rejected, and pulling failed"),
+            "{error}"
+        );
+        assert!(error.contains("hook says no"), "{error}");
+        assert!(!b.is_rebase_in_progress());
+        assert_eq!(git(&b.repo_path, &["rev-parse", "HEAD"]), local);
+        assert_eq!(git(&b.repo_path, &["branch", "--show-current"]), "main");
+        assert_eq!(discarded_branches(&b.repo_path), "");
+
+        std::fs::remove_file(&hook).unwrap();
+        b.push().unwrap();
+        assert!(!b.has_unpushed_commits());
+        assert!(!a.pull().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(a.repo_path.join("other")).unwrap(),
+            "from b"
+        );
     }
 
     /// Verify HEAD with git itself, trusting `key` through an allowed signers file.

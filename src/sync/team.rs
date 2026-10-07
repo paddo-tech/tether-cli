@@ -433,9 +433,7 @@ pub fn extract_team_name_from_url(url: &str) -> Option<String> {
 
 /// Get the git remote origin URL for a project directory
 pub fn get_project_remote_url(project_path: &Path) -> Option<String> {
-    use std::process::Command;
-
-    let output = Command::new("git")
+    let output = crate::sync::git::git_command()
         .args(["remote", "get-url", "origin"])
         .current_dir(project_path)
         .output()
