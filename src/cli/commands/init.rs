@@ -68,7 +68,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
             url.to_string()
         } else if already_initialized && !config.backend.url.is_empty() {
             Output::dim(&format!("  Current repo: {}", config.backend.url));
-            if Prompt::confirm("Keep current repository?", true)? {
+            if Prompt::question("Keep current repository?", true)? {
                 config.backend.url.clone()
             } else {
                 setup_repository().await?
@@ -78,8 +78,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         };
 
         if repo_url.is_empty() {
-            Output::error("Repository URL cannot be empty");
-            return Err(anyhow::anyhow!("Repository URL is required"));
+            anyhow::bail!("Repository URL cannot be empty");
         }
 
         config.backend.url = repo_url.clone();
@@ -137,6 +136,9 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
     // Create initial state
     let state = SyncState::load()?;
     state.save()?;
+    if needs_personal_repo {
+        crate::sync::signing::load_or_create(&state.machine_id)?;
+    }
 
     // Initial sync (only if personal features enabled)
     if needs_personal_repo {
@@ -241,7 +243,7 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
     let mut options: Vec<&str> = names.clone();
     options.push("Create new");
 
-    let idx = Prompt::select("Assign a profile to this machine", options.clone(), 0)?;
+    let idx = Prompt::choose("Assign a profile to this machine", options.clone())?;
 
     if idx < names.len() {
         config
@@ -256,8 +258,7 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
             return Ok(());
         }
         if !Config::is_safe_profile_name(&name) {
-            Output::error(&format!("Invalid profile name: '{}'", name));
-            return Ok(());
+            anyhow::bail!("Invalid profile name: '{}'", name);
         }
         if !config.profiles.contains_key(&name) {
             // Start empty — first sync exports local dotfiles, packages detected locally
@@ -384,7 +385,7 @@ async fn setup_repository() -> Result<String> {
         "Custom Git URL",
     ];
 
-    let selection = Prompt::select("How would you like to sync your dotfiles?", options, 0)?;
+    let selection = Prompt::choose("How would you like to sync your dotfiles?", options)?;
 
     match selection {
         0 => {
@@ -420,7 +421,7 @@ async fn setup_github_automatic() -> Result<String> {
     if !GitHubCli::is_installed() {
         Output::warning("GitHub CLI (gh) is not installed");
 
-        if Prompt::confirm("Install GitHub CLI via Homebrew?", true)? {
+        if Prompt::question("Install GitHub CLI via Homebrew?", true)? {
             let pb = Progress::spinner("Installing GitHub CLI...");
             GitHubCli::install().await?;
             Progress::finish_success(&pb, "GitHub CLI installed");
@@ -438,7 +439,7 @@ async fn setup_github_automatic() -> Result<String> {
         Output::info("Authenticating with GitHub...");
         Output::dim(&format!("  {} This will open your browser", Output::ARROW));
 
-        if Prompt::confirm("Continue?", true)? {
+        if Prompt::question("Continue?", true)? {
             GitHubCli::authenticate().await?;
             Output::success("Authenticated with GitHub");
         } else {
@@ -453,7 +454,7 @@ async fn setup_github_automatic() -> Result<String> {
         Output::warning("SSH key not configured with GitHub");
         Output::dim("  Tether uses SSH for secure Git operations");
 
-        if Prompt::confirm("Set up SSH key now?", true)? {
+        if Prompt::question("Set up SSH key now?", true)? {
             Output::info("Follow the prompts to add your SSH key...");
             if let Err(e) = GitHubCli::setup_ssh_key().await {
                 Output::warning(&format!("Automatic setup failed: {}", e));
@@ -464,7 +465,7 @@ async fn setup_github_automatic() -> Result<String> {
                 Output::dim("  Or visit: https://github.com/settings/keys");
                 println!();
 
-                if !Prompt::confirm("Continue after setting up SSH key?", false)? {
+                if !Prompt::question("Continue after setting up SSH key?", false)? {
                     return Err(anyhow::anyhow!("SSH key setup required"));
                 }
             }
@@ -484,7 +485,7 @@ async fn setup_github_automatic() -> Result<String> {
     if GitHubCli::repo_exists(&username, &repo_name).await? {
         Output::warning(&format!("{}/{} already exists", username, repo_name));
 
-        if Prompt::confirm("Use existing repository?", true)? {
+        if Prompt::question("Use existing repository?", true)? {
             return Ok(format!("git@github.com:{}/{}.git", username, repo_name));
         } else {
             let alt_name = GitHubCli::suggest_repo_name(&repo_name, &username).await?;

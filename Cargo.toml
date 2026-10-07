@@ -1,6 +1,6 @@
 [package]
 name = "tether"
-version = "1.13.1"
+version = "2.0.0-beta.1"
 edition = "2021"
 authors = ["Paddo Tech"]
 description = "Sync your development environment across machines automatically"
@@ -73,6 +73,9 @@ aes-gcm = "0.10"
 base64 = "0.22"
 age = "0.11"
 
+# Commit signing (OpenSSH keys and sshsig, as git verifies them)
+ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ed25519", "getrandom"] }
+
 # Secret detection
 regex = "1.10"
 
@@ -97,6 +100,7 @@ crossterm = "0.29"
 tempfile = "3.8"
 assert_cmd = "2.0"
 predicates = "3.0"
+testcontainers = "0.28"
 
 [profile.release]
 lto = true

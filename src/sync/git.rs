@@ -6,6 +6,31 @@ use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+fn write_signed(
+    repo: &Repository,
+    key: &ssh_key::PrivateKey,
+    author: &Signature,
+    committer: &Signature,
+    message: &str,
+    tree: &git2::Tree,
+    parents: &[&git2::Commit],
+) -> Result<git2::Oid> {
+    let buffer = repo.commit_create_buffer(author, committer, message, tree, parents)?;
+    let content = buffer
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Commit is not valid UTF-8"))?;
+    let signature = crate::sync::signing::sign_commit(key, content.as_bytes())?;
+    Ok(repo.commit_signed(content, &signature, None)?)
+}
+
+/// Point the branch HEAD names (or a detached HEAD) at `oid`.
+fn set_head(repo: &Repository, oid: git2::Oid, message: &str) -> Result<()> {
+    let head = repo.find_reference("HEAD")?;
+    let name = head.symbolic_target().unwrap_or("HEAD").to_string();
+    repo.reference(&name, oid, true, message)?;
+    Ok(())
+}
+
 pub struct GitBackend {
     repo_path: PathBuf,
 }
@@ -69,7 +94,26 @@ impl GitBackend {
         })
     }
 
+    /// This machine's signing key when this is the personal sync repo. Commit signatures
+    /// there are an audit trail only, so team and collab commits stay unsigned.
+    fn signing_key(&self) -> Result<Option<ssh_key::PrivateKey>> {
+        if self.repo_path != crate::sync::SyncEngine::sync_path()? {
+            return Ok(None);
+        }
+        let machine_id = crate::sync::SyncState::load()?.machine_id;
+        Ok(Some(crate::sync::signing::load_or_create(&machine_id)?))
+    }
+
     pub fn commit(&self, message: &str, author: &str) -> Result<()> {
+        self.commit_with_key(message, author, self.signing_key()?.as_ref())
+    }
+
+    pub(crate) fn commit_with_key(
+        &self,
+        message: &str,
+        author: &str,
+        key: Option<&ssh_key::PrivateKey>,
+    ) -> Result<()> {
         let repo = Repository::open(&self.repo_path)?;
         let mut index = repo.index()?;
         index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
@@ -81,18 +125,101 @@ impl GitBackend {
         let sig = Signature::now(author, "tether@local")?;
 
         // Check if this is the first commit
-        if self.has_commits() {
+        let parent = if self.has_commits() {
             let parent = repo.head()?.peel_to_commit()?;
             // Skip empty commits (tree unchanged from parent)
             if parent.tree()?.id() == oid {
                 return Ok(());
             }
-            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent])?;
+            Some(parent)
         } else {
-            // Initial commit (no parent)
-            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
+            None
+        };
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+
+        match key {
+            Some(key) => {
+                let commit = write_signed(&repo, key, &sig, &sig, message, &tree, &parents)?;
+                set_head(&repo, commit, message)?;
+            }
+            None => {
+                repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Delete the tracked files at `paths` (relative to the repo) and commit the deletion.
+    /// When any step fails, the files come back from HEAD, so a retry starts from the
+    /// same tree.
+    pub fn remove_and_commit(&self, paths: &[String], message: &str, author: &str) -> Result<()> {
+        let removed = (|| {
+            let repo = Repository::open(&self.repo_path)?;
+            let mut index = repo.index()?;
+            for path in paths {
+                index.remove_path(Path::new(path))?;
+            }
+            index.write()?;
+            for path in paths {
+                std::fs::remove_file(self.repo_path.join(path))?;
+            }
+            self.commit(message, author)
+        })();
+        let Err(e) = removed else {
+            return Ok(());
+        };
+        if let Err(restore) = self.restore_from_head(paths) {
+            anyhow::bail!(
+                "{}. Restoring {} from HEAD also failed: {}",
+                e,
+                paths.join(", "),
+                restore
+            );
+        }
+        Err(e)
+    }
+
+    /// Write `paths` back from HEAD's tree. It does not touch the index, so a stale
+    /// index lock cannot stop it. Each path is removed and created again, never written
+    /// through: a committed symlink such as `machines/old.json -> ../../state.json` comes
+    /// back as that symlink, and Tether's own files outside the repo stay untouched.
+    fn restore_from_head(&self, paths: &[String]) -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let repo = Repository::open(&self.repo_path)?;
+        let tree = repo.head()?.peel_to_tree()?;
+        let root = self.repo_path.canonicalize()?;
+        for path in paths {
+            let entry = tree.get_path(Path::new(path))?;
+            let blob = entry.to_object(&repo)?.peel_to_blob()?;
+            let target = self.repo_path.join(path);
+            let parent = target
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", path))?;
+            if !parent.canonicalize()?.starts_with(&root) {
+                anyhow::bail!("{} resolves outside the repository", path);
+            }
+            match std::fs::symlink_metadata(&target) {
+                Ok(_) => std::fs::remove_file(&target)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+            let mode = entry.filemode();
+            if mode == i32::from(git2::FileMode::Link) {
+                std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(blob.content()), &target)?;
+            } else {
+                let executable = mode == i32::from(git2::FileMode::BlobExecutable);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(if executable { 0o755 } else { 0o644 })
+                    .open(&target)?
+                    .write_all(blob.content())?;
+            }
+        }
         Ok(())
     }
 
@@ -123,8 +250,27 @@ impl GitBackend {
         Ok(())
     }
 
+    /// Fetch origin/main without changing the local branch.
+    pub fn fetch(&self) -> Result<()> {
+        let output = Command::new("git")
+            .args(["fetch", "origin", "main"])
+            .current_dir(&self.repo_path)
+            .stdin(Stdio::inherit())
+            .output()?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to fetch changes: {}", error));
+        }
+        Ok(())
+    }
+
+    /// Push main once. A rejected push fails and leaves the local commits as they are.
+    pub fn push_once(&self) -> Result<()> {
+        self.git(&["push", "origin", "main"])
+    }
+
     /// Reset local branch to match remote
-    fn reset_to_remote(&self) -> Result<()> {
+    pub fn reset_to_remote(&self) -> Result<()> {
         let output = Command::new("git")
             .args(["reset", "--hard", "origin/main"])
             .current_dir(&self.repo_path)
@@ -207,6 +353,7 @@ impl GitBackend {
             return Ok(true);
         }
 
+        // Rebased commits stay unsigned: commit signatures carry no trust, signed machine records do
         Ok(false)
     }
 
@@ -876,6 +1023,46 @@ mod tests {
         (a, b)
     }
 
+    /// Verify HEAD with git itself, trusting `key` through an allowed signers file.
+    fn git_verifies_head(dir: &Path, key: &ssh_key::PrivateKey) -> bool {
+        let allowed = dir.join("allowed_signers");
+        std::fs::write(
+            &allowed,
+            format!("m1 {}\n", key.public_key().to_openssh().unwrap()),
+        )
+        .unwrap();
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "gpg.format=ssh",
+                "-c",
+                &format!("gpg.ssh.allowedSignersFile={}", allowed.display()),
+                "log",
+                "-1",
+                "--show-signature",
+            ])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains("Good \"git\" signature for m1")
+    }
+
+    fn signing_key() -> ssh_key::PrivateKey {
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap()
+    }
+
+    #[test]
+    fn test_signed_commits_verify_with_git() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, _) = two_clones(tmp.path());
+        let key = signing_key();
+        std::fs::write(a.repo_path.join("shared"), "signed").unwrap();
+        a.commit_with_key("signed", "a", Some(&key)).unwrap();
+        assert!(git_verifies_head(&a.repo_path, &key));
+        assert!(!git_verifies_head(&a.repo_path, &signing_key()));
+    }
+
     #[test]
     fn test_push_rebases_non_conflicting_changes() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -928,5 +1115,53 @@ mod tests {
         assert_eq!(kept, "from b");
         let stashed = git(&b.repo_path, &["show", "stash@{0}:shared"]);
         assert_eq!(stashed, "uncommitted");
+    }
+
+    #[test]
+    fn test_remove_and_commit_restores_files_when_the_commit_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, _) = two_clones(tmp.path());
+        std::fs::create_dir_all(a.repo_path.join("machines")).unwrap();
+        std::fs::write(a.repo_path.join("machines/old.json"), "record").unwrap();
+        std::fs::write(a.repo_path.join("machines/old.json.sig"), "sig").unwrap();
+        a.commit("add old", "a").unwrap();
+        let paths = vec![
+            "machines/old.json".to_string(),
+            "machines/old.json.sig".to_string(),
+        ];
+
+        let lock = a.repo_path.join(".git/index.lock");
+        std::fs::write(&lock, "").unwrap();
+        assert!(a.remove_and_commit(&paths, "remove old", "a").is_err());
+        let record = std::fs::read_to_string(a.repo_path.join("machines/old.json")).unwrap();
+        assert_eq!(record, "record");
+        assert!(a.repo_path.join("machines/old.json.sig").exists());
+
+        std::fs::remove_file(&lock).unwrap();
+        a.remove_and_commit(&paths, "remove old", "a").unwrap();
+        assert!(!a.repo_path.join("machines/old.json").exists());
+        assert_eq!(
+            git(&a.repo_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            "shared"
+        );
+        assert_eq!(git(&a.repo_path, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn test_restore_after_a_failed_commit_never_writes_through_a_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (a, _) = two_clones(tmp.path());
+        let victim = tmp.path().join("state.json");
+        std::fs::write(&victim, "state").unwrap();
+        std::fs::create_dir_all(a.repo_path.join("machines")).unwrap();
+        let link = a.repo_path.join("machines/old.json");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        a.commit("add old", "a").unwrap();
+        let paths = vec!["machines/old.json".to_string()];
+
+        std::fs::write(a.repo_path.join(".git/index.lock"), "").unwrap();
+        assert!(a.remove_and_commit(&paths, "remove old", "a").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "state");
+        assert_eq!(std::fs::read_link(&link).unwrap(), victim);
     }
 }

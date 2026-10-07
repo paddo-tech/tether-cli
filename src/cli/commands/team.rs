@@ -61,7 +61,7 @@ async fn prompt_for_team_repo() -> Result<String> {
 
     if gh_available {
         let options = vec!["Create new private GitHub repo", "Use existing repo URL"];
-        let choice = Prompt::select("Team repository:", options, 0)?;
+        let choice = Prompt::choose("Team repository:", options)?;
 
         if choice == 0 {
             // Create new repo - fetch orgs and username
@@ -77,7 +77,7 @@ async fn prompt_for_team_repo() -> Result<String> {
             }
             let location_refs: Vec<&str> = locations.iter().map(|s| s.as_str()).collect();
 
-            let loc_choice = Prompt::select("Where to create the repo?", location_refs, 0)?;
+            let loc_choice = Prompt::choose("Where to create the repo?", location_refs)?;
             let owner = if loc_choice == 0 {
                 username.clone()
             } else {
@@ -146,7 +146,7 @@ pub async fn setup() -> Result<()> {
             options.push("Add new team");
 
             println!("You have {} team(s) configured.", teams.teams.len());
-            let choice = Prompt::select("Which team to configure?", options.clone(), 0)?;
+            let choice = Prompt::choose("Which team to configure?", options.clone())?;
 
             if choice == options.len() - 1 {
                 println!();
@@ -193,7 +193,7 @@ pub async fn setup() -> Result<()> {
         println!();
         Output::info("Encryption identity required");
         Output::dim("An identity is needed to encrypt/decrypt team secrets");
-        if Prompt::confirm("Create identity now?", true)? {
+        if Prompt::question("Create identity now?", true)? {
             crate::cli::commands::identity::init().await?;
         }
     } else {
@@ -436,7 +436,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
         Output::info("As a team admin/contributor, you can push updates to team configs.");
         println!();
 
-        !Prompt::confirm("Enable write access? (No = read-only mode)", true)?
+        !Prompt::question("Enable write access? (No = read-only mode)", true)?
     } else {
         println!();
         Output::info("Read-only access detected (regular team member mode)");
@@ -477,7 +477,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
             }
         }
         println!();
-        Prompt::confirm("Merge team dotfiles with your personal configs?", true)?
+        Prompt::question("Merge team dotfiles with your personal configs?", true)?
     } else {
         false
     };
@@ -544,7 +544,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
 
         // Add to active teams if first or user confirms
         if teams.active.is_empty()
-            || Prompt::confirm(&format!("Activate team '{}'?", team_name), true)?
+            || Prompt::question(&format!("Activate team '{}'?", team_name), true)?
         {
             if !teams.active.contains(&team_name) {
                 teams.active.push(team_name.clone());
@@ -572,18 +572,16 @@ pub async fn switch(name: &str) -> Result<()> {
     let teams = match config.teams.as_mut() {
         Some(t) => t,
         None => {
-            Output::error("No teams configured. Run 'tether team add' first.");
-            return Ok(());
+            anyhow::bail!("No teams configured. Run 'tether team add' first.");
         }
     };
 
     if !teams.teams.contains_key(name) {
-        Output::error(&format!("Team '{}' not found", name));
-        Output::info("Available teams:");
-        for team_name in teams.teams.keys() {
-            println!("  • {}", team_name);
-        }
-        return Ok(());
+        anyhow::bail!(
+            "Team '{}' not found. Teams: {}",
+            name,
+            teams.teams.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
     }
 
     let is_active = teams.active.contains(&name.to_string());
@@ -617,12 +615,10 @@ pub async fn switch(name: &str) -> Result<()> {
         let team_repo_dir = Config::team_repo_dir(name)?;
 
         if !team_repo_dir.exists() {
-            Output::error(&format!(
-                "Team repository not found at {}",
+            anyhow::bail!(
+                "Team repository not found at {}. The team may need to be added again",
                 team_repo_dir.display()
-            ));
-            Output::info("The team may need to be re-added.");
-            return Ok(());
+            );
         }
 
         // Create symlinks
@@ -715,10 +711,7 @@ pub async fn remove(name: Option<&str>) -> Result<()> {
 
     let teams = match config.teams.as_mut() {
         Some(t) if !t.teams.is_empty() => t,
-        _ => {
-            Output::warning("No teams configured");
-            return Ok(());
-        }
+        _ => anyhow::bail!("No teams configured"),
     };
 
     // Determine which team to remove
@@ -731,18 +724,16 @@ pub async fn remove(name: Option<&str>) -> Result<()> {
             } else if teams.teams.len() == 1 {
                 teams.teams.keys().next().unwrap().clone()
             } else {
-                Output::error("Multiple teams configured. Specify which to remove:");
-                for name in teams.teams.keys() {
-                    println!("  • {}", name);
-                }
-                return Ok(());
+                anyhow::bail!(
+                    "Multiple teams configured. Name the team to remove: {}",
+                    teams.teams.keys().cloned().collect::<Vec<_>>().join(", ")
+                );
             }
         }
     };
 
     if !teams.teams.contains_key(&team_name) {
-        Output::error(&format!("Team '{}' not found", team_name));
-        return Ok(());
+        anyhow::bail!("Team '{}' not found", team_name);
     }
 
     if !Prompt::confirm(&format!("Remove team '{}'?", team_name), false)? {
@@ -790,7 +781,7 @@ pub async fn enable() -> Result<()> {
             }
         }
         None => {
-            Output::error("Team sync is not configured. Run 'tether team add' first.");
+            anyhow::bail!("Team sync is not configured. Run 'tether team add' first.");
         }
     }
     Ok(())
@@ -810,7 +801,7 @@ pub async fn disable() -> Result<()> {
             }
         }
         None => {
-            Output::error("Team sync is not configured");
+            anyhow::bail!("Team sync is not configured");
         }
     }
     Ok(())
@@ -1221,8 +1212,7 @@ pub async fn orgs_add(org: &str, yes: bool) -> Result<()> {
     let teams = match config.teams.as_mut() {
         Some(t) => t,
         None => {
-            Output::error("No teams configured. Run 'tether team add' first.");
-            return Ok(());
+            anyhow::bail!("No teams configured. Run 'tether team add' first.");
         }
     };
 
@@ -1239,8 +1229,7 @@ pub async fn orgs_add(org: &str, yes: bool) -> Result<()> {
 
     // Validate format (should be host/org like github.com/acme-corp)
     if !org.contains('/') {
-        Output::error("Org format should be 'host/org' (e.g., github.com/acme-corp)");
-        return Ok(());
+        anyhow::bail!("Org format should be 'host/org' (e.g., github.com/acme-corp)");
     }
 
     // Check if already exists (case-insensitive)
@@ -1288,11 +1277,11 @@ pub async fn orgs_add(org: &str, yes: bool) -> Result<()> {
                     }
                     Err(e) => {
                         pb.finish_and_clear();
-                        Output::error(&format!("Migration failed: {}", e));
                         Output::dim("Personal secrets were NOT deleted (safe).");
                         Output::dim(
                             "Fix the issue and run 'tether team projects migrate' to retry.",
                         );
+                        return Err(e.context("Migration failed"));
                     }
                 }
             } else {
@@ -1340,8 +1329,7 @@ pub async fn orgs_remove(org: &str) -> Result<()> {
     let teams = match config.teams.as_mut() {
         Some(t) => t,
         None => {
-            Output::error("No teams configured");
-            return Ok(());
+            anyhow::bail!("No teams configured");
         }
     };
 
@@ -1360,8 +1348,7 @@ pub async fn orgs_remove(org: &str) -> Result<()> {
     team_config.orgs.retain(|o| !o.eq_ignore_ascii_case(org));
 
     if team_config.orgs.len() == original_len {
-        Output::warning(&format!("'{}' not mapped to team '{}'", org, active));
-        return Ok(());
+        anyhow::bail!("'{}' not mapped to team '{}'", org, active);
     }
 
     config.save()?;
@@ -1618,8 +1605,10 @@ fn migrate_personal_to_team(
     if personal_git.has_changes()? {
         if let Err(e) = personal_git.push() {
             // Push failed - restore from backup
-            Output::error(&format!("Failed to push personal repo: {}", e));
-            Output::warning("Restoring from backup...");
+            Output::warning(&format!(
+                "Failed to push personal repo: {}. Restoring from backup...",
+                e
+            ));
 
             for project in &migrated {
                 let backup_src = backup_dir.join(project);
@@ -1906,8 +1895,7 @@ pub async fn secrets_remove_recipient(name: &str) -> Result<()> {
     let pubkey_file = recipients_dir.join(format!("{}.pub", name));
 
     if !pubkey_file.exists() {
-        Output::error(&format!("Recipient '{}' not found", name));
-        return Ok(());
+        anyhow::bail!("Recipient '{}' not found", name);
     }
 
     std::fs::remove_file(&pubkey_file)?;
@@ -1968,9 +1956,9 @@ pub async fn secrets_set(name: &str, value: Option<&str>) -> Result<()> {
     let recipients_dir = repo_dir.join("recipients");
     let recipients = crate::security::load_recipients(&recipients_dir)?;
     if recipients.is_empty() {
-        Output::error("No recipients configured. Add recipients first.");
-        Output::info("Run: tether team secrets add-recipient <pubkey>");
-        return Ok(());
+        anyhow::bail!(
+            "No recipients configured. Add one first: tether team secrets add-recipient <pubkey>"
+        );
     }
 
     // Encrypt to all recipients
@@ -1992,8 +1980,7 @@ pub async fn secrets_get(name: &str) -> Result<()> {
     let secret_file = repo_dir.join("secrets").join(format!("{}.age", name));
 
     if !secret_file.exists() {
-        Output::error(&format!("Secret '{}' not found", name));
-        return Ok(());
+        anyhow::bail!("Secret '{}' not found", name);
     }
 
     // Load user's identity
@@ -2039,8 +2026,7 @@ pub async fn secrets_remove(name: &str) -> Result<()> {
     let secret_file = repo_dir.join("secrets").join(format!("{}.age", name));
 
     if !secret_file.exists() {
-        Output::error(&format!("Secret '{}' not found", name));
-        return Ok(());
+        anyhow::bail!("Secret '{}' not found", name);
     }
 
     std::fs::remove_file(&secret_file)?;
@@ -2073,7 +2059,7 @@ pub async fn files_list() -> Result<()> {
         return Ok(());
     }
 
-    let mut table = comfy_table::Table::new();
+    let mut table = Output::table();
     table.set_header(vec![
         Cell::new("File").add_attribute(Attribute::Bold),
         Cell::new("Status").add_attribute(Attribute::Bold),
@@ -2142,7 +2128,7 @@ pub async fn files_reset(file: Option<&str>, all: bool) -> Result<()> {
         crate::sync::layers::reset_to_team(&team_name, filename)?;
         Output::success(&format!("Reset '{}' to team version", filename));
     } else {
-        Output::error("Specify a file or use --all");
+        anyhow::bail!("Specify a file or use --all");
     }
 
     Ok(())
@@ -2156,9 +2142,9 @@ pub async fn files_promote(file: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No active team"))?;
 
     if team_config.read_only {
-        Output::error("Cannot promote files: team is configured as read-only");
-        Output::info("Ask a team admin to grant you write access");
-        return Ok(());
+        anyhow::bail!(
+            "Cannot promote files: team is configured as read-only. Ask a team admin for write access"
+        );
     }
 
     let repo_dir = Config::team_repo_dir(&team_name)?;
@@ -2178,8 +2164,10 @@ pub async fn files_promote(file: &str) -> Result<()> {
         }
         Err(e) => {
             Progress::finish_error(&pb, "Push failed");
-            Output::error(&format!("Failed to push: {}", e));
-            Output::info("You may not have write access to the team repository");
+            anyhow::bail!(
+                "Failed to push: {}. You may not have write access to the team repository",
+                e
+            );
         }
     }
 
@@ -2293,8 +2281,7 @@ pub async fn projects_add(file: &str, project_path: Option<&str>) -> Result<()> 
         .ok_or_else(|| anyhow::anyhow!("Team not found"))?;
 
     if team_config.read_only {
-        Output::error("This team is read-only. Only admins can add project secrets.");
-        return Ok(());
+        anyhow::bail!("This team is read-only. Only admins can add project secrets.");
     }
 
     // Determine project path
@@ -2315,19 +2302,18 @@ pub async fn projects_add(file: &str, project_path: Option<&str>) -> Result<()> 
         .unwrap_or(false);
 
     if !belongs_to_team {
-        Output::error(&format!(
-            "Project '{}' doesn't belong to team '{}' orgs",
-            normalized_url, team_name
-        ));
-        Output::info(&format!("Team orgs: {:?}", team_config.orgs));
-        return Ok(());
+        anyhow::bail!(
+            "Project '{}' doesn't belong to team '{}' orgs. Team orgs: {}",
+            normalized_url,
+            team_name,
+            team_config.orgs.join(", ")
+        );
     }
 
     // Read the file
     let file_path = project_dir.join(file);
     if !file_path.exists() {
-        Output::error(&format!("File not found: {}", file_path.display()));
-        return Ok(());
+        anyhow::bail!("File not found: {}", file_path.display());
     }
 
     let content = std::fs::read(&file_path)?;
@@ -2336,9 +2322,9 @@ pub async fn projects_add(file: &str, project_path: Option<&str>) -> Result<()> 
     let recipients_dir = repo_dir.join("recipients");
     let recipients = crate::security::load_recipients(&recipients_dir)?;
     if recipients.is_empty() {
-        Output::error("No recipients configured. Add recipients first.");
-        Output::info("Run: tether team secrets add-recipient <pubkey>");
-        return Ok(());
+        anyhow::bail!(
+            "No recipients configured. Add one first: tether team secrets add-recipient <pubkey>"
+        );
     }
 
     let encrypted = crate::security::encrypt_to_recipients(&content, &recipients)?;
@@ -2453,8 +2439,7 @@ pub async fn projects_remove(file: &str, project: Option<&str>) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Team not found"))?;
 
     if team_config.read_only {
-        Output::error("This team is read-only. Only admins can remove project secrets.");
-        return Ok(());
+        anyhow::bail!("This team is read-only. Only admins can remove project secrets.");
     }
 
     // Determine project URL
@@ -2472,11 +2457,11 @@ pub async fn projects_remove(file: &str, project: Option<&str>) -> Result<()> {
         .join(format!("{}.age", file));
 
     if !secret_file.exists() {
-        Output::error(&format!(
+        anyhow::bail!(
             "Secret '{}' not found for project '{}'",
-            file, normalized_url
-        ));
-        return Ok(());
+            file,
+            normalized_url
+        );
     }
 
     std::fs::remove_file(&secret_file)?;
@@ -2658,9 +2643,8 @@ pub async fn projects_migrate(yes: bool) -> Result<()> {
         }
         Err(e) => {
             pb.finish_and_clear();
-            Output::error(&format!("Migration failed: {}", e));
             Output::dim("Personal secrets were NOT deleted (safe).");
-            return Err(e);
+            return Err(e.context("Migration failed"));
         }
     }
 

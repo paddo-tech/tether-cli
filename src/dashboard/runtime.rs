@@ -1,0 +1,640 @@
+//! Executes `Cmd`s off the UI thread and reports results as `Msg`s.
+
+use super::app::{DaemonOp, InstallOp, Job};
+use super::msg::{Cmd, Msg};
+use crate::packages::inbox::{InboxItem, Kind, OsvUnchecked};
+use std::collections::HashMap;
+use std::future::Future;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+
+/// Days of history in the Overview activity chart.
+const ACTIVITY_DAYS: usize = 90;
+
+pub struct Runtime {
+    tx: Sender<Msg>,
+    pub rx: Receiver<Msg>,
+    job: Option<(Job, Child)>,
+    daemon: Option<Child>,
+    /// A refresh skips the activity count while the last one still runs.
+    activity_running: Arc<AtomicBool>,
+}
+
+impl Runtime {
+    pub fn new() -> Self {
+        let (tx, rx) = channel();
+        Self {
+            tx,
+            rx,
+            job: None,
+            daemon: None,
+            activity_running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn execute(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Run(job) => self.run_job(job),
+            Cmd::Daemon(op) => self.run_daemon(op),
+            Cmd::Uninstall {
+                manager_key,
+                name,
+                leave,
+            } => {
+                let tx = self.tx.clone();
+                self.spawn(
+                    async move {
+                        // No sync may run between the uninstall and the profile save
+                        let _sync_lock = match crate::sync::wait_for_sync_lock(|| {
+                            let _ = tx.send(Msg::UninstallWaiting);
+                        }) {
+                            Ok(lock) => lock,
+                            Err(e) => return Msg::UninstallDone(Err(e.to_string())),
+                        };
+                        // The profile leaves the package only once it is gone here
+                        if let Err(e) = crate::packages::uninstall(&manager_key, &name).await {
+                            return Msg::UninstallDone(Err(e.to_string()));
+                        }
+                        let not_saved = leave
+                            .and_then(|edit| leave_profile(&manager_key, &name, &edit).err())
+                            .map(|e| {
+                                format!(
+                                    "uninstalled {}, but saving its profiles failed: {}",
+                                    name, e
+                                )
+                            });
+                        Msg::UninstallDone(Ok(not_saved))
+                    },
+                    |e| Some(Msg::UninstallDone(Err(e))),
+                );
+            }
+            Cmd::SaveProfiles {
+                manager_key,
+                name,
+                edit,
+            } => {
+                self.spawn(
+                    async move {
+                        Msg::ProfilesSaved(save_profiles(&manager_key, &name, &edit).map(
+                            |members| {
+                                format!(
+                                    "{} profiles: {}",
+                                    name,
+                                    members
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )
+                            },
+                        ))
+                    },
+                    |e| Some(Msg::ProfilesSaved(Err(e))),
+                );
+            }
+            Cmd::Install { op, osv_required } => {
+                let failed_op = op.clone();
+                self.spawn(
+                    async move {
+                        // No sync may run between the install and the tombstone removal, or
+                        // save this machine's record while this saves it
+                        let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+                            Ok(lock) => lock,
+                            Err(e) => {
+                                return Msg::InstallDone {
+                                    op,
+                                    result: Err(e.to_string()),
+                                }
+                            }
+                        };
+                        let result = match install_check(&op, osv_required).await {
+                            Err(Blocked::OsvUnreachable(error)) => {
+                                return Msg::OsvUnreachable { op, error };
+                            }
+                            Err(Blocked::Refused(e)) => Err(e),
+                            Ok(checked) => crate::packages::inbox::install_from_machine(
+                                &op.manager_key,
+                                &op.name,
+                                checked,
+                                false,
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
+                        };
+                        Msg::InstallDone { op, result }
+                    },
+                    move |e| {
+                        Some(Msg::InstallDone {
+                            op: failed_op,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::ApprovePackages {
+                op,
+                items,
+                osv_required,
+            } => {
+                let failed_op = op.clone();
+                self.spawn(
+                    async move {
+                        match approve_and_install(&items, osv_required).await {
+                            (result, unchecked) if unchecked.is_empty() => {
+                                Msg::InstallDone { op, result }
+                            }
+                            (result, unchecked) => Msg::ApproveOsvUnreachable {
+                                op,
+                                result,
+                                unchecked,
+                            },
+                        }
+                    },
+                    move |e| {
+                        Some(Msg::InstallDone {
+                            op: failed_op,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::TrustKey { item, label } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(match crate::packages::inbox::approve(&item) {
+                            Ok(item) => match item.kind {
+                                Kind::TrustMachine { fingerprint, .. } => {
+                                    Ok(format!("Trusted {} ({})", label, fingerprint))
+                                }
+                                Kind::Package => Ok(format!("Approved {}", item.name)),
+                            },
+                            Err(e) => Err(e.to_string()),
+                        })
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::Reject(item) => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::packages::inbox::reject(&item)
+                                .map(|item| format!("Rejected {}", item.name))
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::TrustMachine {
+                machine_id,
+                fingerprint,
+                label,
+            } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::sync::SyncEngine::sync_path()
+                                .and_then(|sync_path| {
+                                    crate::packages::inbox::trust_machine(
+                                        &sync_path,
+                                        &machine_id,
+                                        &fingerprint,
+                                    )
+                                })
+                                .map(|t| format!("Trusted {} ({})", label, t.fingerprint))
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::Untrust { machine_id, label } => {
+                self.spawn(
+                    async move {
+                        Msg::InboxDone(
+                            crate::packages::inbox::untrust_machine(&machine_id)
+                                .map(|removed| {
+                                    if removed {
+                                        format!("{} is no longer trusted", label)
+                                    } else {
+                                        format!("{} was not trusted", label)
+                                    }
+                                })
+                                .map_err(|e| e.to_string()),
+                        )
+                    },
+                    |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::RemoveMachine { machine_id, digest } => {
+                let failed_id = machine_id.clone();
+                self.spawn(
+                    async move {
+                        let result = crate::sync::acquire_sync_lock(false)
+                            .and_then(|_lock| {
+                                crate::cli::commands::machines::remove_old_record(
+                                    &machine_id,
+                                    &digest,
+                                )
+                            })
+                            .map_err(|e| e.to_string());
+                        Msg::MachineRemoved { machine_id, result }
+                    },
+                    move |e| {
+                        Some(Msg::MachineRemoved {
+                            machine_id: failed_id,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::LoadActivity => {
+                if self.activity_running.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let running = self.activity_running.clone();
+                let failed = self.activity_running.clone();
+                self.spawn(
+                    async move {
+                        let counts = super::repo::commit_activity(ACTIVITY_DAYS).await;
+                        running.store(false, Ordering::SeqCst);
+                        Msg::Activity(counts)
+                    },
+                    move |_| {
+                        failed.store(false, Ordering::SeqCst);
+                        None
+                    },
+                );
+            }
+            Cmd::CollectPackages { config, machine_id } => {
+                // An empty list would wipe this machine's packages, so a failure sends nothing.
+                self.spawn(
+                    async move {
+                        Msg::LocalPackages(collect_local_packages(&config, &machine_id).await)
+                    },
+                    |_| None,
+                );
+            }
+            Cmd::RestoreBackup { path, timestamp } => {
+                // The write is atomic, so quitting mid-restore leaves the old file
+                let short_hash = format!("its backup from {}", timestamp);
+                let failed = (path.clone(), short_hash.clone());
+                self.spawn(
+                    async move {
+                        let result = crate::sync::restore_dotfile_backup(&timestamp, &path)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string());
+                        Msg::RestoreDone {
+                            dotfile: path,
+                            short_hash,
+                            result,
+                        }
+                    },
+                    move |e| {
+                        Some(Msg::RestoreDone {
+                            dotfile: failed.0,
+                            short_hash: failed.1,
+                            result: Err(e),
+                        })
+                    },
+                );
+            }
+            Cmd::Restore {
+                repo_path,
+                dotfile,
+                commit,
+                short_hash,
+            } => {
+                // Runs inline: a detached thread dies mid-write when the dashboard quits.
+                let result = run_restore(&repo_path, &dotfile, &commit);
+                let _ = self.tx.send(Msg::RestoreDone {
+                    dotfile,
+                    short_hash,
+                    result,
+                });
+            }
+        }
+    }
+
+    /// Report finished child processes.
+    pub fn poll(&mut self) {
+        if let Some((_, ref mut child)) = self.job {
+            if let Ok(Some(status)) = child.try_wait() {
+                let (job, _) = self.job.take().expect("job checked above");
+                let _ = self.tx.send(Msg::JobExited {
+                    job,
+                    success: status.success(),
+                });
+            }
+        }
+        if let Some(ref mut child) = self.daemon {
+            if let Ok(Some(_)) = child.try_wait() {
+                self.daemon = None;
+                let _ = self.tx.send(Msg::DaemonOpExited);
+            }
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        if let Some((_, ref mut child)) = self.job {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        // Don't kill the daemon child: let daemon start/stop complete.
+        if let Some(ref mut child) = self.daemon {
+            let _ = child.wait();
+        }
+    }
+
+    fn run_job(&mut self, job: Job) {
+        if self.job.is_some() {
+            let _ = self.tx.send(Msg::JobSpawnFailed(job));
+            return;
+        }
+        let spawned = Command::new(tether_exe())
+            .args(job.args())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let msg = match spawned {
+            Ok(child) => {
+                self.job = Some((job.clone(), child));
+                Msg::JobStarted(job)
+            }
+            Err(_) => Msg::JobSpawnFailed(job),
+        };
+        let _ = self.tx.send(msg);
+    }
+
+    fn run_daemon(&mut self, op: DaemonOp) {
+        if self.daemon.is_some() {
+            return;
+        }
+        let arg = if op == DaemonOp::Stopping {
+            "stop"
+        } else {
+            "start"
+        };
+        if let Ok(child) = Command::new(tether_exe())
+            .args(["daemon", arg])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            self.daemon = Some(child);
+            let _ = self.tx.send(Msg::DaemonOpStarted(op));
+        }
+    }
+
+    /// Run a future on its own thread and current-thread runtime, then send its `Msg`.
+    /// If the runtime cannot start or the future panics, send `on_fail`'s message instead,
+    /// so no operation stays pending.
+    fn spawn<F, E>(&self, fut: F, on_fail: E)
+    where
+        F: Future<Output = Msg> + Send + 'static,
+        E: FnOnce(String) -> Option<Msg> + Send + 'static,
+    {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let msg = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rt.block_on(fut)
+                })) {
+                    Ok(msg) => Some(msg),
+                    Err(_) => on_fail("background task panicked".to_string()),
+                },
+                Err(e) => on_fail(format!("could not start async runtime: {}", e)),
+            };
+            if let Some(msg) = msg {
+                let _ = tx.send(msg);
+            }
+        });
+    }
+}
+
+fn tether_exe() -> std::path::PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| "tether".into())
+}
+
+/// Why a dashboard install did not run.
+enum Blocked {
+    Refused(String),
+    OsvUnreachable(String),
+}
+
+/// The gates of `inbox::check_manual_install`, as `tether packages install` runs them, and
+/// what to install. Unlike a sync, a dashboard install is not checked against trusted
+/// records, so when `osv_required` a release OSV could not check blocks it until the user
+/// agrees.
+async fn install_check(
+    op: &InstallOp,
+    osv_required: bool,
+) -> Result<crate::packages::inbox::ManualInstall, Blocked> {
+    crate::packages::inbox::check_manual_install(&op.manager_key, &op.name, osv_required)
+        .await
+        .map_err(|e| match e.downcast::<OsvUnchecked>() {
+            Ok(unchecked) => Blocked::OsvUnreachable(unchecked.error),
+            Err(e) => Blocked::Refused(e.to_string()),
+        })
+}
+
+/// Approve each item as displayed and install it, and report every failure together.
+/// An item that changed since it was displayed is not approved. With `osv_required`, an
+/// item that OSV cannot check is neither approved nor installed: it is returned, with its
+/// error, for the user to decide.
+async fn approve_and_install(
+    items: &[InboxItem],
+    osv_required: bool,
+) -> (Result<(), String>, Vec<(InboxItem, String)>) {
+    // The daemon must not install the same packages meanwhile; the dashboard cannot wait on it
+    let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+        Ok(lock) => lock,
+        Err(e) => return (Err(e.to_string()), Vec::new()),
+    };
+    let mut failed = Vec::new();
+    let mut unchecked = Vec::new();
+    for item in items {
+        let check = crate::packages::inbox::check_osv(
+            &item.manager,
+            &item.name,
+            item.version.as_deref(),
+            osv_required,
+        )
+        .await;
+        let result = match check {
+            Err(e) => match e.downcast::<OsvUnchecked>() {
+                Ok(e) => {
+                    unchecked.push((item.clone(), e.error));
+                    continue;
+                }
+                Err(e) => Err(e),
+            },
+            Ok(version) => match crate::packages::inbox::approve(item) {
+                Ok(item) => {
+                    let item = InboxItem { version, ..item };
+                    crate::packages::inbox::install(&item, false).await
+                }
+                Err(e) => Err(e),
+            },
+        };
+        if let Err(e) = result {
+            failed.push(format!("{}: {}", item.name, e));
+        }
+    }
+    let result = if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    };
+    (result, unchecked)
+}
+
+async fn collect_local_packages(
+    config: &crate::config::Config,
+    machine_id: &str,
+) -> HashMap<String, Vec<String>> {
+    use crate::packages::*;
+
+    let mut packages = HashMap::new();
+
+    if config.is_manager_enabled(machine_id, "brew") {
+        let brew = BrewManager::new();
+        if brew.is_available().await {
+            if let Ok(formulae) = brew.list_installed().await {
+                packages.insert(
+                    "brew_formulae".to_string(),
+                    formulae.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+            if let Ok(casks) = brew.list_installed_casks().await {
+                packages.insert("brew_casks".to_string(), casks);
+            }
+            if let Ok(taps) = brew.list_taps().await {
+                packages.insert("brew_taps".to_string(), taps);
+            }
+        }
+    }
+
+    let managers: Vec<(&str, Box<dyn PackageManager>)> = vec![
+        ("npm", Box::new(NpmManager::new())),
+        ("pnpm", Box::new(PnpmManager::new())),
+        ("bun", Box::new(BunManager::new())),
+        ("gem", Box::new(GemManager::new())),
+        ("uv", Box::new(UvManager::new())),
+    ];
+
+    for (key, manager) in managers {
+        if config.is_manager_enabled(machine_id, key) && manager.is_available().await {
+            if let Ok(pkgs) = manager.list_installed().await {
+                packages.insert(
+                    manager.name().to_string(),
+                    pkgs.iter().map(|p| p.name.clone()).collect(),
+                );
+            }
+        }
+    }
+
+    packages
+}
+
+fn save_profiles(
+    manager_key: &str,
+    name: &str,
+    edit: &crate::sync::membership::Edit,
+) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+    crate::config::Config::load()
+        .and_then(|config| {
+            // The dashboard owns the terminal, so it cannot wait for a sync with a prompt
+            let _sync_lock = crate::sync::acquire_sync_lock(false)?;
+            crate::sync::membership::save_edit(&config, manager_key, name, edit)
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Take this machine's profile off a package it uninstalled. The caller holds the sync
+/// lock.
+fn leave_profile(
+    manager_key: &str,
+    name: &str,
+    edit: &crate::sync::membership::Edit,
+) -> Result<(), String> {
+    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let saved = crate::sync::membership::save_edit(&config, manager_key, name, edit)
+        .map_err(|e| e.to_string())?;
+    check_left(saved, edit)
+}
+
+/// A save that keeps a profile the edit removes did not apply it, so it is an error.
+fn check_left(
+    saved: Option<std::collections::BTreeSet<String>>,
+    edit: &crate::sync::membership::Edit,
+) -> Result<(), String> {
+    match saved {
+        Some(members) if members.is_disjoint(&edit.remove) => Ok(()),
+        Some(_) => Err("this profile is still a member".to_string()),
+        None => Err("the package would have no profile left".to_string()),
+    }
+}
+
+fn run_restore(repo_path: &str, dotfile_path: &str, commit_hash: &str) -> Result<(), String> {
+    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let sync_path = crate::sync::SyncEngine::sync_path().map_err(|e| e.to_string())?;
+    let git = crate::sync::GitBackend::open(&sync_path).map_err(|e| e.to_string())?;
+    let home = crate::home_dir().map_err(|e| e.to_string())?;
+
+    let content = git
+        .show_at_commit(commit_hash, repo_path)
+        .map_err(|e| e.to_string())?;
+
+    let plaintext = if config.security.encrypt_dotfiles {
+        let key = crate::security::get_encryption_key().map_err(|e| e.to_string())?;
+        crate::security::decrypt(&content, &key).map_err(|e| e.to_string())?
+    } else {
+        content
+    };
+
+    let dest = home.join(dotfile_path);
+    if dest.exists() {
+        let backup_dir = crate::sync::create_backup_dir().map_err(|e| e.to_string())?;
+        crate::sync::backup_file(&backup_dir, "dotfiles", dotfile_path, &dest)
+            .map_err(|e| e.to_string())?;
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&dest, &plaintext).map_err(|e| e.to_string())?;
+
+    // Don't update state hash here. Leaving state unchanged makes the next sync
+    // see "local changed, remote unchanged" → push restored content to repo.
+    // If we updated state to match restored content, sync would see "local unchanged,
+    // remote changed" and overwrite local with the latest repo version.
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::membership::Edit;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn a_leave_that_did_not_apply_is_an_error() {
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let edit = Edit {
+            remove: set(&["dev"]),
+            ..Edit::default()
+        };
+        assert!(check_left(Some(set(&["server"])), &edit).is_ok());
+        assert!(check_left(Some(set(&["dev", "server"])), &edit).is_err());
+        assert!(check_left(None, &edit).is_err());
+    }
+}

@@ -1,7 +1,22 @@
-use super::{PackageInfo, PackageManager};
+use super::command;
+use super::policy::PackagePolicy;
+use super::{
+    validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
+};
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::process::Command;
+
+/// Gems from `gem outdated` lines like `rdoc (7.0.4 < 8.1.0)`.
+fn parse_outdated(stdout: &str) -> Vec<Upgrade> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (name, versions) = line.trim().split_once(" (")?;
+            let (current, latest) = versions.strip_suffix(')')?.split_once(" < ")?;
+            Some(Upgrade::new(name, Some(current), latest))
+        })
+        .collect()
+}
 
 pub struct GemManager;
 
@@ -10,8 +25,12 @@ impl GemManager {
         Self
     }
 
+    fn policy(&self) -> PackagePolicy {
+        PackagePolicy::load()
+    }
+
     async fn run_gem(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gem").args(args).output().await?;
+        let output = command("gem")?.args(args).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -29,12 +48,24 @@ impl GemManager {
     }
 }
 
-// Default gems ship with each Ruby and dependencies follow their parents, so only
-// top-level gems are recorded, matching brew's --installed-on-request. Dependencies of
-// default gems are ignored so a user-installed newer copy (e.g. stringio) still counts
-const TOP_LEVEL_GEMS: &str = "specs = Gem::Specification.reject(&:default_gem?)
-deps = specs.flat_map { |s| s.runtime_dependencies.map(&:name) }
-puts specs.map(&:name).uniq - deps";
+// Default gems ship with each Ruby, and so do bundled gems (rake, minitest) and distro
+// gems such as Debian's rubygems-integration. Those live outside the dirs that
+// `gem install` writes to, and Homebrew copies them into its default dir, so a gem is
+// dropped when its newest version is one found outside those dirs. A newer copy the user
+// installed still counts. Dependencies follow their parents, so only top-level gems are
+// recorded, matching brew's --installed-on-request; dependencies of shipped gems are
+// ignored so a newer user copy (e.g. stringio) still counts. A Ruby whose own gem dir is
+// also its install dir (ruby-build, rbenv) shows no difference, so its bundled gems stay.
+// Each line is "name version" with the newest installed version
+const TOP_LEVEL_GEMS: &str = "dirs = [Gem.dir, Gem.user_dir, Gem.default_dir, *ENV.fetch('GEM_PATH', '').split(File::PATH_SEPARATOR)]
+dirs = dirs.reject(&:empty?).map { |d| File.expand_path(d) }
+specs = Gem::Specification.reject(&:default_gem?)
+shipped = specs.reject { |s| dirs.include?(File.expand_path(s.base_dir)) }.map { |s| [s.name, s.version] }
+own = specs.reject { |s| shipped.include?([s.name, s.version]) }
+deps = own.flat_map { |s| s.runtime_dependencies.map(&:name) }
+latest = specs.group_by(&:name).transform_values { |v| v.map(&:version).max }
+latest.reject! { |n, v| shipped.include?([n, v]) }
+(latest.keys - deps).each { |n| puts \"#{n} #{latest[n]}\" }";
 
 impl Default for GemManager {
     fn default() -> Self {
@@ -45,7 +76,7 @@ impl Default for GemManager {
 #[async_trait]
 impl PackageManager for GemManager {
     async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
-        let output = Command::new("ruby")
+        let output = command("ruby")?
             .args(["-e", TOP_LEVEL_GEMS])
             .output()
             .await?;
@@ -58,14 +89,14 @@ impl PackageManager for GemManager {
         let mut packages = Vec::new();
 
         for line in String::from_utf8(output.stdout)?.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            let mut parts = line.split_whitespace();
+            let Some(name) = parts.next() else {
                 continue;
-            }
+            };
 
             packages.push(PackageInfo {
-                name: line.to_string(),
-                version: None,
+                name: name.to_string(),
+                version: parts.next().map(str::to_string),
             });
         }
 
@@ -74,7 +105,9 @@ impl PackageManager for GemManager {
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {
+        validate_name(Ecosystem::Gem, &package.name)?;
         let pkg_spec = if let Some(version) = &package.version {
+            validate_version(Ecosystem::Gem, version)?;
             format!("{}:{}", package.name, version)
         } else {
             package.name.clone()
@@ -82,7 +115,8 @@ impl PackageManager for GemManager {
 
         // Without GEM_HOME, --user-install avoids needing sudo for a system Ruby
         // --conservative skips gems present only as dependencies, which the listing omits
-        let mut args = vec!["install", pkg_spec.as_str(), "--conservative"];
+        // --remote stops gem from installing a matching *.gem file instead of the registry gem
+        let mut args = vec!["install", pkg_spec.as_str(), "--conservative", "--remote"];
         args.extend(Self::user_install_flag());
         self.run_gem(&args).await?;
         Ok(())
@@ -96,14 +130,33 @@ impl PackageManager for GemManager {
         "gem"
     }
 
-    async fn update_all(&self) -> Result<()> {
-        let packages = self.list_installed().await?;
-        if packages.is_empty() {
+    fn ecosystem(&self) -> Ecosystem {
+        Ecosystem::Gem
+    }
+
+    // RubyGems has no release-age filter
+    async fn cooldown(&self) -> Cooldown {
+        if self.policy().min_release_age_days == 0 {
+            Cooldown::Off
+        } else {
+            Cooldown::Unsupported
+        }
+    }
+
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+        let names: Vec<&str> = planned
+            .iter()
+            .map(|u| u.name.as_str())
+            .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
+            .collect();
+        // Without names gem updates every gem, unplanned and unchecked by OSV
+        if names.is_empty() {
             return Ok(());
         }
-
-        let output = Command::new("gem")
+        let output = command("gem")?
             .arg("update")
+            .args(names)
+            .arg("--remote")
             .args(Self::user_install_flag())
             .output()
             .await?;
@@ -116,8 +169,15 @@ impl PackageManager for GemManager {
         Ok(())
     }
 
+    async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
+        Ok(parse_outdated(
+            &self.run_gem(&["outdated", "--remote"]).await?,
+        ))
+    }
+
     async fn uninstall(&self, package: &str) -> Result<()> {
-        let output = Command::new("gem")
+        validate_name(Ecosystem::Gem, package)?;
+        let output = command("gem")?
             .args(["uninstall", package, "-x", "-a"])
             .output()
             .await?;
@@ -132,7 +192,7 @@ impl PackageManager for GemManager {
 
     async fn get_dependents(&self, package: &str) -> Result<Vec<String>> {
         // gem dependency -R shows reverse dependencies
-        let output = Command::new("gem")
+        let output = command("gem")?
             .args(["dependency", "-R", package])
             .output()
             .await?;
@@ -166,5 +226,22 @@ impl PackageManager for GemManager {
         }
 
         Ok(dependents)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outdated_lines_yield_latest_versions() {
+        let stdout = "rdoc (7.0.4 < 8.1.0)\nnet-imap (0.5.1 < 0.5.6)\nnoise\n";
+        assert_eq!(
+            parse_outdated(stdout),
+            vec![
+                Upgrade::new("rdoc", Some("7.0.4"), "8.1.0"),
+                Upgrade::new("net-imap", Some("0.5.1"), "0.5.6")
+            ]
+        );
     }
 }

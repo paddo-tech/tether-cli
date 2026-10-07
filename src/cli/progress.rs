@@ -1,5 +1,5 @@
+use crate::cli::output::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use owo_colors::OwoColorize;
 use std::time::Duration;
 
 use super::Output;

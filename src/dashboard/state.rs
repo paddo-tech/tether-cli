@@ -1,5 +1,6 @@
 use crate::config::Config;
-use crate::sync::{ConflictState, MachineState, SyncEngine, SyncState, TeamManifest};
+use crate::packages::inbox::{self, Inbox, TrustedMachine};
+use crate::sync::{signing, ConflictState, MachineState, SyncEngine, SyncState, TeamManifest};
 
 pub struct DashboardState {
     pub config: Option<Config>,
@@ -10,6 +11,21 @@ pub struct DashboardState {
     pub daemon_pid: Option<u32>,
     pub daemon_running: bool,
     pub activity_lines: Vec<String>,
+    pub inbox: Inbox,
+    pub trusted: Vec<TrustedMachine>,
+    /// Records that are likely an earlier id of this machine.
+    pub old_ids: Vec<signing::OldId>,
+    /// How a sync reads each record, by machine id
+    pub record_status: Vec<(String, signing::RecordStatus)>,
+    /// Other machines whose record names a 1.x build or no version
+    pub old_builds: Vec<String>,
+    /// The profiles each package belongs to, as a sync reads the records
+    pub membership: Option<crate::sync::membership::Membership>,
+    /// Why the package profiles table does not read. Membership is then unknown, never
+    /// implicit
+    pub membership_error: Option<String>,
+    /// This machine's signing key fingerprint, from the key file
+    pub own_fingerprint: Option<String>,
 }
 
 impl DashboardState {
@@ -19,14 +35,76 @@ impl DashboardState {
         let conflicts = ConflictState::load().unwrap_or_default();
         let team_manifest = TeamManifest::load().unwrap_or_default();
 
-        let machines = sync_state
+        let sync_path = sync_state
             .as_ref()
-            .and_then(|_| SyncEngine::sync_path().ok())
-            .and_then(|p| MachineState::list_all(&p).ok())
+            .and_then(|_| SyncEngine::sync_path().ok());
+        let machines = sync_path
+            .as_ref()
+            .and_then(|p| MachineState::list_all(p).ok())
             .unwrap_or_default();
+        let old_ids = match (&sync_path, &sync_state) {
+            (Some(p), Some(s)) => signing::old_ids_of_this_machine(p, &machines, &s.machine_id),
+            _ => Vec::new(),
+        };
+        let statuses = match (&sync_path, &sync_state) {
+            (Some(p), Some(s)) => signing::record_statuses(p, &s.machine_id).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let old_builds = sync_state
+            .as_ref()
+            .map(|s| signing::old_builds(&machines, &s.machine_id))
+            .unwrap_or_default();
+        let record_status: Vec<(String, signing::RecordStatus)> = statuses
+            .into_iter()
+            .map(|(id, status, _)| (id, status))
+            .collect();
+        let mut membership_error = None;
+        let table = match sync_path
+            .as_deref()
+            .map(crate::sync::membership::read_table)
+        {
+            Some(Ok(table)) => Some(table),
+            Some(Err(e)) => {
+                membership_error = Some(e.to_string());
+                None
+            }
+            None => {
+                membership_error = Some(
+                    "Tether has no sync repo on this machine. Run 'tether init' first".to_string(),
+                );
+                None
+            }
+        };
+        let membership = match (&config, &sync_state, &table) {
+            (Some(config), Some(s), Some(table)) => {
+                let this = machines
+                    .iter()
+                    .find(|m| m.machine_id == s.machine_id)
+                    .cloned()
+                    .unwrap_or_else(|| MachineState::new(&s.machine_id));
+                let others: Vec<(&MachineState, bool)> = machines
+                    .iter()
+                    .filter(|m| m.machine_id != s.machine_id)
+                    .map(|m| {
+                        let trusted = record_status.iter().any(|(id, status)| {
+                            *id == m.machine_id && *status == signing::RecordStatus::Trusted
+                        });
+                        (m, trusted)
+                    })
+                    .collect();
+                Some(crate::sync::membership::Membership::new(
+                    config, table, &this, &others,
+                ))
+            }
+            _ => None,
+        };
 
+        let mut inbox = Inbox::load().unwrap_or_default();
+        inbox::sort_by_group(&mut inbox.items);
         let (daemon_pid, daemon_running) = Self::check_daemon();
-        let activity_lines = Self::read_activity_log();
+        let activity_lines = Self::daemon_log_path()
+            .map(|path| Self::read_log_tail(&path, 8192, 20))
+            .unwrap_or_default();
 
         Self {
             config,
@@ -37,6 +115,14 @@ impl DashboardState {
             daemon_pid,
             daemon_running,
             activity_lines,
+            inbox,
+            trusted: inbox::trusted_machines().unwrap_or_default(),
+            old_ids,
+            record_status,
+            old_builds,
+            membership,
+            membership_error,
+            own_fingerprint: signing::own_fingerprint(),
         }
     }
 
@@ -80,18 +166,46 @@ impl DashboardState {
             }
         }
 
+        // Fallback: check the systemd user service
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(output) = std::process::Command::new("systemctl")
+                .args([
+                    "--user",
+                    "show",
+                    "-p",
+                    "MainPID",
+                    "--value",
+                    "tether.service",
+                ])
+                .output()
+            {
+                // MainPID is 0 when the service is not running
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(pid) = stdout.trim().parse::<u32>() {
+                    if pid > 0 {
+                        return (Some(pid), true);
+                    }
+                }
+            }
+        }
+
         (None, false)
     }
 
-    fn read_activity_log() -> Vec<String> {
+    pub fn daemon_log_path() -> Option<std::path::PathBuf> {
+        Config::config_dir().ok().map(|d| d.join("daemon.log"))
+    }
+
+    /// The last `max_lines` whole lines in the last `max_bytes` of the log at `log_path`.
+    pub fn read_log_tail(
+        log_path: &std::path::Path,
+        max_bytes: u64,
+        max_lines: usize,
+    ) -> Vec<String> {
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        let log_path = match Config::config_dir() {
-            Ok(d) => d.join("daemon.log"),
-            Err(_) => return Vec::new(),
-        };
-
-        let file = match std::fs::File::open(&log_path) {
+        let file = match std::fs::File::open(log_path) {
             Ok(f) => f,
             Err(_) => return Vec::new(),
         };
@@ -106,7 +220,7 @@ impl DashboardState {
             return Vec::new();
         }
 
-        let read_size = 8192u64.min(file_size);
+        let read_size = max_bytes.min(file_size);
         let mut reader = BufReader::new(file);
         if reader.seek(SeekFrom::End(-(read_size as i64))).is_err() {
             return Vec::new();
@@ -119,7 +233,7 @@ impl DashboardState {
         }
 
         let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
-        let start = lines.len().saturating_sub(20);
+        let start = lines.len().saturating_sub(max_lines);
         lines[start..].to_vec()
     }
 }

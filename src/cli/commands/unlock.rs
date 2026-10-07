@@ -3,8 +3,7 @@ use anyhow::Result;
 
 pub async fn run() -> Result<()> {
     if !crate::security::has_encryption_key() {
-        Output::error("No encrypted key found. Run 'tether init' first.");
-        return Err(anyhow::anyhow!("No encryption key"));
+        anyhow::bail!("No encrypted key found. Run 'tether init' first.");
     }
 
     if crate::security::is_unlocked() {

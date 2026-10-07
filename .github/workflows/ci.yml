@@ -8,6 +8,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
+      - 'tests/**'
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/ci.yml'
+      - 'tests/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,7 +50,102 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --lib
+        run: cargo test --locked --lib --test cli
 
       - name: Build release
         run: cargo build --release
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --lib --test cli
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TETHER_E2E: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # images.sh builds old releases from their tags
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # target/debug only: target/e2e holds binaries and images that have their own caches
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/debug/
+          key: ${{ runner.os }}-cargo-e2e-${{ hashFiles('**/Cargo.lock') }}
+
+      # Released versions never change, so their binaries are built once per tag
+      - name: Cache release binaries
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/e2e/bin/tether-v1.11.10
+            target/e2e/bin/tether-v1.12.0
+            target/e2e/bin/tether-v1.13.1
+          key: e2e-bin-${{ runner.os }}-rust-1-bookworm-v1.11.10-v1.12.0-v1.13.1
+
+      - name: Cache machine images
+        id: images
+        uses: actions/cache@v4
+        with:
+          path: target/e2e/images.tar
+          key: e2e-images-${{ runner.os }}-${{ hashFiles('tests/e2e/docker/**') }}
+
+      - name: Load machine images
+        if: steps.images.outputs.cache-hit == 'true'
+        run: docker load -i target/e2e/images.tar
+
+      - name: Build binaries and images
+        run: tests/e2e/images.sh v1.11.10 v1.12.0 v1.13.1
+
+      - name: Save machine images
+        if: steps.images.outputs.cache-hit != 'true'
+        run: docker save -o target/e2e/images.tar tether-e2e-machine tether-e2e-real
+
+      - name: End-to-end tests
+        run: cargo test --locked --test e2e -- --nocapture
+
+      - name: Upload e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            target/e2e/logs/
+            target/e2e/build-*.log

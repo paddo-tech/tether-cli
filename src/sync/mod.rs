@@ -4,17 +4,20 @@ pub mod discovery;
 pub mod engine;
 pub mod git;
 pub mod layers;
+pub mod membership;
 pub mod merge;
 pub mod packages;
+pub mod signing;
 pub mod state;
 pub mod team;
 
 pub use backup::{
     backup_file, backups_dir, create_backup_dir, list_backup_files, list_backups,
-    prune_old_backups, restore_file,
+    prune_old_backups, restore_dotfile_backup, restore_file,
 };
 pub use conflict::{
-    detect_conflict, notify_conflicts, notify_deferred_casks, ConflictResolution, ConflictState,
+    detect_conflict, notify_conflicts, notify_deferred_casks, notify_inbox,
+    notify_membership_error, notify_signature_failed, ConflictResolution, ConflictState,
     FileConflict, PendingConflict,
 };
 pub use discovery::discover_sourced_dirs;
@@ -268,6 +271,25 @@ pub fn acquire_sync_lock(wait: bool) -> Result<File> {
     } else {
         file.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("Sync already in progress, skipping"))?;
+    }
+    Ok(file)
+}
+
+/// Acquire the sync lock, blocking until it is free. `on_wait` runs once before the
+/// wait, so a caller without a terminal, such as the dashboard, can show that it waits.
+pub fn wait_for_sync_lock(on_wait: impl FnOnce()) -> Result<File> {
+    use fs2::FileExt;
+
+    let lock_path = crate::home_dir()?.join(".tether/sync.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    if file.try_lock_exclusive().is_err() {
+        on_wait();
+        file.lock_exclusive()?;
     }
     Ok(file)
 }

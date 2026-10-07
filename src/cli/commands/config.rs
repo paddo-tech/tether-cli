@@ -1,8 +1,7 @@
 use crate::cli::{Output, Prompt};
 use crate::config::{Config, DotfileEntry, FeaturesConfig};
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color, Table};
-use inquire::Select as InquireSelect;
+use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color};
 
 pub async fn get(key: &str) -> Result<()> {
     let config = Config::load()?;
@@ -16,10 +15,7 @@ pub async fn get(key: &str) -> Result<()> {
     for k in &keys {
         match current.get(k) {
             Some(v) => current = v,
-            None => {
-                Output::error(&format!("Key '{}' not found in config", key));
-                return Ok(());
-            }
+            None => anyhow::bail!("Key '{}' not found in config", key),
         }
     }
 
@@ -46,69 +42,69 @@ pub async fn get(key: &str) -> Result<()> {
 }
 
 pub async fn set(key: &str, value: &str) -> Result<()> {
-    let mut config = Config::load()?;
-    let config_toml = toml::to_string_pretty(&config)?;
-    let mut toml_value = toml::from_str::<toml::Value>(&config_toml)?;
-
-    // Parse nested key (e.g., "project_configs.enabled")
-    let keys: Vec<&str> = key.split('.').collect();
-
-    // Navigate to the parent of the target key
-    let mut current = &mut toml_value;
-    for k in &keys[..keys.len() - 1] {
-        match current.get_mut(k) {
-            Some(v) => current = v,
-            None => {
-                Output::error(&format!("Key path '{}' not found in config", key));
-                return Ok(());
-            }
-        }
-    }
-
-    // Set the value
-    let last_key = keys[keys.len() - 1];
-    let table = match current.as_table_mut() {
-        Some(t) => t,
-        None => {
-            Output::error(&format!("Cannot set value at '{}'", key));
-            return Ok(());
-        }
-    };
-
-    // Parse the value string into appropriate TOML type
-    let new_value: toml::Value = if value == "true" {
-        toml::Value::Boolean(true)
-    } else if value == "false" {
-        toml::Value::Boolean(false)
-    } else if let Ok(i) = value.parse::<i64>() {
-        toml::Value::Integer(i)
-    } else if let Ok(f) = value.parse::<f64>() {
-        toml::Value::Float(f)
-    } else if value.starts_with('[') && value.ends_with(']') {
-        // Array value - parse as TOML
-        match toml::from_str(value) {
-            Ok(v) => v,
-            Err(e) => {
-                Output::error(&format!("Failed to parse array: {}", e));
-                return Ok(());
-            }
-        }
-    } else {
-        toml::Value::String(value.to_string())
-    };
-
-    table.insert(last_key.to_string(), new_value);
-
-    // Convert back to config and save
-    let config_toml = toml::to_string_pretty(&toml_value)?;
-    config = toml::from_str(&config_toml)?;
-    config.save()?;
-
+    let config = Config::load()?;
+    set_key(&config, key, parse_value(value)?)?.save()?;
     Output::success(&format!("Set {} = {}", key, value));
     Ok(())
 }
 
+/// Read `value` as a TOML value, such as `true`, `7` or `["a/b"]`. A bare word that is not
+/// TOML, such as `mocha`, is a string. A value that starts like an array, table or quoted
+/// string must parse.
+fn parse_value(value: &str) -> Result<toml::Value> {
+    match toml::from_str::<toml::Table>(&format!("v = {}", value)) {
+        Ok(mut table) => Ok(table.remove("v").expect("the table has v")),
+        Err(e) if value.trim_start().starts_with(['[', '{', '"', '\'']) => {
+            anyhow::bail!("Cannot read {} as a TOML value: {}", value, e)
+        }
+        Err(_) => Ok(toml::Value::String(value.to_string())),
+    }
+}
+
+/// Tables at their defaults are not serialized, so missing tables on the path are created.
+/// `Config` ignores keys it does not know, so a key that does not survive the round trip
+/// through `Config` is unknown, unless it is a known key at a value serialization skips. A
+/// known key rejects a datetime, and an unknown key accepts anything.
+fn set_key(config: &Config, key: &str, new_value: toml::Value) -> Result<Config> {
+    let keys: Vec<&str> = key.split('.').collect();
+    let updated: Config = with_key(config, key, new_value.clone())?.try_into()?;
+    let check = toml::Value::try_from(&updated)?;
+    if keys.iter().try_fold(&check, |v, k| v.get(k)) == Some(&new_value) {
+        return Ok(updated);
+    }
+    let probe = toml::Value::Datetime("1979-05-27T07:32:00Z".parse()?);
+    if with_key(config, key, probe)?.try_into::<Config>().is_ok() {
+        anyhow::bail!("Unknown config key '{}'", key);
+    }
+    Ok(updated)
+}
+
+/// `config` as TOML with `key` set to `value`.
+fn with_key(config: &Config, key: &str, value: toml::Value) -> Result<toml::Value> {
+    let mut toml_value = toml::Value::try_from(config)?;
+    let keys: Vec<&str> = key.split('.').collect();
+    let mut current = &mut toml_value;
+    for k in &keys[..keys.len() - 1] {
+        let Some(table) = current.as_table_mut() else {
+            anyhow::bail!("Cannot set value at '{}'", key);
+        };
+        current = table
+            .entry(k.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    }
+    let Some(table) = current.as_table_mut() else {
+        anyhow::bail!("Cannot set value at '{}'", key);
+    };
+    table.insert(keys[keys.len() - 1].to_string(), value);
+    Ok(toml_value)
+}
+
 pub async fn edit() -> Result<()> {
+    if !Prompt::is_interactive() {
+        anyhow::bail!(
+            "tether config edit needs a terminal. Use 'tether config set <key> <value>' instead"
+        );
+    }
     let config_path = Config::config_path()?;
 
     // Get editor from environment or use default
@@ -134,13 +130,13 @@ pub async fn edit() -> Result<()> {
             Ok(_) => {
                 Output::success("Config updated successfully");
             }
-            Err(e) => {
-                Output::error(&format!("Config validation failed: {}", e));
-                Output::warning("Your changes were saved but contain errors");
-            }
+            Err(e) => anyhow::bail!(
+                "Config validation failed: {}. Your changes were saved but contain errors",
+                e
+            ),
         }
     } else {
-        Output::warning("Editor exited with error");
+        anyhow::bail!("Editor exited with error");
     }
 
     Ok(())
@@ -178,7 +174,7 @@ pub async fn dotfiles() -> Result<()> {
             "Toggle Project Scanning",
             "Done",
         ];
-        let choice = Prompt::select(
+        let choice = Prompt::menu(
             "Select section",
             options.clone(),
             cursor.min(options.len() - 1),
@@ -238,7 +234,7 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
         println!();
         render_entry_table(title, entries);
         let actions = vec!["Add", "Remove", "Back"];
-        let choice = Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+        let choice = Prompt::menu(&format!("{} - select an action", title), actions.clone(), 0)?;
 
         match choice {
             0 => {
@@ -263,11 +259,10 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
                     continue;
                 }
 
-                let selection = InquireSelect::new(
+                let selection = Prompt::pick(
                     &format!("Select {} to remove", title.to_lowercase()),
                     entries.clone(),
-                )
-                .prompt()?;
+                )?;
 
                 entries.retain(|item| item != &selection);
                 changed = true;
@@ -281,14 +276,14 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
 }
 
 fn render_entry_table(title: &str, entries: &[String]) {
-    use owo_colors::OwoColorize;
+    use crate::cli::output::Colorize;
 
     if entries.is_empty() {
         println!("{}", format!("{}: (none)", title).bright_black());
         return;
     }
 
-    let mut table = Table::new();
+    let mut table = Output::table();
     table.load_preset(UTF8_FULL).set_header(vec![
         Cell::new(format!("{} ({})", title, entries.len()))
             .add_attribute(Attribute::Bold)
@@ -309,14 +304,14 @@ fn render_entry_table(title: &str, entries: &[String]) {
 }
 
 fn render_dotfile_table(title: &str, entries: &[DotfileEntry]) {
-    use owo_colors::OwoColorize;
+    use crate::cli::output::Colorize;
 
     if entries.is_empty() {
         println!("{}", format!("{}: (none)", title).bright_black());
         return;
     }
 
-    let mut table = Table::new();
+    let mut table = Output::table();
     table.load_preset(UTF8_FULL).set_header(vec![
         Cell::new(format!("{} ({})", title, entries.len()))
             .add_attribute(Attribute::Bold)
@@ -368,7 +363,7 @@ fn manage_dotfile_list(
         println!();
         render_dotfile_table(title, entries);
         let actions = vec!["Add", "Remove", "Toggle create_if_missing", "Back"];
-        let choice = Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+        let choice = Prompt::menu(&format!("{} - select an action", title), actions.clone(), 0)?;
 
         match choice {
             0 => {
@@ -382,7 +377,7 @@ fn manage_dotfile_list(
                     Output::warning("Already tracked");
                     continue;
                 }
-                let create = Prompt::confirm("Create if missing on other machines?", true)?;
+                let create = Prompt::question("Create if missing on other machines?", true)?;
                 if create {
                     entries.push(DotfileEntry::Simple(value.to_string()));
                 } else {
@@ -403,11 +398,8 @@ fn manage_dotfile_list(
                 }
 
                 let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
-                let selection = InquireSelect::new(
-                    &format!("Select {} to remove", title.to_lowercase()),
-                    paths,
-                )
-                .prompt()?;
+                let selection =
+                    Prompt::pick(&format!("Select {} to remove", title.to_lowercase()), paths)?;
 
                 entries.retain(|e| e.path() != selection);
                 changed = true;
@@ -420,9 +412,7 @@ fn manage_dotfile_list(
                 }
 
                 let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
-                let selection =
-                    InquireSelect::new("Select file to toggle create_if_missing", paths)
-                        .prompt()?;
+                let selection = Prompt::pick("Select file to toggle create_if_missing", paths)?;
 
                 if let Some(entry) = entries.iter_mut().find(|e| e.path() == selection) {
                     let new_value = !entry.create_if_missing();
@@ -444,7 +434,7 @@ fn manage_dotfile_list(
 
 /// List all features and their status
 pub async fn features_list() -> Result<()> {
-    use owo_colors::OwoColorize;
+    use crate::cli::output::Colorize;
 
     let config = Config::load()?;
 
@@ -498,15 +488,10 @@ pub async fn features_list() -> Result<()> {
 pub async fn features_enable(feature: &str) -> Result<()> {
     let mut config = Config::load()?;
 
-    match set_feature(&mut config.features, feature, true) {
-        Ok(()) => {
-            config.save()?;
-            Output::success(&format!("Enabled {}", feature));
-            show_feature_guidance(feature, true);
-        }
-        Err(e) => Output::error(&e.to_string()),
-    }
-
+    set_feature(&mut config.features, feature, true)?;
+    config.save()?;
+    Output::success(&format!("Enabled {}", feature));
+    show_feature_guidance(feature, true);
     Ok(())
 }
 
@@ -514,14 +499,9 @@ pub async fn features_enable(feature: &str) -> Result<()> {
 pub async fn features_disable(feature: &str) -> Result<()> {
     let mut config = Config::load()?;
 
-    match set_feature(&mut config.features, feature, false) {
-        Ok(()) => {
-            config.save()?;
-            Output::success(&format!("Disabled {}", feature));
-        }
-        Err(e) => Output::error(&e.to_string()),
-    }
-
+    set_feature(&mut config.features, feature, false)?;
+    config.save()?;
+    Output::success(&format!("Disabled {}", feature));
     Ok(())
 }
 
@@ -593,5 +573,61 @@ fn show_feature_guidance(feature: &str, enabled: bool) {
             println!("  tether init");
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_key_creates_default_dashboard_table() {
+        let config = set_key(
+            &Config::default(),
+            "dashboard.theme",
+            toml::Value::String("mocha".into()),
+        )
+        .unwrap();
+        assert_eq!(config.dashboard.theme.as_deref(), Some("mocha"));
+    }
+
+    #[test]
+    fn test_set_key_rejects_unknown_key() {
+        let value = toml::Value::Boolean(true);
+        assert!(set_key(&Config::default(), "nope.enabled", value.clone()).is_err());
+        assert!(set_key(&Config::default(), "dashboard.nope", value).is_err());
+        // An existing table ignores an unknown key as well
+        let five = toml::Value::Integer(5);
+        assert!(set_key(&Config::default(), "sync.nope", five).is_err());
+        let interval = toml::Value::String("10m".into());
+        assert!(set_key(&Config::default(), "sync.interval", interval).is_ok());
+    }
+
+    #[test]
+    fn values_parse_as_toml() {
+        use toml::Value;
+        assert_eq!(parse_value("true").unwrap(), Value::Boolean(true));
+        assert_eq!(parse_value("7").unwrap(), Value::Integer(7));
+        assert_eq!(parse_value("mocha").unwrap(), Value::String("mocha".into()));
+        assert_eq!(parse_value("\"7\"").unwrap(), Value::String("7".into()));
+        assert_eq!(parse_value("1.2.3").unwrap(), Value::String("1.2.3".into()));
+        let taps = parse_value(r#"["azure/kubelogin"]"#).unwrap();
+        assert_eq!(
+            taps,
+            Value::Array(vec![Value::String("azure/kubelogin".into())])
+        );
+        let config = set_key(&Config::default(), "packages.brew.trusted_taps", taps).unwrap();
+        assert_eq!(config.packages.brew.trusted_taps, ["azure/kubelogin"]);
+        assert!(parse_value("[\"unclosed\"").is_err());
+        // A string where the config wants an array is an error, not a silent no-op
+        let wrong = parse_value("azure/kubelogin").unwrap();
+        assert!(set_key(&Config::default(), "packages.brew.trusted_taps", wrong).is_err());
+    }
+
+    #[test]
+    fn test_set_key_accepts_existing_key_at_skipped_default() {
+        let empty = toml::Value::Array(Vec::new());
+        let config = set_key(&Config::default(), "packages.allow_scripts", empty).unwrap();
+        assert!(config.packages.allow_scripts.is_empty());
     }
 }

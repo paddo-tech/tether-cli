@@ -1,29 +1,22 @@
+use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use comfy_table::{Attribute, Cell, Color};
-use owo_colors::OwoColorize;
 use std::collections::{HashMap, HashSet};
 
 pub async fn run(machine: Option<&str>) -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("Config version") {
-                Output::error(&msg);
-            } else {
-                Output::error("Tether is not initialized. Run 'tether init' first.");
-            }
-            return Ok(());
-        }
+        Err(e) if e.to_string().contains("Config version") => return Err(e),
+        Err(_) => anyhow::bail!("Tether is not initialized. Run 'tether init' first."),
     };
 
     if !config.has_personal_features() {
-        Output::warning("Diff not available without personal features (no personal repo)");
-        Output::info("Use 'tether team files diff' for team file differences");
-        return Ok(());
+        anyhow::bail!(
+            "Diff is not available without personal features (no personal repo). Use 'tether team files diff' for team files"
+        );
     }
 
     let state = SyncState::load()?;
@@ -40,25 +33,21 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
 
     if let Some(target_machine) = machine {
         // Compare with specific machine
-        match MachineState::load_from_repo(&sync_path, target_machine)? {
+        let target_id = super::machines::resolve(&sync_path, target_machine)?;
+        match MachineState::load_from_repo(&sync_path, &target_id)? {
             Some(other_machine) => {
                 // Build current machine state for comparison
                 let current_state = build_current_machine_state(&config, &state, &home)?;
                 show_machine_diff(&current_state, &other_machine)?;
             }
             None => {
-                Output::error(&format!("Machine '{}' not found", target_machine));
-                Output::info("Use 'tether machines list' to see available machines");
-
-                // List available machines
                 let machines = MachineState::list_all(&sync_path)?;
-                if !machines.is_empty() {
-                    println!();
-                    Output::info("Available machines:");
-                    for m in machines {
-                        println!("  • {}", m.machine_id);
-                    }
-                }
+                let ids: Vec<String> = machines.into_iter().map(|m| m.machine_id).collect();
+                anyhow::bail!(
+                    "Machine '{}' not found. Machines: {}",
+                    target_machine,
+                    ids.join(", ")
+                );
             }
         }
     } else {
@@ -263,7 +252,9 @@ async fn show_package_diff(config: &Config, sync_path: &std::path::Path) -> Resu
         let remote_manifest = std::fs::read_to_string(&manifest_path)?;
         let local_manifest = manager.export_manifest().await?;
 
-        let remote_packages: Vec<_> = remote_manifest.lines().filter(|l| !l.is_empty()).collect();
+        let remote_names =
+            crate::packages::pin::manifest_names(manager.ecosystem(), &remote_manifest);
+        let remote_packages: Vec<_> = remote_names.iter().map(String::as_str).collect();
         let local_packages: Vec<_> = local_manifest.lines().filter(|l| !l.is_empty()).collect();
 
         let diff = diff_package_lists(&remote_packages, &local_packages);

@@ -32,17 +32,21 @@ fn build_project_map(search_paths: &[PathBuf]) -> HashMap<String, Vec<PathBuf>> 
     project_map
 }
 
-pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
-    if dry_run {
-        Output::info("Dry-run mode");
-    }
-
+pub async fn run(dry_run: bool, force: bool, rediscover: bool) -> Result<()> {
     // Acquire sync lock, waiting for any running sync to finish
     let _sync_lock = if !dry_run {
         Some(crate::sync::acquire_sync_lock(true)?)
     } else {
         None
     };
+    run_locked(dry_run, force, rediscover).await
+}
+
+/// A sync for a caller that already holds the sync lock, or a dry run.
+pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
+    if dry_run {
+        Output::info("Dry-run mode");
+    }
 
     // Only an interactive shell has the user's PATH; cron or ssh -c would bake in a bare PATH for good.
     #[cfg(target_os = "macos")]
@@ -107,6 +111,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
     // This ensures config changes from other machines are applied before using config
     if config.security.encrypt_dotfiles && !dry_run {
         if let Some(new_config) = sync_tether_config(&sync_path, &home)? {
+            warn_changed_profile(&config, &new_config);
             config = new_config;
         }
     }
@@ -127,7 +132,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
-        MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
+        crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
     // Apply dotfiles from sync repo (if encrypted) - with conflict detection
     // Interactive mode when run manually, non-interactive when run by daemon
@@ -310,6 +315,13 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         )
         .await?;
 
+        if crate::cli::Prompt::is_interactive() && !crate::cli::Prompt::assume_yes() {
+            // A cancelled prompt defers the review; the sync must still save and push
+            if let Err(e) = super::packages::review_inbox().await {
+                Output::warning(&format!("Inbox review stopped: {}", e));
+            }
+        }
+
         // Clear deferred casks after interactive sync (user had their chance)
         if !state.deferred_casks.is_empty() {
             state.deferred_casks.clear();
@@ -328,7 +340,7 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
 
     // Save machine state for cross-machine comparison
     if !dry_run {
-        machine_state.save_to_repo(&sync_path)?;
+        crate::sync::signing::save_record(&sync_path, &machine_state)?;
     }
 
     // Always export tether config (hardcoded, not dependent on feature flags)
@@ -373,13 +385,10 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
                                         crate::security::scan_for_secrets(&entry.path())
                                     {
                                         if !findings.is_empty() {
-                                            Output::error(&format!(
-                                                "Team push blocked: {} contains {} secret(s)",
+                                            anyhow::bail!(
+                                                "Team push blocked: {} contains {} secret(s). Remove sensitive data first",
                                                 entry.file_name().to_string_lossy(),
                                                 findings.len()
-                                            ));
-                                            anyhow::bail!(
-                                                "Cannot push secrets to team repo. Remove sensitive data first."
                                             );
                                         }
                                     }
@@ -410,11 +419,12 @@ pub async fn run(dry_run: bool, _force: bool, rediscover: bool) -> Result<()> {
         }
     }
 
-    if !dry_run {
-        state.mark_synced();
-        state.save()?;
+    if dry_run {
+        Output::info("Dry run: nothing changed");
+        return Ok(());
     }
-
+    state.mark_synced();
+    state.save()?;
     Output::success("Synced");
     Ok(())
 }
@@ -849,7 +859,8 @@ pub fn decrypt_from_repo(
                                             )?;
                                         }
                                         ConflictResolution::Merged => {
-                                            conflict.launch_merge_tool(&config.merge, home)?;
+                                            conflict
+                                                .launch_merge_tool(&config.merge_tool()?, home)?;
                                         }
                                         ConflictResolution::KeepLocal => {}
                                     }
@@ -1436,28 +1447,15 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
             let remote_hash = crate::sha256_hex(&plaintext);
             let local_hash = local_content.as_ref().map(|c| crate::sha256_hex(c));
 
-            // Check if local has changed since last sync
-            let state = SyncState::load().ok();
-            let last_synced_hash = state
-                .as_ref()
-                .and_then(|s| s.files.get(".tether/config.toml"))
-                .map(|f| f.hash.as_str());
-
-            let local_changed = local_hash.as_deref() != last_synced_hash;
-            let remote_changed = Some(remote_hash.as_str()) != last_synced_hash;
-
-            // Only apply remote if:
-            // - Local hasn't changed (safe to overwrite) OR local doesn't exist yet
-            // - AND remote has changed OR local doesn't exist yet
-            let should_apply = (!local_changed || local_content.is_none())
-                && (remote_changed || local_content.is_none());
-
-            if should_apply {
-                // Apply remote config
+            let mut state = SyncState::load().ok();
+            if apply_remote_config(state.as_mut(), local_hash.as_deref(), &remote_hash) {
                 if let Some(parent) = local_config_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&local_config_path, &plaintext)?;
+                if let Some(state) = state {
+                    state.save()?;
+                }
 
                 // Reload config
                 let new_config = Config::load()?;
@@ -1471,6 +1469,53 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
     }
 
     Ok(None)
+}
+
+/// Whether the remote config.toml replaces the local one: only when the local file is
+/// missing, or unchanged since the last sync while the remote changed. Applying records the
+/// remote hash. Without it, the next remote change looks like a local edit, and the stale
+/// copy is exported over it.
+fn apply_remote_config(
+    state: Option<&mut SyncState>,
+    local_hash: Option<&str>,
+    remote_hash: &str,
+) -> bool {
+    let last_synced_hash = state
+        .as_ref()
+        .and_then(|s| s.files.get(".tether/config.toml"))
+        .map(|f| f.hash.clone());
+    let local_changed = local_hash != last_synced_hash.as_deref();
+    let remote_changed = Some(remote_hash) != last_synced_hash.as_deref();
+    let apply = local_hash.is_none() || (!local_changed && remote_changed);
+    if apply {
+        if let Some(state) = state {
+            state.record_remote_file(".tether/config.toml", remote_hash.to_string());
+        }
+    }
+    apply
+}
+
+/// A synced config.toml can change this machine's profile assignment, and the packages this
+/// machine installs with it: a user on another machine, or a 1.x machine that saved an
+/// older config.
+pub fn warn_changed_profile(old: &Config, new: &Config) {
+    let Ok(state) = SyncState::load() else {
+        return;
+    };
+    let Some(profile) = old.machine_profiles.get(&state.machine_id) else {
+        return;
+    };
+    if new.machine_profiles.get(&state.machine_id) != Some(profile) {
+        Output::warning(&format!(
+            "The synced config changed this machine's profile from {} to {}, so it now \
+             installs the packages of profile {}. If nobody meant to change it, run 'tether \
+             machines profile set {}'",
+            profile,
+            new.profile_name(&state.machine_id),
+            new.profile_name(&state.machine_id),
+            profile
+        ));
+    }
 }
 
 /// Export tether config to sync repo (always, independent of config file list)
@@ -1776,13 +1821,16 @@ pub async fn build_machine_state(
     state: &SyncState,
     sync_path: &Path,
 ) -> Result<MachineState> {
-    // Load existing machine state to preserve removed_packages
-    let mut machine_state = MachineState::load_from_repo(sync_path, &state.machine_id)?
+    // This machine's last record keeps removals and ignores; the repo copy is not trusted
+    let mut machine_state = crate::sync::signing::own_record(sync_path, &state.machine_id)?
         .unwrap_or_else(|| MachineState::new(&state.machine_id));
 
-    // Update last_sync time, CLI version, and profile
+    // Update last_sync time, hostname, CLI and OS version, and profile
     machine_state.last_sync = chrono::Utc::now();
+    machine_state.hostname = crate::sync::local_hostname();
     machine_state.cli_version = env!("CARGO_PKG_VERSION").to_string();
+    machine_state.os_version = crate::sync::state::local_os_version();
+    machine_state.os = std::env::consts::OS.to_string();
     machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
 
     // Collect file hashes
@@ -1846,12 +1894,20 @@ pub async fn build_machine_state(
         ),
     ];
 
+    machine_state.package_versions.clear();
     for (enabled, manager) in managers {
         if enabled && manager.is_available().await {
             if let Ok(packages) = manager.list_installed().await {
                 machine_state.packages.insert(
                     manager.name().to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
+                );
+                machine_state.package_versions.insert(
+                    manager.name().to_string(),
+                    packages
+                        .into_iter()
+                        .filter_map(|p| Some((p.name, p.version?)))
+                        .collect(),
                 );
             }
         }
@@ -2233,13 +2289,14 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
         }
     }
 
-    // Sync team project secrets to local projects
-    if !dry_run {
-        let mut state = SyncState::load()?;
-        sync_team_project_secrets(config, &home, &mut state)?;
-        state.save()?;
+    if dry_run {
+        Output::info("Dry run: nothing changed");
+        return Ok(());
     }
-
+    // Sync team project secrets to local projects
+    let mut state = SyncState::load()?;
+    sync_team_project_secrets(config, &home, &mut state)?;
+    state.save()?;
     Output::success("Team sync complete");
     Ok(())
 }
@@ -2248,6 +2305,22 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_package_uninstalled_since_the_last_record_is_tombstoned() {
+        // The last record, signed by this machine, still lists evilpkg; the user has since
+        // uninstalled it, so a manifest line for it must not install it again this sync
+        let previous = HashMap::from([(
+            "npm".to_string(),
+            vec!["evilpkg".to_string(), "kept".to_string()],
+        )]);
+        let mut machine = MachineState::new("me");
+        machine
+            .packages
+            .insert("npm".to_string(), vec!["kept".to_string()]);
+        detect_removed_packages(&mut machine, &previous);
+        assert_eq!(machine.removed_packages["npm"], vec!["evilpkg"]);
+    }
 
     #[test]
     fn test_write_decrypted_creates_file_with_content() {
@@ -2360,5 +2433,26 @@ mod tests {
 
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
+    }
+
+    #[test]
+    fn applied_remote_config_does_not_look_like_a_local_edit() {
+        let mut state: SyncState = serde_json::from_value(serde_json::json!({
+            "machine_id": "me",
+            "last_sync": "2026-01-01T00:00:00Z",
+            "files": {},
+            "packages": {},
+        }))
+        .unwrap();
+        state.update_file(".tether/config.toml", "a".to_string());
+        // Another machine pushed b; this machine's config is still a
+        assert!(apply_remote_config(Some(&mut state), Some("a"), "b"));
+        // Then c. Before, the stale hash a made b look like a local edit, and b was
+        // exported over c
+        assert!(apply_remote_config(Some(&mut state), Some("b"), "c"));
+        // A real local edit still wins
+        assert!(!apply_remote_config(Some(&mut state), Some("edited"), "d"));
+        // A missing local config always takes the remote one
+        assert!(apply_remote_config(Some(&mut state), None, "d"));
     }
 }

@@ -20,7 +20,7 @@ pub async fn run(timestamp: Option<&str>, file: Option<&str>) -> Result<()> {
         None => {
             // Show list and let user pick
             let options: Vec<&str> = backups.iter().map(|s| s.as_str()).collect();
-            let idx = Prompt::select("Select backup to restore from", options.clone(), 0)?;
+            let idx = Prompt::choose("Select backup to restore from", options.clone())?;
             options[idx].to_string()
         }
     };
@@ -49,7 +49,7 @@ pub async fn run(timestamp: Option<&str>, file: Option<&str>) -> Result<()> {
                 .map(|(cat, path)| format!("{}/{}", cat, path))
                 .collect();
             let options: Vec<&str> = display.iter().map(|s| s.as_str()).collect();
-            let idx = Prompt::select("Select file to restore", options, 0)?;
+            let idx = Prompt::choose("Select file to restore", options)?;
             files[idx].clone()
         }
     };
@@ -71,15 +71,9 @@ pub async fn run(timestamp: Option<&str>, file: Option<&str>) -> Result<()> {
     }
 
     // Do the restore
-    match restore_file(&selected_timestamp, &category, &rel_path) {
-        Ok(dest) => {
-            Output::success(&format!("Restored to {}", dest.display()));
-        }
-        Err(e) => {
-            Output::error(&format!("Failed to restore: {}", e));
-        }
-    }
-
+    let dest = restore_file(&selected_timestamp, &category, &rel_path)
+        .map_err(|e| e.context("Failed to restore"))?;
+    Output::success(&format!("Restored to {}", dest.display()));
     Ok(())
 }
 
@@ -123,7 +117,7 @@ pub async fn git_restore(file: &str, commit: Option<&str>) -> Result<()> {
                 })
                 .collect();
             let opts: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-            let idx = Prompt::select("Select commit to restore from", opts, 0)?;
+            let idx = Prompt::choose("Select commit to restore from", opts)?;
             entries[idx].commit_hash.clone()
         }
     };

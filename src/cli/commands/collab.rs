@@ -93,9 +93,9 @@ pub async fn init(project_path: Option<&str>) -> Result<()> {
     );
 
     if collaborators.is_empty() {
-        Output::warning("No collaborators with write access found");
-        Output::info("Add collaborators to your GitHub repo first");
-        return Ok(());
+        anyhow::bail!(
+            "No collaborators with write access found. Add collaborators to your GitHub repo first"
+        );
     }
 
     Output::info("Collaborators with write access:");
@@ -112,7 +112,7 @@ pub async fn init(project_path: Option<&str>) -> Result<()> {
     let username = GitHubCli::get_username().await?;
     if GitHubCli::repo_exists(&username, &collab_repo_name).await? {
         Output::warning(&format!("{}/{} already exists", username, collab_repo_name));
-        if !Prompt::confirm("Use existing repository?", true)? {
+        if !Prompt::question("Use existing repository?", true)? {
             return Ok(());
         }
     } else {
@@ -712,13 +712,12 @@ pub async fn add_project(project_path: &str) -> Result<()> {
         .unwrap_or_default();
 
     if collabs.is_empty() {
-        Output::error("No collabs available. Create one with 'tether collab init' first.");
-        return Ok(());
+        anyhow::bail!("No collabs available. Create one with 'tether collab init' first.");
     }
 
     // Select collab to add to
     let options: Vec<&str> = collabs.iter().map(|s| s.as_str()).collect();
-    let selection = Prompt::select("Add project to which collab?", options, 0)?;
+    let selection = Prompt::choose("Add project to which collab?", options)?;
     let collab_name = &collabs[selection];
 
     // Update config
@@ -791,7 +790,7 @@ pub async fn remove(collab_name: Option<&str>) -> Result<()> {
         }
 
         let options: Vec<&str> = collabs.iter().map(|s| s.as_str()).collect();
-        let selection = Prompt::select("Remove which collab?", options, 0)?;
+        let selection = Prompt::choose("Remove which collab?", options)?;
         collabs[selection].clone()
     };
     validate_collab_name(&name)?;

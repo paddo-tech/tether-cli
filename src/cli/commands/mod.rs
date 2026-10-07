@@ -6,7 +6,7 @@ mod history;
 mod identity;
 mod ignore;
 mod init;
-mod machines;
+pub mod machines;
 mod packages;
 mod resolve;
 mod restore;
@@ -25,7 +25,8 @@ use clap::{Parser, Subcommand};
 #[command(about = "Sync your dev environment across machines", long_about = None)]
 #[command(version)]
 pub struct Cli {
-    /// Skip confirmation prompts (non-interactive mode)
+    /// Confirm without asking and take each question's default answer. Approvals and key
+    /// trust still need --expect or --fingerprint
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
 
@@ -69,11 +70,15 @@ pub enum Commands {
     },
 
     /// Show current sync status
-    Status,
+    Status {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Show differences between machines
     Diff {
-        /// Compare with specific machine
+        /// Compare with this machine (id or hostname)
         #[arg(long)]
         machine: Option<String>,
     },
@@ -84,13 +89,13 @@ pub enum Commands {
         action: DaemonAction,
     },
 
-    /// Manage machines in sync network
+    /// List, show, trust and remove machines, and manage profiles
     Machines {
         #[command(subcommand)]
         action: MachineAction,
     },
 
-    /// Manage ignore patterns
+    /// Manage what Tether ignores: secret scanning patterns, and files this machine keeps
     Ignore {
         #[command(subcommand)]
         action: IgnoreAction,
@@ -120,14 +125,26 @@ pub enum Commands {
     /// Clear cached encryption key
     Lock,
 
-    /// Upgrade all installed packages
-    Upgrade,
-
-    /// List and manage installed packages
-    Packages {
-        /// List packages without interactive selection
+    /// Upgrade installed packages to the newest release the release-age limit allows. Never
+    /// downgrades. Asks first in a terminal; without one, needs -y
+    Upgrade {
+        /// List what would change without upgrading
         #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// List, share and uninstall packages, and decide on the inbox. Without a subcommand,
+    /// lists the installed packages
+    ///
+    /// A package id is manager:name, such as npm:typescript. Managers: brew_formulae (or
+    /// brew), brew_casks (or cask), brew_taps, npm, pnpm, bun, gem, uv.
+    Packages {
+        /// Same as `tether packages list`
+        #[arg(long, hide = true)]
         list: bool,
+
+        #[command(subcommand)]
+        action: Option<PackagesAction>,
     },
 
     /// Restore files from backup
@@ -165,10 +182,96 @@ pub enum Commands {
 }
 
 #[derive(Subcommand)]
+pub enum PackagesAction {
+    /// List installed packages by manager, with the profiles each belongs to
+    List {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the inbox: packages and machine keys that wait for your approval
+    Inbox {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve an inbox item: install the package, or trust the machine key
+    Approve {
+        /// Item id (manager:name) or a package name. machine:<id> trusts that machine's key,
+        /// as 'tether machines trust' does
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<String>,
+        /// Same as --expect
+        #[arg(conflicts_with = "expect", hide = true)]
+        expected: Option<String>,
+        /// The version, Homebrew tap or key fingerprint you reviewed, as 'packages inbox'
+        /// shows it. Required without a terminal
+        #[arg(long, value_name = "VERSION|TAP|KEY")]
+        expect: Option<String>,
+        /// Approve a package whose source record fails its signature, without a terminal.
+        /// Needs --expect too. In a terminal, Tether asks instead
+        #[arg(long, conflicts_with = "all")]
+        allow_signature_failed: bool,
+        /// Approve and install every package in the inbox, except packages OSV lists as
+        /// malicious, packages whose record fails its signature, packages without a version
+        /// or tap to name, and machine keys. Asks first; without a terminal, needs -y. This
+        /// is the only command where -y approves inbox items
+        #[arg(long)]
+        all: bool,
+        /// With --all, only the items from this machine (id or hostname)
+        #[arg(long, requires = "all", value_name = "MACHINE")]
+        from: Option<String>,
+    },
+    /// Reject an inbox item, so syncs stop offering that version, tap or key
+    Reject {
+        /// Item id (manager:name) or a package name
+        id: String,
+        /// Same as --expect
+        #[arg(conflicts_with = "expect", hide = true)]
+        expected: Option<String>,
+        /// The version, Homebrew tap or key fingerprint you reviewed, as 'packages inbox'
+        /// shows it. Required without a terminal
+        #[arg(long, value_name = "VERSION|TAP|KEY")]
+        expect: Option<String>,
+    },
+    /// Install a package that another machine lists, as the dashboard's Import does. OSV
+    /// checks the release first. A package that waits in the inbox needs 'approve' instead
+    Install {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: String,
+    },
+    /// Add profiles to a package's members, so machines in those profiles install it
+    Share {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: String,
+        /// Profiles to add, separated by commas
+        #[arg(long, value_delimiter = ',', required = true, value_name = "PROFILES")]
+        to: Vec<String>,
+    },
+    /// Take profiles out of a package's members, so machines in those profiles stop
+    /// installing it. Nothing is uninstalled; machines keep any copy they have
+    Unshare {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: String,
+        /// Profiles to take out, separated by commas
+        #[arg(long, value_delimiter = ',', required = true, value_name = "PROFILES")]
+        from: Vec<String>,
+    },
+    /// Uninstall a package here and take this machine's profile out of its members. Without
+    /// a package, pick packages to uninstall in a terminal
+    #[command(visible_alias = "remove")]
+    Uninstall {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum RollbackAction {
-    /// Roll back a package manager's installed set to a manifest commit
+    /// Roll back a package manager's installed set to a manifest commit. Homebrew is not
+    /// supported
     Packages {
-        /// Manager key (npm, pnpm, bun, gem, uv)
+        /// Manager key (npm, pnpm, bun, gem, uv). brew is not supported
         manager: String,
         /// Manifest commit hash to roll back to
         commit: String,
@@ -183,11 +286,21 @@ pub enum DaemonAction {
     Stop,
     /// Restart the daemon
     Restart,
-    /// View daemon logs
-    Logs,
-    /// Install launchd service (auto-start on login)
+    /// Show whether the daemon runs, whether its login service is installed, and the last
+    /// sync and upgrade
+    Status,
+    /// Print the end of the daemon log
+    Logs {
+        /// Keep printing lines as the daemon writes them
+        #[arg(short, long)]
+        follow: bool,
+        /// How many lines to print from the end
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+    },
+    /// Install the login service (launchd on macOS, systemd on Linux)
     Install,
-    /// Uninstall launchd service
+    /// Uninstall the login service
     Uninstall,
     /// Internal daemon runner
     #[command(hide = true)]
@@ -197,11 +310,55 @@ pub enum DaemonAction {
 #[derive(Subcommand)]
 pub enum MachineAction {
     /// List all machines
-    List,
-    /// Rename this machine
-    Rename { old: String, new: String },
-    /// Remove a machine from sync
-    Remove { name: String },
+    List {
+        /// Print JSON (experimental in 2.0: field names may still change)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one machine: profile, versions, record status, and its full key fingerprint and
+    /// trust
+    Show {
+        /// Machine id or hostname. Without it, this machine
+        machine: Option<String>,
+    },
+    /// Rename this machine: 'tether machines rename <NEW>'. The form '<OLD> <NEW>' still
+    /// works in 2.0 and is deprecated
+    Rename {
+        /// The new name, or this machine's current name in the deprecated two-name form
+        #[arg(value_name = "NEW")]
+        name: String,
+        /// The new name, in the deprecated form
+        #[arg(hide = true)]
+        new: Option<String>,
+    },
+    /// Remove a machine from sync. With -y, Tether removes it without asking and prints
+    /// what it removed
+    Remove {
+        /// Machine id or hostname
+        machine: String,
+    },
+    /// Trust the signing key a machine published, so its package changes install on their own.
+    /// Without a fingerprint, Tether shows the current one and asks in a terminal
+    Trust {
+        /// Machine id or hostname
+        machine: String,
+        /// Same as --fingerprint
+        #[arg(conflicts_with = "fingerprint_flag", hide = true)]
+        fingerprint: Option<String>,
+        /// Fingerprint you checked on that machine with 'tether machines show'
+        /// (`SHA256:...`). Required without a terminal
+        #[arg(
+            long = "fingerprint",
+            id = "fingerprint_flag",
+            value_name = "SHA256:..."
+        )]
+        fingerprint_flag: Option<String>,
+    },
+    /// Stop trusting a machine's signing key
+    Untrust {
+        /// Machine id or hostname
+        machine: String,
+    },
     /// Manage machine profile assignment
     Profile {
         #[command(subcommand)]
@@ -211,21 +368,30 @@ pub enum MachineAction {
 
 #[derive(Subcommand)]
 pub enum MachineProfileAction {
-    /// Assign a profile to this machine
+    /// Assign a profile to this machine. Each machine sets only its own profile
     Set {
         /// Profile name (must exist in config)
         profile: String,
     },
     /// Remove profile assignment from this machine
     Unset,
-    /// Create a new profile (interactive wizard)
+    /// Create a profile. Asks about each dotfile, folder and package manager in a terminal;
+    /// -y takes every default, and --from copies a profile without asking
     Create {
         /// Profile name
+        #[arg(value_name = "PROFILE")]
         name: String,
+        /// Copy this existing profile
+        #[arg(long, value_name = "PROFILE")]
+        from: Option<String>,
+        /// Package managers of the profile, separated by commas (brew, npm, pnpm, bun, gem, uv)
+        #[arg(long, value_delimiter = ',', value_name = "MANAGERS")]
+        managers: Option<Vec<String>>,
     },
     /// Edit an existing profile
     Edit {
         /// Profile name
+        #[arg(value_name = "PROFILE")]
         name: String,
     },
     /// List all profiles
@@ -234,26 +400,58 @@ pub enum MachineProfileAction {
 
 #[derive(Subcommand)]
 pub enum IgnoreAction {
-    /// Add secret scanning ignore pattern
+    /// Patterns the secret scanner skips
+    Secrets {
+        #[command(subcommand)]
+        action: IgnoreSecretsAction,
+    },
+    /// Files this machine keeps: a sync does not overwrite them
+    Files {
+        #[command(subcommand)]
+        action: IgnoreFilesAction,
+    },
+    #[command(hide = true)]
     Add { pattern: String },
-    /// List secret scanning ignore patterns
+    #[command(hide = true)]
     List,
-    /// Remove secret scanning ignore pattern
+    #[command(hide = true)]
     Remove { pattern: String },
-    /// Ignore a dotfile on this machine (won't be overwritten during sync)
+    #[command(hide = true)]
     Dotfile { file: String },
-    /// Ignore a project config on this machine
+    #[command(hide = true)]
+    Project { project: String, path: String },
+    #[command(hide = true)]
+    SyncList,
+    #[command(hide = true)]
+    SyncRemove { file: String },
+}
+
+#[derive(Subcommand)]
+pub enum IgnoreSecretsAction {
+    /// Add a pattern the secret scanner skips
+    Add { pattern: String },
+    /// List the patterns
+    List,
+    /// Remove a pattern
+    Remove { pattern: String },
+}
+
+#[derive(Subcommand)]
+pub enum IgnoreFilesAction {
+    /// Keep a dotfile on this machine, such as .zshrc
+    Add { file: String },
+    /// Keep a project config file on this machine
     Project {
         /// Project identifier (repo name or path)
         project: String,
         /// Config file path relative to project root
         path: String,
     },
-    /// List files ignored on this machine
-    SyncList,
-    /// Unignore a file on this machine
-    SyncRemove {
-        /// File to unignore (dotfile name or "project:path")
+    /// List the files this machine keeps
+    List,
+    /// Sync a kept file again
+    Remove {
+        /// Dotfile name, or project:path
         file: String,
     },
 }
@@ -543,7 +741,33 @@ pub enum ProjectsAction {
 }
 
 impl Cli {
+    pub fn is_daemon_run(&self) -> bool {
+        matches!(
+            self.command,
+            Some(Commands::Daemon {
+                action: DaemonAction::Run
+            })
+        )
+    }
+
     pub async fn run(&self) -> Result<()> {
+        crate::cli::Prompt::set_assume_yes(self.yes);
+        crate::cli::Output::set_json(matches!(
+            &self.command,
+            Some(
+                Commands::Status { json: true }
+                    | Commands::Machines {
+                        action: MachineAction::List { json: true }
+                    }
+                    | Commands::Packages {
+                        action: Some(
+                            PackagesAction::List { json: true }
+                                | PackagesAction::Inbox { json: true }
+                        ),
+                        ..
+                    }
+            )
+        ));
         match &self.command {
             None | Some(Commands::Dashboard) => {
                 tokio::task::spawn_blocking(crate::dashboard::run).await?
@@ -565,39 +789,83 @@ impl Cli {
                 force,
                 rediscover,
             } => sync::run(*dry_run, *force, *rediscover).await,
-            Commands::Status => status::run().await,
+            Commands::Status { json } => status::run(*json).await,
             Commands::Diff { machine } => diff::run(machine.as_deref()).await,
             Commands::Daemon { action } => match action {
                 DaemonAction::Start => daemon::start().await,
                 DaemonAction::Stop => daemon::stop().await,
                 DaemonAction::Restart => daemon::restart().await,
-                DaemonAction::Logs => daemon::logs().await,
+                DaemonAction::Status => daemon::status().await,
+                DaemonAction::Logs { follow, lines } => daemon::logs(*lines, *follow).await,
                 DaemonAction::Install => daemon::install().await,
                 DaemonAction::Uninstall => daemon::uninstall().await,
                 DaemonAction::Run => daemon::run_daemon().await,
             },
             Commands::Machines { action } => match action {
-                MachineAction::List => machines::list().await,
-                MachineAction::Rename { old, new } => machines::rename(old, new).await,
-                MachineAction::Remove { name } => machines::remove(name).await,
+                MachineAction::List { json } => machines::list(*json).await,
+                MachineAction::Show { machine } => machines::show(machine.as_deref()).await,
+                MachineAction::Rename { name, new } => match new {
+                    Some(new) => {
+                        crate::cli::Output::warning(
+                            "'tether machines rename <OLD> <NEW>' is deprecated. Run 'tether machines rename <NEW>'",
+                        );
+                        machines::rename(Some(name), new).await
+                    }
+                    None => machines::rename(None, name).await,
+                },
+                MachineAction::Remove { machine } => machines::remove(machine, self.yes).await,
+                MachineAction::Trust {
+                    machine,
+                    fingerprint,
+                    fingerprint_flag,
+                } => {
+                    let fingerprint = fingerprint.as_deref().or(fingerprint_flag.as_deref());
+                    machines::trust(machine, fingerprint).await
+                }
+                MachineAction::Untrust { machine } => machines::untrust(machine).await,
                 MachineAction::Profile { action } => match action {
                     MachineProfileAction::Set { profile } => machines::profile_set(profile).await,
                     MachineProfileAction::Unset => machines::profile_unset().await,
-                    MachineProfileAction::Create { name } => machines::profile_create(name).await,
+                    MachineProfileAction::Create {
+                        name,
+                        from,
+                        managers,
+                    } => machines::profile_create(name, from.as_deref(), managers.as_deref()).await,
                     MachineProfileAction::Edit { name } => machines::profile_edit(name).await,
                     MachineProfileAction::List => machines::profile_list().await,
                 },
             },
             Commands::Ignore { action } => match action {
-                IgnoreAction::Add { pattern } => ignore::add(pattern).await,
-                IgnoreAction::List => ignore::list().await,
-                IgnoreAction::Remove { pattern } => ignore::remove(pattern).await,
-                IgnoreAction::Dotfile { file } => ignore::ignore_dotfile(file).await,
-                IgnoreAction::Project { project, path } => {
+                IgnoreAction::Secrets {
+                    action: IgnoreSecretsAction::Add { pattern },
+                }
+                | IgnoreAction::Add { pattern } => ignore::add(pattern).await,
+                IgnoreAction::Secrets {
+                    action: IgnoreSecretsAction::List,
+                }
+                | IgnoreAction::List => ignore::list().await,
+                IgnoreAction::Secrets {
+                    action: IgnoreSecretsAction::Remove { pattern },
+                }
+                | IgnoreAction::Remove { pattern } => ignore::remove(pattern).await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::Add { file },
+                }
+                | IgnoreAction::Dotfile { file } => ignore::ignore_dotfile(file).await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::Project { project, path },
+                }
+                | IgnoreAction::Project { project, path } => {
                     ignore::ignore_project(project, path).await
                 }
-                IgnoreAction::SyncList => ignore::sync_list().await,
-                IgnoreAction::SyncRemove { file } => ignore::sync_remove(file).await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::List,
+                }
+                | IgnoreAction::SyncList => ignore::sync_list().await,
+                IgnoreAction::Files {
+                    action: IgnoreFilesAction::Remove { file },
+                }
+                | IgnoreAction::SyncRemove { file } => ignore::sync_remove(file).await,
             },
             Commands::Config { action } => match action {
                 ConfigAction::Get { key } => config::get(key).await,
@@ -675,8 +943,41 @@ impl Cli {
             Commands::Resolve { file } => resolve::run(file.as_deref()).await,
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
-            Commands::Upgrade => upgrade::run().await,
-            Commands::Packages { list } => packages::run(*list, self.yes).await,
+            Commands::Upgrade { dry_run } => upgrade::run(*dry_run).await,
+            Commands::Packages { list: _, action } => match action {
+                None => packages::list(false).await,
+                Some(PackagesAction::List { json }) => packages::list(*json).await,
+                Some(PackagesAction::Inbox { json }) => packages::inbox_list(*json).await,
+                Some(PackagesAction::Approve {
+                    id,
+                    expected,
+                    expect,
+                    allow_signature_failed,
+                    all,
+                    from,
+                }) => match id {
+                    _ if *all => packages::approve_all(from.as_deref()).await,
+                    Some(id) => {
+                        packages::approve(
+                            id,
+                            expected.as_deref().or(expect.as_deref()),
+                            *allow_signature_failed,
+                        )
+                        .await
+                    }
+                    None => unreachable!("clap requires an id without --all"),
+                },
+                Some(PackagesAction::Reject {
+                    id,
+                    expected,
+                    expect,
+                }) => packages::reject(id, expected.as_deref().or(expect.as_deref())).await,
+                Some(PackagesAction::Install { id }) => packages::install(id).await,
+                Some(PackagesAction::Share { id, to }) => packages::share(id, to),
+                Some(PackagesAction::Unshare { id, from }) => packages::unshare(id, from),
+                Some(PackagesAction::Uninstall { id: Some(id) }) => packages::remove(id).await,
+                Some(PackagesAction::Uninstall { id: None }) => packages::pick_uninstall().await,
+            },
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,
                 RestoreAction::File { from, file } => {
@@ -696,7 +997,7 @@ impl Cli {
             Commands::History { file, limit } => history::run(file, *limit).await,
             Commands::Rollback { action } => match action {
                 RollbackAction::Packages { manager, commit } => {
-                    rollback::packages(manager, commit).await
+                    rollback::packages(manager, commit, self.yes).await
                 }
             },
             Commands::Collab { action } => match action {

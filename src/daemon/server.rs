@@ -1,9 +1,10 @@
 use crate::config::Config;
 use crate::packages::{
-    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
+    BrewManager, BunManager, Cooldown, GemManager, NpmManager, PackageManager, PnpmManager,
+    UvManager,
 };
 use crate::sync::{
-    import_packages, notify_deferred_casks, GitBackend, MachineState, SyncEngine, SyncState,
+    import_packages, notify_deferred_casks, notify_inbox, GitBackend, SyncEngine, SyncState,
 };
 use anyhow::Result;
 use chrono::Local;
@@ -84,6 +85,8 @@ impl DaemonServer {
             let ctrl_c = tokio::signal::ctrl_c();
             tokio::pin!(ctrl_c);
             sync_timer.tick().await;
+            // Before this line a SIGHUP still stops the process, so scripts wait for it
+            log::info!("Signal handlers ready");
 
             loop {
                 tokio::select! {
@@ -103,6 +106,7 @@ impl DaemonServer {
                         if let Err(e) = self.run_sync().await {
                             log::error!("Sync failed: {}", e);
                         }
+                        log::info!("SIGHUP sync finished");
                     },
                 };
             }
@@ -220,6 +224,7 @@ impl DaemonServer {
             if let Some(new_config) =
                 crate::cli::commands::sync::sync_tether_config(&sync_path, &home)?
             {
+                crate::cli::commands::sync::warn_changed_profile(&config, &new_config);
                 config = new_config;
             }
         }
@@ -240,7 +245,7 @@ impl DaemonServer {
         }
 
         let machine_state_for_decrypt =
-            MachineState::load_from_repo(&sync_path, &state.machine_id)?.unwrap_or_default();
+            crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
         // Apply remote changes (dotfiles, config dirs, project configs)
         if config.security.encrypt_dotfiles {
@@ -386,7 +391,7 @@ impl DaemonServer {
         // Import packages (daemon mode: defer casks that need password)
         if config.features.personal_packages {
             let previously_deferred = state.deferred_casks.clone();
-            let deferred_casks = import_packages(
+            let outcome = import_packages(
                 &config,
                 &sync_path,
                 &mut state,
@@ -395,6 +400,31 @@ impl DaemonServer {
                 &previously_deferred,
             )
             .await?;
+            let deferred_casks = outcome.deferred_casks;
+
+            if !outcome.signature_failed.is_empty() {
+                log::warn!(
+                    "Record for {} fails its signature; Tether ignores it. Someone may have \
+                     edited it in the repo",
+                    outcome.signature_failed.join(", ")
+                );
+                crate::sync::notify_signature_failed(&outcome.signature_failed).ok();
+            }
+
+            if let Some(error) = &outcome.membership_error {
+                log::warn!(
+                    "{}. Tether installs no synced packages until it reads",
+                    error
+                );
+                crate::sync::notify_membership_error().ok();
+            }
+
+            // One notification per batch of newly held packages
+            if !outcome.queued.is_empty() {
+                let names: Vec<&str> = outcome.queued.iter().map(|i| i.name.as_str()).collect();
+                log::info!("Held for approval: {}", names.join(", "));
+                notify_inbox(&names).ok();
+            }
 
             // Handle newly deferred casks
             if !deferred_casks.is_empty() {
@@ -440,7 +470,7 @@ impl DaemonServer {
         }
 
         // Save machine state
-        machine_state.save_to_repo(&sync_path)?;
+        crate::sync::signing::save_record(&sync_path, &machine_state)?;
 
         // Export tether config to sync repo
         if config.security.encrypt_dotfiles {
@@ -609,6 +639,14 @@ impl DaemonServer {
 
     /// Update all enabled package managers
     async fn run_package_updates(&self) -> Result<()> {
+        // Upgrades hold malicious targets in the inbox, which a sync or approval may be changing
+        let _sync_lock = match crate::sync::acquire_sync_lock(false) {
+            Ok(lock) => lock,
+            Err(_) => {
+                log::info!("Sync in progress, skipping today's package update");
+                return Ok(());
+            }
+        };
         let config = Config::load()?;
         let mut any_actual_updates = false;
 
@@ -625,9 +663,22 @@ impl DaemonServer {
             if !enabled || !manager.is_available().await {
                 continue;
             }
+            // Unattended upgrades must honour the release-age cooldown or not run
+            if manager.cooldown().await == Cooldown::Unsupported {
+                if crate::packages::policy::first_warning(&format!(
+                    "auto-upgrade {}",
+                    manager.name()
+                )) {
+                    log::warn!(
+                        "Skipping {} auto-upgrade: this version cannot enforce packages.min_release_age_days",
+                        manager.name()
+                    );
+                }
+                continue;
+            }
             log::info!("Updating {} packages...", manager.name());
             let hash_before = manager.compute_manifest_hash().await.ok();
-            if let Err(e) = manager.update_all().await {
+            if let Err(e) = crate::packages::update_all(manager.as_ref()).await {
                 log::error!("{} update failed: {}", manager.name(), e);
             } else {
                 let hash_after = manager.compute_manifest_hash().await.ok();
@@ -663,18 +714,12 @@ impl Default for DaemonServer {
 mod tests {
     use super::*;
 
+    // One test owns the process-wide flag; two tests writing it in parallel raced
     #[test]
-    fn test_daemon_mode_flag_default_false() {
-        // Reset to known state (other tests may have set it)
-        DAEMON_MODE.store(false, Ordering::Relaxed);
+    fn test_daemon_mode_flag() {
         assert!(!is_daemon_mode());
-    }
-
-    #[test]
-    fn test_daemon_mode_flag_set_true() {
         DAEMON_MODE.store(true, Ordering::Relaxed);
         assert!(is_daemon_mode());
-        // Reset
         DAEMON_MODE.store(false, Ordering::Relaxed);
     }
 
