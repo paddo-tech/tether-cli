@@ -10,25 +10,63 @@ use chrono::Local;
 use comfy_table::{Attribute, Cell, Color};
 use std::path::Path;
 
-/// The machine id `name` refers to: a machine id, or the hostname of exactly one machine.
-/// A name that matches neither is returned as given, so a command can act on an id that
-/// has no record, such as untrust.
+/// The machine id `name` refers to: the id of a machine record, or the hostname of exactly
+/// one machine that this machine trusts, or of this machine. Anyone who can push can write a
+/// record's hostname, so a record that is not trusted never lends a machine its hostname.
 pub fn resolve(sync_path: &Path, name: &str) -> Result<String> {
-    resolve_in(&MachineState::list_all(sync_path).unwrap_or_default(), name)
+    resolve_where(sync_path, name, |status, _| {
+        status == signing::RecordStatus::Trusted
+    })
 }
 
-fn resolve_in(machines: &[MachineState], name: &str) -> Result<String> {
+/// As [`resolve`], and a hostname may also name a new machine whose record a key that this
+/// machine does not trust yet signs, so `machines trust <hostname>` works. Trust still
+/// binds to the key fingerprint the user gives or sees with the machine id.
+fn resolve_for_trust(sync_path: &Path, name: &str) -> Result<String> {
+    resolve_where(sync_path, name, |status, signer| {
+        status == signing::RecordStatus::Trusted
+            || (status == signing::RecordStatus::Untrusted && signer)
+    })
+}
+
+/// `vouched` gets a record's status and whether a signature over it verifies.
+fn resolve_where(
+    sync_path: &Path,
+    name: &str,
+    vouched: impl Fn(signing::RecordStatus, bool) -> bool,
+) -> Result<String> {
+    let machines = MachineState::list_all(sync_path)?;
+    let this = SyncState::load()?.machine_id;
+    let named: Vec<String> = signing::record_statuses(sync_path, &this)?
+        .into_iter()
+        .filter(|(_, status, signer)| vouched(*status, signer.is_some()))
+        .map(|(id, _, _)| id)
+        .collect();
+    resolve_in(&machines, name, |id| {
+        id == this || named.iter().any(|t| t == id)
+    })
+}
+
+fn resolve_in(
+    machines: &[MachineState],
+    name: &str,
+    trusted: impl Fn(&str) -> bool,
+) -> Result<String> {
     if machines.iter().any(|m| m.machine_id == name) {
         return Ok(name.to_string());
     }
     let host = |h: &str| h.trim_end_matches(".local").to_ascii_lowercase();
     let ids: Vec<&str> = machines
         .iter()
-        .filter(|m| host(&m.hostname) == host(name))
+        .filter(|m| trusted(&m.machine_id) && host(&m.hostname) == host(name))
         .map(|m| m.machine_id.as_str())
         .collect();
     match ids.as_slice() {
-        [] => Ok(name.to_string()),
+        [] => anyhow::bail!(
+            "No machine {}. Name a machine id, or the hostname of a trusted machine. Run \
+             'tether machines list' to see the machines",
+            name
+        ),
         [id] => Ok(id.to_string()),
         _ => anyhow::bail!(
             "Hostname {} names more than one machine: {}. Use a machine id",
@@ -454,12 +492,11 @@ pub async fn remove(name: &str, yes: bool) -> Result<()> {
     if !config.has_personal_features() {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
-    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
-    let name = resolved.as_str();
-
     if !valid_machine_id(name) {
         anyhow::bail!("Invalid machine id '{}'", name);
     }
+    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
+    let name = resolved.as_str();
 
     let state = SyncState::load()?;
 
@@ -624,7 +661,7 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
-    let resolved = resolve(&sync_path, name)?;
+    let resolved = resolve_for_trust(&sync_path, name)?;
     let name = resolved.as_str();
     let fingerprint = match fingerprint {
         Some(fingerprint) => fingerprint.to_string(),
@@ -1008,13 +1045,24 @@ mod tests {
             machine("c3", "twin"),
             machine("d4", "twin"),
         ];
-        let resolve = |name: &str| super::resolve_in(&fleet, name);
+        let resolve = |name: &str| super::resolve_in(&fleet, name, |_| true);
         assert_eq!(resolve("b2").unwrap(), "b2");
         assert_eq!(resolve("laptop").unwrap(), "a1");
         assert_eq!(resolve("Laptop.local").unwrap(), "a1");
         assert_eq!(resolve("server").unwrap(), "b2");
-        assert_eq!(resolve("gone").unwrap(), "gone");
+        assert!(resolve("gone")
+            .unwrap_err()
+            .to_string()
+            .contains("No machine gone"));
         assert!(resolve("twin").unwrap_err().to_string().contains("c3, d4"));
+
+        // A record that is not trusted, for example a tampered or replayed one, names a
+        // machine only by its exact id, never by the hostname it claims
+        let fleet = [machine("a1", "laptop.local"), machine("e5", "spoof")];
+        let resolve = |name: &str| super::resolve_in(&fleet, name, |id| id != "e5");
+        assert!(resolve("spoof").is_err());
+        assert_eq!(resolve("e5").unwrap(), "e5");
+        assert_eq!(resolve("laptop").unwrap(), "a1");
     }
 
     #[test]

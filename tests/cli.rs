@@ -239,11 +239,17 @@ fn approve_all_lists_what_it_covers_and_needs_y_without_a_terminal() {
             "1 item(s) need their own decision",
         ))
         .stderr(predicate::str::contains("Pass -y"));
-    tether(h.path())
-        .args(["packages", "approve", "--all", "--from", "nobody"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("No packages to approve"));
+    // An unknown machine is an error, not an empty approval
+    fails(
+        h.path(),
+        &["packages", "approve", "--all", "--from", "nobody"],
+        "No machine nobody",
+    );
+    fails(
+        h.path(),
+        &["machines", "untrust", "nobody"],
+        "No machine nobody",
+    );
     // Approving one item needs the reviewed version without a terminal
     fails(
         h.path(),
@@ -298,7 +304,7 @@ fn rename_with_two_names_is_deprecated_and_checks_this_machine() {
         .code(1)
         .stdout(predicate::str::contains("deprecated"))
         .stderr(predicate::str::contains("can rename itself"));
-    fails(h.path(), &["machines", "show", "nope"], "not found");
+    fails(h.path(), &["machines", "show", "nope"], "No machine nope");
 }
 
 #[test]

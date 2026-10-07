@@ -658,14 +658,16 @@ async fn osv_checked(
 /// that queues more meanwhile does not add to them. With `from`, only items from that
 /// machine.
 pub async fn approve_all(from: Option<&str>) -> Result<()> {
+    let mut items = inbox::list()?;
     let from = match from {
+        // An item names its machine by id, also when that machine has no record any more
+        Some(m) if items.iter().any(|i| i.from_machine() == Some(m)) => Some(m.to_string()),
         Some(m) => Some(super::machines::resolve(
             &crate::sync::SyncEngine::sync_path()?,
             m,
         )?),
         None => None,
     };
-    let mut items = inbox::list()?;
     inbox::sort_by_group(&mut items);
     let (approvable, held): (Vec<InboxItem>, Vec<InboxItem>) = items
         .into_iter()
