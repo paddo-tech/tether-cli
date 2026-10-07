@@ -419,11 +419,12 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         }
     }
 
-    if !dry_run {
-        state.mark_synced();
-        state.save()?;
+    if dry_run {
+        Output::info("Dry run: nothing changed");
+        return Ok(());
     }
-
+    state.mark_synced();
+    state.save()?;
     Output::success("Synced");
     Ok(())
 }
@@ -2288,13 +2289,14 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
         }
     }
 
-    // Sync team project secrets to local projects
-    if !dry_run {
-        let mut state = SyncState::load()?;
-        sync_team_project_secrets(config, &home, &mut state)?;
-        state.save()?;
+    if dry_run {
+        Output::info("Dry run: nothing changed");
+        return Ok(());
     }
-
+    // Sync team project secrets to local projects
+    let mut state = SyncState::load()?;
+    sync_team_project_secrets(config, &home, &mut state)?;
+    state.save()?;
     Output::success("Team sync complete");
     Ok(())
 }
