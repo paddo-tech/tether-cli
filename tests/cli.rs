@@ -163,6 +163,30 @@ fn prompts_without_a_terminal_name_y_and_y_answers_them() {
 }
 
 #[test]
+fn bare_packages_lists_and_uninstall_needs_a_package() {
+    let h = home();
+    for args in [
+        &["packages"][..],
+        &["packages", "list"],
+        &["packages", "--list"],
+    ] {
+        tether(h.path())
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("No packages found"));
+    }
+    fails(h.path(), &["packages", "uninstall"], "Name the package");
+    // `remove` stays an alias of `uninstall`
+    fails(h.path(), &["packages", "remove", "nope"], "manager:name");
+    fails(
+        h.path(),
+        &["packages", "uninstall", "nope:x"],
+        "manager:name",
+    );
+}
+
+#[test]
 fn piped_output_has_no_colour() {
     let h = home();
     for args in [

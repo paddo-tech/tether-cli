@@ -476,6 +476,8 @@ impl Inbox {
 
     /// Find a pending item by id (`manager:name`) or by a name only one item has.
     pub fn find(&self, query: &str) -> Result<&InboxItem> {
+        let query = super::normalize_id(query);
+        let query = query.as_str();
         if let Some(item) = self.items.iter().find(|i| i.id() == query) {
             return Ok(item);
         }
@@ -564,10 +566,12 @@ impl Inbox {
                 Output::warning(&format!(
                     "SIGNING KEY CHANGED for machine {}: {} is now {}. Its record is not trusted \
                      until you approve the new key. If you did not set that machine up again, \
-                     someone may be signing as it",
+                     someone may be signing as it. Run 'tether machines show {}' on that \
+                     machine and compare the fingerprint",
                     id,
                     signing::fingerprint(old),
                     signing::fingerprint(&key),
+                    id,
                 ));
             }
             queued.push(item);

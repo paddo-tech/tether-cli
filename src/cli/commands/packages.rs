@@ -3,137 +3,127 @@ use anyhow::Result;
 use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
 use crate::packages::inbox::{self, InboxItem, Kind};
-use crate::packages::{
-    BrewManager, BunManager, GemManager, NpmManager, PackageInfo, PackageManager, PnpmManager,
-    UvManager,
-};
+use crate::packages::{BrewManager, PackageInfo, PackageManager};
 use crate::sync::membership::{self, Edit, Membership};
 
-struct PackageEntry {
-    manager: String,
-    name: String,
-    version: Option<String>,
-}
-
-struct ManagerInfo {
-    name: String,
-    display: String,
+/// Installed packages under one manager key, such as `brew_casks` or `npm`.
+struct Installed {
+    key: &'static str,
     packages: Vec<PackageInfo>,
 }
 
-pub async fn run(list_only: bool, yes: bool) -> Result<()> {
-    let managers: Vec<Box<dyn PackageManager>> = vec![
-        Box::new(BrewManager::new()),
-        Box::new(NpmManager::new()),
-        Box::new(PnpmManager::new()),
-        Box::new(BunManager::new()),
-        Box::new(GemManager::new()),
-        Box::new(UvManager::new()),
-    ];
-
-    // Collect packages grouped by manager
-    let mut manager_infos: Vec<ManagerInfo> = Vec::new();
-
-    for manager in &managers {
-        if !manager.is_available().await {
-            continue;
-        }
-
-        match manager.list_installed().await {
-            Ok(packages) => {
-                if !packages.is_empty() {
-                    manager_infos.push(ManagerInfo {
-                        name: manager.name().to_string(),
-                        display: format!("{} ({} packages)", manager.name(), packages.len()),
-                        packages,
-                    });
-                }
-            }
-            Err(e) => {
-                Output::warning(&format!(
-                    "Failed to list {} packages: {}",
-                    manager.name(),
-                    e
-                ));
-            }
+/// Installed packages under the manager keys that package ids use. A manager that fails
+/// to list is reported and skipped.
+async fn installed() -> Vec<Installed> {
+    let mut lists: Vec<(&'static str, Result<Vec<PackageInfo>>)> = Vec::new();
+    let brew = BrewManager::new();
+    if brew.is_available().await {
+        lists.push(("brew_formulae", brew.list_installed().await));
+        let casks = brew.list_installed_casks().await.map(|names| {
+            names
+                .into_iter()
+                .map(|name| PackageInfo {
+                    name,
+                    version: None,
+                })
+                .collect()
+        });
+        lists.push(("brew_casks", casks));
+    }
+    for key in ["npm", "pnpm", "bun", "gem", "uv"] {
+        let manager = crate::packages::manager_for_key(key).expect("a manager key");
+        if manager.is_available().await {
+            lists.push((key, manager.list_installed().await));
         }
     }
+    lists
+        .into_iter()
+        .filter_map(|(key, list)| match list {
+            Ok(packages) if !packages.is_empty() => Some(Installed { key, packages }),
+            Ok(_) => None,
+            Err(e) => {
+                Output::warning(&format!("Failed to list {} packages: {}", key, e));
+                None
+            }
+        })
+        .collect()
+}
 
+/// List installed packages by manager key, with the profiles each belongs to.
+pub async fn list() -> Result<()> {
+    let installed = installed().await;
     print_install_failures();
-
-    if manager_infos.is_empty() {
+    if installed.is_empty() {
         Output::info("No packages found");
         return Ok(());
     }
-
-    manager_infos.sort_by(|a, b| a.name.cmp(&b.name));
-
-    if list_only {
-        print_package_list(&manager_infos);
-        return Ok(());
+    let membership = crate::config::Config::load()
+        .and_then(|config| Membership::load_current(&config))
+        .ok();
+    if let Some(m) = &membership {
+        Output::info(&format!(
+            "This machine installs the packages of profile {}",
+            m.profile
+        ));
     }
-
-    // Interactive mode: first select managers to expand
-    let option_refs: Vec<&str> = manager_infos.iter().map(|m| m.display.as_str()).collect();
-
-    let selected_indices =
-        match Prompt::multi_select("Select package managers to expand:", option_refs, &[]) {
-            Ok(indices) => indices,
-            Err(_) => return Ok(()),
-        };
-
-    if selected_indices.is_empty() {
-        Output::info("No managers selected");
-        return Ok(());
-    }
-
-    // Build package list from selected managers only
-    let mut all_packages: Vec<PackageEntry> = Vec::new();
-    for &idx in &selected_indices {
-        let info = &manager_infos[idx];
-        for pkg in &info.packages {
-            all_packages.push(PackageEntry {
-                manager: info.name.clone(),
-                name: pkg.name.clone(),
-                version: pkg.version.clone(),
-            });
+    for group in &installed {
+        Output::section(group.key);
+        for pkg in &group.packages {
+            let mut display = match &pkg.version {
+                Some(v) => format!("{} {}", pkg.name, v),
+                None => pkg.name.clone(),
+            };
+            if let Some(m) = &membership {
+                display.push_str(&format!("  ({})", members_label(m, group.key, &pkg.name)));
+            }
+            Output::list_item(&display);
         }
     }
+    println!();
+    Output::dim(
+        "A package id is manager:name, such as npm:typescript. Run 'tether packages share <id> --to <profile>' to add a profile",
+    );
+    Ok(())
+}
 
-    all_packages.sort_by(|a, b| (&a.manager, &a.name).cmp(&(&b.manager, &b.name)));
-
-    // Now select packages to uninstall
-    let options: Vec<String> = all_packages
+/// Pick installed packages to uninstall, in a terminal. Each one is uninstalled as by
+/// `tether packages uninstall <id>`.
+pub async fn pick_uninstall() -> Result<()> {
+    if !Prompt::is_interactive() {
+        anyhow::bail!("Name the package to uninstall: tether packages uninstall manager:name");
+    }
+    let ids: Vec<String> = installed()
+        .await
         .iter()
-        .map(|p| {
-            let version = p.version.as_deref().unwrap_or("");
-            if version.is_empty() {
-                format!("[{}] {}", p.manager, p.name)
-            } else {
-                format!("[{}] {} ({})", p.manager, p.name, version)
-            }
-        })
+        .flat_map(|g| g.packages.iter().map(|p| format!("{}:{}", g.key, p.name)))
         .collect();
-
-    let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
-
-    let selected = match Prompt::multi_select("Select packages to uninstall:", option_refs, &[]) {
-        Ok(indices) => indices,
-        Err(_) => return Ok(()),
-    };
-
+    if ids.is_empty() {
+        Output::info("No packages found");
+        return Ok(());
+    }
+    let selected = Prompt::multi_select(
+        "Select packages to uninstall",
+        ids.iter().map(String::as_str).collect(),
+        &[],
+    )?;
     if selected.is_empty() {
         Output::info("No packages selected");
         return Ok(());
     }
-
-    // Process each selected package
-    for idx in selected {
-        let pkg = &all_packages[idx];
-        uninstall_package(&managers, pkg, yes).await?;
+    let chosen: Vec<&str> = selected.iter().map(|&i| ids[i].as_str()).collect();
+    if !Prompt::confirm(&format!("Uninstall {}?", chosen.join(", ")), false)? {
+        return Ok(());
     }
-
-    Output::success("Uninstall complete");
+    let mut failed = 0;
+    for id in chosen {
+        if let Err(e) = remove(id).await {
+            Output::warning(&format!("{}: {:#}", id, e));
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{} package(s) were not uninstalled", failed);
+    }
     Ok(())
 }
 
@@ -166,69 +156,33 @@ fn print_install_failures() {
     println!();
 }
 
-fn print_package_list(manager_infos: &[ManagerInfo]) {
-    let membership = crate::config::Config::load()
-        .and_then(|config| Membership::load_current(&config))
-        .ok();
-    if let Some(m) = &membership {
-        Output::info(&format!(
-            "This machine installs the packages of profile {}",
-            m.profile
-        ));
-    }
-    for info in manager_infos {
-        Output::section(&info.name);
-        let key = if info.name == "brew" {
-            "brew_formulae"
-        } else {
-            info.name.as_str()
-        };
-        for pkg in &info.packages {
-            let mut display = match &pkg.version {
-                Some(v) => format!("{} ({})", pkg.name, v),
-                None => pkg.name.clone(),
-            };
-            if let Some(m) = &membership {
-                display.push_str(&format!("  [{}]", members_label(m, key, &pkg.name)));
-            }
-            Output::list_item(&display);
-        }
-    }
-    println!();
-}
-
-/// The package's member profiles, or "this profile only".
+/// The package's member profiles, or "this profile only". A package no record lists yet
+/// joins this machine's profile on the next sync.
 pub fn members_label(membership: &Membership, manager: &str, name: &str) -> String {
     let members = membership.members(manager, name);
-    if members.len() == 1 && members.contains(&membership.profile) {
+    if members.is_empty() || (members.len() == 1 && members.contains(&membership.profile)) {
         "this profile only".to_string()
     } else {
         members.into_iter().collect::<Vec<_>>().join(", ")
     }
 }
 
-const MANAGER_KEYS: &[&str] = &[
-    "brew_formulae",
-    "brew_casks",
-    "brew_taps",
-    "npm",
-    "pnpm",
-    "bun",
-    "gem",
-    "uv",
-];
-
-fn split_id(id: &str) -> Result<(&str, &str)> {
+/// Manager key and name of a `manager:name` id. `brew:` and `cask:` stand for
+/// `brew_formulae:` and `brew_casks:`.
+fn split_id(id: &str) -> Result<(&'static str, &str)> {
     match id.split_once(':') {
-        Some((manager, name)) if MANAGER_KEYS.contains(&manager) && !name.is_empty() => {
-            Ok((manager, name))
+        Some((manager, name)) if !name.is_empty() => {
+            if let Some(key) = crate::packages::key_of_manager(manager) {
+                return Ok((key, name));
+            }
         }
-        _ => anyhow::bail!(
-            "Name the package as manager:name, such as npm:typescript or brew_casks:zoom. \
-             Managers: {}",
-            MANAGER_KEYS.join(", ")
-        ),
+        _ => {}
     }
+    anyhow::bail!(
+        "Name the package as manager:name, such as npm:typescript or cask:zoom. Managers: {}, \
+         and brew and cask for brew_formulae and brew_casks",
+        crate::packages::MANAGER_KEYS.join(", ")
+    )
 }
 
 pub fn share(id: &str, to: &[String]) -> Result<()> {
@@ -269,6 +223,19 @@ pub async fn remove(id: &str) -> Result<()> {
     }
     let config = crate::config::Config::load()?;
     let membership = Membership::load_current(&config)?;
+    if let Some(manager) = crate::packages::manager_for_key(manager) {
+        let dependents = manager.get_dependents(name).await.unwrap_or_default();
+        if !dependents.is_empty() {
+            Output::warning(&format!(
+                "{} is required by: {}",
+                name,
+                dependents.join(", ")
+            ));
+            if !Prompt::confirm(&format!("Uninstall {} anyway?", name), false)? {
+                return Ok(());
+            }
+        }
+    }
     // The profile leaves the package only once it is gone here
     crate::packages::uninstall(manager, name).await?;
     Output::success(&format!("Uninstalled {}", id));
@@ -299,40 +266,6 @@ pub async fn remove(id: &str) -> Result<()> {
             membership.profile
         ),
     }
-    Ok(())
-}
-
-async fn uninstall_package(
-    managers: &[Box<dyn PackageManager>],
-    pkg: &PackageEntry,
-    yes: bool,
-) -> Result<()> {
-    let manager = managers
-        .iter()
-        .find(|m| m.name() == pkg.manager)
-        .ok_or_else(|| anyhow::anyhow!("Manager {} not found", pkg.manager))?;
-
-    // Check for dependents
-    let dependents = manager.get_dependents(&pkg.name).await.unwrap_or_default();
-
-    if !dependents.is_empty() {
-        Output::warning(&format!(
-            "{} is required by: {}",
-            pkg.name,
-            dependents.join(", ")
-        ));
-
-        if !yes && !Prompt::confirm(&format!("Uninstall {} anyway?", pkg.name), false)? {
-            Output::dim(&format!("Skipped {}", pkg.name));
-            return Ok(());
-        }
-    }
-
-    manager
-        .uninstall(&pkg.name)
-        .await
-        .map_err(|e| e.context(format!("Failed to uninstall {}", pkg.name)))?;
-    Output::success(&format!("Uninstalled {} ({})", pkg.name, pkg.manager));
     Ok(())
 }
 

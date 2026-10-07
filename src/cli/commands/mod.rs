@@ -129,10 +129,11 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// List and manage installed packages
+    /// List, share and uninstall packages, and decide on the inbox. Without a subcommand,
+    /// lists the installed packages
     Packages {
-        /// List packages without interactive selection
-        #[arg(long)]
+        /// Same as `tether packages list`
+        #[arg(long, hide = true)]
         list: bool,
 
         #[command(subcommand)]
@@ -173,9 +174,13 @@ pub enum Commands {
     },
 }
 
+/// Package ids are `manager:name`. Managers: brew_formulae (alias brew), brew_casks (alias
+/// cask), brew_taps, npm, pnpm, bun, gem, uv.
 #[derive(Subcommand)]
 pub enum PackagesAction {
-    /// List synced packages waiting for approval
+    /// List installed packages by manager, with the profiles each belongs to
+    List,
+    /// List packages and machine keys waiting in the inbox for approval
     Inbox,
     /// Approve a held package and install it
     Approve {
@@ -193,24 +198,27 @@ pub enum PackagesAction {
     },
     /// Add profiles to a package's members, so machines in those profiles install it
     Share {
-        /// Package as manager:name, such as npm:typescript or brew_casks:zoom
+        /// Package as manager:name, such as npm:typescript or cask:zoom
         id: String,
         /// Profiles to add, separated by commas
         #[arg(long, value_delimiter = ',', required = true)]
         to: Vec<String>,
     },
-    /// Uninstall a package here and take this machine's profile out of its members
-    Remove {
-        /// Package as manager:name, such as npm:typescript or brew_casks:zoom
-        id: String,
+    /// Uninstall a package here and take this machine's profile out of its members. Without
+    /// a package, pick packages to uninstall in a terminal
+    #[command(visible_alias = "remove")]
+    Uninstall {
+        /// Package as manager:name, such as npm:typescript or cask:zoom
+        id: Option<String>,
     },
 }
 
 #[derive(Subcommand)]
 pub enum RollbackAction {
-    /// Roll back a package manager's installed set to a manifest commit
+    /// Roll back a package manager's installed set to a manifest commit. Homebrew is not
+    /// supported
     Packages {
-        /// Manager key (npm, pnpm, bun, gem, uv)
+        /// Manager key (npm, pnpm, bun, gem, uv). brew is not supported
         manager: String,
         /// Manifest commit hash to roll back to
         commit: String,
@@ -753,8 +761,8 @@ impl Cli {
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade { dry_run } => upgrade::run(*dry_run).await,
-            Commands::Packages { list, action } => match action {
-                None => packages::run(*list, self.yes).await,
+            Commands::Packages { list: _, action } => match action {
+                None | Some(PackagesAction::List) => packages::list().await,
                 Some(PackagesAction::Inbox) => packages::inbox_list().await,
                 Some(PackagesAction::Approve { id, expected }) => {
                     packages::approve(id, expected.as_deref()).await
@@ -763,7 +771,8 @@ impl Cli {
                     packages::reject(id, expected.as_deref()).await
                 }
                 Some(PackagesAction::Share { id, to }) => packages::share(id, to),
-                Some(PackagesAction::Remove { id }) => packages::remove(id).await,
+                Some(PackagesAction::Uninstall { id: Some(id) }) => packages::remove(id).await,
+                Some(PackagesAction::Uninstall { id: None }) => packages::pick_uninstall().await,
             },
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,
