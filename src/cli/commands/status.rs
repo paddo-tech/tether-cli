@@ -37,6 +37,23 @@ pub async fn run() -> Result<()> {
     let daemon_badge = Output::badge(if is_running { "active" } else { "stopped" }, is_running);
     Output::key_value("Daemon", &format!("{}  {}", status_label, daemon_badge));
 
+    let inbox = crate::packages::inbox::list()?.len();
+    Output::key_value(
+        "Inbox",
+        &match inbox {
+            0 => "empty".to_string(),
+            n => format!("{} waiting. Review with 'tether packages inbox'", n),
+        },
+    );
+    let conflict_state = ConflictState::load().unwrap_or_default();
+    Output::key_value(
+        "Conflicts",
+        &match conflict_state.conflicts.len() {
+            0 => "none".to_string(),
+            n => format!("{}. Resolve with 'tether resolve'", n),
+        },
+    );
+
     // Features summary
     let mut enabled_features = Vec::new();
     if config.features.personal_dotfiles {
@@ -72,7 +89,6 @@ pub async fn run() -> Result<()> {
     }
 
     // Conflicts warning
-    let conflict_state = ConflictState::load().unwrap_or_default();
     if !conflict_state.conflicts.is_empty() {
         println!();
         println!("  {}", format!("{} Conflicts", Output::WARN).red().bold());

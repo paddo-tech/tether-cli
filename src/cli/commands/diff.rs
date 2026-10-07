@@ -33,7 +33,8 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
 
     if let Some(target_machine) = machine {
         // Compare with specific machine
-        match MachineState::load_from_repo(&sync_path, target_machine)? {
+        let target_id = super::machines::resolve(&sync_path, target_machine)?;
+        match MachineState::load_from_repo(&sync_path, &target_id)? {
             Some(other_machine) => {
                 // Build current machine state for comparison
                 let current_state = build_current_machine_state(&config, &state, &home)?;

@@ -153,6 +153,106 @@ pub fn print_old_build_notes(ids: &[String]) {
     }
 }
 
+/// One machine's record, its key and how this machine trusts it.
+pub async fn show(name: &str) -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        anyhow::bail!("Machine management is not available in team-only mode");
+    }
+    let sync_path = SyncEngine::sync_path()?;
+    let id = resolve(&sync_path, name)?;
+    let this = SyncState::load()?.machine_id;
+    let machines = MachineState::list_all(&sync_path)?;
+    let Some(record) = machines.iter().find(|m| m.machine_id == id) else {
+        anyhow::bail!(
+            "Machine '{}' not found. Run 'tether machines list' to see the machines",
+            name
+        );
+    };
+    let (status, signer) = signing::record_statuses(&sync_path, &this)?
+        .into_iter()
+        .find(|(i, _, _)| *i == id)
+        .map_or((signing::RecordStatus::Untrusted, None), |(_, s, fp)| {
+            (s, fp)
+        });
+    let trusted = signing::TrustStore::load()?
+        .key_for(&id)
+        .map(signing::fingerprint);
+    let packages: usize = record.packages.values().map(Vec::len).sum();
+
+    Output::section(&format!("Machine {}", id));
+    println!();
+    Output::key_value(
+        "Machine",
+        &if id == this {
+            format!("{} (this machine)", id)
+        } else {
+            id.clone()
+        },
+    );
+    Output::key_value("Hostname", &record.hostname);
+    Output::key_value(
+        "Profile",
+        record
+            .profile
+            .as_deref()
+            .unwrap_or(config.profile_name(&id)),
+    );
+    Output::key_value(
+        "Version",
+        if record.cli_version.is_empty() {
+            "-"
+        } else {
+            &record.cli_version
+        },
+    );
+    Output::key_value("OS", &format!("{} {}", record.os, record.os_version));
+    Output::key_value(
+        "Last sync",
+        &record
+            .last_sync
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string(),
+    );
+    Output::key_value("Record", status.label());
+    Output::key_value(
+        "Signed by",
+        signer.as_deref().unwrap_or("no valid signature"),
+    );
+    let trust = match (&trusted, &signer) {
+        (Some(t), Some(s)) if t == s => "trusted".to_string(),
+        (Some(t), _) => format!("trusted key is {}, which did not sign this record", t),
+        (None, _) => "not trusted".to_string(),
+    };
+    Output::key_value("Trust", &trust);
+    Output::key_value(
+        "Packages",
+        &format!(
+            "{} listed, {} removed",
+            packages,
+            record
+                .removed_packages
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        ),
+    );
+    Output::key_value("Dotfiles", &record.dotfiles.len().to_string());
+    println!();
+    if id == this {
+        Output::dim(
+            "Compare the 'Signed by' fingerprint with the one other machines show for this machine",
+        );
+    } else if let (None, Some(fp)) = (&trusted, &signer) {
+        Output::dim(&format!(
+            "After you compare the fingerprint on that machine: tether machines trust {} --fingerprint {}",
+            id, fp
+        ));
+    }
+    Ok(())
+}
+
 /// The signing key column: the fingerprint, if a signature verifies, and how a sync reads
 /// the record.
 fn key_label(status: signing::RecordStatus, fingerprint: Option<&str>) -> (String, Color) {
@@ -241,7 +341,8 @@ pub async fn profile_unset() -> Result<()> {
 
 /// Rename this machine. Only a machine can sign its own record, so another machine's record
 /// is never moved: it would no longer verify under the new id.
-pub async fn rename(old: &str, new: &str) -> Result<()> {
+/// `old` is the deprecated form's first name, which must be this machine.
+pub async fn rename(old: Option<&str>, new: &str) -> Result<()> {
     let mut config = Config::load()?;
     if !config.has_personal_features() {
         anyhow::bail!("Machine management is not available in team-only mode");
@@ -251,6 +352,8 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     // No other writer may save this machine's record between its read and the save
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let mut state = SyncState::load()?;
+    let current = state.machine_id.clone();
+    let old = old.unwrap_or(&current);
     if state.machine_id != old {
         anyhow::bail!(
             "Only machine '{}' can rename itself. Run 'tether machines rename' on that machine",
@@ -293,7 +396,7 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 
     Output::success(&format!("Renamed machine '{}' to '{}'", old, new));
     Output::info(&format!(
-        "Other machines trust this key only as '{}'. On each of them, run 'tether machines trust {} {}'",
+        "Other machines trust this key only as '{}'. On each of them, run 'tether machines trust {} --fingerprint {}'",
         old,
         new,
         signing::fingerprint(signing::load_or_create(new)?.public_key())
@@ -306,6 +409,8 @@ pub async fn remove(name: &str, yes: bool) -> Result<()> {
     if !config.has_personal_features() {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
+    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
+    let name = resolved.as_str();
 
     if !valid_machine_id(name) {
         anyhow::bail!("Invalid machine id '{}'", name);
@@ -474,6 +579,8 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
+    let resolved = resolve(&sync_path, name)?;
+    let name = resolved.as_str();
     let fingerprint = match fingerprint {
         Some(fingerprint) => fingerprint.to_string(),
         None => {
@@ -482,7 +589,8 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
             };
             if !Prompt::is_interactive() || Prompt::assume_yes() {
                 anyhow::bail!(
-                    "Check the key on {}, then run 'tether machines trust {} {}'",
+                    "Run 'tether machines show {}' on that machine and compare the key, then run \
+                     'tether machines trust {} --fingerprint {}'",
                     name,
                     name,
                     current
@@ -507,6 +615,8 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
 }
 
 pub async fn untrust(name: &str) -> Result<()> {
+    let resolved = resolve(&SyncEngine::sync_path()?, name)?;
+    let name = resolved.as_str();
     if SyncState::load()?.machine_id == name {
         anyhow::bail!("Cannot untrust the current machine");
     }

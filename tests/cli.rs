@@ -254,6 +254,46 @@ fn approve_all_lists_what_it_covers_and_needs_y_without_a_terminal() {
 }
 
 #[test]
+fn daemon_status_and_logs() {
+    let h = home();
+    tether(h.path())
+        .args(["daemon", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not running"))
+        .stdout(predicate::str::contains("daemon.log"));
+    std::fs::write(h.path().join(".tether/daemon.log"), "one\ntwo\nthree\n").unwrap();
+    tether(h.path())
+        .args(["daemon", "logs", "-n", "2"])
+        .assert()
+        .success()
+        .stdout("two\nthree\n");
+}
+
+#[test]
+fn status_counts_the_inbox_and_conflicts() {
+    let h = home();
+    tether(h.path())
+        .args(["status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Inbox"))
+        .stdout(predicate::str::contains("Conflicts"));
+}
+
+#[test]
+fn rename_with_two_names_is_deprecated_and_checks_this_machine() {
+    let h = home();
+    tether(h.path())
+        .args(["machines", "rename", "zzz", "yyy"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("deprecated"))
+        .stderr(predicate::str::contains("can rename itself"));
+    fails(h.path(), &["machines", "show", "nope"], "not found");
+}
+
+#[test]
 fn piped_output_has_no_colour() {
     let h = home();
     for args in [

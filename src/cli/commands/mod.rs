@@ -74,7 +74,7 @@ pub enum Commands {
 
     /// Show differences between machines
     Diff {
-        /// Compare with specific machine
+        /// Compare with this machine (id or hostname)
         #[arg(long)]
         machine: Option<String>,
     },
@@ -268,8 +268,18 @@ pub enum DaemonAction {
     Stop,
     /// Restart the daemon
     Restart,
-    /// View daemon logs
-    Logs,
+    /// Show whether the daemon runs, whether its login service is installed, and the last
+    /// sync and upgrade
+    Status,
+    /// Print the end of the daemon log
+    Logs {
+        /// Keep printing lines as the daemon writes them
+        #[arg(short, long)]
+        follow: bool,
+        /// How many lines to print from the end
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+    },
     /// Install the login service (launchd on macOS, systemd on Linux)
     Install,
     /// Uninstall the login service
@@ -283,20 +293,45 @@ pub enum DaemonAction {
 pub enum MachineAction {
     /// List all machines
     List,
-    /// Rename this machine
-    Rename { old: String, new: String },
+    /// Show one machine: profile, versions, record status, and its full key fingerprint and
+    /// trust
+    Show {
+        /// Machine id or hostname
+        machine: String,
+    },
+    /// Rename this machine: 'tether machines rename <NEW>'. The form '<OLD> <NEW>' still
+    /// works in 2.0 and is deprecated
+    Rename {
+        /// The new name, or this machine's current name in the deprecated two-name form
+        name: String,
+        /// The new name, in the deprecated form
+        #[arg(hide = true)]
+        new: Option<String>,
+    },
     /// Remove a machine from sync. With -y, Tether removes it without asking and prints
     /// what it removed
-    Remove { name: String },
+    Remove {
+        /// Machine id or hostname
+        machine: String,
+    },
     /// Trust the signing key a machine published, so its package changes install on their own.
-    /// Without a fingerprint, Tether shows the current one and asks
+    /// Without a fingerprint, Tether shows the current one and asks in a terminal
     Trust {
-        name: String,
-        /// Fingerprint you checked on that machine (`SHA256:...`)
+        /// Machine id or hostname
+        machine: String,
+        /// Same as --fingerprint
+        #[arg(conflicts_with = "fingerprint_flag", hide = true)]
         fingerprint: Option<String>,
+        /// Fingerprint you checked on that machine with 'tether machines show'
+        /// (`SHA256:...`). Required without a terminal
+        #[arg(long = "fingerprint", id = "fingerprint_flag")]
+        fingerprint_flag: Option<String>,
     },
     /// Stop trusting a machine's signing key
-    Untrust { name: String },
+    Untrust {
+        /// Machine id or hostname
+        machine: String,
+    },
     /// Manage machine profile assignment
     Profile {
         #[command(subcommand)]
@@ -683,19 +718,34 @@ impl Cli {
                 DaemonAction::Start => daemon::start().await,
                 DaemonAction::Stop => daemon::stop().await,
                 DaemonAction::Restart => daemon::restart().await,
-                DaemonAction::Logs => daemon::logs().await,
+                DaemonAction::Status => daemon::status().await,
+                DaemonAction::Logs { follow, lines } => daemon::logs(*lines, *follow).await,
                 DaemonAction::Install => daemon::install().await,
                 DaemonAction::Uninstall => daemon::uninstall().await,
                 DaemonAction::Run => daemon::run_daemon().await,
             },
             Commands::Machines { action } => match action {
                 MachineAction::List => machines::list().await,
-                MachineAction::Rename { old, new } => machines::rename(old, new).await,
-                MachineAction::Remove { name } => machines::remove(name, self.yes).await,
-                MachineAction::Trust { name, fingerprint } => {
-                    machines::trust(name, fingerprint.as_deref()).await
+                MachineAction::Show { machine } => machines::show(machine).await,
+                MachineAction::Rename { name, new } => match new {
+                    Some(new) => {
+                        crate::cli::Output::warning(
+                            "'tether machines rename <OLD> <NEW>' is deprecated. Run 'tether machines rename <NEW>'",
+                        );
+                        machines::rename(Some(name), new).await
+                    }
+                    None => machines::rename(None, name).await,
+                },
+                MachineAction::Remove { machine } => machines::remove(machine, self.yes).await,
+                MachineAction::Trust {
+                    machine,
+                    fingerprint,
+                    fingerprint_flag,
+                } => {
+                    let fingerprint = fingerprint.as_deref().or(fingerprint_flag.as_deref());
+                    machines::trust(machine, fingerprint).await
                 }
-                MachineAction::Untrust { name } => machines::untrust(name).await,
+                MachineAction::Untrust { machine } => machines::untrust(machine).await,
                 MachineAction::Profile { action } => match action {
                     MachineProfileAction::Set { profile } => machines::profile_set(profile).await,
                     MachineProfileAction::Unset => machines::profile_unset().await,
