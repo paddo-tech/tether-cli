@@ -27,7 +27,12 @@ async fn inbox() {
     b.tether_ok("sync").await;
     let held = item(&b, "npm:unsigned-a").await.expect("held");
     assert_eq!(held["reasons"], serde_json::json!(["unsigned"]));
-    assert_eq!(held["bulk_approvable"], true);
+    // Only a trusted record gives a version, so nothing binds the item and approve --all
+    // leaves it until b trusts a
+    assert_eq!(held["version"], serde_json::Value::Null);
+    assert_eq!(held["bulk_approvable"], false);
+    let out = b.tether("packages approve npm:unsigned-a -y").await;
+    assert_eq!(out.code, 1, "{}", out.text());
     b.tether_ok("sync").await;
     assert_eq!(b.installed("npm", "unsigned-a").await, None);
 

@@ -90,7 +90,9 @@ async fn trust() {
         "replayed record warns:\n{out}"
     );
     assert_eq!(b.installed("npm", "replayed").await, None);
-    let show = b.tether_ok("machines show a").await.text();
+    // A replayed record never lends its hostname, so only its id names it
+    assert!(b.tether("machines show a").await.code != 0);
+    let show = b.tether_ok(&format!("machines show {a_id}")).await.text();
     assert!(show.contains("replayed"), "{show}");
 
     // a gets a new key: b shows the change and installs nothing from a until it trusts it
