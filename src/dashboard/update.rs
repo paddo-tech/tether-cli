@@ -230,6 +230,12 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
         };
     }
 
+    // Help draws over the tab, so Esc closes it before it reaches the tab
+    if key.code == KeyCode::Esc && app.help_open() {
+        app.overlays.retain(|o| !matches!(o, Overlay::Help));
+        return None;
+    }
+
     let outcome = match app.active_tab {
         Tab::Overview => overview::handle_key(app, key),
         Tab::Files => files::handle_key(app, key),
@@ -243,7 +249,7 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
     }
 
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
+        KeyCode::Char('q') => {
             if app.help_open() {
                 app.overlays.retain(|o| !matches!(o, Overlay::Help));
             } else {
@@ -560,15 +566,45 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_help_before_quitting() {
+    fn escape_closes_help_and_never_quits() {
         let mut app = app();
         key(&mut app, KeyCode::Char('?'));
         assert!(app.help_open());
         key(&mut app, KeyCode::Esc);
         assert!(!app.help_open());
-        assert!(!app.should_quit);
+        for tab in Tab::all() {
+            app.active_tab = *tab;
+            key(&mut app, KeyCode::Esc);
+            assert!(!app.should_quit);
+        }
         key(&mut app, KeyCode::Char('q'));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn escape_collapses_what_enter_opened() {
+        let mut app = packages_app();
+        key(&mut app, KeyCode::Enter);
+        assert!(app.packages.expanded.is_some());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.packages.expanded.is_none());
+        assert!(!app.should_quit);
+
+        app.state
+            .machines
+            .push(crate::sync::MachineState::new("other"));
+        app.active_tab = Tab::Machines;
+        key(&mut app, KeyCode::Enter);
+        assert!(app.machines.expanded.is_some());
+        key(&mut app, KeyCode::Esc);
+        assert!(app.machines.expanded.is_none());
+
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Enter);
+        assert!(app.security.detail);
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.security.detail);
+        assert!(!app.should_quit);
     }
 
     #[test]

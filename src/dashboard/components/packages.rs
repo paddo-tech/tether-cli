@@ -40,6 +40,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match key.code {
         KeyCode::Enter => toggle_row(app),
         KeyCode::Char('x') => confirm_uninstall(app),
+        KeyCode::Esc => return collapse(app),
         KeyCode::Char('R') => {
             if app.uninstalling.is_none() && app.installing.is_none() {
                 confirm_rollback(app);
@@ -67,6 +68,25 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         }
         _ => return KeyOutcome::Ignored,
     }
+    KeyOutcome::Handled(None)
+}
+
+/// Close the innermost open part: a history diff, the history, then the package list.
+fn collapse(app: &mut App) -> KeyOutcome {
+    let pt = &mut app.packages;
+    if pt.history_commit.is_some() {
+        pt.history_commit = None;
+        pt.history_diff.clear();
+    } else if pt.history_manager.is_some() {
+        pt.history_manager = None;
+        pt.history.clear();
+    } else if pt.expanded.is_some() {
+        pt.expanded = None;
+    } else {
+        return KeyOutcome::Ignored;
+    }
+    let len = build_rows(&app.state, &app.packages).len();
+    clamp_cursor(&mut app.packages.cursor, len);
     KeyOutcome::Handled(None)
 }
 

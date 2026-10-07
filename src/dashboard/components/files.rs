@@ -41,6 +41,7 @@ impl FilesTabState {
 pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match key.code {
         KeyCode::Enter => toggle_row(app),
+        KeyCode::Esc => return collapse(app),
         KeyCode::Char('t') => toggle_shared(app),
         KeyCode::Char('R') => confirm_restore(app),
         KeyCode::Char('x') => confirm_remove(app),
@@ -54,6 +55,23 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         }
         _ => return KeyOutcome::Ignored,
     }
+    KeyOutcome::Handled(None)
+}
+
+/// Close the innermost open part: a history diff, then the file's history.
+fn collapse(app: &mut App) -> KeyOutcome {
+    let ft = &mut app.files;
+    if ft.expanded_commit.is_some() {
+        ft.expanded_commit = None;
+        ft.expanded_diff.clear();
+    } else if ft.expanded_file.is_some() {
+        ft.expanded_file = None;
+        ft.expanded_history.clear();
+    } else {
+        return KeyOutcome::Ignored;
+    }
+    let len = build_rows(&app.state, &app.files).len();
+    clamp_cursor(&mut app.files.cursor, len);
     KeyOutcome::Handled(None)
 }
 

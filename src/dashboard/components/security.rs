@@ -58,6 +58,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
             app.security.detail = !app.security.detail;
             None
         }
+        KeyCode::Esc if app.security.detail => {
+            app.security.detail = false;
+            None
+        }
         KeyCode::Char('a') => selected(app).and_then(|item| {
             if item.signature_failed() {
                 app.overlays
