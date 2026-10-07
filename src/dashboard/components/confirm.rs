@@ -129,6 +129,13 @@ pub enum Confirm {
         item: Option<Box<crate::packages::inbox::InboxItem>>,
         arming: Arming,
     },
+    /// Remove an item from a Config list, as shown at `index`.
+    RemoveListItem {
+        list: &'static str,
+        index: usize,
+        item: String,
+        arming: Arming,
+    },
     /// Stop the daemon, which syncs this machine every few minutes.
     StopDaemon {
         arming: Arming,
@@ -186,7 +193,8 @@ impl Confirm {
             | Confirm::Reject { arming, .. }
             | Confirm::Trust { arming, .. }
             | Confirm::Untrust { arming, .. }
-            | Confirm::StopDaemon { arming } => arming,
+            | Confirm::StopDaemon { arming }
+            | Confirm::RemoveListItem { arming, .. } => arming,
         }
     }
 }
@@ -299,8 +307,9 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
                 return None;
             };
-            if !config_edit::remove_profile_dotfile(config, &ss.machine_id, &path) {
-                app.flash_error("remove failed");
+            if let Err(e) = config_edit::remove_profile_dotfile(config, &ss.machine_id, &path) {
+                app.flash_error(e);
+                app.reload_state();
                 return None;
             }
             app.flash_success(format!("removed {}", path));
@@ -321,6 +330,10 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveSignatureFailed { item, .. } => security::approve(app, *item),
         Confirm::Reject { item, .. } => Some(Cmd::Reject(item)),
+        Confirm::RemoveListItem { index, item, .. } => {
+            super::config::remove_list_item(app, index, &item);
+            None
+        }
         Confirm::StopDaemon { .. } => {
             (app.daemon_op == DaemonOp::None).then_some(Cmd::Daemon(DaemonOp::Stopping))
         }
@@ -502,6 +515,14 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 item.source_machine.as_deref().unwrap_or("another machine"),
                 approve_all_line(item)
             ),
+            t.error,
+        ),
+        Confirm::RemoveListItem { list, item, .. } => render_popup(
+            f,
+            app,
+            wait,
+            "Remove",
+            &format!("Remove {} from {}?", item, list),
             t.error,
         ),
         Confirm::StopDaemon { .. } => render_popup(

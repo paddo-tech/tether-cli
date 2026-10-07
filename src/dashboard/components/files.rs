@@ -146,15 +146,18 @@ fn toggle_shared(app: &mut App) {
     let (Some(config), Some(ss)) = (&mut app.state.config, &app.state.sync_state) else {
         return;
     };
-    if config_edit::toggle_profile_dotfile_shared(config, &ss.machine_id, path) {
-        let shared = if config.is_dotfile_shared(&ss.machine_id, path) {
-            "on"
-        } else {
-            "off"
-        };
-        app.flash_success(format!("{} shared: {}", path, shared));
-        app.reload_state();
+    match config_edit::toggle_profile_dotfile_shared(config, &ss.machine_id, path) {
+        Ok(()) => {
+            let shared = if config.is_dotfile_shared(&ss.machine_id, path) {
+                "on"
+            } else {
+                "off"
+            };
+            app.flash_success(format!("{} shared: {}", path, shared));
+        }
+        Err(e) => app.flash_error(e),
     }
+    app.reload_state();
 }
 
 fn confirm_restore(app: &mut App) {

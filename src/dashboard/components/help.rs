@@ -157,7 +157,7 @@ pub fn render_overlay(f: &mut Frame, app: &App) {
         key("R", "Roll back to entry"),
         Line::from(""),
         section("Config list"),
-        key("a / d", "Add / delete item"),
+        key("a / x", "Add / remove item"),
         key("t", "Toggle create"),
         Line::from(""),
         section("Machines"),

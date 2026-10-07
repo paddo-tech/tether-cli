@@ -652,6 +652,55 @@ mod tests {
     }
 
     #[test]
+    fn config_refuses_invalid_values_with_the_reason() {
+        let mut app = app();
+        let mut config = crate::config::Config::default();
+        config.packages.allow_scripts = vec!["esbuild".into()];
+        app.state.config = Some(config);
+        app.active_tab = Tab::Config;
+        let field = |key: &str| {
+            crate::dashboard::config_edit::fields()
+                .iter()
+                .position(|f| f.key == key)
+                .unwrap()
+        };
+        app.config.selected = field("interval");
+        key(&mut app, KeyCode::Enter);
+        app.config.edit_buf = "often".into();
+        key(&mut app, KeyCode::Enter);
+        // The field stays open with the value, and the toast says why
+        assert!(app.config.editing);
+        assert_eq!(app.config.edit_buf, "often");
+        assert_eq!(
+            last_toast(&app),
+            Some((
+                ToastKind::Error,
+                "Sync interval needs a number and s, m or h, such as 5m"
+            ))
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.config.editing);
+
+        // A list item is removed with x, after a question
+        app.config.selected = field("allow_scripts");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::RemoveListItem { .. }))
+        ));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            app.state.config.as_ref().unwrap().packages.allow_scripts,
+            vec!["esbuild".to_string()]
+        );
+        key(&mut app, KeyCode::Esc);
+        assert!(app.config.list_edit.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
     fn daemon_key_asks_before_it_stops() {
         let mut app = app();
         app.state.daemon_running = true;

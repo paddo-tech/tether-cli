@@ -1,5 +1,6 @@
-use super::{cursor_down, list, panel, row, scroll_for, scrollbar, select_row};
-use crate::dashboard::app::{App, Hit};
+use super::confirm::Confirm;
+use super::{clamp_cursor, cursor_down, list, panel, row, scroll_for, scrollbar, select_row};
+use crate::dashboard::app::{App, Hit, Overlay};
 use crate::dashboard::config_edit::{self, FieldKind};
 use crate::dashboard::msg::KeyOutcome;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -58,11 +59,47 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     KeyOutcome::Handled(None)
 }
 
-/// Apply a config edit and flash on failure.
-fn edit_config(app: &mut App, edit: impl FnOnce(&mut crate::config::Config) -> bool) {
-    let ok = app.state.config.as_mut().map(edit).unwrap_or(false);
-    if !ok {
-        app.flash_error("save failed");
+/// Apply a config edit, or show why it was refused or did not save. A failed save can
+/// leave the edit in memory only, so the config is read again from disk.
+fn edit_config(
+    app: &mut App,
+    edit: impl FnOnce(&mut crate::config::Config) -> config_edit::EditResult,
+) -> bool {
+    let Some(config) = app.state.config.as_mut() else {
+        return false;
+    };
+    match edit(config) {
+        Ok(()) => true,
+        Err(e) => {
+            app.flash_error(e);
+            if let Ok(config) = crate::config::Config::load() {
+                app.state.config = Some(config);
+            }
+            false
+        }
+    }
+}
+
+/// Remove the list item the confirm showed, if the list still has it at `index`.
+pub fn remove_list_item(app: &mut App, index: usize, item: &str) {
+    let Some(le) = app.config.list_edit.as_ref() else {
+        return;
+    };
+    if le.items.get(index).map(String::as_str) != Some(item) {
+        app.flash_error(format!("{} moved. Select it again", item));
+        return;
+    }
+    let (field_key, is_dotfile) = (le.field_key, le.is_dotfile);
+    edit_config(app, |c| {
+        if is_dotfile {
+            config_edit::remove_dotfile(c, index)
+        } else {
+            config_edit::remove_list_item(c, field_key, index)
+        }
+    });
+    refresh_list_edit(app);
+    if let Some(ref mut le) = app.config.list_edit {
+        clamp_cursor(&mut le.cursor, le.items.len());
     }
 }
 
@@ -80,8 +117,7 @@ fn list_edit_key(app: &mut App, key: KeyEvent) {
                 let buf = std::mem::take(&mut le.add_buf);
                 let field_key = le.field_key;
                 let is_dotfile = le.is_dotfile;
-                le.adding = false;
-                edit_config(app, |c| {
+                let added = edit_config(app, |c| {
                     if is_dotfile {
                         config_edit::add_dotfile(c, &buf, true)
                     } else {
@@ -89,6 +125,11 @@ fn list_edit_key(app: &mut App, key: KeyEvent) {
                     }
                 });
                 refresh_list_edit(app);
+                // A refused value stays in the input, so the user can correct it
+                if let (false, Some(le)) = (added, app.config.list_edit.as_mut()) {
+                    le.adding = true;
+                    le.add_buf = buf;
+                }
             }
             KeyCode::Backspace => {
                 le.add_buf.pop();
@@ -115,22 +156,15 @@ fn list_edit_key(app: &mut App, key: KeyEvent) {
             le.adding = true;
             le.add_buf.clear();
         }
-        KeyCode::Char('d') | KeyCode::Delete => {
-            let cursor = le.cursor;
-            let field_key = le.field_key;
-            let is_dotfile = le.is_dotfile;
-            edit_config(app, |c| {
-                if is_dotfile {
-                    config_edit::remove_dotfile(c, cursor)
-                } else {
-                    config_edit::remove_list_item(c, field_key, cursor)
-                }
-            });
-            refresh_list_edit(app);
-            if let Some(ref mut le) = app.config.list_edit {
-                if le.cursor > 0 && le.cursor >= le.items.len() {
-                    le.cursor = le.items.len().saturating_sub(1);
-                }
+        KeyCode::Char('x') | KeyCode::Delete => {
+            if let Some(item) = le.items.get(le.cursor) {
+                let confirm = Confirm::RemoveListItem {
+                    list: le.field_label,
+                    index: le.cursor,
+                    item: item.clone(),
+                    arming: Default::default(),
+                };
+                app.overlays.push(Overlay::Confirm(confirm));
             }
         }
         KeyCode::Char('t') if le.is_dotfile => {
@@ -151,7 +185,11 @@ fn text_edit_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             let idx = app.config.selected;
             let buf = std::mem::take(&mut app.config.edit_buf);
-            edit_config(app, |c| config_edit::set_value(c, idx, &buf));
+            // A refused value stays in the field, so the user can correct it
+            if !edit_config(app, |c| config_edit::set_value(c, idx, &buf)) {
+                app.config.edit_buf = buf;
+                return;
+            }
             app.config.editing = false;
         }
         KeyCode::Backspace => {
@@ -171,7 +209,9 @@ fn activate_field(app: &mut App) {
         return;
     };
     match field.kind {
-        FieldKind::Bool => edit_config(app, |c| config_edit::toggle(c, idx)),
+        FieldKind::Bool => {
+            edit_config(app, |c| config_edit::toggle(c, idx));
+        }
         FieldKind::Text => {
             if let Some(ref config) = app.state.config {
                 app.config.edit_buf = config_edit::get_value(config, idx);
@@ -324,8 +364,8 @@ fn render_list_edit(f: &mut Frame, area: Rect, le: &ListEditState, app: &App) {
         Span::styled(" back  ", Style::default().fg(t.muted)),
         Span::styled("a", t.key_hint()),
         Span::styled(" add  ", Style::default().fg(t.muted)),
-        Span::styled("d", t.key_hint()),
-        Span::styled(" delete ", Style::default().fg(t.muted)),
+        Span::styled("x", t.key_hint()),
+        Span::styled(" remove ", Style::default().fg(t.muted)),
     ];
     if le.is_dotfile {
         hints.push(Span::styled(" t", t.key_hint()));
