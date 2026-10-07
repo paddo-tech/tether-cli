@@ -275,6 +275,25 @@ pub fn acquire_sync_lock(wait: bool) -> Result<File> {
     Ok(file)
 }
 
+/// Acquire the sync lock, blocking until it is free. `on_wait` runs once before the
+/// wait, so a caller without a terminal, such as the dashboard, can show that it waits.
+pub fn wait_for_sync_lock(on_wait: impl FnOnce()) -> Result<File> {
+    use fs2::FileExt;
+
+    let lock_path = crate::home_dir()?.join(".tether/sync.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    if file.try_lock_exclusive().is_err() {
+        on_wait();
+        file.lock_exclusive()?;
+    }
+    Ok(file)
+}
+
 /// Get the canonical storage path for a project config file.
 /// Files are stored at ~/.tether/projects/<normalized_url>/<rel_path>
 pub fn canonical_project_file_path(normalized_url: &str, rel_path: &str) -> Result<PathBuf> {

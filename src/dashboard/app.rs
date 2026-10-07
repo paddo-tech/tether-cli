@@ -168,6 +168,8 @@ pub struct App {
     pub config: ConfigTabState,
     pub security: SecurityTabState,
     pub uninstalling: Option<(String, String)>,
+    /// The uninstall waits for a sync to finish before it starts.
+    pub uninstall_waiting: bool,
     pub installing: Option<InstallOp>,
     next_op_id: u64,
     /// A sync was asked for while a job ran; it starts when that job exits.
@@ -204,6 +206,7 @@ impl App {
             config: ConfigTabState::default(),
             security: SecurityTabState::default(),
             uninstalling: None,
+            uninstall_waiting: false,
             installing: None,
             next_op_id: 0,
             sync_pending: false,

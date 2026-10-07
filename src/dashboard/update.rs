@@ -77,14 +77,19 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             app.reload_state();
             None
         }
+        Msg::UninstallWaiting => {
+            app.uninstall_waiting = app.uninstalling.is_some();
+            None
+        }
         Msg::UninstallDone(result) => {
             app.uninstalling = None;
+            app.uninstall_waiting = false;
             match result {
-                Ok(not_saved) => {
-                    if let Some(e) = not_saved {
-                        app.flash_error(e);
-                    }
-                    app.follow_up_sync()
+                Ok(None) => app.follow_up_sync(),
+                // The profile did not leave, so a sync would push nothing of this edit
+                Ok(Some(e)) => {
+                    app.flash_error(e);
+                    None
                 }
                 Err(e) => {
                     app.flash_error(format!("uninstall failed: {}", e));
@@ -951,16 +956,82 @@ mod tests {
             last_toast(&app),
             Some((ToastKind::Error, "uninstall failed: boom"))
         );
-        // The package is gone, so the sync still runs; the toast names what did not save
+        // The profiles did not save, so no sync starts; the toast names what did not save
         let cmd = update(
             &mut app,
             Msg::UninstallDone(Ok(Some("profiles not saved".into()))),
         );
-        assert!(matches!(cmd, Some(Cmd::Run(Job::Sync))));
+        assert!(cmd.is_none());
         assert_eq!(
             last_toast(&app),
             Some((ToastKind::Error, "profiles not saved"))
         );
+        assert!(matches!(
+            update(&mut app, Msg::UninstallDone(Ok(None))),
+            Some(Cmd::Run(Job::Sync))
+        ));
+    }
+
+    #[test]
+    fn uninstall_shows_that_it_waits_for_a_sync() {
+        let mut app = app();
+        app.uninstalling = Some(("npm".into(), "left-pad".into()));
+        update(&mut app, Msg::UninstallWaiting);
+        assert!(app.uninstall_waiting);
+        update(&mut app, Msg::UninstallDone(Ok(None)));
+        assert!(!app.uninstall_waiting);
+        // A late message after the uninstall finished shows nothing
+        update(&mut app, Msg::UninstallWaiting);
+        assert!(!app.uninstall_waiting);
+    }
+
+    #[test]
+    fn uninstall_refuses_without_the_package_profiles() {
+        let mut app = packages_app();
+        app.state.membership_error = Some("profiles.toml is broken".into());
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Error, "profiles.toml is broken"))
+        );
+        // A confirm opened before the error appeared does not uninstall either
+        app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
+            manager_key: "npm".into(),
+            name: "zx".into(),
+            arming: Default::default(),
+        }));
+        assert!(armed_key(&mut app, KeyCode::Char('y')).is_none());
+        assert!(app.uninstalling.is_none());
+    }
+
+    #[test]
+    fn uninstall_leave_carries_the_members_shown() {
+        let mut app = packages_app();
+        let mut config = app.state.config.clone().unwrap();
+        config.machine_profiles.insert("me".into(), "dev".into());
+        let mut record = crate::sync::MachineState::new("me");
+        record.packages.insert("npm".into(), vec!["zx".into()]);
+        let table = crate::sync::membership::Table::from([(
+            "npm:zx".to_string(),
+            vec!["dev".to_string(), "server".to_string()],
+        )]);
+        let membership = crate::sync::membership::Membership::new(&config, &table, &record, &[]);
+        let members = membership.members("npm", "zx");
+        app.state.membership = Some(membership);
+        app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
+            manager_key: "npm".into(),
+            name: "zx".into(),
+            arming: Default::default(),
+        }));
+        match armed_key(&mut app, KeyCode::Char('y')) {
+            Some(Cmd::Uninstall {
+                leave: Some(edit), ..
+            }) => assert_eq!(edit.seen, Some(members)),
+            _ => panic!("expected an uninstall that leaves the profile"),
+        }
     }
 
     #[test]

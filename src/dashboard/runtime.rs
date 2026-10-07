@@ -43,14 +43,22 @@ impl Runtime {
                 name,
                 leave,
             } => {
+                let tx = self.tx.clone();
                 self.spawn(
                     async move {
+                        // No sync may run between the uninstall and the profile save
+                        let _sync_lock = match crate::sync::wait_for_sync_lock(|| {
+                            let _ = tx.send(Msg::UninstallWaiting);
+                        }) {
+                            Ok(lock) => lock,
+                            Err(e) => return Msg::UninstallDone(Err(e.to_string())),
+                        };
                         // The profile leaves the package only once it is gone here
                         if let Err(e) = crate::packages::uninstall(&manager_key, &name).await {
                             return Msg::UninstallDone(Err(e.to_string()));
                         }
                         let not_saved = leave
-                            .and_then(|edit| save_profiles(&manager_key, &name, &edit).err())
+                            .and_then(|edit| leave_profile(&manager_key, &name, &edit).err())
                             .map(|e| {
                                 format!(
                                     "uninstalled {}, but saving its profiles failed: {}",
@@ -537,6 +545,31 @@ fn save_profiles(
         .map_err(|e| e.to_string())
 }
 
+/// Take this machine's profile off a package it uninstalled. The caller holds the sync
+/// lock.
+fn leave_profile(
+    manager_key: &str,
+    name: &str,
+    edit: &crate::sync::membership::Edit,
+) -> Result<(), String> {
+    let config = crate::config::Config::load().map_err(|e| e.to_string())?;
+    let saved = crate::sync::membership::save_edit(&config, manager_key, name, edit)
+        .map_err(|e| e.to_string())?;
+    check_left(saved, edit)
+}
+
+/// A save that keeps a profile the edit removes did not apply it, so it is an error.
+fn check_left(
+    saved: Option<std::collections::BTreeSet<String>>,
+    edit: &crate::sync::membership::Edit,
+) -> Result<(), String> {
+    match saved {
+        Some(members) if members.is_disjoint(&edit.remove) => Ok(()),
+        Some(_) => Err("this profile is still a member".to_string()),
+        None => Err("the package would have no profile left".to_string()),
+    }
+}
+
 fn run_restore(repo_path: &str, dotfile_path: &str, commit_hash: &str) -> Result<(), String> {
     let config = crate::config::Config::load().map_err(|e| e.to_string())?;
     let sync_path = crate::sync::SyncEngine::sync_path().map_err(|e| e.to_string())?;
@@ -572,4 +605,23 @@ fn run_restore(repo_path: &str, dotfile_path: &str, commit_hash: &str) -> Result
     // remote changed" and overwrite local with the latest repo version.
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::membership::Edit;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn a_leave_that_did_not_apply_is_an_error() {
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let edit = Edit {
+            remove: set(&["dev"]),
+            ..Edit::default()
+        };
+        assert!(check_left(Some(set(&["server"])), &edit).is_ok());
+        assert!(check_left(Some(set(&["dev", "server"])), &edit).is_err());
+        assert!(check_left(None, &edit).is_err());
+    }
 }

@@ -285,11 +285,18 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         Confirm::Uninstall {
             manager_key, name, ..
         } => {
-            // Other member profiles keep the package; this profile leaves it
+            // Without the members, Tether cannot tell whether this profile must leave
+            if let Some(error) = app.state.membership_error.clone() {
+                app.flash_error(error);
+                return None;
+            }
+            // Other member profiles keep the package; this profile leaves it, unless the
+            // members changed since the confirm showed them
             let leave = app.state.membership.as_ref().and_then(|m| {
                 let members = m.members(&manager_key, &name);
                 (members.contains(&m.profile) && members.len() > 1).then(|| Edit {
                     remove: BTreeSet::from([m.profile.clone()]),
+                    seen: Some(members.clone()),
                     ..Edit::default()
                 })
             });

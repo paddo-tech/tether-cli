@@ -20,6 +20,8 @@ pub enum Msg {
     },
     DaemonOpStarted(DaemonOp),
     DaemonOpExited,
+    /// An uninstall waits for a running sync to release the sync lock.
+    UninstallWaiting,
     /// Ok with a message when the package uninstalled but its profiles did not save.
     UninstallDone(Result<Option<String>, String>),
     /// A package's profiles were saved and pushed: the toast text, or the error.

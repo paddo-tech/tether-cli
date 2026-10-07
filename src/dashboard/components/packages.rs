@@ -95,6 +95,8 @@ fn confirm_uninstall(app: &mut App) {
     };
     if app.uninstalling.is_some() || app.installing.is_some() || app.running.is_some() {
         app.flash_info("Wait for the running job to finish");
+    } else if let Some(error) = app.state.membership_error.clone() {
+        app.flash_error(error);
     } else if manager_key == "brew_taps" {
         app.flash_info("Tether does not uninstall taps");
     } else {

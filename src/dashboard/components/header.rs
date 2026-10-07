@@ -74,8 +74,13 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         right.push(sep());
     }
     if let Some((_, name)) = &app.uninstalling {
+        let doing = if app.uninstall_waiting {
+            "waiting for sync to uninstall"
+        } else {
+            "uninstalling"
+        };
         right.push(Span::styled(
-            format!("{} uninstalling {}", spinner(ms), name),
+            format!("{} {} {}", spinner(ms), doing, name),
             Style::default().fg(t.warn),
         ));
         right.push(sep());
