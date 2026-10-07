@@ -131,6 +131,42 @@ pub fn restore_file(timestamp: &str, category: &str, relative_path: &str) -> Res
     Ok(dest)
 }
 
+/// Copy a dotfile's backup from `timestamp` over the file, after the current file goes to
+/// a new backup, as a restore from a commit does. Returns the restored path.
+pub fn restore_dotfile_backup(timestamp: &str, relative_path: &str) -> Result<PathBuf> {
+    if relative_path.split('/').any(|part| part == "..") {
+        anyhow::bail!("{} is not a path in your home folder", relative_path);
+    }
+    let backup = backups_dir()?
+        .join(timestamp)
+        .join("dotfiles")
+        .join(relative_path);
+    let dest = crate::home_dir()?.join(relative_path);
+    restore_over(&backup, &dest, relative_path, create_backup_dir)?;
+    Ok(dest)
+}
+
+/// Write `backup` over `dest`, and first back up `dest` into `new_backup_dir()`. The write
+/// is atomic, so an interrupted restore leaves the old file. The file gets the backup's
+/// permissions, as a copy does.
+fn restore_over(
+    backup: &Path,
+    dest: &Path,
+    relative_path: &str,
+    new_backup_dir: impl FnOnce() -> Result<PathBuf>,
+) -> Result<()> {
+    // Read first: the new backup can land in the directory of the one restored
+    let content = std::fs::read(backup)
+        .map_err(|e| anyhow::anyhow!("Backup of {} not readable: {}", relative_path, e))?;
+    let permissions = std::fs::metadata(backup)?.permissions();
+    if dest.exists() {
+        backup_file(&new_backup_dir()?, "dotfiles", relative_path, dest)?;
+    }
+    crate::sync::atomic_write(dest, &content)?;
+    std::fs::set_permissions(dest, permissions)?;
+    Ok(())
+}
+
 /// Prune old backups, keeping only the most recent MAX_BACKUPS
 pub fn prune_old_backups() -> Result<usize> {
     let backups = list_backups()?;
@@ -161,6 +197,31 @@ pub fn parse_backup_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn restore_backs_up_the_current_file_first() {
+        let temp = TempDir::new().unwrap();
+        let backup = temp.path().join("old/.zshrc");
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, "old").unwrap();
+        let dest = temp.path().join("home/.zshrc");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, "current").unwrap();
+        let new_dir = temp.path().join("new");
+
+        restore_over(&backup, &dest, ".zshrc", || Ok(new_dir.clone())).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("dotfiles/.zshrc")).unwrap(),
+            "current"
+        );
+
+        // A missing backup changes nothing
+        std::fs::write(&dest, "current").unwrap();
+        let missing = temp.path().join("none");
+        assert!(restore_over(&missing, &dest, ".zshrc", || Ok(missing.clone())).is_err());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "current");
+    }
 
     #[test]
     fn test_backup_file_copies() {

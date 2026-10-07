@@ -320,7 +320,14 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         }),
         Confirm::RestoreBackup {
             path, timestamp, ..
-        } => Some(Cmd::RestoreBackup { path, timestamp }),
+        } => {
+            // A running sync could push the file while the restore writes it
+            if app.running.is_some() {
+                app.flash_error("Another tether command is still running");
+                return None;
+            }
+            Some(Cmd::RestoreBackup { path, timestamp })
+        }
         Confirm::Rollback { plan, .. } => {
             if app.running.is_some() {
                 app.flash_error("Another tether command is still running");

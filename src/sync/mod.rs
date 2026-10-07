@@ -13,7 +13,7 @@ pub mod team;
 
 pub use backup::{
     backup_file, backups_dir, create_backup_dir, list_backup_files, list_backups,
-    prune_old_backups, restore_file,
+    prune_old_backups, restore_dotfile_backup, restore_file,
 };
 pub use conflict::{
     detect_conflict, notify_conflicts, notify_deferred_casks, notify_inbox,

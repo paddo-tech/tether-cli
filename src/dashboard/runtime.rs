@@ -279,15 +279,28 @@ impl Runtime {
                 );
             }
             Cmd::RestoreBackup { path, timestamp } => {
-                // Runs inline, like a restore from a commit
-                let result = crate::sync::restore_file(&timestamp, "dotfiles", &path)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string());
-                let _ = self.tx.send(Msg::RestoreDone {
-                    dotfile: path,
-                    short_hash: format!("its backup from {}", timestamp),
-                    result,
-                });
+                // The write is atomic, so quitting mid-restore leaves the old file
+                let short_hash = format!("its backup from {}", timestamp);
+                let failed = (path.clone(), short_hash.clone());
+                self.spawn(
+                    async move {
+                        let result = crate::sync::restore_dotfile_backup(&timestamp, &path)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string());
+                        Msg::RestoreDone {
+                            dotfile: path,
+                            short_hash,
+                            result,
+                        }
+                    },
+                    move |e| {
+                        Some(Msg::RestoreDone {
+                            dotfile: failed.0,
+                            short_hash: failed.1,
+                            result: Err(e),
+                        })
+                    },
+                );
             }
             Cmd::Restore {
                 repo_path,

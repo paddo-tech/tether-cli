@@ -986,6 +986,31 @@ mod tests {
     }
 
     #[test]
+    fn backup_restore_waits_for_the_running_job() {
+        let mut app = app();
+        let confirm = || {
+            Overlay::Confirm(Confirm::RestoreBackup {
+                path: ".zshrc".into(),
+                timestamp: "2026-01-01T00-00-00".into(),
+                arming: Default::default(),
+            })
+        };
+        app.running = Some(Job::Sync);
+        app.overlays.push(confirm());
+        assert!(armed_key(&mut app, KeyCode::Char('y')).is_none());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Error, "Another tether command is still running"))
+        );
+        app.running = None;
+        app.overlays.push(confirm());
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::RestoreBackup { .. })
+        ));
+    }
+
+    #[test]
     fn uninstall_refuses_without_the_package_profiles() {
         let mut app = packages_app();
         app.state.membership_error = Some("profiles.toml is broken".into());
