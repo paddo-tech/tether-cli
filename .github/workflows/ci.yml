@@ -50,7 +50,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --lib
+        run: cargo test --locked --lib --test cli
 
       - name: Build release
         run: cargo build --release
@@ -83,7 +83,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --lib
+        run: cargo test --locked --lib --test cli
 
   e2e:
     runs-on: ubuntu-latest
