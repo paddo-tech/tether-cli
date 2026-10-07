@@ -2,7 +2,7 @@ use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
 use crate::packages::{
     brew::BrewManager, bun::BunManager, gem::GemManager, manager::PackageManager, npm::NpmManager,
-    pnpm::PnpmManager, uv::UvManager, Cooldown,
+    pnpm::PnpmManager, uv::UvManager, Cooldown, PackageInfo,
 };
 use crate::sync::SyncState;
 use anyhow::Result;
@@ -73,7 +73,7 @@ pub async fn run(dry_run: bool) -> Result<()> {
 
     for (step_num, (i, pkg_count)) in available.iter().enumerate() {
         let manager = &managers[*i];
-        let hash_before = manager.compute_manifest_hash().await.ok();
+        let before = manager.list_installed().await?;
 
         Output::step(
             step_num + 1,
@@ -82,10 +82,7 @@ pub async fn run(dry_run: bool) -> Result<()> {
         );
         manager.update_all().await?;
 
-        let hash_after = manager.compute_manifest_hash().await.ok();
-        if hash_before != hash_after {
-            any_actual_updates = true;
-        }
+        any_actual_updates |= report_changes(&before, &manager.list_installed().await?);
     }
 
     // Update state
@@ -97,8 +94,37 @@ pub async fn run(dry_run: bool) -> Result<()> {
     }
     state.save()?;
 
-    Output::success("Packages upgraded");
+    if any_actual_updates {
+        Output::success("Packages upgraded");
+    } else {
+        Output::info("No package version changed");
+    }
     Ok(())
+}
+
+/// Print each package whose installed version changed, read again after the upgrade, so
+/// the report never claims an upgrade the manager did not make. True when one changed.
+fn report_changes(before: &[PackageInfo], after: &[PackageInfo]) -> bool {
+    let changes = changed_versions(before, after);
+    for (name, old, new) in &changes {
+        Output::list_item(&format!("{} {} {} {}", name, old, Output::ARROW, new));
+    }
+    !changes.is_empty()
+}
+
+/// Packages installed before and after with a different version, as (name, before, after).
+fn changed_versions(
+    before: &[PackageInfo],
+    after: &[PackageInfo],
+) -> Vec<(String, String, String)> {
+    let version = |p: &PackageInfo| p.version.clone().unwrap_or_else(|| "?".to_string());
+    after
+        .iter()
+        .filter_map(|new| {
+            let old = before.iter().find(|p| p.name == new.name)?;
+            (old.version != new.version).then(|| (new.name.clone(), version(old), version(new)))
+        })
+        .collect()
 }
 
 /// Print what an upgrade of `manager` would change. True when a package would move, or when
@@ -118,7 +144,8 @@ async fn show_plan(manager: &dyn PackageManager) -> bool {
     };
     let forward: Vec<_> = candidates.iter().filter(|u| u.moves_forward()).collect();
     let kept: Vec<_> = candidates.iter().filter(|u| u.is_downgrade()).collect();
-    if forward.is_empty() && kept.is_empty() {
+    let held: Vec<_> = candidates.iter().filter_map(|u| u.hold_note()).collect();
+    if forward.is_empty() && kept.is_empty() && held.is_empty() {
         return false;
     }
     Output::subheader(manager.name());
@@ -139,6 +166,9 @@ async fn show_plan(manager: &dyn PackageManager) -> bool {
             u.target
         ));
     }
+    for note in &held {
+        Output::list_item(note);
+    }
     !forward.is_empty()
 }
 
@@ -155,4 +185,23 @@ fn confirm_without_cooldown(manager: &str, dry_run: bool) -> Result<bool> {
         ),
         false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_installed_versions_that_moved_count_as_changes() {
+        let p = |name: &str, version: &str| PackageInfo {
+            name: name.to_string(),
+            version: Some(version.to_string()),
+        };
+        let before = [p("pinned", "1.0"), p("moved", "1.0"), p("gone", "1.0")];
+        let after = [p("pinned", "1.0"), p("moved", "2.0"), p("new", "1.0")];
+        assert_eq!(
+            changed_versions(&before, &after),
+            [("moved".to_string(), "1.0".to_string(), "2.0".to_string())]
+        );
+    }
 }

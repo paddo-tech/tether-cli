@@ -1,7 +1,8 @@
 use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{
-    validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
+    validate_name, validate_version, Cooldown, Ecosystem, Hold, PackageInfo, PackageManager,
+    Upgrade,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -44,6 +45,13 @@ pub(super) fn parse_outdated_json(stdout: &[u8], latest: bool) -> Result<Vec<Upg
         .collect();
     candidates.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(candidates)
+}
+
+/// npm fails a whole `outdated` run with `ENOVERSIONS` when one package has no release
+/// older than the release-age limit.
+fn no_mature_release(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .is_ok_and(|v| v["error"]["code"] == "ENOVERSIONS")
 }
 
 pub struct NpmManager;
@@ -219,16 +227,42 @@ impl PackageManager for NpmManager {
         Ok(())
     }
 
-    /// npm applies the release-age limit to `wanted`.
+    /// npm applies the release-age limit to `wanted`. When one package has no release old
+    /// enough, npm fails the whole check, so each package is then checked on its own and
+    /// that package is held.
     async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
+        let cooldown = self.cooldown_args().await;
         let output = command("npm")?
             .args(["outdated", "-g", "--json"])
-            .args(self.cooldown_args().await)
+            .args(&cooldown)
             .output()
             .await?;
         // npm exits 1 when something is outdated, so the JSON decides. npm itself is not a
         // synced package, as in `list_installed`.
-        let mut candidates = parse_outdated_json(&output.stdout, false)?;
+        let mut candidates = if no_mature_release(&output.stdout) {
+            let mut candidates = Vec::new();
+            for package in self.list_installed().await? {
+                validate_name(Ecosystem::Npm, &package.name)?;
+                let output = command("npm")?
+                    .args(["outdated", "-g", "--json"])
+                    .args(&cooldown)
+                    .arg(&package.name)
+                    .output()
+                    .await?;
+                if no_mature_release(&output.stdout) {
+                    candidates.push(Upgrade::held(
+                        &package.name,
+                        package.version.as_deref(),
+                        Hold::NoMatureRelease,
+                    ));
+                } else {
+                    candidates.extend(parse_outdated_json(&output.stdout, false)?);
+                }
+            }
+            candidates
+        } else {
+            parse_outdated_json(&output.stdout, false)?
+        };
         candidates.retain(|u| u.name != "npm");
         Ok(candidates)
     }
@@ -296,5 +330,8 @@ mod tests {
         let stdout =
             br#"{"error": {"code": "ENOVERSIONS", "summary": "No versions", "detail": ""}}"#;
         assert!(parse_outdated_json(stdout, false).is_err());
+        assert!(no_mature_release(stdout));
+        assert!(!no_mature_release(br#"{"error": {"code": "E404"}}"#));
+        assert!(!no_mature_release(b"{}"));
     }
 }

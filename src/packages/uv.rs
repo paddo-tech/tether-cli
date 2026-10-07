@@ -1,7 +1,8 @@
 use super::command;
 use super::policy::{self, PackagePolicy};
 use super::{
-    validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
+    validate_name, validate_version, Cooldown, Ecosystem, Hold, PackageInfo, PackageManager,
+    Upgrade,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,6 +23,27 @@ fn parse_outdated(stdout: &str) -> Vec<Upgrade> {
             ))
         })
         .collect()
+}
+
+/// True when the tool receipt pins `name` to one version (`==1.0` or `===1.0`), which
+/// `uv tool upgrade` never moves past. Tether's own installs leave no pin, so a pin is
+/// the user's and stays.
+fn pinned_in_receipt(receipt: &str, name: &str) -> bool {
+    let Ok(receipt) = receipt.parse::<toml::Table>() else {
+        return false;
+    };
+    let normalize = |s: &str| s.to_ascii_lowercase().replace(['_', '.'], "-");
+    receipt
+        .get("tool")
+        .and_then(|t| t.get("requirements"))
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|r| {
+            r.get("name").and_then(toml::Value::as_str).map(normalize) == Some(normalize(name))
+        })
+        .filter_map(|r| r.get("specifier").and_then(toml::Value::as_str))
+        .any(|s| s.trim().starts_with("==") && !s.contains('*'))
 }
 
 pub struct UvManager;
@@ -163,11 +185,29 @@ impl PackageManager for UvManager {
         Ok(())
     }
 
+    /// A tool the user pinned is held: uv lists its newer release, but never upgrades to it.
     async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
         let mut args = vec!["tool", "list", "--outdated"];
         let cooldown = self.cooldown().await;
         args.extend(cooldown.args().iter().map(String::as_str));
-        Ok(parse_outdated(&self.run_uv(&args).await?))
+        let candidates = parse_outdated(&self.run_uv(&args).await?);
+        if candidates.is_empty() {
+            return Ok(candidates);
+        }
+        let tool_dir = std::path::PathBuf::from(self.run_uv(&["tool", "dir"]).await?.trim());
+        Ok(candidates
+            .into_iter()
+            .map(|u| {
+                let receipt =
+                    std::fs::read_to_string(tool_dir.join(&u.name).join("uv-receipt.toml"))
+                        .unwrap_or_default();
+                if pinned_in_receipt(&receipt, &u.name) {
+                    Upgrade::held(&u.name, u.current.as_deref(), Hold::Pinned)
+                } else {
+                    u
+                }
+            })
+            .collect())
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {
@@ -201,5 +241,34 @@ mod tests {
             ]
         );
         assert!(parse_outdated("").is_empty());
+    }
+
+    #[test]
+    fn only_an_exact_receipt_specifier_is_a_pin() {
+        let receipt = |spec: &str| {
+            format!("[tool]\nrequirements = [{{ name = \"Py_Cowsay\"{spec} }}]\nentrypoints = []\n")
+        };
+        assert!(pinned_in_receipt(
+            &receipt(", specifier = \"==0.0.0.1\""),
+            "py-cowsay"
+        ));
+        assert!(pinned_in_receipt(
+            &receipt(", specifier = \"===1.0\""),
+            "py-cowsay"
+        ));
+        assert!(!pinned_in_receipt(&receipt(""), "py-cowsay"));
+        assert!(!pinned_in_receipt(
+            &receipt(", specifier = \">=1.0\""),
+            "py-cowsay"
+        ));
+        assert!(!pinned_in_receipt(
+            &receipt(", specifier = \"==1.*\""),
+            "py-cowsay"
+        ));
+        assert!(!pinned_in_receipt(
+            &receipt(", specifier = \"==0.0.0.1\""),
+            "other"
+        ));
+        assert!(!pinned_in_receipt("", "py-cowsay"));
     }
 }

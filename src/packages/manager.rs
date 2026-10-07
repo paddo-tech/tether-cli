@@ -13,12 +13,22 @@ pub struct PackageInfo {
 }
 
 /// A package that an outdated check lists, with the installed version and the version an
-/// upgrade would install.
+/// upgrade would install. A held package stays at `current` whatever its target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upgrade {
     pub name: String,
     pub current: Option<String>,
     pub target: String,
+    pub hold: Option<Hold>,
+}
+
+/// Why an upgrade leaves a package alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Hold {
+    /// No release of the package is older than the release-age limit
+    NoMatureRelease,
+    /// The user pinned the package, for example with `uv tool install name==1.0`
+    Pinned,
 }
 
 impl Upgrade {
@@ -27,21 +37,43 @@ impl Upgrade {
             name: name.to_string(),
             current: current.map(str::to_string),
             target: target.to_string(),
+            hold: None,
+        }
+    }
+
+    pub fn held(name: &str, current: Option<&str>, hold: Hold) -> Self {
+        Self {
+            hold: Some(hold),
+            ..Self::new(name, current, current.unwrap_or_default())
         }
     }
 
     /// The release-age limit can make the target older than the installed version, and an
     /// upgrade must never downgrade. An unknown installed version cannot prove the target newer.
     pub fn moves_forward(&self) -> bool {
-        self.current.as_deref().is_some_and(|current| {
-            compare_versions(&self.target, current) == Some(Ordering::Greater)
-        })
+        self.hold.is_none()
+            && self.current.as_deref().is_some_and(|current| {
+                compare_versions(&self.target, current) == Some(Ordering::Greater)
+            })
     }
 
     pub fn is_downgrade(&self) -> bool {
-        self.current
-            .as_deref()
-            .is_some_and(|current| compare_versions(&self.target, current) == Some(Ordering::Less))
+        self.hold.is_none()
+            && self.current.as_deref().is_some_and(|current| {
+                compare_versions(&self.target, current) == Some(Ordering::Less)
+            })
+    }
+
+    /// One line on why a held package stays, or `None` when it is not held.
+    pub fn hold_note(&self) -> Option<String> {
+        let current = self.current.as_deref().unwrap_or("?");
+        self.hold.as_ref().map(|hold| match hold {
+            Hold::NoMatureRelease => format!(
+                "{} skipped: no release is older than the release-age limit",
+                self.name
+            ),
+            Hold::Pinned => format!("{} pinned at {}, not upgraded", self.name, current),
+        })
     }
 }
 
@@ -91,13 +123,17 @@ pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
 
 /// The upgrades `update_all` installs: candidates whose target is newer than the installed
 /// version, without the ones OSV lists as malicious. A candidate whose target is older
-/// stays at its installed version with a warning.
+/// stays at its installed version with a warning. A held package stays too; `tether upgrade`
+/// prints why in its plan, so here it goes to the daemon log only.
 pub async fn planned_upgrades(manager: &dyn PackageManager) -> Result<Vec<Upgrade>> {
     let (forward, kept): (Vec<Upgrade>, Vec<Upgrade>) = manager
         .upgrade_candidates()
         .await?
         .into_iter()
         .partition(Upgrade::moves_forward);
+    for note in kept.iter().filter_map(Upgrade::hold_note) {
+        log::info!("{}: {}", manager.name(), note);
+    }
     for upgrade in kept.iter().filter(|u| u.is_downgrade()) {
         crate::cli::Output::warning(&format!(
             "Kept {} {} at {}: the release-age limit allows only {}",
