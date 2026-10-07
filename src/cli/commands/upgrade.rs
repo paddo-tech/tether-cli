@@ -142,8 +142,14 @@ async fn show_plan(manager: &dyn PackageManager) -> bool {
             return true;
         }
     };
-    let forward: Vec<_> = candidates.iter().filter(|u| u.moves_forward()).collect();
-    let kept: Vec<_> = candidates.iter().filter(|u| u.is_downgrade()).collect();
+    let forward: Vec<_> = candidates
+        .iter()
+        .filter(|u| u.moves_forward(manager.ecosystem()))
+        .collect();
+    let kept: Vec<_> = candidates
+        .iter()
+        .filter(|u| u.is_downgrade(manager.ecosystem()))
+        .collect();
     let held: Vec<_> = candidates.iter().filter_map(|u| u.hold_note()).collect();
     if forward.is_empty() && kept.is_empty() && held.is_empty() {
         return false;

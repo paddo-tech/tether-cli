@@ -50,18 +50,26 @@ impl Upgrade {
 
     /// The release-age limit can make the target older than the installed version, and an
     /// upgrade must never downgrade. An unknown installed version cannot prove the target newer.
-    pub fn moves_forward(&self) -> bool {
-        self.hold.is_none()
-            && self.current.as_deref().is_some_and(|current| {
-                compare_versions(&self.target, current) == Some(Ordering::Greater)
-            })
+    pub fn moves_forward(&self, ecosystem: Ecosystem) -> bool {
+        self.hold.is_none() && self.order(ecosystem) == Some(Ordering::Greater)
     }
 
-    pub fn is_downgrade(&self) -> bool {
-        self.hold.is_none()
-            && self.current.as_deref().is_some_and(|current| {
-                compare_versions(&self.target, current) == Some(Ordering::Less)
-            })
+    pub fn is_downgrade(&self, ecosystem: Ecosystem) -> bool {
+        self.hold.is_none() && self.order(ecosystem) == Some(Ordering::Less)
+    }
+
+    /// The target against the installed version, by the ecosystem's own rules: a PEP 440
+    /// `1.0.dev1` is older than `1.0a1`, and a Homebrew revision `_1` is newer than its release.
+    fn order(&self, ecosystem: Ecosystem) -> Option<Ordering> {
+        let current = self.current.as_deref()?;
+        match ecosystem {
+            Ecosystem::Brew | Ecosystem::BrewTap => compare_brew_versions(&self.target, current),
+            _ => Some(super::pin::compare_versions(
+                ecosystem,
+                &self.target,
+                current,
+            )),
+        }
     }
 
     /// One line on why a held package stays, or `None` when it is not held.
@@ -77,11 +85,11 @@ impl Upgrade {
     }
 }
 
-/// Order two versions of the forms npm, PyPI, RubyGems and Homebrew use: numeric dotted
-/// parts first, then a suffix. A suffix such as `-rc.1`, `rc1` or `.pre` sorts before the
-/// release, `post` sorts after it, and `+build` metadata does not count. `None` when a
-/// version does not start with a number.
-pub fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
+/// Order two Homebrew versions: numeric dotted parts first, then a suffix. A suffix such as
+/// `-rc.1` or `rc1` sorts before the release, and a revision such as `_1` after it. `+build`
+/// metadata does not count. `None` when a version does not start with a number, such as a
+/// cask's `latest`.
+pub fn compare_brew_versions(a: &str, b: &str) -> Option<Ordering> {
     fn split(v: &str) -> Option<(Vec<u64>, &str)> {
         let v = v.trim().trim_start_matches('v');
         let v = v.split('+').next().unwrap_or(v);
@@ -140,11 +148,11 @@ pub async fn planned_upgrades(manager: &dyn PackageManager) -> Result<Vec<Upgrad
         .upgrade_candidates()
         .await?
         .into_iter()
-        .partition(Upgrade::moves_forward);
+        .partition(|u| u.moves_forward(manager.ecosystem()));
     for note in kept.iter().filter_map(Upgrade::hold_note) {
         log::info!("{}: {}", manager.name(), note);
     }
-    for upgrade in kept.iter().filter(|u| u.is_downgrade()) {
+    for upgrade in kept.iter().filter(|u| u.is_downgrade(manager.ecosystem())) {
         crate::cli::Output::warning(&format!(
             "Kept {} {} at {}: the release-age limit allows only {}",
             manager.name(),
@@ -329,7 +337,7 @@ mod tests {
 
     #[test]
     fn versions_compare_numerically_with_prereleases_first() {
-        let lt = |a: &str, b: &str| compare_versions(a, b) == Some(Ordering::Less);
+        let lt = |a: &str, b: &str| compare_brew_versions(a, b) == Some(Ordering::Less);
         assert!(lt("0.62.0", "0.63.0"));
         assert!(lt("1.9.0", "1.10.0"));
         assert!(lt("1.0.0-rc.9", "1.0.0-rc.10"));
@@ -340,18 +348,41 @@ mod tests {
         assert!(lt("1.2.3", "1.2.3_1"));
         assert!(lt("1.2.3_1", "1.2.3_2"));
         assert!(lt("1.2.3_9", "1.2.4"));
-        assert_eq!(compare_versions("1.0", "1.0.0"), Some(Ordering::Equal));
-        assert_eq!(compare_versions("1.0.0+b1", "1.0.0"), Some(Ordering::Equal));
-        assert_eq!(compare_versions("latest", "1.0.0"), None);
+        assert_eq!(compare_brew_versions("1.0", "1.0.0"), Some(Ordering::Equal));
+        assert_eq!(
+            compare_brew_versions("1.0.0+b1", "1.0.0"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(compare_brew_versions("latest", "1.0.0"), None);
     }
 
     #[test]
     fn only_a_newer_known_target_moves_forward() {
-        assert!(Upgrade::new("a", Some("0.62.0"), "0.63.0").moves_forward());
+        let npm = Ecosystem::Npm;
+        assert!(Upgrade::new("a", Some("0.62.0"), "0.63.0").moves_forward(npm));
         let older = Upgrade::new("a", Some("0.63.0"), "0.62.0");
-        assert!(!older.moves_forward());
-        assert!(older.is_downgrade());
-        assert!(!Upgrade::new("a", Some("1.0.0"), "1.0.0").moves_forward());
-        assert!(!Upgrade::new("a", None, "1.0.0").moves_forward());
+        assert!(!older.moves_forward(npm));
+        assert!(older.is_downgrade(npm));
+        assert!(!Upgrade::new("a", Some("1.0.0"), "1.0.0").moves_forward(npm));
+        assert!(!Upgrade::new("a", None, "1.0.0").moves_forward(npm));
+    }
+
+    #[test]
+    fn direction_follows_each_ecosystem() {
+        let py = Ecosystem::Python;
+        assert!(Upgrade::new("a", Some("1.0.dev1"), "1.0a1").moves_forward(py));
+        assert!(Upgrade::new("a", Some("1.0a1"), "1.0.dev1").is_downgrade(py));
+        assert!(Upgrade::new("a", Some("1.0a1.dev2"), "1.0a1").moves_forward(py));
+        assert!(Upgrade::new("a", Some("3.0"), "1!2.0").moves_forward(py));
+        assert!(Upgrade::new("a", Some("1!2.0"), "3.0").is_downgrade(py));
+        let npm = Ecosystem::Npm;
+        assert!(Upgrade::new("a", Some("1.0.0-rc.1"), "1.0.0").moves_forward(npm));
+        assert!(Upgrade::new("a", Some("1.0.0-beta.2"), "1.0.0-beta.10").moves_forward(npm));
+        assert!(Upgrade::new("a", Some("1.0.0"), "1.0.0-rc.1").is_downgrade(npm));
+        let gem = Ecosystem::Gem;
+        assert!(Upgrade::new("a", Some("1.0.pre"), "1.0").moves_forward(gem));
+        assert!(Upgrade::new("a", Some("1.0"), "1.0.rc2").is_downgrade(gem));
+        let brew = Ecosystem::Brew;
+        assert!(Upgrade::new("a", Some("1.2.3"), "1.2.3_1").moves_forward(brew));
     }
 }

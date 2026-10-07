@@ -321,8 +321,8 @@ mod tests {
         }"#;
         let candidates = parse_outdated_json(stdout, false).unwrap();
         assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].is_downgrade());
-        assert!(!candidates[0].moves_forward());
+        assert!(candidates[0].is_downgrade(Ecosystem::Npm));
+        assert!(!candidates[0].moves_forward(Ecosystem::Npm));
     }
 
     #[test]
