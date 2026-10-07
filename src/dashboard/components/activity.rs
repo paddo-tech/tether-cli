@@ -35,18 +35,7 @@ pub fn render(f: &mut Frame, area: Rect, lines: &[String], t: &Theme) {
     let runs = collapse(clean);
     let start = runs.len().saturating_sub(inner.height as usize);
     for (i, (l, n)) in runs[start..].iter().enumerate() {
-        let s = l.trim_start();
-        let color = if s.starts_with('✗') || s.contains(" ERROR ") || s.starts_with("ERROR") {
-            t.error
-        } else if s.starts_with('⚠') || s.contains(" WARN ") || s.starts_with("Warning") {
-            t.warn
-        } else if s.starts_with('✓') {
-            t.ok
-        } else if s.starts_with('ℹ') {
-            t.info
-        } else {
-            t.muted
-        };
+        let color = line_color(l, t);
         let count = if *n > 1 {
             Line::from(Span::styled(format!("×{}", n), Style::default().fg(t.dim)))
         } else {
@@ -58,6 +47,22 @@ pub fn render(f: &mut Frame, area: Rect, lines: &[String], t: &Theme) {
             Line::from(Span::styled(l.as_str(), Style::default().fg(color))),
             count,
         );
+    }
+}
+
+/// The color of a log line, by the glyph or level it carries.
+pub fn line_color(line: &str, t: &Theme) -> Color {
+    let s = line.trim_start();
+    if s.starts_with('✗') || s.contains(" ERROR ") || s.starts_with("ERROR") {
+        t.error
+    } else if s.starts_with('⚠') || s.contains(" WARN ") || s.starts_with("Warning") {
+        t.warn
+    } else if s.starts_with('✓') {
+        t.ok
+    } else if s.starts_with('ℹ') {
+        t.info
+    } else {
+        t.muted
     }
 }
 

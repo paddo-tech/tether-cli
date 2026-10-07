@@ -1,5 +1,5 @@
 use super::{activity, cursor_down, files, machines, packages, panel, pulse, sparkline};
-use crate::dashboard::app::{App, Job};
+use crate::dashboard::app::{App, Job, Overlay};
 use crate::dashboard::msg::KeyOutcome;
 use crate::dashboard::theme::mix;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -13,6 +13,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.overview_scroll = app.overview_scroll.saturating_sub(1);
+        }
+        KeyCode::Enter => {
+            app.overlays
+                .push(Overlay::Log(super::log_view::LogView::open()));
         }
         _ => return KeyOutcome::Ignored,
     }

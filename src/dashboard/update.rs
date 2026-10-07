@@ -1,7 +1,7 @@
 use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
 use super::components::palette::{self, Palette, Target};
 use super::components::{
-    config, confirm, file_import, files, machines, overview, package_profiles, packages,
+    config, confirm, file_import, files, log_view, machines, overview, package_profiles, packages,
     pkg_import, profile_picker, security,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
@@ -215,6 +215,7 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
             Overlay::PkgImport(p) => pkg_import::handle_key(app, p, key),
             Overlay::ProfilePicker(p) => profile_picker::handle_key(app, p, key),
             Overlay::PackageProfiles(p) => package_profiles::handle_key(app, p, key),
+            Overlay::Log(l) => log_view::handle_key(app, l, key),
             Overlay::Palette(p) => match palette::handle_key(app, p, key) {
                 Some(target) => run_target(app, target),
                 None => None,
@@ -339,6 +340,7 @@ pub fn run_action(app: &mut App, action: Action) -> Option<Cmd> {
             app.active_tab = Tab::Security;
             security::confirm_approve_all(app);
         }
+        Action::DaemonLog => app.overlays.push(Overlay::Log(log_view::LogView::open())),
     }
     None
 }
@@ -828,6 +830,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn daemon_log_opens_read_only_and_scrolls() {
+        use crate::dashboard::components::log_view::LogView;
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = app();
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlays.last(), Some(Overlay::Log(_))));
+        app.overlays.clear();
+        assert!(palette::entries(&app)
+            .iter()
+            .any(|e| e.target == Target::Action(Action::DaemonLog)));
+
+        app.overlays.push(Overlay::Log(LogView {
+            lines: (0..100).map(|i| format!("✓ line {}", i)).collect(),
+            from_end: 0,
+            rows: std::cell::Cell::new(1),
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("line 99"));
+        for code in [KeyCode::Char('g'), KeyCode::Char('s'), KeyCode::Char('d')] {
+            // Keys that would act elsewhere do nothing here
+            assert!(key(&mut app, code).is_none());
+        }
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("line 0") && !text.contains("line 99"));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.overlays.is_empty());
+        assert!(!app.should_quit);
     }
 
     #[test]

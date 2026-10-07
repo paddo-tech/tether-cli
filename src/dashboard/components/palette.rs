@@ -150,6 +150,7 @@ pub fn entries(app: &App) -> Vec<Entry> {
         ("Sync now", Action::Sync),
         (daemon, Action::ToggleDaemon),
         ("Refresh", Action::Refresh),
+        ("Daemon log", Action::DaemonLog),
         (
             "Import packages from other machines",
             Action::ImportPackages,

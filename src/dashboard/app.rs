@@ -2,6 +2,7 @@ use super::components::config::ConfigTabState;
 use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
 use super::components::files::{self, FilesTabState};
+use super::components::log_view::LogView;
 use super::components::machines::MachinesTabState;
 use super::components::package_profiles::PackageProfiles;
 use super::components::packages::{self, PackagesTabState};
@@ -104,6 +105,7 @@ pub enum Overlay {
     ProfilePicker(ProfilePicker),
     PackageProfiles(PackageProfiles),
     Palette(Palette),
+    Log(LogView),
 }
 
 impl Overlay {
@@ -124,6 +126,7 @@ pub enum Action {
     ImportDotfile,
     PickProfile,
     ApproveAll,
+    DaemonLog,
 }
 
 /// A clickable region recorded by the last draw.

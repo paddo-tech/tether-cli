@@ -7,6 +7,7 @@ pub mod files;
 pub mod header;
 pub mod help;
 pub mod keymap;
+pub mod log_view;
 pub mod machines;
 pub mod overview;
 pub mod package_profiles;

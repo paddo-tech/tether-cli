@@ -124,13 +124,22 @@ pub const GLOBAL: &[Binding] = &[
     b(&[], "click", "", "Select; click again to open", 0),
 ];
 
-const OVERVIEW: &[Binding] = &[b(
-    &[Char('j'), Char('k'), Down, Up],
-    "j/k ↑↓",
-    "scroll",
-    "Scroll the file list",
-    0,
-)];
+const OVERVIEW: &[Binding] = &[
+    b(
+        &[Enter],
+        "Enter",
+        "daemon log",
+        "Open the whole daemon log, read-only",
+        1,
+    ),
+    b(
+        &[Char('j'), Char('k'), Down, Up],
+        "j/k ↑↓",
+        "scroll",
+        "Scroll the file list",
+        0,
+    ),
+];
 
 const FILES: &[Binding] = &[
     b(
