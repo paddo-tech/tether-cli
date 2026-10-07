@@ -21,21 +21,26 @@ cargo fmt                # Format
 | Command | Description |
 |---------|-------------|
 | `init` | Initialize Tether on this machine |
-| `sync` | Manually trigger a sync |
-| `status` | Show current sync status |
+| `sync` | Manually trigger a sync (`--dry-run` changes nothing) |
+| `status` | Show current sync status, inbox and conflict counts (`--json`) |
 | `diff` | Show differences between machines |
 | `config` | Manage configuration and feature toggles |
-| `daemon` | Control the background daemon |
-| `machines` | Manage machines in sync network |
-| `ignore` | Manage ignore patterns |
+| `daemon` | Control the background daemon: `start`, `stop`, `restart`, `status`, `logs -f -n`, `install`, `uninstall` |
+| `machines` | `list` (`--json`), `show`, `rename <NEW>`, `remove`, `trust --fingerprint`, `untrust`, `profile` |
+| `packages` | `list` (`--json`, also bare `packages`), `inbox` (`--json`), `approve [--all] [--from] [--expect]`, `reject`, `install`, `share --to`, `unshare --from`, `uninstall` (alias `remove`) |
+| `ignore` | `secrets add/list/remove` (secret scanning), `files add/project/list/remove` (files this machine keeps) |
 | `team` | Manage team sync (dotfiles, secrets, projects) |
 | `resolve` | Resolve file conflicts |
 | `unlock` | Unlock encryption key with passphrase |
 | `lock` | Clear cached encryption key |
-| `upgrade` | Upgrade all installed packages |
+| `upgrade` | Upgrade packages without downgrades; asks, or needs `-y` (`--dry-run` lists) |
 | `restore` | Restore files from backup |
+| `rollback` | Roll back a manager's packages to a manifest commit (not brew) |
+| `history` | Show a dotfile's history in the sync repo |
 | `identity` | Manage age identity for team secrets |
 | `collab` | Collaborator-based project secret sharing |
+
+CLI rules: every error exits 1 with one `Error:` line on stderr. Every prompt goes through `cli::Prompt`: `-y` confirms and takes defaults, and without a terminal a prompt fails and names `-y`. CLI text styles through `cli::output::Colorize`, never `owo_colors` directly, so pipes and `NO_COLOR` get plain text. Machine arguments take an id or a unique hostname (`machines::resolve`). Package ids are `manager:name`; `brew:` and `cask:` stand for `brew_formulae:` and `brew_casks:`. `--json` is experimental in 2.0.
 
 ## Key Dependencies
 

@@ -78,7 +78,7 @@ Keep a server clean:
 tether config set profiles.server.dotfiles '[]'   # create the profile once
 tether machines profile set server                # on the server
 tether packages share npm:typescript --to server  # send one package to the server
-tether packages remove npm:typescript             # on the server: uninstall it, laptops keep it
+tether packages uninstall npm:typescript          # on the server: uninstall it, laptops keep it
 ```
 
 The shares are in `packages/profiles.toml` in the sync repo, as `"npm:typescript" = ["dev", "server"]`. The dashboard Packages tab shows each package's profiles. Press `t` on a package to change them. Machines on 1.x ignore profiles and install the packages of every machine. A machine on 1.x can also undo a `machines profile set`; a 2.0 sync then warns. Set profiles before you add 1.x machines, or after all machines run 2.0.
@@ -94,13 +94,13 @@ tether diff              # Show differences between machines
 tether config            # Manage configuration and feature toggles
 tether daemon            # Control the background daemon
 tether machines          # Manage machines and profiles
-tether ignore            # Manage ignore patterns
+tether ignore            # Secret scanning patterns and files this machine keeps
 tether team              # Manage team sync (dotfiles, secrets, projects)
 tether collab            # Collaborator-based project secret sharing
 tether resolve           # Resolve file conflicts
 tether unlock / lock     # Manage encryption key
-tether upgrade           # Upgrade all installed packages
-tether packages          # List and manage installed packages
+tether upgrade           # Upgrade installed packages, never downgrading
+tether packages          # List, share, install and uninstall packages; the inbox
 tether restore           # Restore files from backup or git history
 tether history           # Show file change history
 tether identity          # Manage age identity for team secrets
