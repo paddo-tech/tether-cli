@@ -26,6 +26,10 @@ pub struct ListEditState {
 }
 
 impl ListEditState {
+    pub fn is_dotfile(&self) -> bool {
+        self.is_dotfile
+    }
+
     fn new(field_key: &'static str, field_label: &'static str, is_dotfile: bool) -> Self {
         Self {
             field_key,

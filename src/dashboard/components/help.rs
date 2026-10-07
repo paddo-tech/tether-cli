@@ -18,22 +18,24 @@ pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
     } else {
         tab
     };
-    let mut candidates: Vec<&Binding> = tab
+    // Each candidate is (global, index in its table, binding)
+    let mut candidates: Vec<(bool, usize, &Binding)> = tab
         .iter()
-        .chain(keymap::GLOBAL)
-        .filter(|b| b.prio > 0)
+        .enumerate()
+        .map(|(i, b)| (false, i, b))
+        .chain(keymap::GLOBAL.iter().enumerate().map(|(i, b)| (true, i, b)))
+        .filter(|(_, _, b)| b.prio > 0)
         .collect();
-    candidates.sort_by_key(|b| b.prio);
+    candidates.sort_by_key(|(_, _, b)| b.prio);
     let mut room = area.width.saturating_sub(hint_width(&keymap::HELP) + 1);
-    let mut shown: Vec<&Binding> = Vec::new();
-    for b in candidates {
+    let mut shown: Vec<(bool, usize)> = Vec::new();
+    for (global, i, b) in candidates {
         let w = hint_width(b);
         if w <= room {
             room -= w;
-            shown.push(b);
+            shown.push((global, i));
         }
     }
-    let shown = |b: &Binding| shown.iter().any(|s| std::ptr::eq(*s, b));
 
     let draw = |f: &mut Frame, b: &Binding, x: u16| {
         let w = hint_width(b);
@@ -51,10 +53,17 @@ pub fn render_bar(f: &mut Frame, area: Rect, app: &App) {
         w
     };
     let mut x = area.x;
-    for b in tab.iter().filter(|b| shown(b)) {
-        x += draw(f, b, x);
+    for (i, b) in tab.iter().enumerate() {
+        if shown.contains(&(false, i)) {
+            x += draw(f, b, x);
+        }
     }
-    let global: Vec<&Binding> = keymap::GLOBAL.iter().filter(|b| shown(b)).collect();
+    let global: Vec<&Binding> = keymap::GLOBAL
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| shown.contains(&(true, *i)))
+        .map(|(_, b)| b)
+        .collect();
     let global_w: u16 =
         global.iter().map(|b| hint_width(b)).sum::<u16>() + hint_width(&keymap::HELP);
     let mut x = area.right().saturating_sub(global_w + 1).max(x);

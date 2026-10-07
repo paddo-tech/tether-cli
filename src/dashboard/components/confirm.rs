@@ -231,14 +231,16 @@ pub fn handle_key(app: &mut App, confirm: Confirm, key: KeyEvent) -> Option<Cmd>
             | KeyCode::PageDown
             | KeyCode::PageUp
     );
-    // Scrolling is harmless, so it works before the confirm is armed
+    // Cancel is safe, so it works at once; scrolling is harmless. Only accept waits
+    if matches!(key.code, KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter) {
+        return cancel(app, confirm);
+    }
     if !scroll && !confirm.arming().armed(Instant::now()) {
         app.overlays.push(Overlay::Confirm(confirm));
         return None;
     }
     match key.code {
         KeyCode::Char('y') => accept(app, confirm),
-        KeyCode::Char('n') | KeyCode::Esc | KeyCode::Enter => cancel(app, confirm),
         KeyCode::Char('j')
         | KeyCode::Char('k')
         | KeyCode::Down

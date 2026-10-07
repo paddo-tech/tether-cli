@@ -212,6 +212,14 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
     if let KeyOutcome::Handled(cmd) = ctrl_key(app, key) {
         return cmd;
     }
+    // Ctrl+Y or Alt+X is not y or x: it must never accept a confirm or act on a tab
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        && !matches!(app.overlays.last(), Some(Overlay::Palette(_)))
+    {
+        return None;
+    }
 
     if app.overlays.last().is_some_and(Overlay::is_modal) {
         return match app.overlays.pop()? {
@@ -788,25 +796,32 @@ mod tests {
                 tab
             );
         }
-        let list_fixture = || {
-            let mut app = app();
-            let mut config = crate::config::Config::default();
-            // An empty list, so no probed key can save the config
-            config.dotfiles.files.clear();
-            app.state.config = Some(config);
-            app.active_tab = Tab::Config;
-            app.config.selected = crate::dashboard::config_edit::fields()
-                .iter()
-                .position(|f| f.key == "dotfiles.files")
-                .unwrap();
-            key(&mut app, KeyCode::Enter);
-            assert!(app.config.list_edit.is_some());
-            app
-        };
-        assert_eq!(
-            handled(list_fixture, tab_key, KeyModifiers::NONE),
-            listed(keymap::CONFIG_LIST, false)
-        );
+        // Every list field, each with the keymap of its own list kind
+        use crate::dashboard::config_edit::{fields, FieldKind};
+        for (index, field) in fields().iter().enumerate() {
+            if !matches!(field.kind, FieldKind::List | FieldKind::DotfileList) {
+                continue;
+            }
+            let list_fixture = || {
+                let mut app = app();
+                let mut config = crate::config::Config::default();
+                // An empty list, so no probed key can save the config
+                config.dotfiles.files.clear();
+                app.state.config = Some(config);
+                app.active_tab = Tab::Config;
+                app.config.selected = index;
+                key(&mut app, KeyCode::Enter);
+                assert!(app.config.list_edit.is_some());
+                app
+            };
+            let (_, bindings) = keymap::active(&list_fixture());
+            assert_eq!(
+                handled(list_fixture, tab_key, KeyModifiers::NONE),
+                listed(bindings, false),
+                "{}",
+                field.key
+            );
+        }
         assert_eq!(
             handled(app, global_key, KeyModifiers::NONE),
             listed(keymap::GLOBAL, false)
@@ -815,6 +830,102 @@ mod tests {
             handled(app, ctrl_key, KeyModifiers::CONTROL),
             listed(keymap::GLOBAL, true)
         );
+    }
+
+    /// A Ctrl or Alt letter never acts as the plain letter: not on a tab, not in a list,
+    /// not on a confirm. Only Ctrl+C and Ctrl+K act.
+    #[test]
+    fn ctrl_and_alt_letters_do_nothing_but_the_ctrl_keys() {
+        use KeyCode::{Backspace, Char, Delete, Down, Enter, Esc, Left, Right, Up};
+        let mut codes: Vec<KeyCode> = (' '..='~').map(Char).collect();
+        codes.extend([
+            Enter,
+            Esc,
+            KeyCode::Tab,
+            Backspace,
+            Delete,
+            Up,
+            Down,
+            Left,
+            Right,
+        ]);
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            for tab in Tab::all() {
+                for code in &codes {
+                    if modifiers == KeyModifiers::CONTROL && matches!(code, Char('c' | 'k')) {
+                        continue;
+                    }
+                    let mut app = with_inbox();
+                    app.active_tab = *tab;
+                    let cmd = update(&mut app, Msg::Key(KeyEvent::new(*code, modifiers)));
+                    assert!(cmd.is_none(), "{:?} {:?} {:?}", modifiers, tab, code);
+                    assert_eq!(app.active_tab, *tab, "{:?} {:?}", modifiers, code);
+                    assert!(
+                        app.overlays.is_empty(),
+                        "{:?} {:?} {:?}",
+                        modifiers,
+                        tab,
+                        code
+                    );
+                    assert!(
+                        app.toasts.is_empty(),
+                        "{:?} {:?} {:?}",
+                        modifiers,
+                        tab,
+                        code
+                    );
+                }
+            }
+        }
+        let mut app = app();
+        app.overlays.push(Overlay::Confirm(Confirm::StopDaemon {
+            arming: Default::default(),
+        }));
+        if let Some(Overlay::Confirm(c)) = app.overlays.last() {
+            c.arming().drawn_long_ago();
+        }
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let cmd = update(&mut app, Msg::Key(KeyEvent::new(Char('y'), modifiers)));
+            assert!(cmd.is_none());
+            assert_eq!(app.overlays.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_confirm_cancels_at_once_and_accepts_only_when_armed() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+            let mut app = app();
+            app.overlays.push(Overlay::Confirm(Confirm::StopDaemon {
+                arming: Default::default(),
+            }));
+            // Not drawn, so not armed: cancel still works
+            assert!(key(&mut app, code).is_none());
+            assert!(app.overlays.is_empty(), "{:?}", code);
+        }
+        let mut app = app();
+        app.overlays.push(Overlay::Confirm(Confirm::StopDaemon {
+            arming: Default::default(),
+        }));
+        assert!(key(&mut app, KeyCode::Char('y')).is_none());
+        assert_eq!(app.overlays.len(), 1);
+    }
+
+    #[test]
+    fn non_dotfile_lists_neither_take_nor_list_t() {
+        use crate::dashboard::components::keymap;
+        let mut app = app();
+        let mut config = crate::config::Config::default();
+        config.packages.allow_scripts = vec!["esbuild".into()];
+        app.state.config = Some(config);
+        app.active_tab = Tab::Config;
+        app.config.selected = crate::dashboard::config_edit::fields()
+            .iter()
+            .position(|f| f.key == "allow_scripts")
+            .unwrap();
+        key(&mut app, KeyCode::Enter);
+        let (title, bindings) = keymap::active(&app);
+        assert_eq!(title, "Config list");
+        assert!(!listed(bindings, false).contains("Char('t')"));
     }
 
     #[test]

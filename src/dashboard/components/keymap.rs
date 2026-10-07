@@ -313,30 +313,37 @@ const CONFIG: &[Binding] = &[
     MOVE,
 ];
 
+const LIST_ADD: Binding = b(
+    &[Char('a')],
+    "a",
+    "add",
+    "Add an item; Enter saves it, Esc cancels",
+    1,
+);
+const LIST_REMOVE: Binding = b(
+    &[Char('x'), Delete],
+    "x",
+    "remove",
+    "Remove the item (asks)",
+    2,
+);
+const LIST_BACK: Binding = b(&[Esc], "Esc", "back", "Back to the Config list", 1);
+
 /// Keys inside a Config list. Typing a new item takes every key until Enter or Esc.
-pub const CONFIG_LIST: &[Binding] = &[
-    b(
-        &[Char('a')],
-        "a",
-        "add",
-        "Add an item; Enter saves it, Esc cancels",
-        1,
-    ),
-    b(
-        &[Char('x'), Delete],
-        "x",
-        "remove",
-        "Remove the item (asks)",
-        2,
-    ),
+pub const CONFIG_LIST: &[Binding] = &[LIST_ADD, LIST_REMOVE, LIST_BACK, MOVE];
+
+/// Keys inside the Dotfiles list, which also sets whether a missing file is created.
+pub const DOTFILE_LIST: &[Binding] = &[
+    LIST_ADD,
+    LIST_REMOVE,
     b(
         &[Char('t')],
         "t",
         "create",
-        "Dotfiles: create the file when it is missing",
+        "Create the file when it is missing",
         3,
     ),
-    b(&[Esc], "Esc", "back", "Back to the Config list", 1),
+    LIST_BACK,
     MOVE,
 ];
 
@@ -381,8 +388,12 @@ pub fn tab(tab: Tab) -> &'static [Binding] {
 
 /// The keys of what is on screen now, with a title for the help overlay.
 pub fn active(app: &App) -> (&'static str, &'static [Binding]) {
-    if app.active_tab == Tab::Config && app.config.list_edit.is_some() {
-        return ("Config list", CONFIG_LIST);
+    if app.active_tab == Tab::Config {
+        match &app.config.list_edit {
+            Some(le) if le.is_dotfile() => return ("Dotfiles list", DOTFILE_LIST),
+            Some(_) => return ("Config list", CONFIG_LIST),
+            None => {}
+        }
     }
     (app.active_tab.title(), tab(app.active_tab))
 }
@@ -393,10 +404,11 @@ mod tests {
 
     #[test]
     fn every_footer_binding_has_a_hint_and_a_key() {
-        for bindings in Tab::all()
-            .iter()
-            .map(|t| tab(*t))
-            .chain([GLOBAL, CONFIG_LIST])
+        for bindings in
+            Tab::all()
+                .iter()
+                .map(|t| tab(*t))
+                .chain([GLOBAL, CONFIG_LIST, DOTFILE_LIST])
         {
             for binding in bindings {
                 assert!(!binding.help.is_empty());
