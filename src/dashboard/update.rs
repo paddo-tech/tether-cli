@@ -1550,7 +1550,13 @@ mod tests {
         app.active_tab = Tab::Security;
         key(&mut app, KeyCode::Char('j'));
         draw(&app);
-        let Some(Cmd::Reject(item)) = key(&mut app, KeyCode::Char('x')) else {
+        // Reject asks first, and Enter does not answer
+        assert!(key(&mut app, KeyCode::Char('x')).is_none());
+        draw(&app);
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('x'));
+        let Some(Cmd::Reject(item)) = armed_key(&mut app, KeyCode::Char('y')) else {
             panic!("expected a reject command");
         };
         assert_eq!(item.name, "left-pad");
@@ -1585,10 +1591,90 @@ mod tests {
             Some((vec!["left-pad".to_string()], 1))
         );
         app.overlays.clear();
-        let Some(Cmd::TrustKey { item, label }) = key(&mut app, KeyCode::Char('a')) else {
+        // Trust asks first and shows the whole fingerprint
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal).contains("key      SHA256:abc"));
+        let Some(Cmd::TrustKey { item, label }) = armed_key(&mut app, KeyCode::Char('y')) else {
             panic!("expected a trust command");
         };
         assert_eq!((item.name.as_str(), label.as_str()), ("laptop", "laptop"));
+    }
+
+    #[test]
+    fn approve_all_marks_items_with_advisories() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = with_inbox();
+        app.state.inbox.items[1].advisories = vec!["GHSA-1".into(), "GHSA-2".into()];
+        app.active_tab = Tab::Security;
+        key(&mut app, KeyCode::Char('A'));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("1 has OSV advisories"));
+        assert!(text.contains("left-pad 1.0.0 (npm)  ▲ 2 advisories"));
+    }
+
+    /// This machine "me", and "laptop" whose key this machine trusts.
+    fn machines_app() -> App {
+        let mut app = app();
+        app.state.sync_state = Some(
+            serde_json::from_value(serde_json::json!({
+                "machine_id": "me",
+                "last_sync": "2026-01-01T00:00:00Z",
+                "files": {},
+                "packages": {},
+            }))
+            .unwrap(),
+        );
+        app.state.machines = ["me", "laptop"]
+            .map(|id| crate::sync::MachineState {
+                hostname: id.into(),
+                ..crate::sync::MachineState::new(id)
+            })
+            .into();
+        app.state.trusted = vec![crate::packages::inbox::TrustedMachine {
+            machine_id: "laptop".into(),
+            fingerprint: "SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG".into(),
+        }];
+        app.active_tab = Tab::Machines;
+        app
+    }
+
+    #[test]
+    fn machines_tab_untrusts_after_y_with_the_full_fingerprint() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = machines_app();
+        // This machine's own key is never untrusted or trusted again
+        assert!(key(&mut app, KeyCode::Char('x')).is_none());
+        assert!(key(&mut app, KeyCode::Char('a')).is_none());
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Char('a'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Info, "laptop is trusted already"))
+        );
+        key(&mut app, KeyCode::Char('x'));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal)
+            .contains("key      SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"));
+        assert!(armed_key(&mut app, KeyCode::Enter).is_none());
+        key(&mut app, KeyCode::Char('x'));
+        let Some(Cmd::Untrust { machine_id, .. }) = armed_key(&mut app, KeyCode::Char('y')) else {
+            panic!("expected an untrust command");
+        };
+        assert_eq!(machine_id, "laptop");
     }
 
     #[test]

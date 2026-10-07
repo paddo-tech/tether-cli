@@ -113,6 +113,29 @@ pub enum Confirm {
         item: Box<crate::packages::inbox::InboxItem>,
         arming: Arming,
     },
+    /// Reject an Inbox item, as displayed.
+    Reject {
+        item: Box<crate::packages::inbox::InboxItem>,
+        arming: Arming,
+    },
+    /// Trust the key with this fingerprint for a machine. `item` is the Inbox item that asks
+    /// for it, when the user answers that item.
+    Trust {
+        machine_id: String,
+        label: String,
+        fingerprint: String,
+        /// The machine was trusted with another key
+        changed: bool,
+        item: Option<Box<crate::packages::inbox::InboxItem>>,
+        arming: Arming,
+    },
+    /// Stop trusting a machine's key.
+    Untrust {
+        machine_id: String,
+        label: String,
+        fingerprint: String,
+        arming: Arming,
+    },
 }
 
 impl Confirm {
@@ -138,6 +161,13 @@ impl Confirm {
         }
     }
 
+    pub fn reject(item: crate::packages::inbox::InboxItem) -> Self {
+        Confirm::Reject {
+            item: Box::new(item),
+            arming: Arming::default(),
+        }
+    }
+
     pub fn arming(&self) -> &Arming {
         match self {
             Confirm::Uninstall { arming, .. }
@@ -148,7 +178,10 @@ impl Confirm {
             | Confirm::ApproveWithoutOsv { arming, .. }
             | Confirm::RemoveMachine { arming, .. }
             | Confirm::ApproveAll { arming, .. }
-            | Confirm::ApproveSignatureFailed { arming, .. } => arming,
+            | Confirm::ApproveSignatureFailed { arming, .. }
+            | Confirm::Reject { arming, .. }
+            | Confirm::Trust { arming, .. }
+            | Confirm::Untrust { arming, .. } => arming,
         }
     }
 }
@@ -282,6 +315,24 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         }
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveSignatureFailed { item, .. } => security::approve(app, *item),
+        Confirm::Reject { item, .. } => Some(Cmd::Reject(item)),
+        Confirm::Trust {
+            machine_id,
+            label,
+            fingerprint,
+            item,
+            ..
+        } => Some(match item {
+            Some(item) => Cmd::TrustKey { item, label },
+            None => Cmd::TrustMachine {
+                machine_id,
+                fingerprint,
+                label,
+            },
+        }),
+        Confirm::Untrust {
+            machine_id, label, ..
+        } => Some(Cmd::Untrust { machine_id, label }),
         Confirm::ApproveWithoutOsv { items, .. } => {
             security::approve_all(app, items.into_iter().map(|(i, _)| i).collect(), false)
         }
@@ -445,6 +496,82 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             ),
             t.error,
         ),
+        Confirm::Reject { item, .. } => {
+            let what = match &item.kind {
+                crate::packages::inbox::Kind::TrustMachine { fingerprint, .. } => {
+                    format!("the key {} of machine {}", fingerprint, item.name)
+                }
+                crate::packages::inbox::Kind::Package => approve_all_line(item),
+            };
+            render_popup(
+                f,
+                app,
+                wait,
+                "Reject",
+                &format!(
+                    "Reject {}? It leaves the Inbox and comes back only if it changes.",
+                    what
+                ),
+                t.error,
+            )
+        }
+        Confirm::Trust {
+            machine_id,
+            label,
+            fingerprint,
+            changed,
+            ..
+        } => {
+            let mut msg = String::new();
+            if *changed {
+                msg.push_str(
+                    "THE KEY CHANGED. This machine was trusted with another key. If you did not \
+                     set it up again, someone may be signing as it. ",
+                );
+            }
+            msg.push_str(
+                "Compare this fingerprint with the one 'tether machines list' shows on that \
+                 machine. Trust the key? Package changes it signs then install without approval.",
+            );
+            let lines = [
+                format!("machine  {}", machine_label(label, machine_id)),
+                format!("key      {}", fingerprint),
+            ];
+            render_list_popup(
+                f,
+                app,
+                wait,
+                "Trust machine key",
+                &msg,
+                &lines,
+                0,
+                &std::cell::Cell::new(lines.len()),
+                if *changed { t.error } else { t.warn },
+            )
+        }
+        Confirm::Untrust {
+            machine_id,
+            label,
+            fingerprint,
+            ..
+        } => {
+            let lines = [
+                format!("machine  {}", machine_label(label, machine_id)),
+                format!("key      {}", fingerprint),
+            ];
+            render_list_popup(
+                f,
+                app,
+                wait,
+                "Untrust machine key",
+                "Stop trusting this key? Package changes from this machine then wait in the \
+                 Inbox, and its key waits there after the next sync.",
+                &lines,
+                0,
+                &std::cell::Cell::new(lines.len()),
+                t.error,
+            )
+        }
         Confirm::ApproveAll {
             items,
             from,
@@ -461,13 +588,28 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                     .map(|m| format!(" from {}", m))
                     .unwrap_or_default()
             );
+            let advised = items.iter().filter(|i| !i.advisories.is_empty()).count();
+            if advised > 0 {
+                msg.push_str(&format!(
+                    " {} {} OSV advisories (marked ▲).",
+                    advised,
+                    if advised == 1 { "has" } else { "have" }
+                ));
+            }
             if *held > 0 {
                 msg.push_str(&format!(
                     " {} malicious or with a failed signature stay held.",
                     held
                 ));
             }
-            let lines: Vec<String> = items.iter().map(approve_all_line).collect();
+            let lines: Vec<String> = items
+                .iter()
+                .map(|i| match i.advisories.len() {
+                    0 => approve_all_line(i),
+                    1 => format!("{}  ▲ 1 advisory", approve_all_line(i)),
+                    n => format!("{}  ▲ {} advisories", approve_all_line(i), n),
+                })
+                .collect();
             render_list_popup(
                 f,
                 app,
@@ -480,6 +622,15 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 t.ok,
             )
         }
+    }
+}
+
+/// A machine's hostname with its id, or the id alone when it has no other name.
+fn machine_label(label: &str, machine_id: &str) -> String {
+    if label == machine_id {
+        machine_id.to_string()
+    } else {
+        format!("{} ({})", label, machine_id)
     }
 }
 

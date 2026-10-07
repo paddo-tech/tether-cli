@@ -58,6 +58,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         KeyCode::Enter => toggle_expand(app),
         KeyCode::Esc if app.machines.expanded.is_some() => app.machines.expanded = None,
         KeyCode::Char('p') => open_profile_picker(app),
+        KeyCode::Char('a') => confirm_trust(app),
+        KeyCode::Char('x') => confirm_untrust(app),
         KeyCode::Char('D') => {
             clamp_cursor(&mut app.machines.cursor, len);
             if let Some(id) = app
@@ -96,6 +98,87 @@ fn toggle_expand(app: &mut App) {
     } else {
         app.machines.expanded = Some(m.machine_id.clone());
     }
+}
+
+/// The machine at the cursor, with its display name, unless it is this machine.
+fn other_machine(app: &mut App, this: &str) -> Option<(String, String)> {
+    clamp_cursor(&mut app.machines.cursor, app.state.machines.len());
+    let m = app.state.machines.get(app.machines.cursor)?;
+    let found = (m.machine_id.clone(), display_name(m));
+    if found.0 == app.machine_id() {
+        app.flash_info(this);
+        return None;
+    }
+    Some(found)
+}
+
+/// Ask before trusting the key that signs the selected machine's record, with its full
+/// fingerprint. An Inbox item for that key is answered as the Security tab answers it.
+fn confirm_trust(app: &mut App) {
+    let Some((id, label)) = other_machine(app, "This machine trusts its own key") else {
+        return;
+    };
+    let pending = app
+        .state
+        .inbox
+        .items
+        .iter()
+        .find(|i| i.name == id && matches!(i.kind, Kind::TrustMachine { .. }));
+    let confirm = match pending {
+        Some(item) => {
+            let Kind::TrustMachine { fingerprint, .. } = &item.kind else {
+                return;
+            };
+            Confirm::Trust {
+                machine_id: id,
+                label,
+                fingerprint: fingerprint.clone(),
+                changed: item.reasons.contains(&Reason::KeyChanged),
+                item: Some(Box::new(item.clone())),
+                arming: Default::default(),
+            }
+        }
+        None if app.state.trusted.iter().any(|k| k.machine_id == id) => {
+            app.flash_info(format!("{} is trusted already", label));
+            return;
+        }
+        None => {
+            let fingerprint = crate::sync::SyncEngine::sync_path()
+                .ok()
+                .and_then(|p| crate::packages::inbox::signing_fingerprint(&p, &id));
+            let Some(fingerprint) = fingerprint else {
+                app.flash_info(format!("{} has no signed machine record", label));
+                return;
+            };
+            Confirm::Trust {
+                machine_id: id,
+                label,
+                fingerprint,
+                changed: false,
+                item: None,
+                arming: Default::default(),
+            }
+        }
+    };
+    app.overlays.push(Overlay::Confirm(confirm));
+}
+
+/// Ask before removing the selected machine's key from the trust store.
+fn confirm_untrust(app: &mut App) {
+    let Some((id, label)) = other_machine(app, "This machine cannot untrust itself") else {
+        return;
+    };
+    let Some(key) = app.state.trusted.iter().find(|k| k.machine_id == id) else {
+        app.flash_info(format!("{} is not trusted", label));
+        return;
+    };
+    let confirm = Confirm::Untrust {
+        machine_id: id,
+        label,
+        fingerprint: key.fingerprint.clone(),
+        arming: Default::default(),
+    };
+    app.overlays.push(Overlay::Confirm(confirm));
 }
 
 /// Pick this machine's profile, starting on the current one.

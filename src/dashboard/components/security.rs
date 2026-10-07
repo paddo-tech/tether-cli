@@ -67,11 +67,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
                 app.overlays
                     .push(Overlay::Confirm(Confirm::approve_signature_failed(item)));
                 None
+            } else if let Kind::TrustMachine { fingerprint, .. } = &item.kind {
+                app.overlays.push(Overlay::Confirm(Confirm::Trust {
+                    machine_id: item.name.clone(),
+                    label: machine_name(app, &item.name),
+                    fingerprint: fingerprint.clone(),
+                    changed: item.reasons.contains(&Reason::KeyChanged),
+                    item: Some(Box::new(item)),
+                    arming: Default::default(),
+                }));
+                None
             } else {
                 approve(app, item)
             }
         }),
-        KeyCode::Char('x') => selected(app).map(|item| Cmd::Reject(Box::new(item))),
+        KeyCode::Char('x') => {
+            if let Some(item) = selected(app) {
+                app.overlays.push(Overlay::Confirm(Confirm::reject(item)));
+            }
+            None
+        }
         KeyCode::Char('A') => {
             confirm_approve_all(app);
             None
@@ -308,7 +323,7 @@ pub(super) fn pill(text: &str, color: Color, t: &Theme) -> Span<'static> {
     Span::styled(format!(" {} ", text), style)
 }
 
-fn machine_name(app: &App, id: &str) -> String {
+pub(super) fn machine_name(app: &App, id: &str) -> String {
     app.state
         .machines
         .iter()
