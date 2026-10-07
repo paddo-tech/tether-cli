@@ -328,16 +328,11 @@ async fn uninstall_package(
         }
     }
 
-    // Uninstall
-    match manager.uninstall(&pkg.name).await {
-        Ok(()) => {
-            Output::success(&format!("Uninstalled {} ({})", pkg.name, pkg.manager));
-        }
-        Err(e) => {
-            Output::error(&format!("Failed to uninstall {}: {}", pkg.name, e));
-        }
-    }
-
+    manager
+        .uninstall(&pkg.name)
+        .await
+        .map_err(|e| e.context(format!("Failed to uninstall {}", pkg.name)))?;
+    Output::success(&format!("Uninstalled {} ({})", pkg.name, pkg.manager));
     Ok(())
 }
 

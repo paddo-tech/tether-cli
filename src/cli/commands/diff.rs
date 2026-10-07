@@ -9,21 +9,14 @@ use std::collections::{HashMap, HashSet};
 pub async fn run(machine: Option<&str>) -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("Config version") {
-                Output::error(&msg);
-            } else {
-                Output::error("Tether is not initialized. Run 'tether init' first.");
-            }
-            return Ok(());
-        }
+        Err(e) if e.to_string().contains("Config version") => return Err(e),
+        Err(_) => anyhow::bail!("Tether is not initialized. Run 'tether init' first."),
     };
 
     if !config.has_personal_features() {
-        Output::warning("Diff not available without personal features (no personal repo)");
-        Output::info("Use 'tether team files diff' for team file differences");
-        return Ok(());
+        anyhow::bail!(
+            "Diff is not available without personal features (no personal repo). Use 'tether team files diff' for team files"
+        );
     }
 
     let state = SyncState::load()?;
@@ -47,18 +40,13 @@ pub async fn run(machine: Option<&str>) -> Result<()> {
                 show_machine_diff(&current_state, &other_machine)?;
             }
             None => {
-                Output::error(&format!("Machine '{}' not found", target_machine));
-                Output::info("Use 'tether machines list' to see available machines");
-
-                // List available machines
                 let machines = MachineState::list_all(&sync_path)?;
-                if !machines.is_empty() {
-                    println!();
-                    Output::info("Available machines:");
-                    for m in machines {
-                        println!("  • {}", m.machine_id);
-                    }
-                }
+                let ids: Vec<String> = machines.into_iter().map(|m| m.machine_id).collect();
+                anyhow::bail!(
+                    "Machine '{}' not found. Machines: {}",
+                    target_machine,
+                    ids.join(", ")
+                );
             }
         }
     } else {

@@ -8,15 +8,8 @@ use owo_colors::OwoColorize;
 pub async fn run() -> Result<()> {
     let config = match Config::load() {
         Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("Config version") {
-                Output::error(&msg);
-            } else {
-                Output::error("Tether is not initialized. Run 'tether init' first.");
-            }
-            return Ok(());
-        }
+        Err(e) if e.to_string().contains("Config version") => return Err(e),
+        Err(_) => anyhow::bail!("Tether is not initialized. Run 'tether init' first."),
     };
 
     let state = SyncState::load()?;

@@ -385,13 +385,10 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
                                         crate::security::scan_for_secrets(&entry.path())
                                     {
                                         if !findings.is_empty() {
-                                            Output::error(&format!(
-                                                "Team push blocked: {} contains {} secret(s)",
+                                            anyhow::bail!(
+                                                "Team push blocked: {} contains {} secret(s). Remove sensitive data first",
                                                 entry.file_name().to_string_lossy(),
                                                 findings.len()
-                                            ));
-                                            anyhow::bail!(
-                                                "Cannot push secrets to team repo. Remove sensitive data first."
                                             );
                                         }
                                     }

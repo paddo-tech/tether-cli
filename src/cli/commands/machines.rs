@@ -13,8 +13,7 @@ use std::path::Path;
 pub async fn list() -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
 
     let sync_path = SyncEngine::sync_path()?;
@@ -162,12 +161,11 @@ pub async fn profile_set(profile: &str) -> Result<()> {
     let mut config = Config::load()?;
 
     if !Config::is_safe_profile_name(profile) {
-        Output::error(&format!("Invalid profile name: '{}'", profile));
-        return Ok(());
+        anyhow::bail!("Invalid profile name: '{}'", profile);
     }
 
     if !config.profiles.contains_key(profile) {
-        Output::error(&format!(
+        anyhow::bail!(
             "Profile '{}' not found. Available profiles: {}",
             profile,
             if config.profiles.is_empty() {
@@ -180,8 +178,7 @@ pub async fn profile_set(profile: &str) -> Result<()> {
                     .collect::<Vec<_>>()
                     .join(", ")
             }
-        ));
-        return Ok(());
+        );
     }
 
     let state = SyncState::load()?;
@@ -219,8 +216,7 @@ pub async fn profile_unset() -> Result<()> {
 pub async fn rename(old: &str, new: &str) -> Result<()> {
     let mut config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
 
     let sync_path = SyncEngine::sync_path()?;
@@ -228,15 +224,13 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
     let mut state = SyncState::load()?;
     if state.machine_id != old {
-        Output::error(&format!(
+        anyhow::bail!(
             "Only machine '{}' can rename itself. Run 'tether machines rename' on that machine",
             old
-        ));
-        return Ok(());
+        );
     }
     if !valid_machine_id(new) {
-        Output::error("Machine names use letters, digits, '.', '_' and '-' only");
-        return Ok(());
+        anyhow::bail!("Machine names use letters, digits, '.', '_' and '-' only");
     }
     let machines_dir = sync_path.join("machines");
 
@@ -244,13 +238,11 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
     let new_file = machines_dir.join(format!("{}.json", new));
 
     if !old_file.exists() {
-        Output::error(&format!("Machine '{}' not found", old));
-        return Ok(());
+        anyhow::bail!("Machine '{}' not found", old);
     }
 
     if new_file.exists() {
-        Output::error(&format!("Machine '{}' already exists", new));
-        return Ok(());
+        anyhow::bail!("Machine '{}' already exists", new);
     }
 
     signing::rename_own_record(&sync_path, old, new)?;
@@ -284,33 +276,25 @@ pub async fn rename(old: &str, new: &str) -> Result<()> {
 pub async fn remove(name: &str, yes: bool) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
 
     if !valid_machine_id(name) {
-        Output::error(&format!("Invalid machine id '{}'", name));
-        return Ok(());
+        anyhow::bail!("Invalid machine id '{}'", name);
     }
 
     let state = SyncState::load()?;
 
     if state.machine_id == name {
-        Output::error("Cannot remove the current machine");
-        Output::info("Use this command from a different machine to remove this one");
-        return Ok(());
+        anyhow::bail!(
+            "Cannot remove the current machine. Run this command on another machine to remove this one"
+        );
     }
 
     let sync_path = SyncEngine::sync_path()?;
     // A sync may replace the record while the question is open, so only the record shown
     // is removed
-    let digest = match record_digest(&sync_path, name) {
-        Ok(digest) => digest,
-        Err(e) => {
-            Output::error(&e.to_string());
-            return Ok(());
-        }
-    };
+    let digest = record_digest(&sync_path, name)?;
 
     let record = MachineState::list_all(&sync_path)?
         .into_iter()
@@ -459,8 +443,7 @@ fn record_digest(sync_path: &Path, name: &str) -> Result<String> {
 pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     if !config.has_personal_features() {
-        Output::warning("Machine management not available in team-only mode");
-        return Ok(());
+        anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
     let fingerprint = match fingerprint {
@@ -497,8 +480,7 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
 
 pub async fn untrust(name: &str) -> Result<()> {
     if SyncState::load()?.machine_id == name {
-        Output::error("Cannot untrust the current machine");
-        return Ok(());
+        anyhow::bail!("Cannot untrust the current machine");
     }
     if inbox::untrust_machine(name)? {
         Output::success(&format!("Machine {} is no longer trusted", name));
@@ -512,13 +494,11 @@ pub async fn profile_create(name: &str) -> Result<()> {
     let mut config = Config::load()?;
 
     if !Config::is_safe_profile_name(name) {
-        Output::error(&format!("Invalid profile name: '{}'", name));
-        return Ok(());
+        anyhow::bail!("Invalid profile name: '{}'", name);
     }
 
     if config.profiles.contains_key(name) {
-        Output::error(&format!("Profile '{}' already exists", name));
-        return Ok(());
+        anyhow::bail!("Profile '{}' already exists", name);
     }
 
     // Gather all known dotfiles from all existing profiles
@@ -627,8 +607,7 @@ pub async fn profile_edit(name: &str) -> Result<()> {
     let profile = match config.profiles.get(name) {
         Some(p) => p.clone(),
         None => {
-            Output::error(&format!("Profile '{}' not found", name));
-            return Ok(());
+            anyhow::bail!("Profile '{}' not found", name);
         }
     };
 

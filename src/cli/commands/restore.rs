@@ -71,15 +71,9 @@ pub async fn run(timestamp: Option<&str>, file: Option<&str>) -> Result<()> {
     }
 
     // Do the restore
-    match restore_file(&selected_timestamp, &category, &rel_path) {
-        Ok(dest) => {
-            Output::success(&format!("Restored to {}", dest.display()));
-        }
-        Err(e) => {
-            Output::error(&format!("Failed to restore: {}", e));
-        }
-    }
-
+    let dest = restore_file(&selected_timestamp, &category, &rel_path)
+        .map_err(|e| e.context("Failed to restore"))?;
+    Output::success(&format!("Restored to {}", dest.display()));
     Ok(())
 }
 

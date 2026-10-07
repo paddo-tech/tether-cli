@@ -16,10 +16,7 @@ pub async fn get(key: &str) -> Result<()> {
     for k in &keys {
         match current.get(k) {
             Some(v) => current = v,
-            None => {
-                Output::error(&format!("Key '{}' not found in config", key));
-                return Ok(());
-            }
+            None => anyhow::bail!("Key '{}' not found in config", key),
         }
     }
 
@@ -66,36 +63,49 @@ fn parse_value(value: &str) -> Result<toml::Value> {
 }
 
 /// Tables at their defaults are not serialized, so missing tables on the path are created.
-/// A key under a created table that does not survive the round trip through `Config` is unknown.
+/// `Config` ignores keys it does not know, so a key that does not survive the round trip
+/// through `Config` is unknown, unless it is a known key at a value serialization skips. A
+/// known key rejects a datetime, and an unknown key accepts anything.
 fn set_key(config: &Config, key: &str, new_value: toml::Value) -> Result<Config> {
+    let keys: Vec<&str> = key.split('.').collect();
+    let updated: Config = with_key(config, key, new_value.clone())?.try_into()?;
+    let check = toml::Value::try_from(&updated)?;
+    if keys.iter().try_fold(&check, |v, k| v.get(k)) == Some(&new_value) {
+        return Ok(updated);
+    }
+    let probe = toml::Value::Datetime("1979-05-27T07:32:00Z".parse()?);
+    if with_key(config, key, probe)?.try_into::<Config>().is_ok() {
+        anyhow::bail!("Unknown config key '{}'", key);
+    }
+    Ok(updated)
+}
+
+/// `config` as TOML with `key` set to `value`.
+fn with_key(config: &Config, key: &str, value: toml::Value) -> Result<toml::Value> {
     let mut toml_value = toml::Value::try_from(config)?;
     let keys: Vec<&str> = key.split('.').collect();
-
-    let mut created = false;
     let mut current = &mut toml_value;
     for k in &keys[..keys.len() - 1] {
         let Some(table) = current.as_table_mut() else {
             anyhow::bail!("Cannot set value at '{}'", key);
         };
-        current = table.entry(k.to_string()).or_insert_with(|| {
-            created = true;
-            toml::Value::Table(toml::map::Map::new())
-        });
+        current = table
+            .entry(k.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
     }
     let Some(table) = current.as_table_mut() else {
         anyhow::bail!("Cannot set value at '{}'", key);
     };
-    table.insert(keys[keys.len() - 1].to_string(), new_value.clone());
-
-    let updated: Config = toml_value.try_into()?;
-    let check = toml::Value::try_from(&updated)?;
-    if created && keys.iter().try_fold(&check, |v, k| v.get(k)) != Some(&new_value) {
-        anyhow::bail!("Key path '{}' not found in config", key);
-    }
-    Ok(updated)
+    table.insert(keys[keys.len() - 1].to_string(), value);
+    Ok(toml_value)
 }
 
 pub async fn edit() -> Result<()> {
+    if !Prompt::is_interactive() {
+        anyhow::bail!(
+            "tether config edit needs a terminal. Use 'tether config set <key> <value>' instead"
+        );
+    }
     let config_path = Config::config_path()?;
 
     // Get editor from environment or use default
@@ -121,13 +131,13 @@ pub async fn edit() -> Result<()> {
             Ok(_) => {
                 Output::success("Config updated successfully");
             }
-            Err(e) => {
-                Output::error(&format!("Config validation failed: {}", e));
-                Output::warning("Your changes were saved but contain errors");
-            }
+            Err(e) => anyhow::bail!(
+                "Config validation failed: {}. Your changes were saved but contain errors",
+                e
+            ),
         }
     } else {
-        Output::warning("Editor exited with error");
+        anyhow::bail!("Editor exited with error");
     }
 
     Ok(())
@@ -485,15 +495,10 @@ pub async fn features_list() -> Result<()> {
 pub async fn features_enable(feature: &str) -> Result<()> {
     let mut config = Config::load()?;
 
-    match set_feature(&mut config.features, feature, true) {
-        Ok(()) => {
-            config.save()?;
-            Output::success(&format!("Enabled {}", feature));
-            show_feature_guidance(feature, true);
-        }
-        Err(e) => Output::error(&e.to_string()),
-    }
-
+    set_feature(&mut config.features, feature, true)?;
+    config.save()?;
+    Output::success(&format!("Enabled {}", feature));
+    show_feature_guidance(feature, true);
     Ok(())
 }
 
@@ -501,14 +506,9 @@ pub async fn features_enable(feature: &str) -> Result<()> {
 pub async fn features_disable(feature: &str) -> Result<()> {
     let mut config = Config::load()?;
 
-    match set_feature(&mut config.features, feature, false) {
-        Ok(()) => {
-            config.save()?;
-            Output::success(&format!("Disabled {}", feature));
-        }
-        Err(e) => Output::error(&e.to_string()),
-    }
-
+    set_feature(&mut config.features, feature, false)?;
+    config.save()?;
+    Output::success(&format!("Disabled {}", feature));
     Ok(())
 }
 
@@ -603,6 +603,11 @@ mod tests {
         let value = toml::Value::Boolean(true);
         assert!(set_key(&Config::default(), "nope.enabled", value.clone()).is_err());
         assert!(set_key(&Config::default(), "dashboard.nope", value).is_err());
+        // An existing table ignores an unknown key as well
+        let five = toml::Value::Integer(5);
+        assert!(set_key(&Config::default(), "sync.nope", five).is_err());
+        let interval = toml::Value::String("10m".into());
+        assert!(set_key(&Config::default(), "sync.interval", interval).is_ok());
     }
 
     #[test]

@@ -78,8 +78,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
         };
 
         if repo_url.is_empty() {
-            Output::error("Repository URL cannot be empty");
-            return Err(anyhow::anyhow!("Repository URL is required"));
+            anyhow::bail!("Repository URL cannot be empty");
         }
 
         config.backend.url = repo_url.clone();
@@ -259,8 +258,7 @@ fn assign_profile_during_init(config: &mut Config) -> Result<()> {
             return Ok(());
         }
         if !Config::is_safe_profile_name(&name) {
-            Output::error(&format!("Invalid profile name: '{}'", name));
-            return Ok(());
+            anyhow::bail!("Invalid profile name: '{}'", name);
         }
         if !config.profiles.contains_key(&name) {
             // Start empty — first sync exports local dotfiles, packages detected locally

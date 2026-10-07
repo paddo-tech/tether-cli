@@ -93,9 +93,9 @@ pub async fn init(project_path: Option<&str>) -> Result<()> {
     );
 
     if collaborators.is_empty() {
-        Output::warning("No collaborators with write access found");
-        Output::info("Add collaborators to your GitHub repo first");
-        return Ok(());
+        anyhow::bail!(
+            "No collaborators with write access found. Add collaborators to your GitHub repo first"
+        );
     }
 
     Output::info("Collaborators with write access:");
@@ -712,8 +712,7 @@ pub async fn add_project(project_path: &str) -> Result<()> {
         .unwrap_or_default();
 
     if collabs.is_empty() {
-        Output::error("No collabs available. Create one with 'tether collab init' first.");
-        return Ok(());
+        anyhow::bail!("No collabs available. Create one with 'tether collab init' first.");
     }
 
     // Select collab to add to

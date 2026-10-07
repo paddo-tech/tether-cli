@@ -1,9 +1,10 @@
-use anyhow::Result;
 use clap::Parser;
+use std::process::ExitCode;
 use tether::cli::{Cli, Prompt};
 
+/// Every failure prints one `Error: ...` line on stderr and exits 1.
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     // The daemon's stderr is daemon.log, and launchd and systemd start it without RUST_LOG.
     let default_filter = if cli.is_daemon_run() { "info" } else { "error" };
@@ -11,7 +12,11 @@ async fn main() -> Result<()> {
         .init();
     inquire::set_global_render_config(Prompt::theme());
 
-    cli.run().await?;
-
-    Ok(())
+    match cli.run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {:#}", e);
+            ExitCode::FAILURE
+        }
+    }
 }
