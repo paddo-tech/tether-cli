@@ -264,6 +264,7 @@ pub async fn show(name: &str) -> Result<()> {
         signer.as_deref().unwrap_or("no valid signature"),
     );
     let trust = match (&trusted, &signer) {
+        _ if id == this => "this machine".to_string(),
         (Some(t), Some(s)) if t == s => "trusted".to_string(),
         (Some(t), _) => format!("trusted key is {}, which did not sign this record", t),
         (None, _) => "not trusted".to_string(),

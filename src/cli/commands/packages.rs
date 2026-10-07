@@ -324,13 +324,10 @@ pub async fn install(id: &str) -> Result<()> {
                 .any(|n| membership::canonical_id(manager, n) == canonical)
         })
     };
-    let records = crate::sync::MachineState::list_all(&sync_path)?;
-    if records
-        .iter()
-        .any(|m| m.machine_id == machine_id && lists(m))
-    {
+    if installed_here(manager, name).await? {
         anyhow::bail!("{} is already installed here", id);
     }
+    let records = crate::sync::MachineState::list_all(&sync_path)?;
     let sources: Vec<&str> = records
         .iter()
         .filter(|m| m.machine_id != machine_id && lists(m))
@@ -368,6 +365,35 @@ pub async fn install(id: &str) -> Result<()> {
     forget_removal(&sync_path, &machine_id, manager, name)?;
     Output::success(&format!("Installed {}", canonical));
     Ok(())
+}
+
+/// Whether the manager lists the package as installed now. This machine's record lists it
+/// only after the next sync.
+async fn installed_here(manager: &str, name: &str) -> Result<bool> {
+    let brew = BrewManager::new();
+    let names: Vec<String> = match manager {
+        "brew_formulae" => brew
+            .list_installed()
+            .await?
+            .into_iter()
+            .map(|p| p.name)
+            .collect(),
+        "brew_casks" => brew.list_installed_casks().await?,
+        "brew_taps" => brew.list_taps().await?,
+        key => match crate::packages::manager_for_key(key) {
+            Some(m) if m.is_available().await => m
+                .list_installed()
+                .await?
+                .into_iter()
+                .map(|p| p.name)
+                .collect(),
+            _ => Vec::new(),
+        },
+    };
+    let canonical = membership::canonical_id(manager, name);
+    Ok(names
+        .iter()
+        .any(|n| membership::canonical_id(manager, n) == canonical))
 }
 
 /// A sync uninstalls a package this machine removed, so an install takes it off that list.
