@@ -27,6 +27,7 @@ Never run Tether or a package manager against your own `~/.tether` or your own m
 - Setup: the first test runs `tests/e2e/images.sh` once. The script builds HEAD and v1.11.10, v1.12.0 and v1.13.1 from `git archive` in a `rust:1-bookworm` container, into `target/e2e/bin/`. HEAD includes uncommitted changes to tracked files. The script also builds the machine images, tagged by a hash of `tests/e2e/docker/`. Each step skips work that is done. The first run takes a few minutes.
 - `TETHER_E2E_FLAP_REF=<git ref>` sets the 1.x binary of `config_flap`, for example a 1.x patch commit.
 - Logs: `target/e2e/logs/<test>/<machine>.log` has every command, its exit code and its output. The fleet tests also write `events.log` and `summary.txt`.
+- CI runs `cargo test --locked --lib --test cli` on macOS and Linux. The e2e HEAD binary is keyed on every top-level entry of the archive except `tests`, `website`, `fastlane`, `.github` and `*.md`.
 - Tests: `fleet` (a mixed 1.x and HEAD fleet; checks a to k are listed in `tests/e2e/fleet.rs`), `config_flap`, `trust`, `inbox`, `upgrade_never_downgrades`, `casks_never_import_on_linux`, `systemd_install_needs_a_user_session`, `notify_send_once_per_inbox_batch` and `cli_contract`.
 
 ## CLI Commands
@@ -53,7 +54,7 @@ Never run Tether or a package manager against your own `~/.tether` or your own m
 | `identity` | Manage age identity for team secrets |
 | `collab` | Collaborator-based project secret sharing |
 
-CLI rules: every error exits 1 with one `Error:` line on stderr. Every prompt goes through `cli::Prompt`: `-y` confirms and takes defaults, and without a terminal a prompt fails and names `-y`. CLI text styles through `cli::output::Colorize`, never `owo_colors` directly, so pipes and `NO_COLOR` get plain text. Machine arguments take an id or a unique hostname (`machines::resolve`). Package ids are `manager:name`; `brew:` and `cask:` stand for `brew_formulae:` and `brew_casks:`. `--json` is experimental in 2.0.
+CLI rules: every error exits 1 with one `Error:` line on stderr. A clap usage error, such as an unknown flag or a missing argument, exits 2, as is the convention. Every prompt goes through `cli::Prompt`: `-y` confirms and takes defaults, and without a terminal a prompt fails and names `-y`. `-y` never approves an inbox item or trusts a key, with one exception: `packages approve --all -y` approves the listed packages. It still leaves machine keys, malicious packages, packages whose record fails its signature and packages without a version or tap to name. A review that approves or trusts uses `Prompt::review`, which `-y` never answers. CLI text styles through `cli::output::Colorize`, never `owo_colors` directly, so pipes and `NO_COLOR` get plain text. Machine arguments take an id or a hostname of exactly one trusted machine or this machine (`machines::resolve`). `machines trust` also takes the hostname of a new machine whose record a key signs. An unknown name is an error. Package ids are `manager:name`; `brew:` and `cask:` stand for `brew_formulae:` and `brew_casks:`. `--json` is experimental in 2.0.
 
 ## Key Dependencies
 
