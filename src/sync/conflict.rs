@@ -79,8 +79,6 @@ impl FileConflict {
 
     /// Prompt user for resolution
     pub fn prompt_resolution(&self) -> Result<ConflictResolution> {
-        use inquire::Select;
-
         let options = vec![
             "Keep local version",
             "Use remote version",
@@ -88,16 +86,17 @@ impl FileConflict {
             "Skip (decide later)",
         ];
 
-        let choice = Select::new(
+        // -y skips: it never picks a side of a conflict
+        let choice = crate::cli::Prompt::select(
             &format!("How do you want to resolve {}?", self.file_path),
             options,
-        )
-        .prompt()?;
+            3,
+        )?;
 
         Ok(match choice {
-            "Keep local version" => ConflictResolution::KeepLocal,
-            "Use remote version" => ConflictResolution::UseRemote,
-            "Launch merge tool" => ConflictResolution::Merged,
+            0 => ConflictResolution::KeepLocal,
+            1 => ConflictResolution::UseRemote,
+            2 => ConflictResolution::Merged,
             _ => ConflictResolution::Skip,
         })
     }

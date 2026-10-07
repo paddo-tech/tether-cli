@@ -25,7 +25,8 @@ use clap::{Parser, Subcommand};
 #[command(about = "Sync your dev environment across machines", long_about = None)]
 #[command(version)]
 pub struct Cli {
-    /// Skip confirmation prompts (non-interactive mode)
+    /// Answer yes to confirmations and take the default answer of other questions. Approvals,
+    /// key trust and choices without a safe default still need a terminal or their own flags
     #[arg(short = 'y', long, global = true)]
     pub yes: bool,
 
@@ -269,10 +270,17 @@ pub enum MachineProfileAction {
     },
     /// Remove profile assignment from this machine
     Unset,
-    /// Create a new profile (interactive wizard)
+    /// Create a profile. Asks about each dotfile, folder and package manager in a terminal;
+    /// -y takes every default, and --from copies a profile without asking
     Create {
         /// Profile name
         name: String,
+        /// Copy this existing profile
+        #[arg(long)]
+        from: Option<String>,
+        /// Package managers of the profile, separated by commas (brew, npm, pnpm, bun, gem, uv)
+        #[arg(long, value_delimiter = ',')]
+        managers: Option<Vec<String>>,
     },
     /// Edit an existing profile
     Edit {
@@ -648,7 +656,11 @@ impl Cli {
                 MachineAction::Profile { action } => match action {
                     MachineProfileAction::Set { profile } => machines::profile_set(profile).await,
                     MachineProfileAction::Unset => machines::profile_unset().await,
-                    MachineProfileAction::Create { name } => machines::profile_create(name).await,
+                    MachineProfileAction::Create {
+                        name,
+                        from,
+                        managers,
+                    } => machines::profile_create(name, from.as_deref(), managers.as_deref()).await,
                     MachineProfileAction::Edit { name } => machines::profile_edit(name).await,
                     MachineProfileAction::List => machines::profile_list().await,
                 },

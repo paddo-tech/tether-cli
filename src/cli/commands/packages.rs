@@ -413,7 +413,7 @@ fn reviewed(
     let item = inbox::Inbox::load()?.find(id)?.clone();
     match expected {
         Some(expected) => check_expected(&item, expected)?,
-        None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+        None if Prompt::is_interactive() && !Prompt::assume_yes() => {
             Output::info(&describe(&item));
             if !Prompt::confirm(question, false)? {
                 return Ok(None);
@@ -464,7 +464,7 @@ fn confirm_signature_failed(item: &InboxItem) -> Result<bool> {
             return Ok(false);
         }
     }
-    Prompt::confirm("Approve it anyway?", false)
+    Prompt::question("Approve it anyway?", false)
 }
 
 /// Approve exactly the item shown to the user. The caller holds the sync lock.
@@ -507,12 +507,12 @@ async fn osv_checked(item: &InboxItem) -> Result<Option<Option<String>>> {
         Err(e) => e,
     };
     let unchecked = match e.downcast::<inbox::OsvUnchecked>() {
-        Ok(unchecked) if std::io::IsTerminal::is_terminal(&std::io::stdin()) => unchecked,
+        Ok(unchecked) if Prompt::is_interactive() && !Prompt::assume_yes() => unchecked,
         Ok(unchecked) => return Err(unchecked.into()),
         Err(e) => return Err(e),
     };
     Output::warning(&unchecked.to_string());
-    if Prompt::confirm("Install it without the malicious-package check?", false)? {
+    if Prompt::question("Install it without the malicious-package check?", false)? {
         Ok(Some(unchecked.version))
     } else {
         Ok(None)

@@ -127,6 +127,42 @@ fn status_without_init_exits_1() {
 }
 
 #[test]
+fn prompts_without_a_terminal_name_y_and_y_answers_them() {
+    let h = home();
+    let profiles = |h: &Path| {
+        let text = std::fs::read_to_string(h.join(".tether/config.toml")).unwrap();
+        toml::from_str::<tether::Config>(&text).unwrap().profiles
+    };
+    tether(h.path())
+        .args(["machines", "profile", "create", "server"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("needs a terminal"))
+        .stderr(predicate::str::contains("-y"));
+    assert!(!profiles(h.path()).contains_key("server"));
+
+    tether(h.path())
+        .args(["-y", "machines", "profile", "create", "server"])
+        .args(["--managers", "npm,uv"])
+        .assert()
+        .success();
+    assert_eq!(profiles(h.path())["server"].packages, ["npm", "uv"]);
+
+    tether(h.path())
+        .args([
+            "machines", "profile", "create", "server2", "--from", "server",
+        ])
+        .assert()
+        .success();
+    assert_eq!(profiles(h.path())["server2"].packages, ["npm", "uv"]);
+    fails(
+        h.path(),
+        &["machines", "profile", "create", "x", "--from", "nope"],
+        "not found",
+    );
+}
+
+#[test]
 fn piped_output_has_no_colour() {
     let h = home();
     for args in [

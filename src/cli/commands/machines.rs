@@ -452,7 +452,7 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
             let Some(current) = inbox::signing_fingerprint(&sync_path, name) else {
                 anyhow::bail!("Machine {} has no signed machine record", name);
             };
-            if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            if !Prompt::is_interactive() || Prompt::assume_yes() {
                 anyhow::bail!(
                     "Check the key on {}, then run 'tether machines trust {} {}'",
                     name,
@@ -461,8 +461,8 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
                 );
             }
             Output::info(&format!("Machine {} signs with key {}", name, current));
-            if !crate::cli::Prompt::confirm(
-                "Trust this key? Compare it with 'tether machines list' on that machine",
+            if !Prompt::confirm(
+                "Trust this key? Compare it with 'tether machines show' on that machine",
                 false,
             )? {
                 return Ok(());
@@ -490,7 +490,15 @@ pub async fn untrust(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn profile_create(name: &str) -> Result<()> {
+const PROFILE_MANAGERS: [&str; 6] = ["brew", "npm", "pnpm", "bun", "gem", "uv"];
+
+/// Create a profile. `from` copies an existing profile without asking. `managers` sets the
+/// package managers instead of asking. With `-y`, the wizard takes every default answer.
+pub async fn profile_create(
+    name: &str,
+    from: Option<&str>,
+    managers: Option<&[String]>,
+) -> Result<()> {
     let mut config = Config::load()?;
 
     if !Config::is_safe_profile_name(name) {
@@ -499,6 +507,34 @@ pub async fn profile_create(name: &str) -> Result<()> {
 
     if config.profiles.contains_key(name) {
         anyhow::bail!("Profile '{}' already exists", name);
+    }
+    if let Some(unknown) = managers
+        .unwrap_or_default()
+        .iter()
+        .find(|m| !PROFILE_MANAGERS.contains(&m.as_str()))
+    {
+        anyhow::bail!(
+            "Unknown package manager '{}'. Managers: {}",
+            unknown,
+            PROFILE_MANAGERS.join(", ")
+        );
+    }
+
+    if let Some(from) = from {
+        let Some(mut profile) = config.profiles.get(from).cloned() else {
+            anyhow::bail!("Profile '{}' not found", from);
+        };
+        if let Some(managers) = managers {
+            profile.packages = managers.to_vec();
+        }
+        config.profiles.insert(name.to_string(), profile);
+        config.save()?;
+        Output::success(&format!("Created profile '{}' from '{}'", name, from));
+        Output::info(&format!(
+            "Assign it on a machine: tether machines profile set {}",
+            name
+        ));
+        return Ok(());
     }
 
     // Gather all known dotfiles from all existing profiles
@@ -539,7 +575,7 @@ pub async fn profile_create(name: &str) -> Result<()> {
         let path = &all_dotfiles[*idx];
         // Common files default to shared
         let default_shared = path == ".gitconfig" || path == ".gitignore_global";
-        let shared = Prompt::confirm(&format!("Share {} across profiles?", path), default_shared)?;
+        let shared = Prompt::question(&format!("Share {} across profiles?", path), default_shared)?;
         profile_dotfiles.push(crate::config::ProfileDotfileEntry::WithOptions {
             path: path.clone(),
             shared,
@@ -573,16 +609,20 @@ pub async fn profile_create(name: &str) -> Result<()> {
     };
     let dirs: Vec<String> = selected_dirs.iter().map(|i| all_dirs[*i].clone()).collect();
 
-    // Select package managers
-    let all_managers = ["brew", "npm", "pnpm", "bun", "gem", "uv"];
-    let manager_options: Vec<&str> = all_managers.to_vec();
-    let mgr_defaults: Vec<usize> = (0..all_managers.len()).collect();
-    let selected_managers =
-        Prompt::multi_select("Select package managers", manager_options, &mgr_defaults)?;
-    let packages: Vec<String> = selected_managers
-        .iter()
-        .map(|i| all_managers[*i].to_string())
-        .collect();
+    let packages: Vec<String> = match managers {
+        Some(managers) => managers.to_vec(),
+        None => {
+            let mgr_defaults: Vec<usize> = (0..PROFILE_MANAGERS.len()).collect();
+            Prompt::multi_select(
+                "Select package managers",
+                PROFILE_MANAGERS.to_vec(),
+                &mgr_defaults,
+            )?
+            .iter()
+            .map(|i| PROFILE_MANAGERS[*i].to_string())
+            .collect()
+        }
+    };
 
     let profile = crate::config::ProfileConfig {
         dotfiles: profile_dotfiles,
@@ -595,7 +635,7 @@ pub async fn profile_create(name: &str) -> Result<()> {
 
     Output::success(&format!("Created profile '{}'", name));
     Output::info(&format!(
-        "Assign to a machine: tether machines profile set {}",
+        "Assign it on a machine: tether machines profile set {}",
         name
     ));
     Ok(())
@@ -657,7 +697,7 @@ pub async fn profile_edit(name: &str) -> Result<()> {
         let existing_shared = existing.map(|e| e.shared()).unwrap_or(false);
         let on_conflict = existing.map(|e| e.on_conflict()).unwrap_or_default();
         let default_shared = existing_shared || path == ".gitconfig" || path == ".gitignore_global";
-        let shared = Prompt::confirm(&format!("Share {} across profiles?", path), default_shared)?;
+        let shared = Prompt::question(&format!("Share {} across profiles?", path), default_shared)?;
         new_dotfiles.push(crate::config::ProfileDotfileEntry::WithOptions {
             path: path.clone(),
             shared,
@@ -667,19 +707,20 @@ pub async fn profile_edit(name: &str) -> Result<()> {
     }
 
     // Package managers
-    let all_managers = ["brew", "npm", "pnpm", "bun", "gem", "uv"];
-    let manager_options: Vec<&str> = all_managers.to_vec();
-    let mgr_defaults: Vec<usize> = all_managers
+    let mgr_defaults: Vec<usize> = PROFILE_MANAGERS
         .iter()
         .enumerate()
         .filter(|(_, m)| profile.packages.is_empty() || profile.packages.contains(&m.to_string()))
         .map(|(i, _)| i)
         .collect();
-    let selected_managers =
-        Prompt::multi_select("Select package managers", manager_options, &mgr_defaults)?;
+    let selected_managers = Prompt::multi_select(
+        "Select package managers",
+        PROFILE_MANAGERS.to_vec(),
+        &mgr_defaults,
+    )?;
     let packages: Vec<String> = selected_managers
         .iter()
-        .map(|i| all_managers[*i].to_string())
+        .map(|i| PROFILE_MANAGERS[*i].to_string())
         .collect();
 
     let updated = crate::config::ProfileConfig {

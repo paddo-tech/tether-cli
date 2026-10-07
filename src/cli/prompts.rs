@@ -125,6 +125,25 @@ impl Prompt {
         Ok(options.iter().position(|&x| x == selection).unwrap_or(0))
     }
 
+    /// A menu of an interactive editor, such as `tether config dotfiles`. It needs a
+    /// terminal, and `-y` does not answer it. `cursor` is where the cursor starts.
+    pub fn menu(message: &str, options: Vec<&str>, cursor: usize) -> Result<usize> {
+        if !Self::is_interactive() {
+            return Err(Self::needs_terminal(message, false));
+        }
+        let selection = Select::new(message, options.clone())
+            .with_starting_cursor(cursor)
+            .prompt()?;
+        Ok(options.iter().position(|&x| x == selection).unwrap_or(0))
+    }
+
+    /// Choose one of `options`, which have no safe default, so `-y` does not answer it.
+    /// Returns the index.
+    pub fn choose(message: &str, options: Vec<&str>) -> Result<usize> {
+        let choice = Self::pick(message, options.iter().map(|o| o.to_string()).collect())?;
+        Ok(options.iter().position(|&o| o == choice).unwrap_or(0))
+    }
+
     /// Pick one of `options`, which have no default answer.
     pub fn pick(message: &str, options: Vec<String>) -> Result<String> {
         if !Self::is_interactive() {

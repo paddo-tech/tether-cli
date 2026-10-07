@@ -61,7 +61,7 @@ async fn prompt_for_team_repo() -> Result<String> {
 
     if gh_available {
         let options = vec!["Create new private GitHub repo", "Use existing repo URL"];
-        let choice = Prompt::select("Team repository:", options, 0)?;
+        let choice = Prompt::choose("Team repository:", options)?;
 
         if choice == 0 {
             // Create new repo - fetch orgs and username
@@ -77,7 +77,7 @@ async fn prompt_for_team_repo() -> Result<String> {
             }
             let location_refs: Vec<&str> = locations.iter().map(|s| s.as_str()).collect();
 
-            let loc_choice = Prompt::select("Where to create the repo?", location_refs, 0)?;
+            let loc_choice = Prompt::choose("Where to create the repo?", location_refs)?;
             let owner = if loc_choice == 0 {
                 username.clone()
             } else {
@@ -146,7 +146,7 @@ pub async fn setup() -> Result<()> {
             options.push("Add new team");
 
             println!("You have {} team(s) configured.", teams.teams.len());
-            let choice = Prompt::select("Which team to configure?", options.clone(), 0)?;
+            let choice = Prompt::choose("Which team to configure?", options.clone())?;
 
             if choice == options.len() - 1 {
                 println!();
@@ -193,7 +193,7 @@ pub async fn setup() -> Result<()> {
         println!();
         Output::info("Encryption identity required");
         Output::dim("An identity is needed to encrypt/decrypt team secrets");
-        if Prompt::confirm("Create identity now?", true)? {
+        if Prompt::question("Create identity now?", true)? {
             crate::cli::commands::identity::init().await?;
         }
     } else {
@@ -436,7 +436,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
         Output::info("As a team admin/contributor, you can push updates to team configs.");
         println!();
 
-        !Prompt::confirm("Enable write access? (No = read-only mode)", true)?
+        !Prompt::question("Enable write access? (No = read-only mode)", true)?
     } else {
         println!();
         Output::info("Read-only access detected (regular team member mode)");
@@ -477,7 +477,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
             }
         }
         println!();
-        Prompt::confirm("Merge team dotfiles with your personal configs?", true)?
+        Prompt::question("Merge team dotfiles with your personal configs?", true)?
     } else {
         false
     };
@@ -544,7 +544,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
 
         // Add to active teams if first or user confirms
         if teams.active.is_empty()
-            || Prompt::confirm(&format!("Activate team '{}'?", team_name), true)?
+            || Prompt::question(&format!("Activate team '{}'?", team_name), true)?
         {
             if !teams.active.contains(&team_name) {
                 teams.active.push(team_name.clone());

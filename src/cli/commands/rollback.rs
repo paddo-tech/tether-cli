@@ -7,7 +7,6 @@ use crate::sync::packages::{RollbackGate, RollbackLine};
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
-use std::io::IsTerminal;
 
 /// Reverse-delta against the union manifest at `commit`; the follow-up sync records removals.
 /// Nothing changes before the user confirms the plan. The sync lock covers the whole rollback, so the daemon cannot install or record packages
@@ -84,10 +83,10 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     for line in &plan {
         Output::list_item(&describe(line));
     }
-    let interactive = std::io::stdin().is_terminal();
+    let interactive = Prompt::is_interactive();
     if !yes {
         if !interactive {
-            anyhow::bail!("Run 'tether rollback' in a terminal to confirm, or pass --yes");
+            anyhow::bail!("Run 'tether rollback' in a terminal to confirm, or pass -y");
         }
         if !Prompt::confirm("Apply this rollback?", false)? {
             return Ok(());
@@ -103,7 +102,7 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
                 line.version.as_deref().unwrap_or_default(),
                 not_trusted(line)
             );
-            if Prompt::confirm(&question, false)? {
+            if Prompt::question(&question, false)? {
                 confirmed.insert(line.name.clone());
             }
         }

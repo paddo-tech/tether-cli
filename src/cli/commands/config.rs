@@ -2,7 +2,6 @@ use crate::cli::{Output, Prompt};
 use crate::config::{Config, DotfileEntry, FeaturesConfig};
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Attribute, Cell, Color};
-use inquire::Select as InquireSelect;
 
 pub async fn get(key: &str) -> Result<()> {
     let config = Config::load()?;
@@ -175,7 +174,7 @@ pub async fn dotfiles() -> Result<()> {
             "Toggle Project Scanning",
             "Done",
         ];
-        let choice = Prompt::select(
+        let choice = Prompt::menu(
             "Select section",
             options.clone(),
             cursor.min(options.len() - 1),
@@ -235,7 +234,7 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
         println!();
         render_entry_table(title, entries);
         let actions = vec!["Add", "Remove", "Back"];
-        let choice = Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+        let choice = Prompt::menu(&format!("{} - select an action", title), actions.clone(), 0)?;
 
         match choice {
             0 => {
@@ -260,11 +259,10 @@ fn manage_entry_list(title: &str, prompt_label: &str, entries: &mut Vec<String>)
                     continue;
                 }
 
-                let selection = InquireSelect::new(
+                let selection = Prompt::pick(
                     &format!("Select {} to remove", title.to_lowercase()),
                     entries.clone(),
-                )
-                .prompt()?;
+                )?;
 
                 entries.retain(|item| item != &selection);
                 changed = true;
@@ -365,7 +363,7 @@ fn manage_dotfile_list(
         println!();
         render_dotfile_table(title, entries);
         let actions = vec!["Add", "Remove", "Toggle create_if_missing", "Back"];
-        let choice = Prompt::select(&format!("{} - select an action", title), actions.clone(), 0)?;
+        let choice = Prompt::menu(&format!("{} - select an action", title), actions.clone(), 0)?;
 
         match choice {
             0 => {
@@ -379,7 +377,7 @@ fn manage_dotfile_list(
                     Output::warning("Already tracked");
                     continue;
                 }
-                let create = Prompt::confirm("Create if missing on other machines?", true)?;
+                let create = Prompt::question("Create if missing on other machines?", true)?;
                 if create {
                     entries.push(DotfileEntry::Simple(value.to_string()));
                 } else {
@@ -400,11 +398,8 @@ fn manage_dotfile_list(
                 }
 
                 let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
-                let selection = InquireSelect::new(
-                    &format!("Select {} to remove", title.to_lowercase()),
-                    paths,
-                )
-                .prompt()?;
+                let selection =
+                    Prompt::pick(&format!("Select {} to remove", title.to_lowercase()), paths)?;
 
                 entries.retain(|e| e.path() != selection);
                 changed = true;
@@ -417,9 +412,7 @@ fn manage_dotfile_list(
                 }
 
                 let paths: Vec<String> = entries.iter().map(|e| e.path().to_string()).collect();
-                let selection =
-                    InquireSelect::new("Select file to toggle create_if_missing", paths)
-                        .prompt()?;
+                let selection = Prompt::pick("Select file to toggle create_if_missing", paths)?;
 
                 if let Some(entry) = entries.iter_mut().find(|e| e.path() == selection) {
                     let new_value = !entry.create_if_missing();

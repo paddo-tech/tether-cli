@@ -315,7 +315,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         )
         .await?;
 
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        if crate::cli::Prompt::is_interactive() && !crate::cli::Prompt::assume_yes() {
             // A cancelled prompt defers the review; the sync must still save and push
             if let Err(e) = super::packages::review_inbox().await {
                 Output::warning(&format!("Inbox review stopped: {}", e));
