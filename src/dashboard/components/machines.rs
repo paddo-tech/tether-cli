@@ -57,7 +57,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
     match key.code {
         KeyCode::Enter => toggle_expand(app),
         KeyCode::Esc if app.machines.expanded.is_some() => app.machines.expanded = None,
-        KeyCode::Char('p') => open_profile_picker(app),
+        KeyCode::Char('p') => {
+            clamp_cursor(&mut app.machines.cursor, len);
+            match app.state.machines.get(app.machines.cursor) {
+                // A machine sets only its own profile
+                Some(m) if m.machine_id != app.machine_id() => {
+                    let name = display_name(m);
+                    app.flash_info(format!("Set the profile of {} on that machine", name));
+                }
+                _ => open_profile_picker(app),
+            }
+        }
         KeyCode::Char('a') => confirm_trust(app),
         KeyCode::Char('x') => confirm_untrust(app),
         KeyCode::Char('D') => {
@@ -503,8 +513,14 @@ fn card(
 /// fingerprint when known.
 fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String>) {
     let t = &app.theme;
+    let trusted = app
+        .state
+        .trusted
+        .iter()
+        .find(|k| k.machine_id == m.machine_id)
+        .map(|k| k.fingerprint.clone());
     if m.machine_id == app.machine_id() {
-        return ("this machine", t.accent, None);
+        return ("this machine", t.accent, trusted);
     }
     let pending = app.state.inbox.items.iter().find_map(|i| match &i.kind {
         Kind::TrustMachine { fingerprint, .. } if i.name == m.machine_id => {
@@ -524,13 +540,8 @@ fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String
         (None, Some(status @ (RecordStatus::Replayed | RecordStatus::SignatureFailed))) => {
             (status.label(), t.error, None)
         }
-        (None, _) => match app
-            .state
-            .trusted
-            .iter()
-            .find(|k| k.machine_id == m.machine_id)
-        {
-            Some(k) => ("trusted", t.ok, Some(k.fingerprint.clone())),
+        (None, _) => match trusted {
+            Some(fp) => ("trusted", t.ok, Some(fp)),
             None => ("not trusted", t.dim, None),
         },
     }
@@ -568,16 +579,38 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
         inner.y += h;
         inner.height -= h;
     }
-    let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .spacing(2)
-        .areas(inner);
-
     let kv = |k: &str, v: String| {
         Line::from(vec![
             Span::styled(format!("{:<14}", k), Style::default().fg(t.dim)),
             Span::styled(v, Style::default().fg(t.text)),
         ])
     };
+
+    // The whole fingerprint, so it can be compared with the one that machine shows
+    let (word, color, fingerprint) = key_state(app, m);
+    let mut key = vec![
+        Span::styled(format!("{:<14}", "Key"), Style::default().fg(t.dim)),
+        Span::styled(word, Style::default().fg(color)),
+    ];
+    if let Some(fp) = fingerprint {
+        key.push(Span::raw("  "));
+        key.push(Span::styled(fp, Style::default().fg(t.hash)));
+    }
+    let key = Line::from(key);
+    let key_h = (key.width().div_ceil(inner.width.max(1) as usize) as u16 + 1).min(inner.height);
+    f.render_widget(
+        Paragraph::new(key).wrap(Wrap { trim: false }),
+        Rect {
+            height: key_h,
+            ..inner
+        },
+    );
+    inner.y += key_h;
+    inner.height -= key_h;
+
+    let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .spacing(2)
+        .areas(inner);
     let mut lines = vec![
         kv("Hostname", m.hostname.clone()),
         kv("Machine ID", m.machine_id.clone()),

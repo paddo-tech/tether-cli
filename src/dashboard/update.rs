@@ -1647,6 +1647,44 @@ mod tests {
     }
 
     #[test]
+    fn profile_is_set_only_on_this_machines_card() {
+        let mut app = machines_app();
+        let mut config = crate::config::Config::default();
+        config
+            .profiles
+            .insert("dev".into(), crate::config::ProfileConfig::default());
+        app.state.config = Some(config);
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Info, "Set the profile of laptop on that machine"))
+        );
+        key(&mut app, KeyCode::Char('h'));
+        key(&mut app, KeyCode::Char('p'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::ProfilePicker(_))
+        ));
+    }
+
+    #[test]
+    fn machine_details_show_the_full_fingerprint() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut app = machines_app();
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        assert!(screen(&terminal)
+            .contains("trusted  SHA256:0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"));
+    }
+
+    #[test]
     fn machines_tab_untrusts_after_y_with_the_full_fingerprint() {
         use ratatui::{backend::TestBackend, Terminal};
 
