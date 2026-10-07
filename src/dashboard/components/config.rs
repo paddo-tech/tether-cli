@@ -79,21 +79,21 @@ fn edit_config(
     }
 }
 
-/// Remove the list item the confirm showed, if the list still has it at `index`.
-pub fn remove_list_item(app: &mut App, index: usize, item: &str) {
-    let Some(le) = app.config.list_edit.as_ref() else {
-        return;
-    };
-    if le.items.get(index).map(String::as_str) != Some(item) {
-        app.flash_error(format!("{} moved. Select it again", item));
-        return;
+/// Remove the item the confirm showed, by value, from the config as it is on disk now. The
+/// copy on screen can be older, and saving it would undo other edits.
+pub fn remove_list_item(app: &mut App, field_key: &str, dotfile: bool, name: &str) {
+    match crate::config::Config::load() {
+        Ok(current) => app.state.config = Some(current),
+        Err(e) => {
+            app.flash_error(format!("Config not loaded: {}", e));
+            return;
+        }
     }
-    let (field_key, is_dotfile) = (le.field_key, le.is_dotfile);
     edit_config(app, |c| {
-        if is_dotfile {
-            config_edit::remove_dotfile(c, index)
+        if dotfile {
+            config_edit::remove_dotfile(c, name)
         } else {
-            config_edit::remove_list_item(c, field_key, index)
+            config_edit::remove_list_item(c, field_key, name)
         }
     });
     refresh_list_edit(app);
@@ -167,9 +167,9 @@ fn list_edit_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
                 };
                 let confirm = Confirm::RemoveListItem {
                     list: le.field_label,
-                    index: le.cursor,
+                    field_key: le.field_key,
+                    dotfile: le.is_dotfile,
                     name: name.unwrap_or_else(|| item.clone()),
-                    item: item.clone(),
                     arming: Default::default(),
                 };
                 app.overlays.push(Overlay::Confirm(confirm));

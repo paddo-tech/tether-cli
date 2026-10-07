@@ -370,15 +370,22 @@ pub fn add_list_item(config: &mut Config, key: &str, value: &str) -> EditResult 
 }
 
 /// Remove an item from a List field by index.
-pub fn remove_list_item(config: &mut Config, key: &str, index: usize) -> EditResult {
+pub fn remove_list_item(config: &mut Config, key: &str, value: &str) -> EditResult {
+    take_list_item(config, key, value)?;
+    save(config)
+}
+
+/// Remove `value` from a List field. Another edit can change the list after the user chose
+/// the value, so the value counts, not its position.
+fn take_list_item(config: &mut Config, key: &str, value: &str) -> EditResult {
     let Some(list) = list_mut(config, key) else {
         return Err(format!("{} is not a list", key));
     };
-    if index >= list.len() {
-        return Err("Nothing to remove".into());
-    }
-    list.remove(index);
-    save(config)
+    let Some(pos) = list.iter().position(|v| v == value) else {
+        return Err(format!("{} is no longer in the list", value));
+    };
+    list.remove(pos);
+    Ok(())
 }
 
 /// Add a dotfile entry.
@@ -405,12 +412,18 @@ pub fn add_dotfile(config: &mut Config, path: &str, create_if_missing: bool) -> 
 }
 
 /// Remove a dotfile by index.
-pub fn remove_dotfile(config: &mut Config, index: usize) -> EditResult {
-    if index >= config.dotfiles.files.len() {
-        return Err("Nothing to remove".into());
-    }
-    config.dotfiles.files.remove(index);
+pub fn remove_dotfile(config: &mut Config, path: &str) -> EditResult {
+    take_dotfile(config, path)?;
     save(config)
+}
+
+/// Remove the dotfile entry for `path`, by path like [`take_list_item`].
+fn take_dotfile(config: &mut Config, path: &str) -> EditResult {
+    let Some(pos) = config.dotfiles.files.iter().position(|e| e.path() == path) else {
+        return Err(format!("{} is no longer in the list", path));
+    };
+    config.dotfiles.files.remove(pos);
+    Ok(())
 }
 
 /// Toggle create_if_missing for a dotfile entry.
@@ -505,6 +518,27 @@ mod tests {
 
     fn index(key: &str) -> usize {
         fields().iter().position(|f| f.key == key).unwrap()
+    }
+
+    #[test]
+    fn list_items_are_removed_by_value_not_position() {
+        let mut config = Config::default();
+        config.packages.allow_scripts = vec!["a".into(), "b".into()];
+        // Another edit put a new item first, after the user chose `b`
+        config.packages.allow_scripts.insert(0, "new".into());
+        assert!(take_list_item(&mut config, "allow_scripts", "b").is_ok());
+        assert_eq!(config.packages.allow_scripts, ["new", "a"]);
+        assert_eq!(
+            take_list_item(&mut config, "allow_scripts", "b"),
+            Err("b is no longer in the list".to_string())
+        );
+        assert_eq!(config.packages.allow_scripts, ["new", "a"]);
+
+        let before = config.dotfiles.files.len();
+        let path = config.dotfiles.files[0].path().to_string();
+        assert!(take_dotfile(&mut config, &path).is_ok());
+        assert_eq!(config.dotfiles.files.len(), before - 1);
+        assert!(take_dotfile(&mut config, &path).is_err());
     }
 
     #[test]

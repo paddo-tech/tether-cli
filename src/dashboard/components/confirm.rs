@@ -145,13 +145,12 @@ pub enum Confirm {
         item: Option<Box<crate::packages::inbox::InboxItem>>,
         arming: Arming,
     },
-    /// Remove an item from a Config list, as shown at `index`.
+    /// Remove an item from a Config list, by value.
     RemoveListItem {
         list: &'static str,
-        index: usize,
-        /// The row as shown, to check that the list still has it at `index`
-        item: String,
-        /// The item without its options
+        field_key: &'static str,
+        dotfile: bool,
+        /// The item without its options: the value, or a dotfile's path
         name: String,
         arming: Arming,
     },
@@ -360,8 +359,13 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
         Confirm::ApproveAll { items, .. } => security::approve_all(app, items, true),
         Confirm::ApproveSignatureFailed { item, .. } => security::approve(app, *item),
         Confirm::Reject { item, .. } => Some(Cmd::Reject(item)),
-        Confirm::RemoveListItem { index, item, .. } => {
-            super::config::remove_list_item(app, index, &item);
+        Confirm::RemoveListItem {
+            field_key,
+            dotfile,
+            name,
+            ..
+        } => {
+            super::config::remove_list_item(app, field_key, dotfile, &name);
             None
         }
         Confirm::StopDaemon { .. } => {
