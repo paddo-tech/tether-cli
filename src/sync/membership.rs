@@ -782,7 +782,11 @@ mod tests {
             seen: Some(set(&["dev", "mini"])),
             ..leave("mini")
         };
-        assert!(save_members(&a, "npm:a", &stale, listed("npm:a")).is_err());
+        let error = save_members(&a, "npm:a", &stale, listed("npm:a")).unwrap_err();
+        assert!(
+            error.to_string().contains("changed since you opened them"),
+            "{error}"
+        );
         assert_eq!(read_entries(&a)["npm:a"], vec!["dev", "mini", "server"]);
 
         // An edit that changes nothing commits nothing
@@ -804,18 +808,40 @@ mod tests {
 
         // A save never commits changes it did not make
         std::fs::write(a.join("stray"), "x").unwrap();
-        assert!(save_members(&a, "npm:a", &leave("dev"), listed("npm:a")).is_err());
+        let error = save_members(&a, "npm:a", &leave("dev"), listed("npm:a")).unwrap_err();
+        assert!(error.to_string().contains("not pushed"), "{error}");
         std::fs::remove_file(a.join("stray")).unwrap();
 
-        // A rejected push leaves the clone as the remote has it
+        // A rejected push leaves the clone as the remote has it, after three attempts
         let hook = remote.join("hooks/pre-receive");
+        let attempts = root.path().join("attempts");
         let reject_pushes = || {
-            std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::write(
+                &hook,
+                format!("#!/bin/sh\necho x >> '{}'\nexit 1\n", attempts.display()),
+            )
+            .unwrap();
             std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
                 .unwrap();
+            let _ = std::fs::remove_file(&attempts);
+        };
+        let rejected = |result: Result<Option<BTreeSet<String>>>| {
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.contains("pre-receive hook declined"), "{error}");
+            let tried = std::fs::read_to_string(&attempts).unwrap();
+            assert_eq!(tried.lines().count(), 3);
+            let rev = |name: &str| {
+                std::process::Command::new("git")
+                    .args(["rev-parse", name])
+                    .current_dir(&a)
+                    .output()
+                    .unwrap()
+                    .stdout
+            };
+            assert_eq!(rev("HEAD"), rev("origin/main"));
         };
         reject_pushes();
-        assert!(save_members(&a, "npm:a", &leave("dev"), listed("npm:a")).is_err());
+        rejected(save_members(&a, "npm:a", &leave("dev"), listed("npm:a")));
         assert_eq!(read_entries(&a)["npm:a"], vec!["dev", "mini", "server"]);
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
 
@@ -825,7 +851,7 @@ mod tests {
         GitBackend::new(a.clone()).commit("drop", "test").unwrap();
         git(&a, &["push", "-q", "origin", "main"]);
         reject_pushes();
-        assert!(save_members(&a, "npm:a", &share(&["dev"]), listed("npm:a")).is_err());
+        rejected(save_members(&a, "npm:a", &share(&["dev"]), listed("npm:a")));
         assert!(!a.join(FILE).exists());
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
     }
