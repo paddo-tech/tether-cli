@@ -1874,12 +1874,12 @@ pub fn sync_directories(
                 }
             }
         } else if expanded_path.is_dir() {
-            // The walk follows no symlink below the root, so a file is in ~/.tether only
-            // when its directory is
+            // Every entry that resolves into ~/.tether stays out: a directory, a file, and a
+            // symlink to either, so a later change to what the loop reads cannot leak one
             for entry in WalkDir::new(&expanded_path)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|e| !(e.file_type().is_dir() && tether.contains(e.path())))
+                .filter_entry(|e| !tether.contains(e.path()))
             {
                 let entry = match entry {
                     Ok(e) => e,
@@ -3061,6 +3061,11 @@ mod tests {
         std::fs::create_dir_all(home.join(".config/app")).unwrap();
         std::fs::write(home.join(".config/app/a.conf"), b"a").unwrap();
         std::os::unix::fs::symlink(home.join(".tether"), home.join("tlink")).unwrap();
+        std::os::unix::fs::symlink(
+            home.join(".tether/signing_key"),
+            home.join(".config/app/key"),
+        )
+        .unwrap();
         let mut config = Config::default();
         config.security.encrypt_dotfiles = false;
         config.dotfiles.dirs = vec![

@@ -482,46 +482,51 @@ pub fn is_safe_dotfile_path(path: &str) -> bool {
 }
 
 /// Whether a home-relative path names Tether's own directory or a path in it. `.` components
-/// do not count. `TetherDir` also resolves symlinks and aliases.
+/// do not count. The name compares exactly: `TetherDir` decides by file identity, which also
+/// covers `~/.Tether` on a volume that ignores case, and symlinks and aliases.
 pub fn in_tether_dir(path: &str) -> bool {
     let path = path.strip_prefix("~/").unwrap_or(path);
     path.split('/')
         .find(|c| !c.is_empty() && *c != ".")
-        .is_some_and(|first| same_name(first, ".tether"))
+        .is_some_and(|first| first == ".tether")
 }
 
-/// The macOS file system ignores case by default, so `.Tether` is `.tether` there.
-fn same_name(a: &str, b: &str) -> bool {
-    if cfg!(target_os = "macos") {
-        a.eq_ignore_ascii_case(b)
-    } else {
-        a == b
-    }
+/// Tether's own directory, to test the paths that a sync reads or writes. It holds keys, the
+/// merge base and state, so nothing in it syncs, also through a symlink or an alias such as
+/// /var for /private/var. A path is in it when the path or an ancestor is the same directory
+/// (device and inode), so whether `.Tether` is `.tether` follows the volume, not the OS.
+pub struct TetherDir {
+    path: PathBuf,
+    id: Option<(u64, u64)>,
 }
-
-/// Tether's own directory, resolved, to test the paths that a sync reads or writes. It holds
-/// keys, the merge base and state, so nothing in it syncs, also through a symlink or an alias
-/// such as /var for /private/var.
-pub struct TetherDir(PathBuf);
 
 impl TetherDir {
     pub fn new(home: &std::path::Path) -> Self {
-        Self(resolve(&home.join(".tether")))
+        let path = resolve(&home.join(".tether"));
+        let id = file_id(&path);
+        Self { path, id }
     }
 
     /// Whether `path` resolves to the directory or a path in it
     pub fn contains(&self, path: &std::path::Path) -> bool {
         let path = resolve(path);
-        let mut parts = path.components();
-        self.0.components().all(|d| {
-            parts.next().is_some_and(|p| {
-                same_name(
-                    &p.as_os_str().to_string_lossy(),
-                    &d.as_os_str().to_string_lossy(),
-                )
-            })
-        })
+        match self.id {
+            Some(id) => path.ancestors().any(|a| file_id(a) == Some(id)),
+            // Nothing exists in a directory that does not exist yet
+            None => path.starts_with(&self.path),
+        }
     }
+}
+
+#[cfg(unix)]
+fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_path: &std::path::Path) -> Option<(u64, u64)> {
+    None
 }
 
 /// The canonical path; for a path that does not exist yet, the canonical path of the nearest
@@ -1696,10 +1701,8 @@ mod tests {
         assert!(!is_safe_dotfile_path(".//.tether/x"));
         assert!(!is_safe_dotfile_path("./././.tether"));
         assert!(is_safe_dotfile_path(".config/.tether"));
-        assert_eq!(
-            is_safe_dotfile_path("~/.Tether/*"),
-            !cfg!(target_os = "macos")
-        );
+        // A distinct ~/.Tether exists on a volume that keeps case; TetherDir decides by identity
+        assert!(is_safe_dotfile_path("~/.Tether/*"));
     }
 
     #[cfg(unix)]
@@ -1724,9 +1727,10 @@ mod tests {
         assert!(!tether.contains(&home.join(".config/nvim/init.lua")));
         assert!(!tether.contains(&home.join(".tetherrc")));
         assert!(!tether.contains(&home));
+        // On a volume that ignores case, .TETHER is the same directory
         assert_eq!(
             tether.contains(&home.join(".TETHER/x")),
-            cfg!(target_os = "macos")
+            home.join(".TETHER").exists()
         );
         if cfg!(target_os = "macos") {
             let canonical = std::fs::canonicalize(&home).unwrap();
@@ -1740,6 +1744,29 @@ mod tests {
                 crate::sync::expand_dotfile_glob(pattern, &home).is_empty(),
                 "{pattern}"
             );
+        }
+    }
+
+    /// ~/.Tether is Tether's directory only when the volume ignores case
+    #[cfg(unix)]
+    #[test]
+    fn tether_dir_case_follows_the_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::write(home.join(".tether/signing_key"), "secret").unwrap();
+        let ignores_case = home.join(".Tether").exists();
+        if !ignores_case {
+            std::fs::create_dir_all(home.join(".Tether")).unwrap();
+            std::fs::write(home.join(".Tether/notes"), "mine").unwrap();
+        }
+        let tether = TetherDir::new(home);
+        assert_eq!(tether.contains(&home.join(".Tether/x")), ignores_case);
+        let expanded = crate::sync::expand_dotfile_glob(".Tether/*", home);
+        if ignores_case {
+            assert!(expanded.is_empty(), "{expanded:?}");
+        } else {
+            assert_eq!(expanded, vec![".Tether/notes"]);
         }
     }
 
