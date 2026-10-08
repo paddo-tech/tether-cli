@@ -1,7 +1,10 @@
 //! config.toml merges between HEAD machines: a machine that only rewrote the format of its
 //! config, or changed another setting, never exports over another machine's profile change.
+//! A 1.x machine's export does not strip 2.0 settings, a setting both machines changed
+//! settles, set lists keep one order, a cleared list stays cleared, and a dry run writes no
+//! config.
 
-use crate::harness::{enabled, Lab, Machine, HEAD};
+use crate::harness::{enabled, Lab, Machine, HEAD, OLD};
 
 const CONFIG: &str = "/root/.tether/config.toml";
 
@@ -18,6 +21,32 @@ async fn assigned(m: &Machine, id: &str) -> Option<String> {
 
 async fn has_profile(m: &Machine, name: &str) -> bool {
     config(m).await["profiles"].get(name).is_some()
+}
+
+/// packages.allow_scripts as written, in file order; missing is empty.
+async fn allow_scripts(m: &Machine) -> Vec<String> {
+    config(m).await["packages"]
+        .get("allow_scripts")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+async fn sha(m: &Machine, path: &str) -> String {
+    m.ok(&format!("sha256sum {path}")).await.stdout
+}
+
+/// Syncs a then b until a round commits nothing; panics after `rounds`.
+async fn settle(lab: &Lab, a: &Machine, b: &Machine, rounds: usize, what: &str) {
+    for _ in 0..rounds {
+        let head = lab.head().await;
+        a.tether_ok("sync").await;
+        b.tether_ok("sync").await;
+        if lab.changed(&head, &lab.head().await).await.is_empty() {
+            return;
+        }
+    }
+    panic!("{what}: the pair still commits after {rounds} rounds");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -129,4 +158,106 @@ async fn config_changes_merge() {
         assert!(has_profile(m, "linux-server").await);
     }
     assert_eq!(assigned(&c, &c_id).await.as_deref(), Some("dev"));
+
+    // A 1.x machine saves a config without the keys it does not know and exports it. HEAD
+    // machines keep those settings and take the change 1.x made
+    a.tether_ok(r#"config set packages.allow_scripts '["esbuild"]'"#)
+        .await;
+    a.tether_ok("sync").await;
+    let old = lab.machine("old", &[OLD[2]]).await;
+    assert_eq!(old.init(&lab).await.code, 0, "init old");
+    old.tether_ok("config set packages.brew.sync_casks true")
+        .await;
+    let stripped = old.read(CONFIG).await;
+    assert!(!stripped.contains("dashboard"), "{stripped}");
+    assert!(!stripped.contains("allow_scripts"), "{stripped}");
+    old.tether_ok("sync").await;
+    let head = lab.head().await;
+    a.tether_ok("sync").await;
+    // a exports the merged config, so the repo holds the 2.0 settings again
+    assert!(
+        lab.changed(&head, &lab.head().await)
+            .await
+            .iter()
+            .any(|p| p.contains("config.toml")),
+        "a did not restore the stripped config"
+    );
+    b.tether_ok("sync").await;
+    for m in [&a, &b] {
+        let cfg = config(m).await;
+        assert_eq!(
+            cfg["dashboard"]["theme"].as_str(),
+            Some("mocha"),
+            "{}",
+            m.name
+        );
+        assert_eq!(
+            cfg["packages"]["brew"]["sync_casks"].as_bool(),
+            Some(true),
+            "{}",
+            m.name
+        );
+        assert_eq!(allow_scripts(m).await, vec!["esbuild"], "{}", m.name);
+        assert_eq!(assigned(m, &b_id).await.as_deref(), Some("linux-server"));
+        assert!(has_profile(m, "linux-server").await, "{}", m.name);
+    }
+    drop(old);
+    drop(c);
+
+    // Both machines change one setting to different values: the pair settles on one value
+    // within two rounds, and then stops committing
+    a.tether_ok("config set packages.min_release_age_days 3")
+        .await;
+    b.tether_ok("config set packages.min_release_age_days 14")
+        .await;
+    for _ in 0..2 {
+        a.tether_ok("sync").await;
+        b.tether_ok("sync").await;
+    }
+    let days = |cfg: toml::Table| cfg["packages"]["min_release_age_days"].as_integer();
+    assert_eq!(days(config(&a).await), days(config(&b).await));
+    settle(&lab, &a, &b, 3, "same-setting conflict").await;
+
+    // Both machines add to a set list: both write the union in one order, so no machine
+    // rewrites the other's order
+    a.tether_ok(r#"config set packages.allow_scripts '["zeta", "esbuild"]'"#)
+        .await;
+    b.tether_ok(r#"config set packages.allow_scripts '["esbuild", "alpha"]'"#)
+        .await;
+    a.tether_ok("sync").await;
+    b.tether_ok("sync").await;
+    a.tether_ok("sync").await;
+    for m in [&a, &b] {
+        assert_eq!(
+            allow_scripts(m).await,
+            vec!["alpha", "esbuild", "zeta"],
+            "{}",
+            m.name
+        );
+    }
+    settle(&lab, &a, &b, 3, "set list order").await;
+
+    // A cleared list stays cleared
+    a.tether_ok("config set packages.allow_scripts '[]'").await;
+    a.tether_ok("sync").await;
+    b.tether_ok("sync").await;
+    a.tether_ok("sync").await;
+    for m in [&a, &b] {
+        assert!(allow_scripts(m).await.is_empty(), "{}", m.name);
+    }
+
+    // A dry run neither merges nor writes the base
+    a.tether_ok("config set dashboard.theme latte").await;
+    a.tether_ok("sync").await;
+    let base = "/root/.tether/config.base.toml";
+    let before = (sha(&b, CONFIG).await, sha(&b, base).await);
+    b.tether_ok("sync --dry-run").await;
+    assert_eq!(before, (sha(&b, CONFIG).await, sha(&b, base).await));
+    b.tether_ok("sync").await;
+    assert_eq!(
+        config(&b).await["dashboard"]["theme"].as_str(),
+        Some("latte")
+    );
+    let modes = b.ok(&format!("stat -c %a {CONFIG} {base}")).await.stdout;
+    assert_eq!(modes.split_whitespace().collect::<Vec<_>>(), ["600", "600"]);
 }

@@ -17,6 +17,7 @@ async fn sync_without_a_terminal_skips_conflicts() {
     a.ok("echo 'export FROM=a' >> /root/.bashrc").await;
     a.tether_ok("sync").await;
     b.ok("echo 'export FROM=b' >> /root/.bashrc").await;
+    let head = lab.head().await;
     let out = b.tether("sync").await;
     assert_eq!(out.code, 0, "sync without a terminal:\n{}", out.text());
     let text = out.text();
@@ -33,5 +34,25 @@ async fn sync_without_a_terminal_skips_conflicts() {
             .any(|c| c["tool"] == "notify-send"
                 && c["argv"].to_string().contains("Conflict in .bashrc")),
         "b notifies about the conflict: {notify:?}"
+    );
+    // The skipped conflict keeps the remote file
+    let pushed = lab.changed(&head, &lab.head().await).await;
+    assert!(
+        !pushed.iter().any(|p| p.contains("bashrc")),
+        "b pushed its file over the conflict: {pushed:?}"
+    );
+
+    // -y answers prompts, but a conflict still waits: its merge tool needs a terminal
+    let out = b.tether("sync -y").await;
+    assert_eq!(out.code, 0, "sync -y without a terminal:\n{}", out.text());
+    let text = out.text();
+    assert!(text.contains(".bashrc (conflict - skipped)"), "{text}");
+    let pushed = lab.changed(&head, &lab.head().await).await;
+    assert!(!pushed.iter().any(|p| p.contains("bashrc")), "{pushed:?}");
+    a.tether_ok("sync").await;
+    let bashrc = a.read("/root/.bashrc").await;
+    assert!(
+        bashrc.contains("FROM=a") && !bashrc.contains("FROM=b"),
+        "{bashrc}"
     );
 }
