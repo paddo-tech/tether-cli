@@ -116,7 +116,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
     // This ensures config changes from other machines are applied before using config
     let mut state = SyncState::load()?;
     if config.security.encrypt_dotfiles && !dry_run {
-        if let Some(new_config) = sync_tether_config(&sync_path, &home, &state)? {
+        if let Some(new_config) = sync_tether_config(&sync_path, &home, &mut state)? {
             warn_changed_profile(&config, &new_config, &state.machine_id);
             config = new_config;
         }
@@ -1445,7 +1445,7 @@ fn decrypt_project_configs(
 pub fn sync_tether_config(
     sync_path: &Path,
     home: &Path,
-    state: &SyncState,
+    state: &mut SyncState,
 ) -> Result<Option<Config>> {
     let new_path = sync_path.join("configs/tether/config.toml.enc");
     let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
@@ -1496,6 +1496,14 @@ pub fn sync_tether_config(
     };
 
     let base = load_config_base(sync_path, home, state, &local, &key)?;
+    // 1.x exports its stale copy of an earlier synced config verbatim. Every 2.0 export names
+    // its parent, so it never matches an earlier copy: a copy seen before changes nothing,
+    // and this machine's export restores the newer config
+    let remote_hash = crate::sha256_hex(&remote);
+    if base.as_deref() != Some(&remote[..]) && state.config_seen.contains(&remote_hash) {
+        log::info!("The synced config.toml is an earlier copy; this machine keeps its config");
+        return Ok(None);
+    }
     let merged = crate::sync::config_merge::merge(
         base.as_deref().map(text).as_deref(),
         &text(&local),
@@ -1520,10 +1528,12 @@ pub fn sync_tether_config(
     // The base follows the local write: a failed write must not mark remote changes as merged
     if !merged.changed {
         write_config_base(home, &remote)?;
+        state.saw_config(remote_hash);
         return Ok(None);
     }
     crate::sync::atomic_write(&local_config_path, merged.text.as_bytes())?;
     write_config_base(home, &remote)?;
+    state.saw_config(remote_hash);
     Ok(Some(Config::load()?))
 }
 
@@ -1639,7 +1649,6 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
     }
 
     let content = std::fs::read(&config_path)?;
-    let hash = crate::sha256_hex(&content);
 
     let dest_dir = sync_path.join("configs/tether");
     std::fs::create_dir_all(&dest_dir)?;
@@ -1657,9 +1666,17 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
     });
     let unchanged = newer
         || repo_plain
-            .is_some_and(|plain| crate::sync::config_merge::same_settings(&plain, &content));
+            .as_ref()
+            .is_some_and(|plain| crate::sync::config_merge::same_settings(plain, &content));
 
     if !unchanged {
+        let parent = repo_plain
+            .as_deref()
+            .map(crate::sha256_hex)
+            .unwrap_or_default();
+        let content =
+            crate::sync::config_merge::with_parent(&String::from_utf8_lossy(&content), &parent)
+                .into_bytes();
         let key = crate::security::get_encryption_key()?;
         let encrypted = crate::security::encrypt(&content, &key)?;
         std::fs::write(&dest, encrypted)?;
@@ -1667,6 +1684,8 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
         // remote as base, a kept conflict reads as a local edit forever and two machines
         // export their values in turn
         write_config_base(home, &content)?;
+        let hash = crate::sha256_hex(&content);
+        state.saw_config(hash.clone());
         state.update_file(".tether/config.toml", hash);
     }
 

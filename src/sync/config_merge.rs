@@ -43,7 +43,7 @@ const SET_LISTS: &[&[&str]] = &[
 ];
 
 /// Keys that each machine sets for its own file. They never merge.
-const OWN_KEYS: [&str; 2] = ["config_version", "config_writer"];
+const OWN_KEYS: [&str; 3] = ["config_version", "config_writer", "config_parent"];
 
 pub struct Merged {
     /// The local config.toml with the merged settings written in
@@ -61,6 +61,18 @@ pub fn newer_version(text: &str) -> Option<i64> {
     let raw: Table = toml::from_str(text).ok()?;
     let version = raw.get("config_version")?.as_integer()?;
     (version > CURRENT_CONFIG_VERSION as i64).then_some(version)
+}
+
+/// The text an export pushes: the local config with `config_parent`, the SHA-256 of the synced
+/// copy it replaces. So each export differs from every earlier synced copy, and a copy that a
+/// 1.x machine exports again verbatim is known as stale. Text that does not parse stays.
+pub fn with_parent(text: &str, parent: &str) -> String {
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return text.to_string();
+    };
+    doc.as_table_mut()
+        .insert("config_parent", toml_edit::value(parent));
+    doc.to_string()
 }
 
 /// Whether the text reads as a config.toml.
@@ -861,6 +873,15 @@ mod tests {
             !sync(&mut a, &mut repo) && !sync(&mut b, &mut repo),
             "{exports:?}"
         );
+    }
+
+    #[test]
+    fn an_export_names_its_parent_and_compares_unchanged() {
+        let local = base_config();
+        let exported = with_parent(&local, "abc");
+        assert!(exported.contains("config_parent = \"abc\""), "{exported}");
+        assert_ne!(with_parent(&local, "abc"), with_parent(&local, "def"));
+        assert!(same_settings(local.as_bytes(), exported.as_bytes()));
     }
 
     #[test]

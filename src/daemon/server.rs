@@ -223,7 +223,7 @@ impl DaemonServer {
         // Import remote config before using it
         if config.security.encrypt_dotfiles {
             if let Some(new_config) =
-                crate::cli::commands::sync::sync_tether_config(&sync_path, &home, &state)?
+                crate::cli::commands::sync::sync_tether_config(&sync_path, &home, &mut state)?
             {
                 crate::cli::commands::sync::warn_changed_profile(
                     &config,
