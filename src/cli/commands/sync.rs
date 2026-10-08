@@ -1536,7 +1536,8 @@ fn merge_tether_config(
     let local = match std::fs::read(&local_config_path) {
         Ok(local) => local,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::sync::atomic_write_private(&local_config_path, &remote)?;
+            let text = crate::sync::config_merge::without_legacy_keys(&text(&remote))?;
+            crate::sync::atomic_write_private(&local_config_path, text.as_bytes())?;
             write_config_base(home, &remote)?;
             return Ok(true);
         }

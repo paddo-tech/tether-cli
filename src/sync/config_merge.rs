@@ -43,12 +43,35 @@ const SET_LISTS: &[&[&str]] = &[
 ];
 
 /// Keys that each machine sets for its own file. They never merge.
-const OWN_KEYS: [&str; 3] = ["config_version", "config_writer", "config_generation"];
+const OWN_KEYS: [&str; 2] = ["config_version", "config_writer"];
+
+/// Keys that earlier 2.0 betas wrote to detect a replayed copy. They are no settings: every
+/// write leaves them out, and they never merge.
+const LEGACY_KEYS: [&str; 2] = ["config_parent", "config_generation"];
+
+/// Removes LEGACY_KEYS; true when the document had one.
+fn strip_legacy(doc: &mut DocumentMut) -> bool {
+    let mut had = false;
+    for key in LEGACY_KEYS {
+        had |= doc.remove(key).is_some();
+    }
+    had
+}
+
+/// The text without LEGACY_KEYS, for a synced copy that becomes the local file as it is.
+pub fn without_legacy_keys(text: &str) -> Result<String> {
+    let mut doc: DocumentMut = text.parse()?;
+    Ok(if strip_legacy(&mut doc) {
+        doc.to_string()
+    } else {
+        text.to_string()
+    })
+}
 
 pub struct Merged {
     /// The local config.toml with the merged settings written in
     pub text: String,
-    /// The merged settings differ from the local ones
+    /// The text differs from the local file: the settings changed, or legacy keys went
     pub changed: bool,
     /// Settings both sides changed to different values; the local value stays
     pub conflicts: Vec<String>,
@@ -72,6 +95,7 @@ pub fn export_text(local: &str) -> Result<String> {
     let mut doc: DocumentMut = local.parse()?;
     let full = table_of(&Config::parse(local)?)?;
     fill_doc(doc.as_table_mut(), &full, false);
+    strip_legacy(&mut doc);
     doc.as_table_mut()
         .insert("config_writer", toml_edit::value(i64::from(CONFIG_WRITER)));
     Ok(doc.to_string())
@@ -146,6 +170,7 @@ pub fn save_text(current: Option<&str>, config: &Config) -> Result<String> {
         &table_of(config)?,
         false,
     );
+    strip_legacy(&mut doc);
     Ok(doc.to_string())
 }
 
@@ -182,10 +207,14 @@ pub fn merge(base: Option<&str>, local: &str, remote: &str, machine_id: &str) ->
     let base_table = base_value.as_ref().and_then(|b| b.as_table());
     let kept_profiles = keep_assigned_profiles(&mut merged, local_table, base_table);
 
+    let mut doc: DocumentMut = local.parse()?;
+    let stripped = strip_legacy(&mut doc);
     let changed = merged != *local_table;
-    let text = if changed {
-        let mut doc: DocumentMut = local.parse()?;
+    if changed {
         apply(doc.as_table_mut(), local_table, &merged, false);
+    }
+    let changed = changed || stripped;
+    let text = if changed {
         doc.to_string()
     } else {
         local.to_string()
@@ -222,8 +251,8 @@ fn settings(text: &str, filled: bool) -> Result<Table> {
         fill_empty(&mut known);
     }
     let mut out = overlay(known, &raw, filled);
-    for key in OWN_KEYS {
-        out.remove(key);
+    for key in OWN_KEYS.iter().chain(&LEGACY_KEYS) {
+        out.remove(*key);
     }
     sort_set_lists(&mut out, &mut Vec::new());
     Ok(out)
@@ -1214,6 +1243,33 @@ dotfiles = { files = [".zshrc"] }
         assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
         assert_eq!(c.packages.min_release_age_days, 3);
         assert!(!c.packages.npm.enabled);
+    }
+
+    /// Keys of earlier betas leave every written file and never merge as settings
+    #[test]
+    fn legacy_keys_are_stripped_and_never_merge() {
+        let base = base_config();
+        let with = |gen: i64| format!("config_parent = \"abc\"\nconfig_generation = {gen}\n{base}");
+        let (local, remote) = (with(3), with(9));
+        assert!(same_settings(local.as_bytes(), remote.as_bytes()));
+        assert!(same_settings(base.as_bytes(), remote.as_bytes()));
+        let m = merge(Some(&base), &local, &remote, "a").unwrap();
+        assert!(m.conflicts.is_empty());
+        assert!(m.changed);
+        let edited = edit(&local, |c| c.dashboard.theme = Some("mocha".into()));
+        for text in [
+            m.text,
+            export_text(&local).unwrap(),
+            edited,
+            without_legacy_keys(&remote).unwrap(),
+        ] {
+            for key in LEGACY_KEYS {
+                assert!(!text.contains(key), "{key} in:\n{text}");
+            }
+        }
+        // A file without them stays as it is
+        assert_eq!(without_legacy_keys(&base).unwrap(), base);
+        assert!(!merge(Some(&base), &base, &remote, "a").unwrap().changed);
     }
 
     #[test]
