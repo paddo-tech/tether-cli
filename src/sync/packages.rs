@@ -1182,15 +1182,35 @@ async fn import_simple_manager(
                 installed_any = true;
                 failures.remove(&InstallFailure::key(def.state_key, &name));
             }
-            Err(e) if foreign.contains(&name) => {
+            Err(e) => {
                 let error = e.to_string();
                 let first_line = error_line(&error);
                 let min_age = PackagePolicy::load().min_release_age_days;
-                match fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await {
+                let age = too_new(def, &name, asked.as_deref(), min_age).await;
+                // Only a release that this machine cannot take falls back to an older one
+                if !age && !foreign.contains(&name) {
+                    record_failure(failures, def.state_key, &name, asked.as_deref(), &error);
+                    continue;
+                }
+                let reason = if age {
+                    Reason::PinnedTooNew
+                } else {
+                    Reason::OtherOsVersion
+                };
+                match fallback(
+                    def,
+                    manager.as_ref(),
+                    trust,
+                    &name,
+                    asked.as_deref(),
+                    reason,
+                )
+                .await
+                {
                     Ok(Fallback::Installed(version)) => {
                         installed_any = true;
                         failures.remove(&InstallFailure::key(def.state_key, &name));
-                        let why = if too_new(def.ecosystem, asked.as_deref(), &version, min_age) {
+                        let why = if age {
                             format!("is newer than the release-age limit of {} days", min_age)
                         } else {
                             format!(
@@ -1208,7 +1228,7 @@ async fn import_simple_manager(
                     }
                     Ok(Fallback::Held(item)) => {
                         let older = item.version.as_deref().unwrap_or_default();
-                        let message = if too_new(def.ecosystem, asked.as_deref(), older, min_age) {
+                        let message = if age {
                             format!(
                                 "{} {} is newer than the release-age limit of {} days. The \
                                  older release {} waits in the inbox for approval",
@@ -1218,7 +1238,14 @@ async fn import_simple_manager(
                                 older
                             )
                         } else {
-                            format!("{}; holding {} for approval", first_line, older)
+                            format!(
+                                "{} {} cannot be installed here: {}. The release {} waits in \
+                                 the inbox for approval",
+                                name,
+                                asked.as_deref().unwrap_or_default(),
+                                first_line,
+                                older
+                            )
                         };
                         record_failure(failures, def.state_key, &name, asked.as_deref(), &message);
                         // The held item replaces the pass the failed version got
@@ -1236,26 +1263,23 @@ async fn import_simple_manager(
                     ),
                 }
             }
-            Err(e) => record_failure(
-                failures,
-                def.state_key,
-                &name,
-                asked.as_deref(),
-                &e.to_string(),
-            ),
         }
     }
     installed_any
 }
 
-/// The fallback is the newest release older than the release-age limit, so a pinned
-/// version above it is too new for the limit.
-fn too_new(ecosystem: Ecosystem, pinned: Option<&str>, fallback: &str, min_age: u32) -> bool {
-    min_age > 0
-        && pinned.is_some_and(|p| {
-            crate::packages::pin::compare_versions(ecosystem, p, fallback)
-                == std::cmp::Ordering::Greater
-        })
+/// Whether the registry shows that the pinned release came out within the release-age
+/// limit, so that the limit is why it failed. A publish time that Tether cannot read does
+/// not count.
+async fn too_new(def: &PackageManagerDef, name: &str, pinned: Option<&str>, min_age: u32) -> bool {
+    let Some(pinned) = pinned.filter(|_| min_age > 0) else {
+        return false;
+    };
+    matches!(
+        crate::packages::resolve::old_enough(def.state_key, def.ecosystem, name, pinned, min_age)
+            .await,
+        Ok(false)
+    )
 }
 
 /// The line of a manager's error that says what failed. Managers print progress first,
@@ -1292,6 +1316,7 @@ async fn fallback(
     trust: &Trust,
     name: &str,
     failed: Option<&str>,
+    reason: Reason,
 ) -> Result<Fallback> {
     let min_age = PackagePolicy::load().min_release_age_days;
     let version = resolve_version(def.state_key, def.ecosystem, name, min_age).await?;
@@ -1303,7 +1328,7 @@ async fn fallback(
         .into_iter()
         .next()
         .unwrap_or_default();
-    let decided = fallback_decision(def, trust, name, version, advisories)?;
+    let decided = fallback_decision(def, trust, name, version, advisories, reason)?;
     if let Fallback::Installed(version) = &decided {
         manager
             .install(&PackageInfo {
@@ -1323,6 +1348,7 @@ fn fallback_decision(
     name: &str,
     version: String,
     advisories: Vec<String>,
+    reason: Reason,
 ) -> Result<Fallback> {
     let key = def.state_key;
     if trust.inbox.is_rejected(key, name, Some(&version), None) {
@@ -1343,11 +1369,7 @@ fn fallback_decision(
         }
         return Ok(Fallback::Installed(version));
     }
-    let reason = if malicious {
-        Reason::Malicious
-    } else {
-        Reason::OtherOsVersion
-    };
+    let reason = if malicious { Reason::Malicious } else { reason };
     let mut item = trust.item(key, name, Some(version), None, vec![reason]);
     item.advisories = advisories;
     Ok(Fallback::Held(Box::new(item)))
@@ -1816,12 +1838,12 @@ fn write_manifest(
 mod tests {
     use super::*;
 
-    #[test]
-    fn release_age_rejection_reads_as_such() {
-        assert!(too_new(Ecosystem::Npm, Some("2.0.0"), "1.9.0", 7));
-        assert!(!too_new(Ecosystem::Npm, Some("1.9.0"), "1.9.0", 7));
-        assert!(!too_new(Ecosystem::Npm, Some("2.0.0"), "1.9.0", 0));
-        assert!(!too_new(Ecosystem::Npm, None, "1.9.0", 7));
+    #[tokio::test]
+    async fn release_age_rejection_reads_as_such() {
+        // Without a limit or a pin, the limit is never the reason, and no registry is asked
+        let npm = &SIMPLE_MANAGERS[0];
+        assert!(!too_new(npm, "example", Some("2.0.0"), 0).await);
+        assert!(!too_new(npm, "example", None, 7).await);
         assert_eq!(
             error_line("bun command failed: Resolving dependencies\nerror: No version matching"),
             "error: No version matching"
@@ -2261,7 +2283,14 @@ mod tests {
         let npm = &SIMPLE_MANAGERS[0];
         let decide = |trust: &Trust, advisories: &[&str]| {
             let advisories = advisories.iter().map(|a| a.to_string()).collect();
-            fallback_decision(npm, trust, "example", "1.5.0".to_string(), advisories)
+            fallback_decision(
+                npm,
+                trust,
+                "example",
+                "1.5.0".to_string(),
+                advisories,
+                Reason::OtherOsVersion,
+            )
         };
         let held = |decision: Result<Fallback>| match decision.unwrap() {
             Fallback::Held(item) => (item.version.unwrap(), item.reasons),
@@ -2276,6 +2305,16 @@ mod tests {
             held(decide(&trust, &["MAL-2026-1"])).1,
             vec![Reason::Malicious]
         );
+        // A pin newer than the release-age limit holds the older release the same way
+        let too_new = fallback_decision(
+            npm,
+            &trust,
+            "example",
+            "1.5.0".to_string(),
+            Vec::new(),
+            Reason::PinnedTooNew,
+        );
+        assert_eq!(held(too_new).1, vec![Reason::PinnedTooNew]);
 
         let decision = |version: &str| inbox::Decision {
             manager: "npm".to_string(),

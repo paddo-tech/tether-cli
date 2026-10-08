@@ -241,7 +241,7 @@ fn reason_color(reason: Reason, t: &Theme) -> Color {
     match reason {
         Reason::Unsigned => t.warn,
         Reason::UntrustedTap => t.key,
-        Reason::CooldownUnsupported | Reason::TooNew => t.info,
+        Reason::CooldownUnsupported | Reason::TooNew | Reason::PinnedTooNew => t.info,
         Reason::Malicious
         | Reason::MaliciousUpgrade
         | Reason::MaliciousUnresolved
@@ -290,6 +290,9 @@ fn explain(reason: Reason) -> &'static str {
         }
         Reason::OtherOsVersion => {
             "Only machines on another OS list the newest trusted version, and it failed to install here. This is the newest release that suits this machine. No trusted machine lists it, so it installs only when you approve it."
+        }
+        Reason::PinnedTooNew => {
+            "A trusted machine lists a release that is newer than the minimum release age, so it did not install here. This is the newest release older than the limit. No trusted machine lists it, so it installs only when you approve it."
         }
     }
 }
