@@ -236,7 +236,7 @@ pub async fn run(json: bool) -> Result<()> {
                 "  Installs the packages of profile {}. Not installed here: {} package(s) of \
                  other profiles",
                 m.profile,
-                m.excluded().len()
+                m.excluded_packages().len()
             ),
             Err(e) => Output::warning(&format!("{}. No synced package installs", e)),
         }

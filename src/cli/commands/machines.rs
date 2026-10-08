@@ -68,13 +68,18 @@ fn resolve_in(
             name
         ),
         [id] => Ok(id.to_string()),
-        _ => anyhow::bail!(
+        _ => Err(AmbiguousHost(format!(
             "Hostname {} names more than one machine: {}. Use a machine id",
             name,
             ids.join(", ")
-        ),
+        ))
+        .into()),
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct AmbiguousHost(String);
 
 pub async fn list(json: bool) -> Result<()> {
     let config = Config::load()?;
@@ -661,14 +666,39 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         anyhow::bail!("Machine management is not available in team-only mode");
     }
     let sync_path = SyncEngine::sync_path()?;
-    let resolved = resolve_for_trust(&sync_path, name)?;
+    let unsigned = |name: &str| {
+        anyhow::anyhow!(
+            "Machine {} has no signed machine record. Run 'tether sync' on that machine first",
+            name
+        )
+    };
+    let signed = match resolve_for_trust(&sync_path, name) {
+        Ok(id) => inbox::signing_fingerprint(&sync_path, &id).map(|_| id),
+        Err(e) if e.is::<AmbiguousHost>() => return Err(e),
+        Err(_) => None,
+    };
+    let resolved = match signed {
+        Some(id) => id,
+        None => {
+            // A new machine's record may have arrived after this machine's last sync. Without
+            // the pull, the local copy of the repo still decides
+            let pulled = crate::sync::acquire_sync_lock(true).and_then(|_sync_lock| {
+                Output::info("Pulling latest changes...");
+                GitBackend::open(&sync_path)?.pull()
+            });
+            if let Err(e) = pulled {
+                Output::warning(&format!("Could not pull the latest changes: {}", e));
+            }
+            resolve_for_trust(&sync_path, name)?
+        }
+    };
     let name = resolved.as_str();
+    let Some(current) = inbox::signing_fingerprint(&sync_path, name) else {
+        return Err(unsigned(name));
+    };
     let fingerprint = match fingerprint {
         Some(fingerprint) => fingerprint.to_string(),
         None => {
-            let Some(current) = inbox::signing_fingerprint(&sync_path, name) else {
-                anyhow::bail!("Machine {} has no signed machine record", name);
-            };
             if !Prompt::is_interactive() || Prompt::assume_yes() {
                 anyhow::bail!(
                     "Run 'tether machines show {}' on that machine and compare the key, then run \
@@ -1054,7 +1084,11 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No machine gone"));
-        assert!(resolve("twin").unwrap_err().to_string().contains("c3, d4"));
+        let twin = resolve("twin").unwrap_err();
+        assert!(twin.to_string().contains("c3, d4"));
+        // trust surfaces this error instead of pulling and reporting another
+        assert!(twin.is::<super::AmbiguousHost>());
+        assert!(!resolve("gone").unwrap_err().is::<super::AmbiguousHost>());
 
         // A record that is not trusted, for example a tampered or replayed one, names a
         // machine only by its exact id, never by the hostname it claims

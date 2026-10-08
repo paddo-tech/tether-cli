@@ -566,6 +566,20 @@ impl GitBackend {
         Ok(output.stdout)
     }
 
+    /// The file as origin/main holds it: what the last fetch or push saw on the remote.
+    pub fn show_pushed(&self, repo_path: &str) -> Result<Vec<u8>> {
+        let spec = format!("origin/main:{}", repo_path);
+        let output = git_command()
+            .args(["show", &spec])
+            .current_dir(&self.repo_path)
+            .output()?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("Failed to get {}: {}", spec, error));
+        }
+        Ok(output.stdout)
+    }
+
     /// Like file_log, but filters out commits where the file content didn't change.
     /// For encrypted files, this decrypts to compare plaintext.
     pub fn file_log_changed(
