@@ -1186,7 +1186,8 @@ async fn import_simple_manager(
                 let error = e.to_string();
                 let first_line = error_line(&error);
                 let min_age = PackagePolicy::load().min_release_age_days;
-                let age = too_new(def, &name, asked.as_deref(), min_age).await;
+                let age =
+                    refused_version(&error) && too_new(def, &name, asked.as_deref(), min_age).await;
                 // Only a release that this machine cannot take falls back to an older one
                 if !age && !foreign.contains(&name) {
                     record_failure(failures, def.state_key, &name, asked.as_deref(), &error);
@@ -1280,6 +1281,32 @@ async fn too_new(def: &PackageManagerDef, name: &str, pinned: Option<&str>, min_
             .await,
         Ok(false)
     )
+}
+
+/// Whether a manager's install error says that no release matched the version, as npm, pnpm,
+/// bun and uv report a release that the release-age limit holds back. Other failures, such as
+/// a full disk, the network or an install script, never make an older release install.
+fn refused_version(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        // npm: "code ETARGET", "notarget No matching version found for x@1 with a date before"
+        "etarget",
+        "notarget",
+        "no matching version",
+        // pnpm
+        "no_mature_matching_version",
+        "no_matching_version",
+        // bun: "No version matching \"1.0.0\" found for specifier"
+        "no version matching",
+        // uv: "No solution found ... there is no version of x==1.0.0"
+        "no solution found",
+        "there is no version of",
+        "minimum release age",
+        "minimum-release-age",
+        "minimumreleaseage",
+    ]
+    .iter()
+    .any(|p| error.contains(p))
 }
 
 /// The line of a manager's error that says what failed. Managers print progress first,
@@ -1852,6 +1879,36 @@ mod tests {
             error_line("bun command failed: Resolving dependencies\nResolved, downloaded\n"),
             "Resolved, downloaded"
         );
+    }
+
+    /// Only an error that says no release matched can be the release-age limit; other
+    /// install failures get no fallback release
+    #[test]
+    fn only_a_version_refusal_can_be_too_new() {
+        for refused in [
+            // npm 11.19 with --min-release-age
+            "npm command failed: npm error code ETARGET\nnpm error notarget No matching \
+             version found for typescript@7.1.0-dev.20261007.1 with a date before \
+             10/1/2026, 2:53:47 AM.",
+            " ERR_PNPM_NO_MATURE_MATCHING_VERSION  No matching version found for x@1.0.0",
+            "bun command failed: Resolving dependencies\nerror: No version matching \"1.0.0\" \
+             found for specifier \"x\"",
+            "× No solution found when resolving tool dependencies:\n  ╰─▶ Because there is no \
+             version of ruff==0.99.0",
+        ] {
+            assert!(refused_version(refused), "{refused}");
+        }
+        for other in [
+            "npm error code ENOSPC\nnpm error syscall write\nnpm error no space left on device",
+            "npm error code ECONNRESET\nnpm error network aborted",
+            "npm error code ELIFECYCLE\nnpm error command failed\nnpm error command sh -c \
+             node install.js",
+            "error: EACCES: permission denied, mkdir '/usr/lib/node_modules/x'",
+            "bun command failed: error: ConnectionRefused downloading package manifest x",
+            "uv command failed: error: Failed to fetch: `https://pypi.org/simple/x/`",
+        ] {
+            assert!(!refused_version(other), "{other}");
+        }
     }
 
     #[test]
