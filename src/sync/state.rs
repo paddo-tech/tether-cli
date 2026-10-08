@@ -37,11 +37,14 @@ pub struct SyncState {
     /// daemon notifies once per error
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_error: Option<String>,
-    /// SHA-256 of the recent synced config.toml copies this machine pulled or exported,
-    /// newest last. A 1.x machine exports its stale copy verbatim, so a synced copy listed
-    /// here, other than the base, changes nothing.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub config_seen: Vec<String>,
+    /// The newest `config_generation` of a synced config.toml that this machine merged or
+    /// exported. A 1.x save drops the generation, so the base alone can lose it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub config_generation: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -489,16 +492,8 @@ impl SyncState {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
-            config_seen: Vec::new(),
+            config_generation: 0,
         }
-    }
-
-    /// Remembers a synced config.toml copy; the list keeps the newest 50.
-    pub fn saw_config(&mut self, hash: String) {
-        self.config_seen.retain(|h| *h != hash);
-        self.config_seen.push(hash);
-        let excess = self.config_seen.len().saturating_sub(50);
-        self.config_seen.drain(..excess);
     }
 
     pub fn update_file(&mut self, path: &str, hash: String) {
@@ -561,18 +556,6 @@ impl SyncState {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn seen_configs_keep_the_newest_fifty() {
-        let mut state = SyncState::new();
-        for i in 0..60 {
-            state.saw_config(i.to_string());
-        }
-        state.saw_config("20".to_string());
-        assert_eq!(state.config_seen.len(), 50);
-        assert_eq!(state.config_seen.first().unwrap(), "10");
-        assert_eq!(state.config_seen.last().unwrap(), "20");
-    }
 
     #[test]
     fn test_safe_package_names() {

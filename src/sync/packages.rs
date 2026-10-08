@@ -2827,7 +2827,7 @@ mod tests {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
-            config_seen: Vec::new(),
+            config_generation: 0,
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -2858,7 +2858,7 @@ mod tests {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
-            config_seen: Vec::new(),
+            config_generation: 0,
         };
 
         state.packages.insert(

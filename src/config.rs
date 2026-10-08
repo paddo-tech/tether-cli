@@ -1365,6 +1365,34 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code)]
+        struct OldTeam {
+            enabled: bool,
+            url: String,
+            auto_inject: bool,
+            read_only: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldCollab {
+            sync_url: String,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldTeams {
+            teams: HashMap<String, OldTeam>,
+            #[serde(default)]
+            collabs: HashMap<String, OldCollab>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldProjectConfigs {
+            enabled: bool,
+            search_paths: Vec<String>,
+            patterns: Vec<String>,
+            only_if_gitignored: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct OldConfig {
             config_version: u32,
             sync: OldSync,
@@ -1372,6 +1400,9 @@ mod tests {
             packages: OldPackages,
             dotfiles: OldDotfiles,
             security: OldSecurity,
+            team: Option<OldTeam>,
+            teams: Option<OldTeams>,
+            project_configs: Option<OldProjectConfigs>,
         }
 
         let mut config = Config::default();
@@ -1390,6 +1421,40 @@ mod tests {
         let without_field = saved.replace("sync_versions = false\n", "");
         let config: Config = toml::from_str(&without_field).unwrap();
         assert!(!config.packages.npm.sync_versions);
+
+        // The synced copy of a local file that leaves out fields 1.x requires has them again,
+        // also with teams, collabs and project configs, and as written by a merge or save
+        let mut config = Config::default();
+        let team = TeamConfig {
+            enabled: true,
+            url: "git@example.com:acme/dotfiles.git".to_string(),
+            auto_inject: false,
+            read_only: true,
+            orgs: vec!["github.com/acme".to_string()],
+        };
+        config.team = Some(team.clone());
+        let mut teams = TeamsConfig::default();
+        teams.teams.insert("acme".to_string(), team);
+        teams.collabs.insert(
+            "c".to_string(),
+            CollabConfig {
+                sync_url: "git@example.com:acme/collab.git".to_string(),
+                projects: vec![],
+                members_cache: vec![],
+                last_refresh: None,
+                enabled: true,
+            },
+        );
+        config.teams = Some(teams);
+        config.project_configs.enabled = true;
+        let local = toml::to_string_pretty(&config)
+            .unwrap()
+            .replace("sync_versions = false\n", "");
+        assert!(toml::from_str::<OldConfig>(&local).is_err());
+        let exported = crate::sync::config_merge::export_text(&local, 1).unwrap();
+        let old = toml::from_str::<OldConfig>(&exported).unwrap();
+        assert!(old.config_version <= 2);
+        assert!(old.teams.is_some() && old.team.is_some() && old.project_configs.is_some());
     }
 
     // Path safety tests
