@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-10-08
+
+### Fixed
+
+- A sync that applies the synced `config.toml` now records it as synced. Before, the next sync treated it as a local edit and pushed the older copy over newer changes from other machines
+- Tether now writes `config.toml` maps, such as machine profiles, profiles, teams and collabs, in sorted order. Before, an unchanged config could look changed on other machines
+
 ## [1.13.1] - 2026-10-02
 
 ### Fixed
