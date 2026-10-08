@@ -217,18 +217,22 @@ impl DaemonServer {
             }
         }
 
+        // Load state and machine state
+        let mut state = SyncState::load()?;
+
         // Import remote config before using it
         if config.security.encrypt_dotfiles {
             if let Some(new_config) =
-                crate::cli::commands::sync::sync_tether_config(&sync_path, &home)?
+                crate::cli::commands::sync::sync_tether_config(&sync_path, &home, &state)?
             {
-                crate::cli::commands::sync::warn_changed_profile(&config, &new_config);
+                crate::cli::commands::sync::warn_changed_profile(
+                    &config,
+                    &new_config,
+                    &state.machine_id,
+                );
                 config = new_config;
             }
         }
-
-        // Load state and machine state
-        let mut state = SyncState::load()?;
         if !git.has_unpushed_commits() {
             state.discard_unpushed();
         }

@@ -337,6 +337,7 @@ pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
                         .ok()
                         .map(|r| r.to_string_lossy().to_string())
                 })
+                .filter(|p| !crate::config::in_tether_dir(p))
                 .collect();
             if expanded.is_empty() {
                 log::warn!("Glob pattern '{}' matched no files", pattern);
@@ -457,6 +458,10 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(content)?;
     temp.flush()?;
+    // The temp file is 0600, so a new file is private and a file that exists keeps its mode
+    if let Ok(meta) = std::fs::metadata(path) {
+        temp.as_file().set_permissions(meta.permissions())?;
+    }
 
     // Persist atomically renames the temp file to the target
     temp.persist(path)?;
@@ -467,6 +472,23 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let new = temp.path().join("new");
+        atomic_write(&new, b"a").unwrap();
+        assert_eq!(mode(&new), 0o600);
+        let shared = temp.path().join("shared");
+        std::fs::write(&shared, b"a").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o644)).unwrap();
+        atomic_write(&shared, b"b").unwrap();
+        assert_eq!(mode(&shared), 0o644);
+        assert_eq!(std::fs::read(&shared).unwrap(), b"b");
+    }
 
     #[test]
     fn test_dotfile_to_repo_path() {

@@ -59,7 +59,12 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         }
     }
 
-    let config = Config::load()?;
+    // A dry run reads config.toml without saving a migration
+    let config = if dry_run {
+        Config::parse(&std::fs::read_to_string(Config::config_path()?)?)?
+    } else {
+        Config::load()?
+    };
 
     // No personal features: skip personal sync, only sync teams
     if !config.has_personal_features() {
@@ -109,14 +114,14 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
 
     // Always sync tether config first (hardcoded, not dependent on config)
     // This ensures config changes from other machines are applied before using config
+    let mut state = SyncState::load()?;
     if config.security.encrypt_dotfiles && !dry_run {
-        if let Some(new_config) = sync_tether_config(&sync_path, &home)? {
-            warn_changed_profile(&config, &new_config);
+        if let Some(new_config) = sync_tether_config(&sync_path, &home, &state)? {
+            warn_changed_profile(&config, &new_config, &state.machine_id);
             config = new_config;
         }
     }
 
-    let mut state = SyncState::load()?;
     if !git.has_unpushed_commits() {
         state.discard_unpushed();
     }
@@ -127,7 +132,9 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             state.machine_id.clone(),
             crate::config::DEFAULT_PROFILE.to_string(),
         );
-        config.save()?;
+        if !dry_run {
+            config.save()?;
+        }
     }
 
     // Load machine state early to get ignored lists for decrypt phase
@@ -1425,7 +1432,11 @@ fn decrypt_project_configs(
 
 /// Merges the synced config.toml into the local one (always, independent of config file
 /// list). Returns Some(config) if the local config changed.
-pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
+pub fn sync_tether_config(
+    sync_path: &Path,
+    home: &Path,
+    state: &SyncState,
+) -> Result<Option<Config>> {
     let new_path = sync_path.join("configs/tether/config.toml.enc");
     let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
     let enc_file = if new_path.exists() {
@@ -1448,22 +1459,33 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
             return Ok(None);
         }
     };
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    if let Some(version) = crate::sync::config_merge::newer_version(&text(&remote)) {
+        Output::warning(&format!(
+            "The synced config.toml has config_version {}, which this Tether cannot read. \
+             This machine keeps its config.toml until you upgrade Tether",
+            version
+        ));
+        return Ok(None);
+    }
     let local_config_path = home.join(".tether/config.toml");
-    let base_path = config_base_path(home);
-    let Ok(local) = std::fs::read(&local_config_path) else {
-        if let Some(parent) = local_config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+    let local = match std::fs::read(&local_config_path) {
+        Ok(local) => local,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            crate::sync::atomic_write(&local_config_path, &remote)?;
+            write_config_base(home, &remote)?;
+            return Ok(Some(Config::load()?));
         }
-        crate::sync::atomic_write(&local_config_path, &remote)?;
-        crate::sync::atomic_write(&base_path, &remote)?;
-        return Ok(Some(Config::load()?));
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Could not read {}: {}",
+                local_config_path.display(),
+                e
+            ))
+        }
     };
 
-    let state = SyncState::load()?;
-    let base = std::fs::read(&base_path)
-        .ok()
-        .or_else(|| recover_config_base(sync_path, &state, &local, &key));
-    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    let base = load_config_base(sync_path, home, state, &local, &key)?;
     let merged = crate::sync::config_merge::merge(
         base.as_deref().map(text).as_deref(),
         &text(&local),
@@ -1477,18 +1499,56 @@ pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config
             path
         ));
     }
+    for profile in &merged.kept_profiles {
+        Output::warning(&format!(
+            "config.toml: another machine deleted profile {}, which a machine still uses; \
+             the profile stays",
+            profile
+        ));
+    }
     // The merged config holds every remote change, so this remote is the next merge's base.
     // The base follows the local write: a failed write must not mark remote changes as merged
     if !merged.changed {
-        crate::sync::atomic_write(&base_path, &remote)?;
+        write_config_base(home, &remote)?;
         return Ok(None);
     }
-    crate::sync::atomic_write(
-        &local_config_path,
-        toml::to_string_pretty(&merged.config)?.as_bytes(),
-    )?;
-    crate::sync::atomic_write(&base_path, &remote)?;
+    crate::sync::atomic_write(&local_config_path, merged.text.as_bytes())?;
+    write_config_base(home, &remote)?;
     Ok(Some(Config::load()?))
+}
+
+/// The base of the next merge. A base file that does not read is replaced by one from the
+/// sync history.
+fn load_config_base(
+    sync_path: &Path,
+    home: &Path,
+    state: &SyncState,
+    local: &[u8],
+    key: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let path = config_base_path(home);
+    match std::fs::read(&path) {
+        Ok(base) if crate::sync::config_merge::reads(&base) => return Ok(Some(base)),
+        Ok(_) => Output::warning(&format!(
+            "{} does not read; the merge takes its base from the sync history",
+            path.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("Could not read {}: {}", path.display(), e)),
+    }
+    Ok(recover_config_base(sync_path, state, local, key))
+}
+
+/// The base holds the synced config, so only the user may read it.
+fn write_config_base(home: &Path, content: &[u8]) -> Result<()> {
+    let path = config_base_path(home);
+    crate::sync::atomic_write(&path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// The remote config.toml of the last merge, kept on this machine only.
@@ -1535,11 +1595,8 @@ fn recover_config_base(
 /// A synced config.toml can change this machine's profile assignment, and the packages this
 /// machine installs with it: a user on another machine, or a 1.x machine that saved an
 /// older config.
-pub fn warn_changed_profile(old: &Config, new: &Config) {
-    let Ok(state) = SyncState::load() else {
-        return;
-    };
-    if let Some(message) = changed_profile_warning(old, new, &state.machine_id) {
+pub fn warn_changed_profile(old: &Config, new: &Config, machine_id: &str) {
+    if let Some(message) = changed_profile_warning(old, new, machine_id) {
         Output::warning(&message);
     }
 }
@@ -1584,8 +1641,13 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
         let key = crate::security::get_encryption_key().ok()?;
         crate::security::decrypt(&enc, &key).ok()
     });
-    let unchanged =
-        repo_plain.is_some_and(|plain| crate::sync::config_merge::same_settings(&plain, &content));
+    // A newer Tether wrote the repo config; this machine leaves it alone until it upgrades
+    let newer = repo_plain.as_ref().is_some_and(|plain| {
+        crate::sync::config_merge::newer_version(&String::from_utf8_lossy(plain)).is_some()
+    });
+    let unchanged = newer
+        || repo_plain
+            .is_some_and(|plain| crate::sync::config_merge::same_settings(&plain, &content));
 
     if !unchanged {
         let key = crate::security::get_encryption_key()?;
@@ -1594,7 +1656,7 @@ pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState
         // The repo now holds this config, so it is the next merge's base. With the pulled
         // remote as base, a kept conflict reads as a local edit forever and two machines
         // export their values in turn
-        crate::sync::atomic_write(&config_base_path(home), &content)?;
+        write_config_base(home, &content)?;
         state.update_file(".tether/config.toml", hash);
     }
 
@@ -1666,7 +1728,12 @@ pub fn sync_directories(
                 }
             }
         } else if expanded_path.is_dir() {
-            for entry in WalkDir::new(&expanded_path).follow_links(false) {
+            let tether_dir = home.join(".tether");
+            for entry in WalkDir::new(&expanded_path)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| e.path() != tether_dir)
+            {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -2530,6 +2597,40 @@ mod tests {
             recover_config_base(dir, &state, b"synced = 1\n", &key).as_deref(),
             Some(&b"synced = 1\n"[..])
         );
+    }
+
+    #[test]
+    fn config_base_that_does_not_read_comes_from_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state: SyncState = serde_json::from_value(serde_json::json!({
+            "machine_id": "me",
+            "last_sync": "2026-01-01T00:00:00Z",
+            "files": {},
+            "packages": {},
+        }))
+        .unwrap();
+        let local = toml::to_string_pretty(&Config::default()).unwrap();
+        write_config_base(home, b"not = [toml").unwrap();
+        let base = load_config_base(home, home, &state, local.as_bytes(), &[7u8; 32]).unwrap();
+        assert_eq!(base.as_deref(), Some(local.as_bytes()));
+        write_config_base(home, local.as_bytes()).unwrap();
+        let base = load_config_base(home, home, &state, b"other", &[7u8; 32]).unwrap();
+        assert_eq!(base.as_deref(), Some(local.as_bytes()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_base_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = config_base_path(temp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_config_base(temp.path(), b"new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

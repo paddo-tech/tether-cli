@@ -14,6 +14,10 @@ use std::path::PathBuf;
 ///   Migration: creates "dev" profile from global dotfiles/dirs/packages.
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
 pub const DEFAULT_PROFILE: &str = "dev";
+/// Written as `config_writer` by Tether 2.0 and later. 1.x drops keys it does not know when
+/// it saves config.toml, so a synced config without it came from 1.x, and a key it lacks
+/// was not deleted. A constant, so an upgrade does not change the synced config.
+pub const CONFIG_WRITER: u32 = 2;
 
 fn default_config_version() -> u32 {
     1
@@ -39,6 +43,9 @@ pub struct Config {
     /// Config format version - prevents older tether from corrupting newer configs
     #[serde(default = "default_config_version")]
     pub config_version: u32,
+    /// CONFIG_WRITER when Tether 2.0 or later wrote the file; 0 when 1.x did
+    #[serde(default)]
+    pub config_writer: u32,
     /// Team-only mode: no personal dotfiles/packages, only team sync
     /// DEPRECATED: Use features.personal_dotfiles and features.personal_packages instead
     #[serde(default, skip_serializing_if = "is_false")]
@@ -385,7 +392,14 @@ pub fn is_safe_dotfile_path(path: &str) -> bool {
         return false;
     }
 
-    true
+    // Tether's own directory holds keys, the merge base and state; it never syncs as a dotfile
+    !in_tether_dir(path_to_check)
+}
+
+/// Whether a home-relative path is in Tether's own directory.
+pub fn in_tether_dir(path: &str) -> bool {
+    let path = path.strip_prefix("~/").unwrap_or(path);
+    path.trim_start_matches("./").split('/').next() == Some(".tether")
 }
 
 /// A dotfile entry within a profile — extends DotfileEntry with `shared` flag.
@@ -1122,12 +1136,20 @@ impl Config {
         // (machines already in machine_profiles keep their existing assignment)
     }
 
+    /// Writes only the settings that changed into the existing file, so comments, layout and
+    /// keys from a newer Tether stay.
     pub fn save(&self) -> Result<()> {
         let mut config = self.clone();
         config.config_version = CURRENT_CONFIG_VERSION;
+        config.config_writer = CONFIG_WRITER;
 
         let path = Self::config_path()?;
-        let content = toml::to_string_pretty(&config)?;
+        let current = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let content = crate::sync::config_merge::save_text(current.as_deref(), &config)?;
         crate::sync::atomic_write(&path, content.as_bytes())
     }
 }
@@ -1136,6 +1158,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
+            config_writer: CONFIG_WRITER,
             team_only: false,
             features: FeaturesConfig::default(),
             sync: SyncConfig {
@@ -1405,6 +1428,14 @@ mod tests {
     #[test]
     fn test_unsafe_empty_path() {
         assert!(!is_safe_dotfile_path(""));
+    }
+
+    #[test]
+    fn tether_dir_never_syncs() {
+        assert!(!is_safe_dotfile_path(".tether"));
+        assert!(!is_safe_dotfile_path("~/.tether/config.base.toml"));
+        assert!(!is_safe_dotfile_path(".tether/*"));
+        assert!(is_safe_dotfile_path(".tetherrc"));
     }
 
     #[test]
