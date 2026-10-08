@@ -1577,6 +1577,11 @@ fn merge_tether_config(
             return Ok(false);
         }
     };
+    // The unpushed export waits again as the pending base, so a later push that succeeds
+    // promotes it even when this sync exports nothing new
+    if !pushed {
+        crate::sync::atomic_write_private(&config_base_pending_path(home), &remote)?;
+    }
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     if let Some(version) = crate::sync::config_merge::newer_version(&text(&remote)) {
         Output::warning(&format!(
@@ -1716,7 +1721,15 @@ pub fn promote_config_base(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let key = key()?;
+    // Without a key, as when encryption is off or the key is locked, the pending copy waits;
+    // a failure here must not fail every sync
+    let key = match key() {
+        Ok(key) => key,
+        Err(e) => {
+            log::debug!("Pending config base not promoted: {}", e);
+            return Ok(());
+        }
+    };
     let pushed = GitBackend::open(sync_path)
         .ok()
         .and_then(|git| {
@@ -2910,6 +2923,50 @@ mod tests {
         // A pushed export is the base
         a.push();
         assert_eq!(a.base(), remote.copy());
+    }
+
+    /// A push that succeeds only on a later sync still makes the export the base, so the
+    /// next remote change applies without a false conflict.
+    #[test]
+    fn an_export_pushed_on_retry_becomes_the_base() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull();
+        a.export();
+        // The next sync merges its own unpushed copy, exports nothing new, and its push works
+        a.pull();
+        a.try_push().unwrap();
+        assert_eq!(a.base(), remote.copy());
+
+        b.sync();
+        b.edit(|c| c.packages.min_release_age_days = 14);
+        b.sync();
+        a.pull();
+        assert_eq!(a.config().packages.min_release_age_days, 14);
+    }
+
+    /// Without the encryption key the pending base waits; the sync does not fail.
+    #[test]
+    fn a_pending_base_without_a_key_does_not_fail() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        a.sync();
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull();
+        a.export();
+        a.git().push().unwrap();
+        promote_config_base(&a.sync_path(), a.home.path(), &mut a.state, || {
+            Err(anyhow::anyhow!("locked"))
+        })
+        .unwrap();
+        assert!(config_base_pending_path(a.home.path()).exists());
     }
 
     /// The next sync after a failed push merges the copy of its own unpushed commit. That
