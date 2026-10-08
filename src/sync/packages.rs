@@ -2828,6 +2828,7 @@ mod tests {
             profile_notice_shown: false,
             membership_error: None,
             config_generation: 0,
+            config_export_hash: None,
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -2859,6 +2860,7 @@ mod tests {
             profile_notice_shown: false,
             membership_error: None,
             config_generation: 0,
+            config_export_hash: None,
         };
 
         state.packages.insert(

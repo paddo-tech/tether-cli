@@ -1593,10 +1593,12 @@ fn config_base_path(home: &Path) -> PathBuf {
     home.join(".tether/config.base.toml")
 }
 
-/// A base for a machine that has none yet, as after an upgrade: the config whose hash the
-/// last sync recorded, from the local file or from the sync repo's history. A machine that
-/// never synced its config joins the fleet's: its local config is the base, so every remote
-/// setting applies, and it keeps only its own profile assignment.
+/// A base for a machine that has none yet, as after an upgrade. The local file when its hash
+/// is the one the last export recorded; else the exported copy from the sync repo's history,
+/// by the hash of the export (1.x and earlier betas recorded the exported bytes in `files`).
+/// No match gives no base, so the merge keeps additions from both sides and reports
+/// conflicts. A machine that never synced its config joins the fleet's: its local config is
+/// the base, so every remote setting applies, and it keeps only its own profile assignment.
 fn recover_config_base(
     sync_path: &Path,
     state: &SyncState,
@@ -1606,10 +1608,10 @@ fn recover_config_base(
     let Some(entry) = state.files.get(".tether/config.toml") else {
         return Some(local.to_vec());
     };
-    let hash = &entry.hash;
-    if crate::sha256_hex(local) == *hash {
+    if crate::sha256_hex(local) == entry.hash {
         return Some(local.to_vec());
     }
+    let hashes = [Some(&entry.hash), state.config_export_hash.as_ref()];
     let git = GitBackend::open(sync_path).ok()?;
     for repo_path in [
         "configs/tether/config.toml.enc",
@@ -1620,7 +1622,7 @@ fn recover_config_base(
                 continue;
             };
             if let Ok(plain) = crate::security::decrypt(&enc, key) {
-                if crate::sha256_hex(&plain) == *hash {
+                if hashes.contains(&Some(&crate::sha256_hex(&plain))) {
                     return Some(plain);
                 }
             }
@@ -1709,7 +1711,8 @@ fn write_synced_config(
     // export their values in turn
     write_config_base(home, &exported)?;
     state.config_generation = newest + 1;
-    state.update_file(".tether/config.toml", crate::sha256_hex(&exported));
+    state.config_export_hash = Some(crate::sha256_hex(&exported));
+    state.update_file(".tether/config.toml", crate::sha256_hex(&content));
     Ok(())
 }
 
@@ -2655,6 +2658,71 @@ mod tests {
         assert!(a.config().packages.brew.sync_casks);
     }
 
+    /// state.json records the local file; the hash of the exported copy is kept apart
+    #[test]
+    fn an_export_records_the_local_file_hash() {
+        let repo = TempDir::new().unwrap();
+        let repo = repo.path();
+        let start = format!(
+            "# mine\n{}",
+            toml::to_string_pretty(&Config::default()).unwrap()
+        );
+        let mut a = Peer::new("a", Some(&start));
+        a.push(repo);
+        let exported = repo_copy(repo);
+        assert_ne!(exported, start.as_bytes());
+        assert_eq!(
+            a.state.files[".tether/config.toml"].hash,
+            crate::sha256_hex(start.as_bytes())
+        );
+        assert_eq!(
+            a.state.config_export_hash.as_deref(),
+            Some(crate::sha256_hex(&exported).as_str())
+        );
+        // Without a base file, the unchanged local file is the base
+        std::fs::remove_file(config_base_path(a.home.path())).unwrap();
+        let base = load_config_base(repo, a.home.path(), &a.state, start.as_bytes(), &KEY);
+        assert_eq!(base.unwrap().as_deref(), Some(start.as_bytes()));
+    }
+
+    /// A recorded hash that matches nothing gives no base: additions from both sides stay and
+    /// a setting both changed is a conflict. Only a machine with no recorded hash takes the
+    /// remote values.
+    #[test]
+    fn a_base_that_cannot_be_recovered_merges_without_one() {
+        let repo = TempDir::new().unwrap();
+        let repo = repo.path();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut remote = Config::parse(&start).unwrap();
+        remote.dashboard.theme = Some("mocha".into());
+        remote.packages.min_release_age_days = 14;
+        remote.packages.brew.sync_casks = false;
+        let remote = crate::sync::config_merge::save_text(Some(&start), &remote).unwrap();
+        set_repo_copy(repo, remote.as_bytes());
+
+        let mut a = Peer::new("a", Some(&start));
+        a.edit(|c| {
+            c.packages.allow_scripts = vec!["esbuild".into()];
+            c.packages.min_release_age_days = 3;
+        });
+        a.state
+            .update_file(".tether/config.toml", crate::sha256_hex(b"lost"));
+        assert!(a.pull(repo));
+        let c = a.config();
+        assert_eq!(c.packages.allow_scripts, vec!["esbuild"]);
+        assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+        assert_eq!(c.packages.min_release_age_days, 3);
+        // Without a base, a setting that differs is a change on both sides
+        assert!(c.packages.brew.sync_casks);
+
+        // A new machine joins the fleet's config
+        let mut b = Peer::new("b", Some(&start));
+        assert!(b.pull(repo));
+        let c = b.config();
+        assert_eq!(c.packages.min_release_age_days, 14);
+        assert!(!c.packages.brew.sync_casks);
+    }
+
     /// A new machine copies a 1.x remote without the marker, and its export has the marker
     #[test]
     fn a_copied_1x_config_exports_with_the_marker() {
@@ -2840,6 +2908,13 @@ mod tests {
         );
         state.update_file(".tether/config.toml", crate::sha256_hex(b"unknown"));
         assert_eq!(recover_config_base(dir, &state, b"local", &key), None);
+        // The hash of the export finds the exported copy
+        state.config_export_hash = Some(crate::sha256_hex(b"remote = 2\n"));
+        assert_eq!(
+            recover_config_base(dir, &state, b"local", &key).as_deref(),
+            Some(&b"remote = 2\n"[..])
+        );
+        state.config_export_hash = None;
         state.update_file(".tether/config.toml", crate::sha256_hex(b"synced = 1\n"));
         // The local file was rewritten since, so the base comes from history
         assert_eq!(

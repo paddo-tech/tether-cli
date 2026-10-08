@@ -41,6 +41,10 @@ pub struct SyncState {
     /// exported. A 1.x save drops the generation, so the base alone can lose it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub config_generation: i64,
+    /// SHA-256 of the synced config.toml copy this machine last exported. `files` records
+    /// the local file, which differs from the exported bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_export_hash: Option<String>,
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -493,6 +497,7 @@ impl SyncState {
             profile_notice_shown: false,
             membership_error: None,
             config_generation: 0,
+            config_export_hash: None,
         }
     }
 
