@@ -360,4 +360,12 @@ async fn config_changes_merge() {
     );
     let modes = b.ok(&format!("stat -c %a {CONFIG} {base}")).await.stdout;
     assert_eq!(modes.split_whitespace().collect::<Vec<_>>(), ["600", "600"]);
+
+    for m in [&a, &b] {
+        let stray = m
+            .ok("test -e ~/tether/config.toml && echo yes || echo no")
+            .await
+            .stdout;
+        assert_eq!(stray.trim(), "no", "the synced config leaked to ~/tether");
+    }
 }

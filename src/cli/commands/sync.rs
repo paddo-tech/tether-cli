@@ -737,6 +737,9 @@ fn backup_and_write_dotfile(
     Ok(())
 }
 
+/// Path of the synced Tether config under `configs/`, without `.enc`.
+const TETHER_CONFIG_REL: &str = "tether/config.toml";
+
 pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
@@ -972,6 +975,11 @@ pub fn decrypt_from_repo(
                         .map_err(|e| anyhow::anyhow!("Failed to strip prefix: {}", e))?;
                     let rel_path_str = rel_path.to_string_lossy();
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
+
+                    // Tether's own synced config merges into ~/.tether/config.toml, never into ~/tether
+                    if rel_path_no_enc == TETHER_CONFIG_REL {
+                        continue;
+                    }
 
                     // Validate path is safe (defense-in-depth)
                     if !crate::config::is_safe_dotfile_path(rel_path_no_enc)
@@ -1470,7 +1478,7 @@ pub fn sync_tether_config(
 
 /// The synced config.toml, at its legacy path in a repo that has not moved it yet.
 fn synced_config_path(sync_path: &Path) -> PathBuf {
-    let new_path = sync_path.join("configs/tether/config.toml.enc");
+    let new_path = sync_path.join(format!("configs/{}.enc", TETHER_CONFIG_REL));
     let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
     if new_path.exists() {
         new_path
@@ -1732,7 +1740,7 @@ fn write_synced_config(
 ) -> Result<()> {
     use crate::sync::config_merge::{export_text, generation, has_marker};
     let content = std::fs::read(home.join(".tether/config.toml"))?;
-    let dest = sync_path.join("configs/tether/config.toml.enc");
+    let dest = sync_path.join(format!("configs/{}.enc", TETHER_CONFIG_REL));
     let repo = match std::fs::read(&dest) {
         Ok(enc) => match crate::security::decrypt(&enc, key) {
             Ok(plain) => Some(plain),
