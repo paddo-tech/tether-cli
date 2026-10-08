@@ -142,7 +142,8 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
     // Without a terminal, a sync runs as the daemon does: conflicts wait for 'tether resolve'
-    // and casks that need a password wait for a sync in a terminal. -y still answers prompts.
+    // and casks that need a password wait for a sync in a terminal. -y still answers prompts,
+    // but never a conflict: its merge tool or editor needs a terminal.
     let daemon_like = crate::daemon::is_daemon_mode() || !Prompt::is_interactive();
     let interactive =
         !crate::daemon::is_daemon_mode() && (Prompt::is_interactive() || Prompt::assume_yes());
@@ -153,7 +154,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             &home,
             &mut state,
             &machine_state_for_decrypt,
-            interactive,
+            !daemon_like,
         )?;
     }
 
@@ -174,11 +175,14 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
                     &home,
                     &mut state,
                     &machine_state_for_decrypt,
-                    interactive,
+                    !daemon_like,
                 )?;
             }
         }
     }
+
+    // A pending conflict keeps the remote file until 'tether resolve'
+    let conflict_state = crate::sync::ConflictState::load().unwrap_or_default();
 
     // Sync dotfiles (local → Git) - only if personal dotfiles enabled
     if config.features.personal_dotfiles {
@@ -198,6 +202,9 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
             for file in expanded {
+                if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
+                    continue;
+                }
                 if !dry_run {
                     crate::sync::migrate_dotfile_shared_change(
                         &sync_path,
@@ -323,7 +330,10 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             &deferred_casks,
         )
         .await?;
-        crate::sync::packages::defer_casks(&mut state, &outcome.deferred_casks)?;
+        // A sync in a terminal installs casks now, so only a sync without one defers them
+        if daemon_like {
+            crate::sync::packages::defer_casks(&mut state, &outcome.deferred_casks)?;
+        }
 
         if crate::cli::Prompt::is_interactive() && !crate::cli::Prompt::assume_yes() {
             // A cancelled prompt defers the review; the sync must still save and push
