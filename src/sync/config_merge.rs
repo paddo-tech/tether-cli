@@ -126,6 +126,7 @@ pub fn merge(base: Option<&str>, local: &str, remote: &str, machine_id: &str) ->
         fill_missing(
             &mut remote_value,
             base_value.as_ref().unwrap_or(&local_value),
+            &mut Vec::new(),
         );
     }
 
@@ -196,25 +197,54 @@ fn settings(text: &str, filled: bool) -> Result<Table> {
     Ok(out)
 }
 
-/// `Config` leaves these out when they are empty, so a missing one is empty.
+/// What `Config` leaves out of a file when a key holds it
+#[derive(Clone, Copy)]
+enum Skipped {
+    False,
+    EmptyList,
+    EmptyTable,
+}
+
+/// The keys `Config` leaves out when they hold the default, so a missing one holds it. `*`
+/// matches any key of a map. A test checks that every list `Config` skips is here.
+const SKIPPED: &[(&[&str], Skipped)] = &[
+    (&["team_only"], Skipped::False),
+    (&["machine_profiles"], Skipped::EmptyTable),
+    (&["profiles"], Skipped::EmptyTable),
+    (&["dashboard"], Skipped::EmptyTable),
+    (&["packages", "allow_scripts"], Skipped::EmptyList),
+    (&["packages", "brew", "trusted_taps"], Skipped::EmptyList),
+    (&["profiles", "*", "dirs"], Skipped::EmptyList),
+    (&["profiles", "*", "packages"], Skipped::EmptyList),
+];
+
 fn fill_empty(t: &mut Table) {
-    let empty_list = || Value::Array(Vec::new());
-    let empty_table = || Value::Table(Table::new());
-    t.entry("team_only").or_insert(Value::Boolean(false));
-    t.entry("machine_profiles").or_insert_with(empty_table);
-    t.entry("profiles").or_insert_with(empty_table);
-    t.entry("dashboard").or_insert_with(empty_table);
-    if let Some(Value::Table(packages)) = t.get_mut("packages") {
-        packages.entry("allow_scripts").or_insert_with(empty_list);
-        if let Some(Value::Table(brew)) = packages.get_mut("brew") {
-            brew.entry("trusted_taps").or_insert_with(empty_list);
-        }
+    for (path, skipped) in SKIPPED {
+        fill_path(t, path, *skipped);
     }
-    if let Some(Value::Table(profiles)) = t.get_mut("profiles") {
-        for (_, profile) in profiles.iter_mut() {
-            if let Value::Table(p) = profile {
-                p.entry("dirs").or_insert_with(empty_list);
-                p.entry("packages").or_insert_with(empty_list);
+}
+
+/// Fills the key at `path` in the tables that exist; a missing parent stays missing.
+fn fill_path(t: &mut Table, path: &[&str], skipped: Skipped) {
+    match path {
+        [] => {}
+        [key] => {
+            t.entry(*key).or_insert_with(|| match skipped {
+                Skipped::False => Value::Boolean(false),
+                Skipped::EmptyList => Value::Array(Vec::new()),
+                Skipped::EmptyTable => Value::Table(Table::new()),
+            });
+        }
+        ["*", rest @ ..] => {
+            for (_, child) in t.iter_mut() {
+                if let Value::Table(child) = child {
+                    fill_path(child, rest, skipped);
+                }
+            }
+        }
+        [key, rest @ ..] => {
+            if let Some(Value::Table(child)) = t.get_mut(*key) {
+                fill_path(child, rest, skipped);
             }
         }
     }
@@ -240,23 +270,39 @@ fn overlay(mut known: Table, raw: &Table, filled: bool) -> Table {
     known
 }
 
-/// A config from 1.x lacks the keys 1.x does not know. They keep the reference value.
-fn fill_missing(remote: &mut Table, reference: &Table) {
+/// A config from 1.x lacks the keys 1.x does not know. They keep the reference value, also
+/// in the items of a set list: an item that 1.x wrote without a field keeps that field.
+fn fill_missing<'a>(remote: &mut Table, reference: &'a Table, path: &mut Vec<&'a str>) {
     for (key, r) in reference {
+        path.push(key);
         match (remote.get_mut(key), r) {
             (None, _) => {
                 remote.insert(key.clone(), r.clone());
             }
-            (Some(Value::Table(t)), Value::Table(r)) => fill_missing(t, r),
+            (Some(Value::Table(t)), Value::Table(r)) => fill_missing(t, r, path),
+            (Some(Value::Array(items)), Value::Array(r)) if is_set_list(path) => {
+                for item in items.iter_mut() {
+                    let key = item_key(item);
+                    let found = r.iter().find(|v| item_key(v) == key);
+                    if let (Value::Table(t), Some(Value::Table(rt))) = (item, found) {
+                        for (k, v) in rt {
+                            t.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
+            }
             _ => {}
         }
+        path.pop();
     }
 }
 
+fn matches(pattern: &[&str], path: &[&str]) -> bool {
+    pattern.len() == path.len() && pattern.iter().zip(path).all(|(p, k)| *p == "*" || p == k)
+}
+
 fn is_set_list(path: &[&str]) -> bool {
-    SET_LISTS.iter().any(|pattern| {
-        pattern.len() == path.len() && pattern.iter().zip(path).all(|(p, k)| *p == "*" || p == k)
-    })
+    SET_LISTS.iter().any(|pattern| matches(pattern, path))
 }
 
 fn sort_set_lists<'a>(t: &'a mut Table, path: &mut Vec<&'a str>) {
@@ -265,18 +311,26 @@ fn sort_set_lists<'a>(t: &'a mut Table, path: &mut Vec<&'a str>) {
         match value {
             Value::Table(child) => sort_set_lists(child, path),
             Value::Array(items) if is_set_list(path) => {
-                let mut seen = Vec::new();
-                items.retain(|v| {
-                    let k = item_key(v);
-                    let new = !seen.contains(&k);
-                    seen.push(k);
-                    new
+                // Of two items with one key, the richer stays, whatever their order
+                items.sort_by(|a, b| {
+                    item_key(a)
+                        .cmp(&item_key(b))
+                        .then_with(|| richness(b).cmp(&richness(a)))
                 });
-                items.sort_by_key(item_key);
+                items.dedup_by(|later, kept| item_key(later) == item_key(kept));
             }
             _ => {}
         }
         path.pop();
+    }
+}
+
+/// A table holds more than a bare string, and a table with more fields more than one with
+/// fewer. The text breaks a tie, so the order is total.
+fn richness(v: &Value) -> (usize, String) {
+    match v {
+        Value::Table(t) => (1 + t.len(), v.to_string()),
+        _ => (0, v.to_string()),
     }
 }
 
@@ -513,7 +567,7 @@ fn to_value(v: &Value) -> toml_edit::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DotfileEntry, ProfileConfig};
+    use crate::config::{DotfileEntry, OnConflict, ProfileConfig, ProfileDotfileEntry};
 
     fn base_config() -> String {
         let mut c = Config::default();
@@ -896,6 +950,151 @@ mod tests {
         assert!(exported.contains("config_parent = \"abc\""), "{exported}");
         assert_ne!(with_parent(&local, "abc"), with_parent(&local, "def"));
         assert!(same_settings(local.as_bytes(), exported.as_bytes()));
+    }
+
+    #[test]
+    fn a_1x_list_item_keeps_the_fields_1x_dropped() {
+        let base = edit(&base_config(), |c| {
+            c.dotfiles.files = vec![DotfileEntry::WithOptions {
+                path: ".zshrc".into(),
+                create_if_missing: false,
+                on_conflict: OnConflict::Local,
+            }];
+        });
+        // 1.11 has no on_conflict: its save drops the field from the item, and it adds a file
+        let mut t: Table = toml::from_str(&strip_2x(&base)).unwrap();
+        let files = t["dotfiles"]["files"].as_array_mut().unwrap();
+        files[0].as_table_mut().unwrap().remove("on_conflict");
+        files.push(".vimrc".into());
+        let remote = toml::to_string_pretty(&t).unwrap();
+        assert!(!remote.contains("on_conflict"));
+        for b in [Some(base.as_str()), None] {
+            let m = merge(b, &base, &remote, "a").unwrap();
+            let c = config(&m);
+            let zshrc = c
+                .dotfiles
+                .files
+                .iter()
+                .find(|f| f.path() == ".zshrc")
+                .unwrap();
+            assert_eq!(zshrc.on_conflict(), OnConflict::Local);
+            assert!(c.dotfiles.files.iter().any(|f| f.path() == ".vimrc"));
+        }
+    }
+
+    #[test]
+    fn a_set_list_keeps_the_richer_of_two_items_in_any_order() {
+        let base = base_config();
+        let rich = "{ path = \".zshrc\", create_if_missing = false }";
+        let with = |files: &str| {
+            let mut t: Table = toml::from_str(&base).unwrap();
+            let files: Value =
+                toml::from_str::<Table>(&format!("f = [{files}]")).unwrap()["f"].clone();
+            t["dotfiles"]
+                .as_table_mut()
+                .unwrap()
+                .insert("files".into(), files);
+            toml::to_string_pretty(&t).unwrap()
+        };
+        let one = with(&format!("\".zshrc\", {rich}"));
+        let two = with(&format!("{rich}, \".zshrc\""));
+        assert!(same_settings(one.as_bytes(), two.as_bytes()));
+        let s = settings(&one, true).unwrap();
+        assert_eq!(
+            s["dotfiles"]["files"],
+            Value::Array(vec![toml::from_str::<Table>(&format!("x = {rich}"))
+                .unwrap()["x"]
+                .clone()])
+        );
+    }
+
+    /// Every list that `Config` leaves out when empty is in SKIPPED, so a missing one counts
+    /// as empty and a cleared list stays cleared.
+    #[test]
+    fn every_skipped_list_is_filled() {
+        let mut full = Config::default();
+        full.packages.allow_scripts = vec!["a".into()];
+        full.packages.brew.trusted_taps = vec!["a/b".into()];
+        full.dotfiles.dirs = vec![".config/a".into()];
+        full.profiles.insert(
+            "p".into(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::Simple(".zshrc".into())],
+                dirs: vec![".config/a".into()],
+                packages: vec!["npm".into()],
+            },
+        );
+        let team = crate::config::TeamConfig {
+            enabled: true,
+            url: "u".into(),
+            auto_inject: false,
+            read_only: true,
+            orgs: vec!["o".into()],
+        };
+        full.team = Some(team.clone());
+        let mut teams = crate::config::TeamsConfig {
+            active: vec!["t".into()],
+            allowed_orgs: vec!["o".into()],
+            ..Default::default()
+        };
+        teams.teams.insert("t".into(), team);
+        teams.collabs.insert(
+            "c".into(),
+            crate::config::CollabConfig {
+                sync_url: "u".into(),
+                projects: vec!["p".into()],
+                members_cache: vec!["m".into()],
+                last_refresh: None,
+                enabled: true,
+            },
+        );
+        full.teams = Some(teams);
+        let full = table_of(&full).unwrap();
+
+        fn lists<'a>(t: &'a Table, path: &mut Vec<&'a str>, out: &mut Vec<Vec<&'a str>>) {
+            for (k, v) in t {
+                path.push(k);
+                match v {
+                    Value::Table(c) => lists(c, path, out),
+                    Value::Array(_) => out.push(path.clone()),
+                    _ => {}
+                }
+                path.pop();
+            }
+        }
+        fn emptied(t: &Table) -> Table {
+            t.iter()
+                .map(|(k, v)| {
+                    let v = match v {
+                        Value::Table(c) => Value::Table(emptied(c)),
+                        Value::Array(_) => Value::Array(Vec::new()),
+                        v => v.clone(),
+                    };
+                    (k.clone(), v)
+                })
+                .collect()
+        }
+        let mut all = Vec::new();
+        lists(&full, &mut Vec::new(), &mut all);
+        assert!(all.len() > 10, "{all:?}");
+        let empty: Config = Value::Table(emptied(&full)).try_into().unwrap();
+        let written = table_of(&empty).unwrap();
+        let has = |path: &[&str]| {
+            let mut t = &written;
+            for k in &path[..path.len() - 1] {
+                t = t[*k].as_table().unwrap();
+            }
+            t.contains_key(path[path.len() - 1])
+        };
+        let skipped_lists: Vec<&[&str]> = SKIPPED
+            .iter()
+            .filter(|(_, s)| matches!(s, Skipped::EmptyList))
+            .map(|(p, _)| *p)
+            .collect();
+        for path in all {
+            let filled = skipped_lists.iter().any(|p| matches(p, &path));
+            assert_eq!(!has(&path), filled, "{path:?}");
+        }
     }
 
     /// A hand-written config with inline tables and dotted keys
