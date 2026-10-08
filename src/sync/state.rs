@@ -45,6 +45,10 @@ pub struct SyncState {
     /// the local file, which differs from the exported bytes
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_export_hash: Option<String>,
+    /// SHA-256 of the synced config.toml that did not read, once warned, so the daemon warns
+    /// once per copy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -498,6 +502,7 @@ impl SyncState {
             membership_error: None,
             config_generation: 0,
             config_export_hash: None,
+            config_error: None,
         }
     }
 

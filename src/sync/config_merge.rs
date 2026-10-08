@@ -126,7 +126,15 @@ fn fill_doc(doc: &mut dyn TableLike, full: &Table, inline: bool) {
 
 /// Whether the text reads as a config.toml.
 pub fn reads(text: &[u8]) -> bool {
-    std::str::from_utf8(text).is_ok_and(|t| settings(t, true).is_ok())
+    read_error(text).is_none()
+}
+
+/// Why the text does not read as a config.toml.
+pub fn read_error(text: &[u8]) -> Option<String> {
+    match std::str::from_utf8(text) {
+        Ok(t) => settings(t, true).err().map(|e| e.to_string()),
+        Err(e) => Some(e.to_string()),
+    }
 }
 
 /// Whether two config.toml texts hold the same settings. Text that does not parse

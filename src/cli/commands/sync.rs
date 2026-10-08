@@ -1490,7 +1490,8 @@ fn merge_tether_config(
     let remote = match crate::security::decrypt(&encrypted_content, key) {
         Ok(plaintext) => plaintext,
         Err(e) => {
-            Output::warning(&format!("Failed to decrypt tether config: {}", e));
+            let hash = crate::sha256_hex(&encrypted_content);
+            warn_config_error(state, hash, &format!("does not decrypt: {}", e));
             return Ok(false);
         }
     };
@@ -1503,6 +1504,15 @@ fn merge_tether_config(
         ));
         return Ok(false);
     }
+    if let Some(e) = crate::sync::config_merge::read_error(&remote) {
+        warn_config_error(
+            state,
+            crate::sha256_hex(&remote),
+            &format!("does not read: {}", e),
+        );
+        return Ok(false);
+    }
+    state.config_error = None;
     let local_config_path = home.join(".tether/config.toml");
     let local = match std::fs::read(&local_config_path) {
         Ok(local) => local,
@@ -1533,7 +1543,7 @@ fn merge_tether_config(
         &text(&remote),
         &state.machine_id,
     )
-    .map_err(|e| anyhow::anyhow!("The synced config.toml does not read: {}", e))?;
+    .map_err(|e| anyhow::anyhow!("Could not merge the synced config.toml: {}", e))?;
     for path in &merged.conflicts {
         Output::warning(&format!(
             "config.toml: {} changed on this machine and on another; this machine's value stays",
@@ -1555,6 +1565,23 @@ fn merge_tether_config(
     write_config_base(home, &remote)?;
     state.config_generation = known_generation(state, Some(&remote));
     Ok(merged.changed)
+}
+
+/// A synced config.toml that does not decrypt or read stops only the config step: the merge
+/// and the export skip it, so this machine never replaces a copy it cannot read, such as
+/// one from a newer Tether. The warning shows once per copy; later syncs log it.
+fn warn_config_error(state: &mut SyncState, hash: String, error: &str) {
+    let message = format!(
+        "The synced config.toml {}. This machine keeps its config.toml and does not export it \
+         until the sync repo holds a copy it can read",
+        error
+    );
+    if state.config_error.as_ref() == Some(&hash) {
+        log::warn!("{}", message);
+    } else {
+        Output::warning(&message);
+        state.config_error = Some(hash);
+    }
 }
 
 /// The newest config generation this machine merged or exported
@@ -1704,13 +1731,21 @@ fn write_synced_config(
     use crate::sync::config_merge::{export_text, generation, has_marker, is_stale};
     let content = std::fs::read(home.join(".tether/config.toml"))?;
     let dest = sync_path.join("configs/tether/config.toml.enc");
-    let repo = std::fs::read(&dest)
-        .ok()
-        .and_then(|enc| crate::security::decrypt(&enc, key).ok());
+    let repo = match std::fs::read(&dest) {
+        Ok(enc) => match crate::security::decrypt(&enc, key) {
+            Ok(plain) => Some(plain),
+            // The merge warned (warn_config_error)
+            Err(_) => return Ok(()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
     let base = std::fs::read(config_base_path(home)).ok();
     if let Some(repo) = &repo {
         // A newer Tether wrote the repo config; this machine leaves it alone until it upgrades
-        if crate::sync::config_merge::newer_version(&String::from_utf8_lossy(repo)).is_some() {
+        if crate::sync::config_merge::newer_version(&String::from_utf8_lossy(repo)).is_some()
+            || !crate::sync::config_merge::reads(repo)
+        {
             return Ok(());
         }
         // A format-only difference is no change: exporting it would make 1.x machines see
@@ -1729,8 +1764,7 @@ fn write_synced_config(
         .map(generation)
         .fold(state.config_generation, i64::max);
     let exported = export_text(&String::from_utf8_lossy(&content), newest + 1)?.into_bytes();
-    std::fs::create_dir_all(sync_path.join("configs/tether"))?;
-    std::fs::write(&dest, crate::security::encrypt(&exported, key)?)?;
+    crate::sync::atomic_write(&dest, &crate::security::encrypt(&exported, key)?)?;
     // Once pushed, the repo holds this config, so it is the next merge's base. With the
     // pulled remote as base, a kept conflict reads as a local edit forever and two machines
     // export their values in turn. Until the push, the base stays: a pull that discards
@@ -2729,6 +2763,49 @@ mod tests {
         assert_eq!(
             std::fs::read(config_base_path(a.home.path())).unwrap(),
             repo_copy(repo)
+        );
+    }
+
+    /// A synced copy that does not read stops neither this sync nor the next: the merge and
+    /// the export skip it, and the warning shows once per copy
+    #[test]
+    fn an_unreadable_synced_config_skips_the_config_step() {
+        let repo = TempDir::new().unwrap();
+        let repo = repo.path();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new("a", Some(&start));
+        a.sync(repo);
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        for corrupt in [&b"not = [toml"[..], b"\xff\xfe", b"packages = 1\n"] {
+            set_repo_copy(repo, corrupt);
+            for _ in 0..2 {
+                assert!(!a.pull(repo));
+                assert_eq!(
+                    a.state.config_error.as_deref(),
+                    Some(crate::sha256_hex(corrupt).as_str())
+                );
+                a.push(repo);
+                assert_eq!(repo_copy(repo), corrupt);
+            }
+        }
+        // A copy that does not decrypt
+        let path = repo.join("configs/tether/config.toml.enc");
+        std::fs::write(&path, b"garbage").unwrap();
+        assert!(!a.pull(repo));
+        a.push(repo);
+        assert_eq!(std::fs::read(&path).unwrap(), b"garbage");
+        assert!(a.read().contains("min_release_age_days = 3"));
+
+        // A readable copy merges again, and the export follows
+        set_repo_copy(repo, start.as_bytes());
+        a.sync(repo);
+        assert_eq!(a.state.config_error, None);
+        assert_eq!(
+            Config::parse(&String::from_utf8_lossy(&repo_copy(repo)))
+                .unwrap()
+                .packages
+                .min_release_age_days,
+            3
         );
     }
 
