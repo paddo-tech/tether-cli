@@ -20,16 +20,19 @@
 //!      flaps (see `config_flap`)
 //!
 //! `config_flap`: after the fleet settles, one HEAD machine changes config.toml once.
-//! It checks (a), and
-//!   l  after the round of the change, a HEAD machine commits config.toml only to restore
-//!      the change after a 1.x machine exported its stale copy earlier in that round
-//!   m  every HEAD machine ends with the change, and the last rounds commit no config.toml
+//! An unpatched 1.x machine can push its earlier copy over the change, which then reverts:
+//! the documented limit. It checks (a), and
+//!   l  after the round of the change, no HEAD machine commits config.toml
+//!   m  every HEAD machine ends with the same config.toml settings, and the last rounds
+//!      commit no config.toml
 //! Then a HEAD machine whose config.toml leaves out fields 1.x requires changes a setting,
 //! and the 1.x machine saves its config again, without the marker. (a) still holds, and
-//!   n  HEAD machines keep the 2.0 setting and take the change of the 1.x save
+//!   n  HEAD machines keep the 2.0 settings they had before the 1.x save, and take the
+//!      change of the 1.x save
 //!   o  the last rounds after the 1.x save commit no config.toml
-//! It also logs how often 1.x machines commit config.toml per round, without failing on
-//! it. Its 1.x machine runs TETHER_E2E_FLAP_REF (default v1.13.1), which can be any commit.
+//! It also logs how often 1.x machines commit config.toml per round, and whether each
+//! change survived, without failing on it. Its 1.x machine runs TETHER_E2E_FLAP_REF
+//! (default v1.13.1), which can be any commit, such as the 1.13.2 patch.
 
 use crate::harness::{enabled, flap_ref, Lab, Machine, HEAD, INIT_SCRIPT, OLD};
 use regex::Regex;
@@ -760,6 +763,39 @@ async fn fleet() {
     );
 }
 
+/// The config.toml settings that config_flap changes, as a HEAD machine holds them
+#[derive(Debug, PartialEq)]
+struct FlapSettings {
+    theme: Option<String>,
+    days: Option<i64>,
+    sync_taps: Option<bool>,
+}
+
+async fn head_settings(f: &Fleet) -> Vec<(String, FlapSettings)> {
+    let mut out = Vec::new();
+    for machine in f.machines.iter().filter(|m| m.version() == HEAD) {
+        let config: toml::Table =
+            toml::from_str(&machine.read("/root/.tether/config.toml").await).unwrap();
+        let theme = config
+            .get("dashboard")
+            .and_then(|d| d.get("theme"))
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
+        let packages = &config["packages"];
+        out.push((
+            machine.name.clone(),
+            FlapSettings {
+                theme,
+                days: packages
+                    .get("min_release_age_days")
+                    .and_then(|d| d.as_integer()),
+                sync_taps: packages["brew"].get("sync_taps").and_then(|t| t.as_bool()),
+            },
+        ));
+    }
+    out
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn config_flap() {
     if !enabled("config_flap") {
@@ -796,6 +832,8 @@ async fn config_flap() {
     for _ in 0..SETTLE + STEADY {
         f.round("after-change2").await;
     }
+    // The 2.0 settings before the 1.x save, which the save must not change
+    let before_resave = head_settings(&f).await;
     // The 1.x machine saves its config again, without the marker and the 2.0 keys, and a HEAD
     // machine pulls it next. In a round, the other 1.x machine would push its stale copy over
     // it first, and no 2.0 machine could see the change
@@ -816,20 +854,14 @@ async fn config_flap() {
         .filter(|r| r.phase == "after-change")
         .map(|r| r.round.as_str())
         .collect();
-    // A HEAD machine may export in the round it applies the change. Later, it exports only
-    // to restore the change after a 1.x machine exported its stale copy earlier that round
+    // A HEAD machine may export in the round it applies the change. A copy that a 1.x machine
+    // pushes again merges as it is, so no HEAD machine exports after that round
     let l: Vec<String> = f
         .syncs
         .iter()
-        .enumerate()
-        .filter(|(_, s)| after[1..].contains(&s.round.as_str()) && s.version == HEAD)
-        .filter(|(_, s)| s.changed.iter().any(|c| c == CONFIG))
-        .filter(|(i, s)| {
-            !f.syncs[..*i].iter().any(|o| {
-                o.round == s.round && is_old(&o.version) && o.changed.iter().any(|c| c == CONFIG)
-            })
-        })
-        .map(|(_, s)| format!("{} {} committed {CONFIG}", s.round, s.machine))
+        .filter(|s| after[1..].contains(&s.round.as_str()) && s.version == HEAD)
+        .filter(|s| s.changed.iter().any(|c| c == CONFIG))
+        .map(|s| format!("{} {} committed {CONFIG}", s.round, s.machine))
         .collect();
     let last = after[after.len() - STEADY..].to_vec();
     let steady: Vec<String> = f
@@ -838,17 +870,14 @@ async fn config_flap() {
         .filter(|s| last.contains(&s.round.as_str()) && s.changed.iter().any(|c| c == CONFIG))
         .map(|s| format!("{} {} committed {CONFIG}", s.round, s.machine))
         .collect();
-    // The change survives the stale copies of 1.x machines. 1.x drops the dashboard table
     let mut m = Vec::new();
-    for machine in f.machines.iter().filter(|m| m.version() == HEAD) {
-        let config: toml::Table =
-            toml::from_str(&machine.read("/root/.tether/config.toml").await).unwrap();
-        let theme = config
-            .get("dashboard")
-            .and_then(|d| d.get("theme"))
-            .and_then(|t| t.as_str());
-        if theme != Some("mocha") {
-            m.push(format!("{} has dashboard.theme {:?}", machine.name, theme));
+    let settings = head_settings(&f).await;
+    for (name, s) in &settings {
+        if Some(s) != settings.first().map(|(_, s)| s) {
+            m.push(format!(
+                "{name} has {s:?}, {} has {:?}",
+                settings[0].0, settings[0].1
+            ));
         }
     }
     let mut flaps =
@@ -884,34 +913,37 @@ async fn config_flap() {
     results.insert(
         "l",
         (
-            "HEAD machines commit config.toml after the change only to restore it",
+            "no HEAD machine commits config.toml after the round of the change",
             Some(l),
         ),
     );
     results.insert(
         "m",
         (
-            "the change reaches every machine, and the fleet then stops committing config.toml",
+            "HEAD machines agree on config.toml, and the fleet then stops committing it",
             Some([m, steady].concat()),
         ),
     );
-    // No setting is lost: the 1.x save keeps the 2.0 settings and its own change merges
+    // No 2.0 setting is lost: the 1.x save keeps the 2.0 settings and its own change merges
     let mut n = Vec::new();
-    for machine in f.machines.iter().filter(|m| m.version() == HEAD) {
-        let config: toml::Table =
-            toml::from_str(&machine.read("/root/.tether/config.toml").await).unwrap();
-        let days = config["packages"].get("min_release_age_days");
-        if days.and_then(|d| d.as_integer()) != Some(14) {
+    let after_resave = head_settings(&f).await;
+    for ((name, before), (_, after)) in before_resave.iter().zip(&after_resave) {
+        if (&before.theme, before.days) != (&after.theme, after.days) {
             n.push(format!(
-                "{} has min_release_age_days {:?}",
-                machine.name, days
+                "{name} had {before:?} before the 1.x save, then {after:?}"
             ));
         }
-        let taps = config["packages"]["brew"].get("sync_taps");
-        if taps.and_then(|t| t.as_bool()) != Some(false) {
-            n.push(format!("{} has sync_taps {:?}", machine.name, taps));
+        if after.sync_taps != Some(false) {
+            n.push(format!("{name} has sync_taps {:?}", after.sync_taps));
         }
     }
+    writeln!(
+        flaps,
+        "Change survived (reported, not checked): dashboard.theme {:?}, \
+         min_release_age_days {:?}",
+        settings[0].1.theme, before_resave[0].1.days
+    )
+    .unwrap();
     let resave: Vec<&str> = f
         .rounds
         .iter()
@@ -928,7 +960,7 @@ async fn config_flap() {
     results.insert(
         "n",
         (
-            "after a 1.x stale copy and a 1.x save, HEAD machines keep every setting",
+            "a 1.x save keeps the 2.0 settings of HEAD machines and merges its change",
             Some(n),
         ),
     );

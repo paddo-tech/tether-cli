@@ -1,7 +1,8 @@
 //! config.toml merges between HEAD machines: a machine that only rewrote the format of its
 //! config, or changed another setting, never exports over another machine's profile change.
-//! A 1.x machine's export does not strip 2.0 settings, and its stale copy of an earlier
-//! export changes nothing. 1.x loads every exported copy, also when the local file leaves
+//! A 1.x machine's export does not strip 2.0 settings. Its replayed copy of an earlier export
+//! reverts the change made since (the documented limit of an unpatched 1.x machine), and
+//! the machines then settle. 1.x loads every exported copy, also when the local file leaves
 //! out fields 1.x requires. A setting both machines changed settles, set lists keep one
 //! order, a cleared list stays cleared, a dry run writes no config, and a write makes
 //! config.toml 0600.
@@ -220,14 +221,23 @@ async fn config_changes_merge() {
         assert!(has_profile(m, "linux-server").await, "{}", m.name);
     }
 
-    // 1.13.1 applies the restored copy, and later pushes it again verbatim: a stale copy
-    // with an older config_generation. The config.toml of a and b leaves out fields 1.x
-    // requires
+    // 1.13.1 applies the marked copy, and later pushes it again verbatim. The replayed copy
+    // reverts the change made since, the documented limit of an unpatched 1.x machine: HEAD
+    // merges it as it is and exports nothing. The config.toml of a and b leaves out fields
+    // 1.x requires
     old.tether_ok("sync").await;
-    assert!(old.read(CONFIG).await.contains("config_generation"));
+    assert!(old.read(CONFIG).await.contains("config_writer"));
     for m in [&a, &b] {
         m.ok(&format!("sed -i '/sync_versions/d' {CONFIG}")).await;
     }
+    // A missing key holds the default, 7
+    let days = |cfg: toml::Table| {
+        cfg["packages"]
+            .get("min_release_age_days")
+            .and_then(|d| d.as_integer())
+            .unwrap_or(7)
+    };
+    let replayed = days(config(&a).await);
     a.tether_ok("config set packages.min_release_age_days 14")
         .await;
     a.tether_ok("sync").await;
@@ -239,31 +249,46 @@ async fn config_changes_merge() {
             .await
             .iter()
             .any(|p| p.contains("config.toml")),
-        "1.13.1 did not export its stale copy"
+        "1.13.1 did not export its earlier copy"
     );
     let head = lab.head().await;
     b.tether_ok("sync").await;
+    a.tether_ok("sync").await;
     assert!(
-        lab.changed(&head, &lab.head().await)
+        !lab.changed(&head, &lab.head().await)
             .await
             .iter()
             .any(|p| p.contains("config.toml")),
-        "b did not restore the config over the stale copy"
+        "a HEAD machine exported over the replayed copy"
     );
-    a.tether_ok("sync").await;
-    let days = |cfg: toml::Table| cfg["packages"]["min_release_age_days"].as_integer();
     for m in [&a, &b] {
-        assert_eq!(days(config(m).await), Some(14), "{}", m.name);
+        let cfg = config(m).await;
+        assert_eq!(days(cfg.clone()), replayed, "{}", m.name);
+        assert_eq!(
+            cfg["dashboard"]["theme"].as_str(),
+            Some("mocha"),
+            "{}",
+            m.name
+        );
     }
-    // 1.13.1 takes the restored copy, which has every field it requires, and loads it
+    settle3(&lab, [&a, &b, &old], "replayed 1.x copy").await;
+    // Set again, the change stays. 1.13.1 takes the copy, which has every field it requires,
+    // and loads it
+    a.tether_ok("config set packages.min_release_age_days 14")
+        .await;
+    a.tether_ok("sync").await;
+    b.tether_ok("sync").await;
     old.tether_ok("sync").await;
     let text = old.read(CONFIG).await;
     assert!(text.contains("min_release_age_days = 14"), "{text}");
     assert_eq!(text.matches("sync_versions = false").count(), 5, "{text}");
     old.tether_ok("config get packages.npm.sync_versions").await;
-    settle3(&lab, [&a, &b, &old], "stale 1.x copy").await;
+    settle3(&lab, [&a, &b, &old], "1.x copy").await;
+    for m in [&a, &b] {
+        assert_eq!(days(config(m).await), 14, "{}", m.name);
+    }
 
-    // 1.13.1 saves its config again: no marker, no generation, no 2.0 keys. HEAD merges its
+    // 1.13.1 saves its config again: no marker, no 2.0 keys. HEAD merges its
     // change, keeps the 2.0 settings, and marks the copy again
     old.tether_ok("config set packages.brew.sync_taps false")
         .await;
@@ -279,7 +304,7 @@ async fn config_changes_merge() {
             "{}",
             m.name
         );
-        assert_eq!(days(cfg.clone()), Some(14), "{}", m.name);
+        assert_eq!(days(cfg.clone()), 14, "{}", m.name);
         assert_eq!(
             cfg["dashboard"]["theme"].as_str(),
             Some("mocha"),
