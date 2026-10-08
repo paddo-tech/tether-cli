@@ -1517,7 +1517,7 @@ fn merge_tether_config(
     let local = match std::fs::read(&local_config_path) {
         Ok(local) => local,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            crate::sync::atomic_write(&local_config_path, &remote)?;
+            crate::sync::atomic_write_private(&local_config_path, &remote)?;
             write_config_base(home, &remote)?;
             return Ok(true);
         }
@@ -1560,7 +1560,7 @@ fn merge_tether_config(
     // The merged config holds every remote change, so this remote is the next merge's base.
     // The base follows the local write: a failed write must not mark remote changes as merged
     if merged.changed {
-        crate::sync::atomic_write(&local_config_path, merged.text.as_bytes())?;
+        crate::sync::atomic_write_private(&local_config_path, merged.text.as_bytes())?;
     }
     write_config_base(home, &remote)?;
     state.config_generation = known_generation(state, Some(&remote));
@@ -1612,19 +1612,9 @@ fn load_config_base(
     Ok(recover_config_base(sync_path, state, local, key))
 }
 
-fn write_config_base(home: &Path, content: &[u8]) -> Result<()> {
-    write_private(&config_base_path(home), content)
-}
-
 /// The base holds the synced config, so only the user may read it.
-fn write_private(path: &Path, content: &[u8]) -> Result<()> {
-    crate::sync::atomic_write(path, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+fn write_config_base(home: &Path, content: &[u8]) -> Result<()> {
+    crate::sync::atomic_write_private(&config_base_path(home), content)
 }
 
 /// The remote config.toml of the last merge, kept on this machine only.
@@ -1769,7 +1759,7 @@ fn write_synced_config(
     // pulled remote as base, a kept conflict reads as a local edit forever and two machines
     // export their values in turn. Until the push, the base stays: a pull that discards
     // the commit must not leave a base that holds local edits the repo never got
-    write_private(&config_base_pending_path(home), &exported)?;
+    crate::sync::atomic_write_private(&config_base_pending_path(home), &exported)?;
     state.config_generation = newest + 1;
     state.config_export_hash = Some(crate::sha256_hex(&exported));
     state.update_file(".tether/config.toml", crate::sha256_hex(&content));
@@ -2807,6 +2797,29 @@ mod tests {
                 .min_release_age_days,
             3
         );
+    }
+
+    /// A merge or a first copy writes config.toml 0600, also over a file that was 0644
+    #[cfg(unix)]
+    #[test]
+    fn a_synced_config_write_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let repo = TempDir::new().unwrap();
+        let repo = repo.path();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new("a", Some(&start));
+        let mut b = Peer::new("b", Some(&start));
+        a.sync(repo);
+        b.sync(repo);
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.sync(repo);
+        std::fs::set_permissions(b.config_path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(b.pull(repo));
+        assert_eq!(mode(&b.config_path()), 0o600);
+        let mut c = Peer::new("c", None);
+        assert!(c.pull(repo));
+        assert_eq!(mode(&c.config_path()), 0o600);
     }
 
     /// state.json records the local file; the hash of the exported copy is kept apart

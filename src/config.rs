@@ -1150,7 +1150,7 @@ impl Config {
             Err(e) => return Err(e.into()),
         };
         let content = crate::sync::config_merge::save_text(current.as_deref(), &config)?;
-        crate::sync::atomic_write(&path, content.as_bytes())
+        crate::sync::atomic_write_private(&path, content.as_bytes())
     }
 }
 
