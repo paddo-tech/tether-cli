@@ -439,6 +439,43 @@ fn list_other_profiles_names_what_this_profile_skips() {
 }
 
 #[test]
+fn list_other_profiles_without_a_profiles_table_shows_nothing() {
+    let h = home();
+    let table = h.path().join(".tether/sync/packages/profiles.toml");
+    std::fs::create_dir_all(table.parent().unwrap()).unwrap();
+    std::fs::write(&table, "not = [toml").unwrap();
+    let list = json(
+        h.path(),
+        &["packages", "list", "--other-profiles", "--json"],
+    );
+    assert_eq!(list["profile"], serde_json::Value::Null);
+    assert_eq!(list["packages"], serde_json::json!([]));
+    tether(h.path())
+        .args(["packages", "list", "--other-profiles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing to show"));
+}
+
+#[test]
+fn trust_without_a_pull_names_the_missing_signature() {
+    let h = home();
+    let sync = h.path().join(".tether/sync");
+    tether::sync::MachineState::new("m1")
+        .save_to_repo(&sync)
+        .unwrap();
+    // The sync dir is no repo, so the pull fails; the local record still decides
+    tether(h.path())
+        .args(["machines", "trust", "m1", "--fingerprint", "SHA256:x"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "Could not pull the latest changes",
+        ))
+        .stderr(predicate::str::contains("m1 has no signed machine record"));
+}
+
+#[test]
 fn daemon_status_and_logs() {
     let h = home();
     tether(h.path())

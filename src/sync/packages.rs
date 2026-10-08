@@ -255,16 +255,13 @@ fn notify_excluded(scope: &Membership, shown: &mut bool) {
 
 /// Counts, not names: a machine that joins a large fleet can miss hundreds of packages.
 fn excluded_notice(scope: &Membership) -> Option<String> {
-    let excluded = scope.excluded();
+    let excluded = scope.excluded_packages();
     if excluded.is_empty() {
         return None;
     }
     let mut managers: HashMap<&str, usize> = HashMap::new();
     let mut profiles: HashMap<String, usize> = HashMap::new();
-    for id in &excluded {
-        let Some((manager, name)) = id.split_once(':') else {
-            continue;
-        };
+    for (manager, name) in &excluded {
         *managers.entry(manager).or_default() += 1;
         for profile in scope.members(manager, name) {
             *profiles.entry(profile).or_default() += 1;

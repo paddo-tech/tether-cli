@@ -95,15 +95,24 @@ pub async fn list(json: bool, other_profiles: bool) -> Result<()> {
 /// `packages list --other-profiles`: the packages a sync names in its one-time notice.
 /// The JSON has `profile` and `packages`, each with `id`, `manager`, `name` and `profiles`.
 fn list_other_profiles(json: bool) -> Result<()> {
-    let config = crate::config::Config::load()?;
-    let membership = Membership::load_current(&config)?;
+    // Without a sync repo or a readable profiles table, as for `list`, there is nothing to show
+    let membership =
+        match crate::config::Config::load().and_then(|config| Membership::load_current(&config)) {
+            Ok(m) => m,
+            Err(e) => {
+                if json {
+                    return Output::json(&serde_json::json!({ "profile": null, "packages": [] }));
+                }
+                Output::info(&format!("Nothing to show: {}", e));
+                return Ok(());
+            }
+        };
     let excluded: Vec<(String, String, Vec<String>)> = membership
-        .excluded()
+        .excluded_packages()
         .into_iter()
-        .filter_map(|id| {
-            let (manager, name) = id.split_once(':')?;
-            let profiles = membership.members(manager, name).into_iter().collect();
-            Some((manager.to_string(), name.to_string(), profiles))
+        .map(|(manager, name)| {
+            let profiles = membership.members(&manager, &name).into_iter().collect();
+            (manager, name, profiles)
         })
         .collect();
     if json {

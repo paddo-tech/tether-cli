@@ -356,6 +356,18 @@ impl Membership {
         ids.sort();
         ids
     }
+
+    /// `excluded` as (manager, name). Every list and count of excluded packages uses it, so
+    /// they skip the same malformed ids.
+    pub fn excluded_packages(&self) -> Vec<(String, String)> {
+        self.excluded()
+            .iter()
+            .filter_map(|id| {
+                let (manager, name) = id.split_once(':')?;
+                Some((manager.to_string(), name.to_string()))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
