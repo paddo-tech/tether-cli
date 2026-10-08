@@ -1507,7 +1507,7 @@ mod tests {
             .unwrap()
             .replace("sync_versions = false\n", "");
         assert!(toml::from_str::<OldConfig>(&local).is_err());
-        let exported = crate::sync::config_merge::export_text(&local, 1).unwrap();
+        let exported = crate::sync::config_merge::export_text(&local).unwrap();
         let old = toml::from_str::<OldConfig>(&exported).unwrap();
         assert!(old.config_version <= 2);
         assert!(old.teams.is_some() && old.team.is_some() && old.project_configs.is_some());

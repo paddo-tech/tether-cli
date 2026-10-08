@@ -11,8 +11,6 @@
 //!   the machine that exports last.
 //! - A synced config without `config_writer` came from 1.x, which drops keys it does not
 //!   know when it saves. A key that it does not have is not a deletion.
-//! - A synced config with the marker and a lower `config_generation` than the base is an
-//!   earlier 2.0 export that a 1.x machine pushed again. The sync ignores it (`is_stale`).
 //! - The `machine_profiles` entry of this machine keeps its local value. A profile that an
 //!   assignment names is never deleted.
 //! - The lists in SET_LISTS merge item by item and are written sorted. Every other list
@@ -68,41 +66,20 @@ pub fn newer_version(text: &str) -> Option<i64> {
 /// The text an export pushes, from the local config.toml. Every export goes through here, so
 /// every synced copy from 2.0 has:
 /// - `config_writer`, the marker that 1.x drops when it saves.
-/// - `config_generation`, one more than the newest generation the exporting machine knows.
-///   1.x pushes an earlier copy again verbatim, so that copy has a lower generation than the
-///   copy it replaces.
 /// - Every key that `Config` writes, with its value, also where the local file leaves a key
 ///   out. 1.x requires some of them, such as `packages.npm.sync_versions`.
-pub fn export_text(local: &str, generation: i64) -> Result<String> {
+pub fn export_text(local: &str) -> Result<String> {
     let mut doc: DocumentMut = local.parse()?;
     let full = table_of(&Config::parse(local)?)?;
     fill_doc(doc.as_table_mut(), &full, false);
-    let root = doc.as_table_mut();
-    root.insert("config_writer", toml_edit::value(i64::from(CONFIG_WRITER)));
-    root.insert("config_generation", toml_edit::value(generation));
+    doc.as_table_mut()
+        .insert("config_writer", toml_edit::value(i64::from(CONFIG_WRITER)));
     Ok(doc.to_string())
-}
-
-/// The generation of a synced copy; 0 for a copy without one.
-pub fn generation(text: &[u8]) -> i64 {
-    std::str::from_utf8(text)
-        .ok()
-        .and_then(|t| toml::from_str::<Table>(t).ok())
-        .and_then(|raw| raw.get("config_generation")?.as_integer())
-        .unwrap_or(0)
 }
 
 /// Whether a 2.0 export wrote the copy. 1.x drops the marker when it saves.
 pub fn has_marker(text: &[u8]) -> bool {
     std::str::from_utf8(text).is_ok_and(|t| has_writer(t).unwrap_or(false))
-}
-
-/// Whether a synced copy is an earlier 2.0 export that a 1.x machine pushed again verbatim:
-/// it has the marker and a lower generation than `known`, the newest generation this
-/// machine merged or exported. A copy with a higher generation, as for a machine that was
-/// offline, is never stale.
-pub fn is_stale(remote: &[u8], known: i64) -> bool {
-    has_marker(remote) && generation(remote) < known
 }
 
 /// Adds the keys of `full` that `doc` lacks. Lists and keys that `doc` has stay as they are.
@@ -999,32 +976,15 @@ mod tests {
     }
 
     #[test]
-    fn an_export_has_marker_generation_and_compares_unchanged() {
-        // A copy from 1.x: no marker, no generation
+    fn an_export_has_the_marker_and_compares_unchanged() {
         let local = strip_2x(&base_config());
         assert!(!has_marker(local.as_bytes()));
-        let exported = export_text(&local, 7).unwrap();
+        let exported = export_text(&local).unwrap();
         assert!(has_marker(exported.as_bytes()), "{exported}");
-        assert_eq!(generation(exported.as_bytes()), 7);
-        assert_eq!(generation(local.as_bytes()), 0);
         assert!(same_settings(local.as_bytes(), exported.as_bytes()));
-        // Again over an earlier export: the generation moves, the marker stays once
-        let again = export_text(&exported, 8).unwrap();
-        assert_eq!(generation(again.as_bytes()), 8);
+        // Again over an earlier export: the marker stays once
+        let again = export_text(&exported).unwrap();
         assert_eq!(again.matches("config_writer").count(), 1, "{again}");
-    }
-
-    #[test]
-    fn only_a_marked_copy_below_the_base_generation_is_stale() {
-        let local = base_config();
-        let gen = |n| export_text(&local, n).unwrap().into_bytes();
-        assert!(is_stale(&gen(3), 4));
-        // Equal: a concurrent export; higher: this machine was offline
-        assert!(!is_stale(&gen(4), 4));
-        assert!(!is_stale(&gen(9), 4));
-        assert!(!is_stale(&gen(3), 0));
-        // 1.x saved it: no marker, so it merges
-        assert!(!is_stale(strip_2x(&local).as_bytes(), 4));
     }
 
     /// The export of a file that leaves out keys that 1.x requires has them
@@ -1032,7 +992,7 @@ mod tests {
     fn an_export_has_the_fields_1x_requires() {
         let local = COMPACT.replace("enabled = true, sync_versions = false", "enabled = true");
         assert!(!local.contains("sync_versions"));
-        let exported = export_text(&local, 1).unwrap();
+        let exported = export_text(&local).unwrap();
         let t: Table = toml::from_str(&exported).unwrap();
         for manager in ["npm", "pnpm", "bun", "gem", "uv"] {
             assert_eq!(

@@ -2884,7 +2884,6 @@ mod tests {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
-            config_generation: 0,
             config_export_hash: None,
             config_error: None,
         };
@@ -2917,7 +2916,6 @@ mod tests {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
-            config_generation: 0,
             config_export_hash: None,
             config_error: None,
         };

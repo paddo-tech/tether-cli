@@ -37,10 +37,6 @@ pub struct SyncState {
     /// daemon notifies once per error
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_error: Option<String>,
-    /// The newest `config_generation` of a synced config.toml that this machine merged or
-    /// exported. A 1.x save drops the generation, so the base alone can lose it.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub config_generation: i64,
     /// SHA-256 of the synced config.toml copy this machine last exported. `files` records
     /// the local file, which differs from the exported bytes
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,10 +45,6 @@ pub struct SyncState {
     /// once per copy
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_error: Option<String>,
-}
-
-fn is_zero(n: &i64) -> bool {
-    *n == 0
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -500,7 +492,6 @@ impl SyncState {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
-            config_generation: 0,
             config_export_hash: None,
             config_error: None,
         }
