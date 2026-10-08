@@ -589,6 +589,17 @@ fn json_output_has_the_documented_fields() {
     assert!(machines.is_array());
 }
 
+/// A dry run without config.toml runs with the defaults, up to the missing key, and writes
+/// no config.toml
+#[test]
+fn dry_run_without_config_uses_defaults() {
+    let h = home();
+    let config = h.path().join(".tether/config.toml");
+    std::fs::remove_file(&config).unwrap();
+    fails(h.path(), &["sync", "--dry-run"], "No encryption key found");
+    assert!(!config.exists());
+}
+
 #[test]
 fn piped_output_has_no_colour() {
     let h = home();

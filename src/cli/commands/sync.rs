@@ -59,9 +59,14 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         }
     }
 
-    // A dry run reads config.toml without saving a migration
+    // A dry run reads config.toml without saving a migration. Without one, a sync would take
+    // the synced config; a dry run does not pull it, so it shows what the defaults do
     let config = if dry_run {
-        Config::parse(&std::fs::read_to_string(Config::config_path()?)?)?
+        match std::fs::read_to_string(Config::config_path()?) {
+            Ok(text) => Config::parse(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(e.into()),
+        }
     } else {
         Config::load()?
     };
