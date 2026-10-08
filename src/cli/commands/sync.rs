@@ -745,6 +745,44 @@ fn backup_and_write_dotfile(
 /// Path of the synced Tether config under `configs/`, without `.enc`.
 const TETHER_CONFIG_REL: &str = "tether/config.toml";
 
+/// The lowercase names of a relative path, without `.` components
+fn rel_names(rel: &Path) -> Vec<String> {
+    rel.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a home-relative file maps to the repo path of Tether's own synced config, as
+/// ~/tether/config.toml does. Its export would replace the synced config, and its import
+/// would write the synced config to ~/tether. The case folds: on a volume that ignores
+/// case, the repo holds one file for both spellings.
+fn is_tether_config_rel(rel: &Path) -> bool {
+    rel_names(rel) == ["tether", "config.toml"]
+}
+
+/// Whether a synced dir names ~/tether/config.toml or a directory below the home that holds
+/// it. The home itself does not count: it syncs everything, so it warns at the export only
+/// when the file exists.
+fn dir_holds_tether_config(dir: &str) -> bool {
+    let names = rel_names(Path::new(dir.strip_prefix('~').unwrap_or(dir)));
+    !names.is_empty()
+        && names.len() <= 2
+        && names
+            .iter()
+            .zip(["tether", "config.toml"])
+            .all(|(n, t)| n == t)
+}
+
+fn warn_tether_config_dir(path: &str) {
+    Output::warning(&format!(
+        "  {} (its repo path is the synced Tether config, skipping)",
+        path
+    ));
+}
+
 pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
@@ -982,7 +1020,14 @@ pub fn decrypt_from_repo(
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
 
                     // Tether's own synced config merges into ~/.tether/config.toml, never into ~/tether
-                    if rel_path_no_enc == TETHER_CONFIG_REL {
+                    if is_tether_config_rel(Path::new(rel_path_no_enc)) {
+                        if config
+                            .effective_dirs(machine_id)
+                            .iter()
+                            .any(|d| dir_holds_tether_config(d))
+                        {
+                            warn_tether_config_dir(&format!("~/{}", rel_path_no_enc));
+                        }
                         continue;
                     }
 
@@ -1841,6 +1886,10 @@ pub fn sync_directories(
         }
 
         if expanded_path.is_file() {
+            if is_tether_config_rel(expanded_path.strip_prefix(home).unwrap_or(&expanded_path)) {
+                warn_tether_config_dir(dir_path);
+                continue;
+            }
             if let Ok(content) = std::fs::read(&expanded_path) {
                 let hash = crate::sha256_hex(&content);
                 let file_changed = state
@@ -1890,6 +1939,10 @@ pub fn sync_directories(
                     let file_path = entry.path();
                     let rel_to_home = file_path.strip_prefix(home).unwrap_or(file_path);
                     let state_key = format!("~/{}", rel_to_home.display());
+                    if is_tether_config_rel(rel_to_home) {
+                        warn_tether_config_dir(&state_key);
+                        continue;
+                    }
 
                     if let Ok(content) = std::fs::read(file_path) {
                         let hash = crate::sha256_hex(&content);
@@ -2936,6 +2989,43 @@ mod tests {
         a.sync();
         assert_eq!(a.state.config_error, None);
         assert_eq!(days_of(&remote.copy()), 3);
+    }
+
+    /// A synced dir that maps a file to the repo path of the synced Tether config never
+    /// exports it
+    #[test]
+    fn a_synced_dir_never_replaces_the_tether_config() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::create_dir_all(home.join("tether")).unwrap();
+        std::fs::write(home.join("tether/config.toml"), b"mine").unwrap();
+        std::fs::write(home.join("tether/other"), b"other").unwrap();
+        let synced_config = repo.join("configs/tether/config.toml");
+        for dirs in [
+            vec!["~/tether"],
+            vec!["~/tether/config.toml"],
+            vec!["~/./tether"],
+        ] {
+            let mut config = Config::default();
+            config.security.encrypt_dotfiles = false;
+            config.dotfiles.dirs = dirs.iter().map(|d| d.to_string()).collect();
+            let mut state = new_state("me");
+            sync_directories(&config, "me", &mut state, &repo, &home, false).unwrap();
+            assert!(!synced_config.exists(), "{dirs:?}");
+            assert!(
+                !state.files.contains_key("~/tether/config.toml"),
+                "{dirs:?}"
+            );
+            assert!(dirs.iter().all(|d| dir_holds_tether_config(d)));
+        }
+        assert!(repo.join("configs/tether/other").exists());
+        assert!(is_tether_config_rel(Path::new("Tether/config.toml")));
+        assert!(!is_tether_config_rel(Path::new("tether/other")));
+        for dir in ["~", "~/.config", "~/tether2"] {
+            assert!(!dir_holds_tether_config(dir), "{dir}");
+        }
     }
 
     /// A merge or a first copy writes config.toml 0600, also over a file that was 0644
