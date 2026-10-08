@@ -396,26 +396,19 @@ fn sort_set_lists<'a>(t: &'a mut Table, path: &mut Vec<&'a str>) {
         match value {
             Value::Table(child) => sort_set_lists(child, path),
             Value::Array(items) if is_set_list(path) => {
-                // Of two items with one key, the richer stays, whatever their order
-                items.sort_by(|a, b| {
-                    item_key(a)
-                        .cmp(&item_key(b))
-                        .then_with(|| richness(b).cmp(&richness(a)))
+                // Items with one key and different bodies all stay, in file order: no rule
+                // can tell which one the user meant
+                items.sort_by_key(item_key);
+                let mut seen = Vec::new();
+                items.retain(|item| {
+                    let new = !seen.contains(item);
+                    seen.push(item.clone());
+                    new
                 });
-                items.dedup_by(|later, kept| item_key(later) == item_key(kept));
             }
             _ => {}
         }
         path.pop();
-    }
-}
-
-/// A table holds more than a bare string, and a table with more fields more than one with
-/// fewer. The text breaks a tie, so the order is total.
-fn richness(v: &Value) -> (usize, String) {
-    match v {
-        Value::Table(t) => (1 + t.len(), v.to_string()),
-        _ => (0, v.to_string()),
     }
 }
 
@@ -516,8 +509,10 @@ fn merge_node(
     }
 }
 
-/// Merges each item as a setting of its own: an item one side added or changed takes that
-/// side, and an item one side removed goes. Without a base, nothing counts as removed.
+/// Merges the items of each key as a setting of its own: items one side added or changed
+/// take that side, and items one side removed go. Items that both sides changed, or that
+/// differ without a base, are a conflict: the local items stay. Without a base, nothing
+/// counts as removed.
 fn merge_set(
     ctx: &mut Ctx,
     path: &[&str],
@@ -525,27 +520,33 @@ fn merge_set(
     local: &[Value],
     remote: &[Value],
 ) -> Vec<Value> {
-    let find = |items: &[Value], key: &str| items.iter().find(|v| item_key(v) == key).cloned();
+    let items = |list: &[Value], key: &str| -> Vec<Value> {
+        list.iter()
+            .filter(|v| item_key(v) == key)
+            .cloned()
+            .collect()
+    };
     let mut keys: Vec<String> = local.iter().chain(remote).map(item_key).collect();
     keys.sort();
     keys.dedup();
     let mut out = Vec::new();
     for key in keys {
-        let (l, r) = (find(local, &key), find(remote, &key));
-        let pick = match base {
-            _ if l == r => l,
-            Some(base) => {
-                let b = find(base, &key);
-                if l == b {
-                    r
-                } else if r == b {
-                    l
-                } else {
-                    ctx.conflicts.push(format!("{} {}", path.join("."), key));
-                    l
-                }
+        let (l, r) = (items(local, &key), items(remote, &key));
+        // The side that did not change, if one did not
+        let unchanged = match base {
+            _ if l == r => Some(&r),
+            Some(base) => [&l, &r]
+                .into_iter()
+                .find(|side| **side == items(base, &key)),
+            None => [&l, &r].into_iter().find(|side| side.is_empty()),
+        };
+        let pick = match unchanged {
+            Some(side) if *side == l => r,
+            Some(_) => l,
+            None => {
+                ctx.conflicts.push(format!("{} {}", path.join("."), key));
+                l
             }
-            None => l.or(r),
         };
         out.extend(pick);
     }
@@ -1162,10 +1163,11 @@ mod tests {
         }
     }
 
+    /// Two items with one key and different bodies are a conflict, also without a base:
+    /// the local item stays, whatever the text order
     #[test]
-    fn a_set_list_keeps_the_richer_of_two_items_in_any_order() {
+    fn set_items_with_one_key_conflict_and_keep_local() {
         let base = base_config();
-        let rich = "{ path = \".zshrc\", create_if_missing = false }";
         let with = |files: &str| {
             let mut t: Table = toml::from_str(&base).unwrap();
             let files: Value =
@@ -1176,16 +1178,27 @@ mod tests {
                 .insert("files".into(), files);
             toml::to_string_pretty(&t).unwrap()
         };
-        let one = with(&format!("\".zshrc\", {rich}"));
-        let two = with(&format!("{rich}, \".zshrc\""));
-        assert!(same_settings(one.as_bytes(), two.as_bytes()));
-        let s = settings(&one).unwrap();
-        assert_eq!(
-            s["dotfiles"]["files"],
-            Value::Array(vec![toml::from_str::<Table>(&format!("x = {rich}"))
-                .unwrap()["x"]
-                .clone()])
-        );
+        let files = |text: &str| settings(text).unwrap()["dotfiles"]["files"].clone();
+        let rich = "{ path = \".zshrc\", create_if_missing = false }";
+        let plain = with("\".zshrc\"");
+        let table = with(rich);
+        // Both sides added the item, each with another body
+        let neither = with("\".vimrc\"");
+        for (local, remote) in [(&plain, &table), (&table, &plain)] {
+            for b in [None, Some(neither.as_str())] {
+                let m = merge(b, local, remote, "a").unwrap();
+                assert_eq!(m.conflicts, vec!["dotfiles.files .zshrc"], "{b:?}");
+                assert_eq!(files(&m.text), files(local));
+            }
+        }
+        // One side changed the item: no conflict, that side wins
+        let m = merge(Some(&plain), &plain, &table, "a").unwrap();
+        assert!(m.conflicts.is_empty());
+        assert_eq!(files(&m.text), files(&table));
+        // Items with one key in one file all stay, in file order
+        let both = with(&format!("{rich}, \".zshrc\""));
+        let s = settings(&both).unwrap();
+        assert_eq!(s["dotfiles"]["files"].as_array().unwrap().len(), 2);
     }
 
     /// Every list that `Config` leaves out when empty is in SKIPPED, so a missing one counts
