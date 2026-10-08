@@ -106,7 +106,12 @@ pub fn save_text(current: Option<&str>, config: &Config) -> Result<String> {
     ) else {
         return pretty();
     };
-    apply(doc.as_table_mut(), &table_of(&old)?, &table_of(config)?);
+    apply(
+        doc.as_table_mut(),
+        &table_of(&old)?,
+        &table_of(config)?,
+        false,
+    );
     Ok(doc.to_string())
 }
 
@@ -145,7 +150,7 @@ pub fn merge(base: Option<&str>, local: &str, remote: &str, machine_id: &str) ->
     let changed = merged != *local_table;
     let text = if changed {
         let mut doc: DocumentMut = local.parse()?;
-        apply(doc.as_table_mut(), local_table, &merged);
+        apply(doc.as_table_mut(), local_table, &merged, false);
         doc.as_table_mut()
             .insert("config_writer", toml_edit::value(i64::from(CONFIG_WRITER)));
         doc.to_string()
@@ -441,8 +446,10 @@ fn keep_assigned_profiles(merged: &mut Table, local: &Table, base: Option<&Table
 }
 
 /// Edits `doc` from the settings `from` to the settings `to`. Keys that neither has, such as
-/// keys from a newer Tether, and the comments around unchanged keys stay.
-fn apply(doc: &mut dyn TableLike, from: &Table, to: &Table) {
+/// keys from a newer Tether, and the comments around unchanged keys stay. `inline`: `doc` is
+/// an inline table or a dotted-key table, where a `[header]` table cannot go, so a new table
+/// goes in as an inline value.
+fn apply(doc: &mut dyn TableLike, from: &Table, to: &Table, inline: bool) {
     let mut keys: Vec<&String> = from.keys().chain(to.keys()).collect();
     keys.sort();
     keys.dedup();
@@ -458,8 +465,13 @@ fn apply(doc: &mut dyn TableLike, from: &Table, to: &Table) {
             (Some(Value::Table(f)), Some(Value::Table(t)))
                 if doc.get(key).is_some_and(|i| i.as_table_like().is_some()) =>
             {
-                let child = doc.get_mut(key).and_then(|i| i.as_table_like_mut());
-                apply(child.expect("checked above"), f, t);
+                let item = doc.get_mut(key).expect("checked above");
+                let inline = inline || !matches!(item, Item::Table(t) if !t.is_dotted());
+                let child = item.as_table_like_mut().expect("checked above");
+                apply(child, f, t, inline);
+            }
+            (_, Some(t)) if inline => {
+                doc.insert(key, Item::Value(to_value(t)));
             }
             (_, Some(t)) => {
                 doc.insert(key, to_item(t));
@@ -472,7 +484,9 @@ fn to_item(v: &Value) -> Item {
     match v {
         Value::Table(t) => {
             let mut table = toml_edit::Table::new();
-            table.set_implicit(true);
+            // An implicit table writes no header, so only a table that holds nothing but
+            // tables may be implicit; an empty one must keep its header to stay
+            table.set_implicit(!t.is_empty() && t.values().all(Value::is_table));
             for (k, v) in t {
                 table.insert(k, to_item(v));
             }
@@ -882,6 +896,71 @@ mod tests {
         assert!(exported.contains("config_parent = \"abc\""), "{exported}");
         assert_ne!(with_parent(&local, "abc"), with_parent(&local, "def"));
         assert!(same_settings(local.as_bytes(), exported.as_bytes()));
+    }
+
+    /// A hand-written config with inline tables and dotted keys
+    const COMPACT: &str = r#"config_version = 2
+sync.interval = "5m"
+sync.strategy = "last-write-wins"
+backend = { type = "git", url = "" }
+packages.brew = { enabled = true, sync_casks = true, sync_taps = true }
+packages.npm = { enabled = true, sync_versions = false }
+dotfiles = { files = [".zshrc"] }
+"#;
+
+    #[test]
+    fn edits_into_inline_and_dotted_tables_stay_inline() {
+        let mut remote: Table = toml::from_str(COMPACT).unwrap();
+        let packages = remote["packages"].as_table_mut().unwrap();
+        packages["brew"]
+            .as_table_mut()
+            .unwrap()
+            .insert("trusted_taps".into(), Value::Array(vec!["a/b".into()]));
+        packages.insert("allow_scripts".into(), Value::Array(vec!["esbuild".into()]));
+        packages.insert("future".into(), toml::toml! { x = 1 }.into());
+        packages.insert("future_empty".into(), Value::Table(Table::new()));
+        remote["sync"]
+            .as_table_mut()
+            .unwrap()
+            .insert("interval".into(), "10m".into());
+        remote["backend"]
+            .as_table_mut()
+            .unwrap()
+            .insert("future".into(), toml::toml! { y = 2 }.into());
+        // A newer Tether's empty section
+        remote.insert("future_section".into(), Value::Table(Table::new()));
+        let remote = toml::to_string_pretty(&remote).unwrap();
+
+        let m = merge(Some(COMPACT), COMPACT, &remote, "a").unwrap();
+        assert!(m.changed);
+        for header in ["[packages", "[backend", "[sync", "[dotfiles"] {
+            assert!(!m.text.contains(header), "{header} in:\n{}", m.text);
+        }
+        assert!(m.text.contains("sync.interval = \"10m\""), "{}", m.text);
+        let t: Table = toml::from_str(&m.text).unwrap();
+        assert_eq!(
+            t["packages"]["brew"]["trusted_taps"][0].as_str(),
+            Some("a/b")
+        );
+        assert_eq!(t["packages"]["allow_scripts"][0].as_str(), Some("esbuild"));
+        assert_eq!(t["packages"]["future"]["x"].as_integer(), Some(1));
+        assert_eq!(t["packages"]["future_empty"], Value::Table(Table::new()));
+        assert_eq!(t["backend"]["future"]["y"].as_integer(), Some(2));
+        assert_eq!(t["future_section"], Value::Table(Table::new()));
+        // Merged again, nothing changes: the empty tables were written
+        assert!(!merge(Some(&remote), &m.text, &remote, "a").unwrap().changed);
+
+        // A save into dotted keys stays dotted
+        let saved = edit(&m.text, |c| {
+            c.dashboard.theme = Some("mocha".into());
+            c.packages.min_release_age_days = 3;
+            c.packages.npm.enabled = false;
+        });
+        assert!(!saved.contains("[packages"), "{saved}");
+        let c = Config::parse(&saved).unwrap();
+        assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+        assert_eq!(c.packages.min_release_age_days, 3);
+        assert!(!c.packages.npm.enabled);
     }
 
     #[test]
