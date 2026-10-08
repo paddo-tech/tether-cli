@@ -1730,7 +1730,7 @@ fn write_synced_config(
     state: &mut SyncState,
     key: &[u8],
 ) -> Result<()> {
-    use crate::sync::config_merge::{export_text, generation, has_marker, is_stale};
+    use crate::sync::config_merge::{export_text, generation, has_marker};
     let content = std::fs::read(home.join(".tether/config.toml"))?;
     let dest = sync_path.join("configs/tether/config.toml.enc");
     let repo = match std::fs::read(&dest) {
@@ -1751,12 +1751,10 @@ fn write_synced_config(
             return Ok(());
         }
         // A format-only difference is no change: exporting it would make 1.x machines see
-        // one. A copy without the marker or a stale copy is replaced, so that the repo holds
-        // a marked copy of the current generation
-        if has_marker(repo)
-            && !is_stale(repo, known_generation(state, base.as_deref()))
-            && crate::sync::config_merge::same_settings(repo, &content)
-        {
+        // one. A copy without the marker is replaced, so that 1.x copies get the marker. A
+        // stale copy with the current settings stays: an export makes every other 1.x
+        // machine push its own stale copy again, so with two 1.x machines it never settles
+        if has_marker(repo) && crate::sync::config_merge::same_settings(repo, &content) {
             return Ok(());
         }
     }
@@ -2685,6 +2683,22 @@ mod tests {
         assert_eq!(days(&b.config()), 14);
         // Settled: b took the restore and exports nothing
         assert_eq!(repo_copy(repo), restored);
+
+        // A stale copy with the current settings changes nothing and is not restored, so
+        // the 1.x machines do not push their stale copies in turn
+        let mut same = Config::parse(&String::from_utf8_lossy(&r1)).unwrap();
+        same.packages.min_release_age_days = 14;
+        let stale =
+            crate::sync::config_merge::save_text(Some(&String::from_utf8_lossy(&r1)), &same)
+                .unwrap();
+        assert_eq!(generation(stale.as_bytes()), generation(&r1));
+        set_repo_copy(repo, stale.as_bytes());
+        for p in [&mut a, &mut b] {
+            assert!(!p.pull(repo));
+            p.push(repo);
+            assert_eq!(repo_copy(repo), stale.as_bytes());
+            assert_eq!(days(&p.config()), 14);
+        }
     }
 
     /// A 1.x user who sets a value back saves a copy without the marker: it merges
