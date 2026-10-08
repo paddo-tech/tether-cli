@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Sync no longer needs a git identity. On a machine without `user.name` and `user.email`, a rejected push failed its rebase. Tether then reset the sync repo and moved the local commits to a `tether-discarded-*` branch, and `tether init` failed. Each git command that Tether runs now gives the identity that Tether commits use, and turns off commit signing for rebased commits. Only a real content conflict now resets the repo. Any other rebase failure keeps the local commits and shows the git error
 
+## [1.13.2] - 2026-10-08
+
+### Fixed
+
+- A sync now records the config it applied from the repo, so the next sync does not treat it as a local edit and push the older copy back
+- config.toml is written with its maps in sorted order, so the same settings give the same file
+
 ## [2.0.0-beta.1] - 2026-10-07
 
 ### Added
