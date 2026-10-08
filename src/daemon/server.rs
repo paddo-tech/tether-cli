@@ -447,7 +447,7 @@ impl DaemonServer {
 
         // Export tether config to sync repo
         if config.security.encrypt_dotfiles {
-            crate::cli::commands::sync::export_tether_config(&sync_path, &home, &mut state)?;
+            crate::cli::commands::sync::export_tether_config(&sync_path, &home)?;
         }
 
         // Commit and push if changes made
@@ -463,7 +463,12 @@ impl DaemonServer {
         } else {
             log::debug!("No changes to sync");
         }
-        crate::cli::commands::sync::commit_config_base(&home)?;
+        crate::cli::commands::sync::promote_config_base(
+            &sync_path,
+            &home,
+            &mut state,
+            crate::security::get_encryption_key,
+        )?;
 
         state.mark_synced();
 
