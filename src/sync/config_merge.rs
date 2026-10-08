@@ -10,14 +10,16 @@
 //!   export then makes the local value the repo value, so the fleet settles on the value of
 //!   the machine that exports last.
 //! - A synced config without `config_writer` came from 1.x, which drops keys it does not
-//!   know when it saves. A key that it does not have is not a deletion.
+//!   know when it saves. A key that 1.x does not know (`V1_KEYS`) and that the copy lacks
+//!   keeps the base value. A key that 1.x knows and the copy lacks is a deletion or a
+//!   skipped default, as in any copy.
 //! - The `machine_profiles` entry of this machine keeps its local value. A profile that an
 //!   assignment names is never deleted.
 //! - The lists in SET_LISTS merge item by item and are written sorted. Every other list
 //!   merges as one value.
 //! - The merged settings go into the local file as edits, so its comments and layout stay.
 
-use crate::config::{Config, CONFIG_WRITER, CURRENT_CONFIG_VERSION};
+use crate::config::{Config, CONFIG_WRITER, CURRENT_CONFIG_VERSION, V1_KEYS};
 use anyhow::{Context, Result};
 use toml::{Table, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
@@ -133,7 +135,7 @@ pub fn reads(text: &[u8]) -> bool {
 /// Why the text does not read as a config.toml.
 pub fn read_error(text: &[u8]) -> Option<String> {
     match std::str::from_utf8(text) {
-        Ok(t) => settings(t, true).err().map(|e| e.to_string()),
+        Ok(t) => settings(t).err().map(|e| e.to_string()),
         Err(e) => Some(e.to_string()),
     }
 }
@@ -141,11 +143,7 @@ pub fn read_error(text: &[u8]) -> Option<String> {
 /// Whether two config.toml texts hold the same settings. Text that does not parse
 /// compares by bytes.
 pub fn same_settings(a: &[u8], b: &[u8]) -> bool {
-    let parse = |t: &[u8]| {
-        std::str::from_utf8(t)
-            .ok()
-            .and_then(|t| settings(t, true).ok())
-    };
+    let parse = |t: &[u8]| std::str::from_utf8(t).ok().and_then(|t| settings(t).ok());
     match (parse(a), parse(b)) {
         (Some(a), Some(b)) => a == b,
         _ => a == b,
@@ -177,13 +175,14 @@ pub fn save_text(current: Option<&str>, config: &Config) -> Result<String> {
 /// Merges `local` and `remote` against `base`, the synced config this machine last merged or
 /// exported. Without a base, every difference counts as a change on both sides.
 pub fn merge(base: Option<&str>, local: &str, remote: &str, machine_id: &str) -> Result<Merged> {
-    let local_value = settings(local, true)?;
-    let from_2x = has_writer(remote)?;
-    let mut remote_value = settings(remote, from_2x)?;
-    let base_value = base.map(|b| settings(b, true)).transpose()?;
-    if !from_2x {
-        fill_missing(
+    let local_value = settings(local)?;
+    let mut remote_value = settings(remote)?;
+    let base_value = base.map(settings).transpose()?;
+    let raw: Table = toml::from_str(remote)?;
+    if !raw.contains_key("config_writer") {
+        fill_2x_only(
             &mut remote_value,
+            Some(&raw),
             base_value.as_ref().unwrap_or(&local_value),
             &mut Vec::new(),
         );
@@ -241,16 +240,14 @@ fn table_of(config: &Config) -> Result<Table> {
 }
 
 /// The settings of a config in the form two configs compare by: the raw keys, with the
-/// values `Config` reads for the keys it knows, and set lists sorted. `filled`: a missing
-/// key holds its default. Otherwise a missing key stays missing.
-fn settings(text: &str, filled: bool) -> Result<Table> {
+/// values `Config` reads for the keys it knows, and set lists sorted. A missing key holds
+/// its default.
+fn settings(text: &str) -> Result<Table> {
     let raw: Table = toml::from_str(text)?;
     let config: Config = toml::from_str(text)?;
     let mut known = table_of(&config)?;
-    if filled {
-        fill_empty(&mut known);
-    }
-    let mut out = overlay(known, &raw, filled);
+    fill_empty(&mut known);
+    let mut out = overlay(known, &raw);
     for key in OWN_KEYS.iter().chain(&LEGACY_KEYS) {
         out.remove(*key);
     }
@@ -311,16 +308,12 @@ fn fill_path(t: &mut Table, path: &[&str], skipped: Skipped) {
     }
 }
 
-/// Adds the raw keys that `Config` does not know to `known`. Unless `filled`, drops the keys
-/// the raw text does not have.
-fn overlay(mut known: Table, raw: &Table, filled: bool) -> Table {
-    if !filled {
-        known.retain(|k, _| raw.contains_key(k));
-    }
+/// Adds the raw keys that `Config` does not know to `known`.
+fn overlay(mut known: Table, raw: &Table) -> Table {
     for (key, r) in raw {
         match (known.get_mut(key), r) {
             (Some(Value::Table(k)), Value::Table(r)) => {
-                *k = overlay(std::mem::take(k), r, filled);
+                *k = overlay(std::mem::take(k), r);
             }
             (Some(_), _) => {}
             (None, _) => {
@@ -331,31 +324,55 @@ fn overlay(mut known: Table, raw: &Table, filled: bool) -> Table {
     known
 }
 
-/// A config from 1.x lacks the keys 1.x does not know. They keep the reference value, also
-/// in the items of a set list: an item that 1.x wrote without a field keeps that field.
-fn fill_missing<'a>(remote: &mut Table, reference: &'a Table, path: &mut Vec<&'a str>) {
+/// A config from 1.x lacks the keys 1.x does not know. Each one that `raw`, the text 1.x
+/// wrote, does not have keeps the reference value, also in the items of a set list. A key
+/// that 1.x knows keeps the value of the copy, so a deletion or a skipped default holds.
+fn fill_2x_only<'a>(
+    remote: &mut Table,
+    raw: Option<&Table>,
+    reference: &'a Table,
+    path: &mut Vec<&'a str>,
+) {
     for (key, r) in reference {
         path.push(key);
-        match (remote.get_mut(key), r) {
-            (None, _) => {
+        let raw_value = raw.and_then(|t| t.get(key));
+        if !known_to_1x(path) {
+            if raw_value.is_none() {
                 remote.insert(key.clone(), r.clone());
             }
-            (Some(Value::Table(t)), Value::Table(r)) => fill_missing(t, r, path),
-            (Some(Value::Array(items)), Value::Array(r)) if is_set_list(path) => {
-                for item in items.iter_mut() {
-                    let key = item_key(item);
-                    let found = r.iter().find(|v| item_key(v) == key);
-                    if let (Value::Table(t), Some(Value::Table(rt))) = (item, found) {
-                        for (k, v) in rt {
-                            t.entry(k.clone()).or_insert_with(|| v.clone());
+        } else {
+            match (remote.get_mut(key), r) {
+                (Some(Value::Table(t)), Value::Table(r)) => {
+                    fill_2x_only(t, raw_value.and_then(Value::as_table), r, path);
+                }
+                (Some(Value::Array(items)), Value::Array(r)) if is_set_list(path) => {
+                    for item in items.iter_mut() {
+                        let key = item_key(item);
+                        let found = r.iter().find(|v| item_key(v) == key);
+                        if let (Value::Table(t), Some(Value::Table(rt))) = (item, found) {
+                            for (field, v) in rt {
+                                path.extend(["[]", field.as_str()]);
+                                if !known_to_1x(path) {
+                                    t.entry(field.clone()).or_insert_with(|| v.clone());
+                                }
+                                path.truncate(path.len() - 2);
+                            }
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
         path.pop();
     }
+}
+
+/// Whether 1.x knows the key at `path`: a key of V1_KEYS is the path or lies under it.
+fn known_to_1x(path: &[&str]) -> bool {
+    V1_KEYS.iter().any(|(key, _)| {
+        let key: Vec<&str> = key.split('.').collect();
+        key.len() >= path.len() && matches(&key[..path.len()], path)
+    })
 }
 
 fn matches(pattern: &[&str], path: &[&str]) -> bool {
@@ -651,7 +668,7 @@ mod tests {
     /// A config as 1.x saves it: no keys 1.x does not know
     fn strip_2x(text: &str) -> String {
         let mut t: Table = toml::from_str(text).unwrap();
-        for key in ["config_writer", "dashboard", "profiles", "machine_profiles"] {
+        for key in ["config_writer", "dashboard"] {
             t.remove(key);
         }
         let packages = t["packages"].as_table_mut().unwrap();
@@ -662,7 +679,60 @@ mod tests {
         ] {
             packages.remove(key);
         }
+        packages["brew"]
+            .as_table_mut()
+            .unwrap()
+            .remove("trusted_taps");
         toml::to_string_pretty(&t).unwrap()
+    }
+
+    /// A 1.x save that deletes keys 1.x knows deletes them; the keys only 2.0 knows stay
+    #[test]
+    fn a_1x_copy_deletes_the_keys_1x_knows() {
+        let team = crate::config::TeamConfig {
+            enabled: true,
+            url: "u".into(),
+            auto_inject: false,
+            read_only: true,
+            orgs: vec!["o".into()],
+        };
+        let base = edit(&base_config(), |c| {
+            c.team_only = true;
+            c.team = Some(team.clone());
+            let mut teams = crate::config::TeamsConfig::default();
+            teams.teams.insert("t".into(), team.clone());
+            teams.teams.insert("gone".into(), team.clone());
+            c.teams = Some(teams);
+            c.profiles.insert("old".into(), ProfileConfig::default());
+            c.dashboard.theme = Some("mocha".into());
+            c.packages.allow_scripts = vec!["esbuild".into()];
+            c.packages.min_release_age_days = 3;
+            c.packages.brew.trusted_taps = vec!["a/b".into()];
+        });
+        let remote = strip_2x(&edit(&base, |c| {
+            c.team_only = false;
+            c.team = None;
+            c.teams.as_mut().unwrap().teams.remove("gone");
+            c.profiles.remove("old");
+        }));
+        assert!(
+            !remote.contains("team_only") && !remote.contains("[team]"),
+            "{remote}"
+        );
+        for b in [Some(base.as_str()), None] {
+            let m = merge(b, &base, &remote, "a").unwrap();
+            let c = config(&m);
+            // Without a base, a deletion is a change on both sides: local stays
+            let deleted = b.is_some();
+            assert_eq!(!c.team_only, deleted);
+            assert_eq!(c.team.is_none(), deleted);
+            assert_eq!(!c.teams.unwrap().teams.contains_key("gone"), deleted);
+            assert_eq!(!c.profiles.contains_key("old"), deleted);
+            assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+            assert_eq!(c.packages.allow_scripts, vec!["esbuild"]);
+            assert_eq!(c.packages.min_release_age_days, 3);
+            assert_eq!(c.packages.brew.trusted_taps, vec!["a/b"]);
+        }
     }
 
     #[test]
@@ -1082,7 +1152,7 @@ mod tests {
         let one = with(&format!("\".zshrc\", {rich}"));
         let two = with(&format!("{rich}, \".zshrc\""));
         assert!(same_settings(one.as_bytes(), two.as_bytes()));
-        let s = settings(&one, true).unwrap();
+        let s = settings(&one).unwrap();
         assert_eq!(
             s["dotfiles"]["files"],
             Value::Array(vec![toml::from_str::<Table>(&format!("x = {rich}"))

@@ -19,6 +19,91 @@ pub const DEFAULT_PROFILE: &str = "dev";
 /// was not deleted. A constant, so an upgrade does not change the synced config.
 pub const CONFIG_WRITER: u32 = 2;
 
+/// Whether 1.x fails to load a config.toml without the key
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum V1Key {
+    Required,
+    Optional,
+}
+
+/// The config.toml keys that every 1.x release since 1.11.10 reads and writes: the
+/// intersection of the `Config` structs of 1.11.10, 1.12.0 and 1.13.1. They are the same,
+/// except for `on_conflict` in dotfile entries, which only 1.13 has. The intersection, not the
+/// union: a 1.11 or 1.12 save drops `on_conflict`, so a missing one is no deletion. Only a
+/// key in this list that a 1.x copy lacks is a deletion or a skipped default.
+///
+/// A key is a dotted path. `*` matches any key of a map and `[]` any item of a list. A table
+/// that holds a listed key is known too: `team` is known through `team.url`. A key is
+/// `Required` when 1.x has no default for it: when its table is present, 1.x needs it.
+pub const V1_KEYS: &[(&str, V1Key)] = &[
+    ("config_version", V1Key::Optional),
+    ("team_only", V1Key::Optional),
+    ("features.personal_dotfiles", V1Key::Optional),
+    ("features.personal_packages", V1Key::Optional),
+    ("features.team_dotfiles", V1Key::Optional),
+    ("features.collab_secrets", V1Key::Optional),
+    ("features.team_layering", V1Key::Optional),
+    ("sync", V1Key::Required),
+    ("sync.interval", V1Key::Required),
+    ("sync.strategy", V1Key::Required),
+    ("backend", V1Key::Required),
+    ("backend.type", V1Key::Required),
+    ("backend.url", V1Key::Required),
+    ("packages", V1Key::Required),
+    ("packages.remove_unlisted", V1Key::Optional),
+    ("packages.brew.enabled", V1Key::Required),
+    ("packages.brew.sync_casks", V1Key::Required),
+    ("packages.brew.sync_taps", V1Key::Required),
+    ("packages.npm.enabled", V1Key::Required),
+    ("packages.npm.sync_versions", V1Key::Required),
+    ("packages.pnpm.enabled", V1Key::Required),
+    ("packages.pnpm.sync_versions", V1Key::Required),
+    ("packages.bun.enabled", V1Key::Required),
+    ("packages.bun.sync_versions", V1Key::Required),
+    ("packages.gem.enabled", V1Key::Required),
+    ("packages.gem.sync_versions", V1Key::Required),
+    ("packages.uv.enabled", V1Key::Required),
+    ("packages.uv.sync_versions", V1Key::Required),
+    ("dotfiles", V1Key::Required),
+    ("dotfiles.files", V1Key::Required),
+    ("dotfiles.files.[].path", V1Key::Required),
+    ("dotfiles.files.[].create_if_missing", V1Key::Optional),
+    ("dotfiles.dirs", V1Key::Optional),
+    ("security.encrypt_dotfiles", V1Key::Required),
+    ("security.scan_secrets", V1Key::Required),
+    ("merge.command", V1Key::Optional),
+    ("merge.args", V1Key::Optional),
+    ("team.enabled", V1Key::Required),
+    ("team.url", V1Key::Required),
+    ("team.auto_inject", V1Key::Required),
+    ("team.read_only", V1Key::Required),
+    ("team.orgs", V1Key::Optional),
+    ("teams.active", V1Key::Optional),
+    ("teams.teams", V1Key::Required),
+    ("teams.teams.*.enabled", V1Key::Required),
+    ("teams.teams.*.url", V1Key::Required),
+    ("teams.teams.*.auto_inject", V1Key::Required),
+    ("teams.teams.*.read_only", V1Key::Required),
+    ("teams.teams.*.orgs", V1Key::Optional),
+    ("teams.allowed_orgs", V1Key::Optional),
+    ("teams.collabs.*.sync_url", V1Key::Required),
+    ("teams.collabs.*.projects", V1Key::Optional),
+    ("teams.collabs.*.members_cache", V1Key::Optional),
+    ("teams.collabs.*.last_refresh", V1Key::Optional),
+    ("teams.collabs.*.enabled", V1Key::Optional),
+    ("project_configs.enabled", V1Key::Required),
+    ("project_configs.search_paths", V1Key::Required),
+    ("project_configs.patterns", V1Key::Required),
+    ("project_configs.only_if_gitignored", V1Key::Required),
+    ("machine_profiles.*", V1Key::Optional),
+    ("profiles.*.dotfiles", V1Key::Optional),
+    ("profiles.*.dotfiles.[].path", V1Key::Required),
+    ("profiles.*.dotfiles.[].shared", V1Key::Optional),
+    ("profiles.*.dotfiles.[].create_if_missing", V1Key::Optional),
+    ("profiles.*.dirs", V1Key::Optional),
+    ("profiles.*.packages", V1Key::Optional),
+];
+
 fn default_config_version() -> u32 {
     1
 }
@@ -1497,12 +1582,34 @@ mod tests {
                 sync_url: "git@example.com:acme/collab.git".to_string(),
                 projects: vec![],
                 members_cache: vec![],
-                last_refresh: None,
+                last_refresh: Some(chrono::Utc::now()),
                 enabled: true,
             },
         );
         config.teams = Some(teams);
         config.project_configs.enabled = true;
+        config.team_only = true;
+        config.dotfiles.files.push(DotfileEntry::WithOptions {
+            path: ".vimrc".to_string(),
+            create_if_missing: true,
+            on_conflict: OnConflict::Local,
+        });
+        config.profiles.insert(
+            "dev".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::WithOptions {
+                    path: ".zshrc".to_string(),
+                    shared: true,
+                    create_if_missing: true,
+                    on_conflict: OnConflict::Local,
+                }],
+                dirs: vec![".config/a".to_string()],
+                packages: vec!["npm".to_string()],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("m".to_string(), "dev".to_string());
         let local = toml::to_string_pretty(&config)
             .unwrap()
             .replace("sync_versions = false\n", "");
@@ -1511,6 +1618,34 @@ mod tests {
         let old = toml::from_str::<OldConfig>(&exported).unwrap();
         assert!(old.config_version <= 2);
         assert!(old.teams.is_some() && old.team.is_some() && old.project_configs.is_some());
+
+        /// The values at a V1_KEYS path
+        fn at<'a>(v: &'a toml::Value, path: &[&str]) -> Vec<&'a toml::Value> {
+            let Some((key, rest)) = path.split_first() else {
+                return vec![v];
+            };
+            let children: Vec<&toml::Value> = match (*key, v) {
+                ("*", toml::Value::Table(t)) => t.values().collect(),
+                ("[]", toml::Value::Array(a)) => a.iter().collect(),
+                (key, toml::Value::Table(t)) => t.get(key).into_iter().collect(),
+                _ => Vec::new(),
+            };
+            children.into_iter().flat_map(|c| at(c, rest)).collect()
+        }
+        let full: toml::Value = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        let exported: toml::Value = toml::from_str(&exported).unwrap();
+        for (key, kind) in V1_KEYS {
+            let path: Vec<&str> = key.split('.').collect();
+            // Every key 1.x knows is a key 2.0 writes
+            assert!(!at(&full, &path).is_empty(), "{key} is not a 2.0 key");
+            // An export has every key 1.x requires, in each table that holds it
+            if *kind == V1Key::Required {
+                let (last, parent) = path.split_last().unwrap();
+                for table in at(&exported, parent).iter().filter_map(|v| v.as_table()) {
+                    assert!(table.contains_key(*last), "the export lacks {key}");
+                }
+            }
+        }
     }
 
     // Path safety tests
