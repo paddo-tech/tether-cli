@@ -1,8 +1,10 @@
 //! config.toml merges between HEAD machines: a machine that only rewrote the format of its
 //! config, or changed another setting, never exports over another machine's profile change.
-//! A 1.x machine's export does not strip 2.0 settings, a setting both machines changed
-//! settles, set lists keep one order, a cleared list stays cleared, and a dry run writes no
-//! config.
+//! A 1.x machine's export does not strip 2.0 settings, and its stale copy of an earlier
+//! export changes nothing. 1.x loads every exported copy, also when the local file leaves
+//! out fields 1.x requires. A setting both machines changed settles, set lists keep one
+//! order, a cleared list stays cleared, a dry run writes no config, and a write makes
+//! config.toml 0600.
 
 use crate::harness::{enabled, Lab, Machine, HEAD, OLD};
 
@@ -47,6 +49,22 @@ async fn settle(lab: &Lab, a: &Machine, b: &Machine, rounds: usize, what: &str) 
         }
     }
     panic!("{what}: the pair still commits after {rounds} rounds");
+}
+
+/// Syncs the machines in turn until a round commits no config.toml; panics after 4 rounds.
+/// 1.x rewrites its own record on every sync, so only config.toml counts.
+async fn settle3(lab: &Lab, machines: [&Machine; 3], what: &str) {
+    for _ in 0..4 {
+        let head = lab.head().await;
+        for m in machines {
+            m.tether_ok("sync").await;
+        }
+        let changed = lab.changed(&head, &lab.head().await).await;
+        if !changed.iter().any(|p| p.contains("config.toml")) {
+            return;
+        }
+    }
+    panic!("{what}: config.toml still changes after 4 rounds");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -201,6 +219,79 @@ async fn config_changes_merge() {
         assert_eq!(assigned(m, &b_id).await.as_deref(), Some("linux-server"));
         assert!(has_profile(m, "linux-server").await, "{}", m.name);
     }
+
+    // 1.13.1 applies the restored copy, and later pushes it again verbatim: a stale copy
+    // with an older config_generation. The config.toml of a and b leaves out fields 1.x
+    // requires
+    old.tether_ok("sync").await;
+    assert!(old.read(CONFIG).await.contains("config_generation"));
+    for m in [&a, &b] {
+        m.ok(&format!("sed -i '/sync_versions/d' {CONFIG}")).await;
+    }
+    a.tether_ok("config set packages.min_release_age_days 14")
+        .await;
+    a.tether_ok("sync").await;
+    b.tether_ok("sync").await;
+    let head = lab.head().await;
+    old.tether_ok("sync").await;
+    assert!(
+        lab.changed(&head, &lab.head().await)
+            .await
+            .iter()
+            .any(|p| p.contains("config.toml")),
+        "1.13.1 did not export its stale copy"
+    );
+    let head = lab.head().await;
+    b.tether_ok("sync").await;
+    assert!(
+        lab.changed(&head, &lab.head().await)
+            .await
+            .iter()
+            .any(|p| p.contains("config.toml")),
+        "b did not restore the config over the stale copy"
+    );
+    a.tether_ok("sync").await;
+    let days = |cfg: toml::Table| cfg["packages"]["min_release_age_days"].as_integer();
+    for m in [&a, &b] {
+        assert_eq!(days(config(m).await), Some(14), "{}", m.name);
+    }
+    // 1.13.1 takes the restored copy, which has every field it requires, and loads it
+    old.tether_ok("sync").await;
+    let text = old.read(CONFIG).await;
+    assert!(text.contains("min_release_age_days = 14"), "{text}");
+    assert_eq!(text.matches("sync_versions = false").count(), 5, "{text}");
+    old.tether_ok("config get packages.npm.sync_versions").await;
+    settle3(&lab, [&a, &b, &old], "stale 1.x copy").await;
+
+    // 1.13.1 saves its config again: no marker, no generation, no 2.0 keys. HEAD merges its
+    // change, keeps the 2.0 settings, and marks the copy again
+    old.tether_ok("config set packages.brew.sync_taps false")
+        .await;
+    assert!(!old.read(CONFIG).await.contains("config_writer"));
+    old.tether_ok("sync").await;
+    a.tether_ok("sync").await;
+    b.tether_ok("sync").await;
+    for m in [&a, &b] {
+        let cfg = config(m).await;
+        assert_eq!(
+            cfg["packages"]["brew"]["sync_taps"].as_bool(),
+            Some(false),
+            "{}",
+            m.name
+        );
+        assert_eq!(days(cfg.clone()), Some(14), "{}", m.name);
+        assert_eq!(
+            cfg["dashboard"]["theme"].as_str(),
+            Some("mocha"),
+            "{}",
+            m.name
+        );
+        assert_eq!(allow_scripts(m).await, vec!["esbuild"], "{}", m.name);
+    }
+    old.tether_ok("sync").await;
+    assert!(old.read(CONFIG).await.contains("config_writer"));
+    old.tether_ok("config get packages.brew.sync_taps").await;
+    settle3(&lab, [&a, &b, &old], "1.x save").await;
     drop(old);
     drop(c);
 
@@ -253,6 +344,15 @@ async fn config_changes_merge() {
     let before = (sha(&b, CONFIG).await, sha(&b, base).await);
     b.tether_ok("sync --dry-run").await;
     assert_eq!(before, (sha(&b, CONFIG).await, sha(&b, base).await));
+    // Without config.toml, a dry run runs with the defaults and writes none
+    b.ok(&format!("mv {CONFIG} /root/config.away")).await;
+    b.tether_ok("sync --dry-run").await;
+    b.ok(&format!(
+        "! test -e {CONFIG} && mv /root/config.away {CONFIG}"
+    ))
+    .await;
+    // A write makes a config.toml that was 0644 private again
+    b.ok(&format!("chmod 644 {CONFIG}")).await;
     b.tether_ok("sync").await;
     assert_eq!(
         config(&b).await["dashboard"]["theme"].as_str(),

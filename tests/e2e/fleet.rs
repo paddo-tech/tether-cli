@@ -24,6 +24,10 @@
 //!   l  after the round of the change, a HEAD machine commits config.toml only to restore
 //!      the change after a 1.x machine exported its stale copy earlier in that round
 //!   m  every HEAD machine ends with the change, and the last rounds commit no config.toml
+//! Then a HEAD machine whose config.toml leaves out fields 1.x requires changes a setting,
+//! and the 1.x machine saves its config again, without the marker. (a) still holds, and
+//!   n  HEAD machines keep the 2.0 setting and take the change of the 1.x save
+//!   o  the last rounds after the 1.x save commit no config.toml
 //! It also logs how often 1.x machines commit config.toml per round, without failing on
 //! it. Its 1.x machine runs TETHER_E2E_FLAP_REF (default v1.13.1), which can be any commit.
 
@@ -780,6 +784,31 @@ async fn config_flap() {
     for _ in 0..SETTLE + 2 * STEADY {
         f.round("after-change").await;
     }
+    // A HEAD config.toml without the fields 1.x requires: every 1.x machine still loads the
+    // synced copy (a)
+    f.event(
+        "h1",
+        "change2",
+        "sed -i '/sync_versions/d' /root/.tether/config.toml && \
+         tether config set packages.min_release_age_days 14",
+    )
+    .await;
+    for _ in 0..SETTLE + STEADY {
+        f.round("after-change2").await;
+    }
+    // The 1.x machine saves its config again, without the marker and the 2.0 keys, and a HEAD
+    // machine pulls it next. In a round, the other 1.x machine would push its stale copy over
+    // it first, and no 2.0 machine could see the change
+    for (machine, command) in [
+        ("m1", "tether config set packages.brew.sync_taps false"),
+        ("m1", "tether sync"),
+        ("h1", "tether sync"),
+    ] {
+        f.event(machine, "resave", command).await;
+    }
+    for _ in 0..SETTLE + 2 * STEADY {
+        f.round("after-resave").await;
+    }
 
     let after: Vec<&str> = f
         .rounds
@@ -864,6 +893,50 @@ async fn config_flap() {
         (
             "the change reaches every machine, and the fleet then stops committing config.toml",
             Some([m, steady].concat()),
+        ),
+    );
+    // No setting is lost: the 1.x save keeps the 2.0 settings and its own change merges
+    let mut n = Vec::new();
+    for machine in f.machines.iter().filter(|m| m.version() == HEAD) {
+        let config: toml::Table =
+            toml::from_str(&machine.read("/root/.tether/config.toml").await).unwrap();
+        let days = config["packages"].get("min_release_age_days");
+        if days.and_then(|d| d.as_integer()) != Some(14) {
+            n.push(format!(
+                "{} has min_release_age_days {:?}",
+                machine.name, days
+            ));
+        }
+        let taps = config["packages"]["brew"].get("sync_taps");
+        if taps.and_then(|t| t.as_bool()) != Some(false) {
+            n.push(format!("{} has sync_taps {:?}", machine.name, taps));
+        }
+    }
+    let resave: Vec<&str> = f
+        .rounds
+        .iter()
+        .filter(|r| r.phase == "after-resave")
+        .map(|r| r.round.as_str())
+        .collect();
+    let last = &resave[resave.len() - STEADY..];
+    let o: Vec<String> = f
+        .syncs
+        .iter()
+        .filter(|s| last.contains(&s.round.as_str()) && s.changed.iter().any(|c| c == CONFIG))
+        .map(|s| format!("{} {} committed {CONFIG}", s.round, s.machine))
+        .collect();
+    results.insert(
+        "n",
+        (
+            "after a 1.x stale copy and a 1.x save, HEAD machines keep every setting",
+            Some(n),
+        ),
+    );
+    results.insert(
+        "o",
+        (
+            "after the 1.x save, the fleet stops committing config.toml",
+            Some(o),
         ),
     );
     report(&f.lab, &results, &flaps);
