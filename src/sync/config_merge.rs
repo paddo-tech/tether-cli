@@ -79,6 +79,9 @@ pub struct Merged {
     pub conflicts: Vec<String>,
     /// Profiles the remote deleted that an assignment still names; they stay
     pub kept_profiles: Vec<String>,
+    /// The base of the next merge: the remote, and for a 1.x copy the remote with the keys
+    /// it lacks filled in, so that a later deletion of one of them is a deletion
+    pub base: String,
 }
 
 /// The `config_version` of a config that this build cannot read, if it is newer.
@@ -179,14 +182,17 @@ pub fn merge(base: Option<&str>, local: &str, remote: &str, machine_id: &str) ->
     let mut remote_value = settings(remote)?;
     let base_value = base.map(settings).transpose()?;
     let raw: Table = toml::from_str(remote)?;
-    if !raw.contains_key("config_writer") {
+    let next_base = if raw.contains_key("config_writer") {
+        remote.to_string()
+    } else {
         fill_2x_only(
             &mut remote_value,
             Some(&raw),
             base_value.as_ref().unwrap_or(&local_value),
             &mut Vec::new(),
         );
-    }
+        toml::to_string_pretty(&remote_value)?
+    };
 
     let (local_value, remote_value) = (Value::Table(local_value), Value::Table(remote_value));
     let base_value = base_value.map(Value::Table);
@@ -224,6 +230,7 @@ pub fn merge(base: Option<&str>, local: &str, remote: &str, machine_id: &str) ->
         changed,
         conflicts: ctx.conflicts,
         kept_profiles,
+        base: next_base,
     })
 }
 
@@ -684,6 +691,26 @@ mod tests {
             .unwrap()
             .remove("trusted_taps");
         toml::to_string_pretty(&t).unwrap()
+    }
+
+    /// After a 1.x copy, the base holds the 2.0 keys the copy lacked, so a later 2.0 deletion
+    /// of one is a deletion and does not come back
+    #[test]
+    fn the_base_after_a_1x_copy_keeps_the_2x_keys() {
+        let base = edit(&base_config(), |c| c.dashboard.theme = Some("mocha".into()));
+        let from_1x = strip_2x(&edit(&base, |c| c.packages.brew.sync_casks = false));
+        let m = merge(Some(&base), &base, &from_1x, "a").unwrap();
+        assert!(
+            same_settings(m.base.as_bytes(), m.text.as_bytes()),
+            "{}",
+            m.base
+        );
+        let deleted = edit(&m.text, |c| c.dashboard.theme = None);
+        let again = merge(Some(&m.base), &m.text, &deleted, "a").unwrap();
+        assert_eq!(config(&again).dashboard.theme, None);
+        assert!(!config(&again).packages.brew.sync_casks);
+        // A 2.0 copy is the base as it is
+        assert_eq!(again.base, deleted);
     }
 
     /// A 1.x save that deletes keys 1.x knows deletes them; the keys only 2.0 knows stay

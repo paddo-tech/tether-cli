@@ -1576,7 +1576,7 @@ fn merge_tether_config(
     if merged.changed {
         crate::sync::atomic_write_private(&local_config_path, merged.text.as_bytes())?;
     }
-    write_config_base(home, &remote)?;
+    write_config_base(home, merged.base.as_bytes())?;
     Ok(merged.changed)
 }
 
