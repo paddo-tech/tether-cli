@@ -1684,9 +1684,10 @@ fn recover_config_base(
     None
 }
 
-/// A synced config.toml can change this machine's profile assignment, and the packages this
-/// machine installs with it: a user on another machine, or a 1.x machine that saved an
-/// older config.
+/// A machine sets only its own profile: the merge keeps this machine's `machine_profiles`
+/// entry, whatever another machine or a 1.x copy holds. So the profile changes only when
+/// the sync copies the synced config over a missing config.toml, or when the local file
+/// changed during the sync. The warning names the packages that change with it.
 pub fn warn_changed_profile(old: &Config, new: &Config, machine_id: &str) {
     if let Some(message) = changed_profile_warning(old, new, machine_id) {
         Output::warning(&message);
