@@ -396,10 +396,66 @@ pub fn is_safe_dotfile_path(path: &str) -> bool {
     !in_tether_dir(path_to_check)
 }
 
-/// Whether a home-relative path is in Tether's own directory.
+/// Whether a home-relative path names Tether's own directory or a path in it. `.` components
+/// do not count. `TetherDir` also resolves symlinks and aliases.
 pub fn in_tether_dir(path: &str) -> bool {
     let path = path.strip_prefix("~/").unwrap_or(path);
-    path.trim_start_matches("./").split('/').next() == Some(".tether")
+    path.split('/')
+        .find(|c| !c.is_empty() && *c != ".")
+        .is_some_and(|first| same_name(first, ".tether"))
+}
+
+/// The macOS file system ignores case by default, so `.Tether` is `.tether` there.
+fn same_name(a: &str, b: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// Tether's own directory, resolved, to test the paths that a sync reads or writes. It holds
+/// keys, the merge base and state, so nothing in it syncs, also through a symlink or an alias
+/// such as /var for /private/var.
+pub struct TetherDir(PathBuf);
+
+impl TetherDir {
+    pub fn new(home: &std::path::Path) -> Self {
+        Self(resolve(&home.join(".tether")))
+    }
+
+    /// Whether `path` resolves to the directory or a path in it
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        let path = resolve(path);
+        let mut parts = path.components();
+        self.0.components().all(|d| {
+            parts.next().is_some_and(|p| {
+                same_name(
+                    &p.as_os_str().to_string_lossy(),
+                    &d.as_os_str().to_string_lossy(),
+                )
+            })
+        })
+    }
+}
+
+/// The canonical path; for a path that does not exist yet, the canonical path of the nearest
+/// ancestor that exists, with the rest appended.
+fn resolve(path: &std::path::Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(current) {
+            return rest.iter().rev().fold(canonical, |p, name| p.join(name));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// A dotfile entry within a profile — extends DotfileEntry with `shared` flag.
@@ -1501,6 +1557,55 @@ mod tests {
         assert!(!is_safe_dotfile_path("~/.tether/config.base.toml"));
         assert!(!is_safe_dotfile_path(".tether/*"));
         assert!(is_safe_dotfile_path(".tetherrc"));
+        assert!(!is_safe_dotfile_path("~/./.tether/*"));
+        assert!(!is_safe_dotfile_path(".//.tether/x"));
+        assert!(!is_safe_dotfile_path("./././.tether"));
+        assert!(is_safe_dotfile_path(".config/.tether"));
+        assert_eq!(
+            is_safe_dotfile_path("~/.Tether/*"),
+            !cfg!(target_os = "macos")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tether_dir_contains_resolved_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::os::unix::fs::symlink(home.join(".tether"), home.join(".config/link")).unwrap();
+        // The home through another name, as /var is /private/var on macOS
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+
+        let tether = TetherDir::new(&home);
+        assert!(tether.contains(&home.join(".tether")));
+        assert!(tether.contains(&home.join(".tether/config.toml")));
+        assert!(tether.contains(&home.join("./.tether/new/file")));
+        assert!(tether.contains(&home.join(".config/link/config.toml")));
+        assert!(tether.contains(&alias.join(".tether/state.json")));
+        assert!(TetherDir::new(&alias).contains(&home.join(".tether/x")));
+        assert!(!tether.contains(&home.join(".config/nvim/init.lua")));
+        assert!(!tether.contains(&home.join(".tetherrc")));
+        assert!(!tether.contains(&home));
+        assert_eq!(
+            tether.contains(&home.join(".TETHER/x")),
+            cfg!(target_os = "macos")
+        );
+        if cfg!(target_os = "macos") {
+            let canonical = std::fs::canonicalize(&home).unwrap();
+            assert_ne!(canonical, home, "a macOS temp dir is under /private/var");
+            assert!(tether.contains(&canonical.join(".tether/x")));
+        }
+
+        for pattern in [".tether/*", "./.tether/config.toml", ".config/link/*"] {
+            std::fs::write(home.join(".tether/config.toml"), "x").unwrap();
+            assert!(
+                crate::sync::expand_dotfile_glob(pattern, &home).is_empty(),
+                "{pattern}"
+            );
+        }
     }
 
     #[test]

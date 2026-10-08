@@ -321,10 +321,15 @@ pub fn is_glob_pattern(pattern: &str) -> bool {
 /// Expand glob patterns in dotfile paths.
 /// Returns vec of relative paths (e.g., ".config/gcloud/foo.json").
 /// If pattern has no glob chars, returns it unchanged.
-/// Logs warning if glob pattern matches nothing.
+/// Logs warning if glob pattern matches nothing. Paths in `~/.tether` are left out.
 pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
+    let tether = crate::config::TetherDir::new(home);
+    let outside = |p: &String| !crate::config::in_tether_dir(p) && !tether.contains(&home.join(p));
     if !is_glob_pattern(pattern) {
-        return vec![pattern.to_string()];
+        return Some(pattern.to_string())
+            .filter(outside)
+            .into_iter()
+            .collect();
     }
 
     let full_pattern = home.join(pattern);
@@ -337,7 +342,7 @@ pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
                         .ok()
                         .map(|r| r.to_string_lossy().to_string())
                 })
-                .filter(|p| !crate::config::in_tether_dir(p))
+                .filter(outside)
                 .collect();
             if expanded.is_empty() {
                 log::warn!("Glob pattern '{}' matched no files", pattern);

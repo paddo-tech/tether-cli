@@ -746,6 +746,7 @@ pub fn decrypt_from_repo(
     let key = crate::security::get_encryption_key()?;
     let dotfiles_dir = sync_path.join("dotfiles");
     let mut conflict_state = ConflictState::load().unwrap_or_default();
+    let tether = crate::config::TetherDir::new(home);
     let mut new_conflicts = Vec::new();
 
     // Create backup directory for this sync (lazily - only if needed)
@@ -798,6 +799,9 @@ pub fn decrypt_from_repo(
         for file in expanded {
             // Skip if this dotfile is ignored on this machine
             if machine_state.ignored_dotfiles.iter().any(|f| f == &file) {
+                continue;
+            }
+            if tether.contains(&home.join(&file)) {
                 continue;
             }
 
@@ -965,7 +969,9 @@ pub fn decrypt_from_repo(
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
 
                     // Validate path is safe (defense-in-depth)
-                    if !crate::config::is_safe_dotfile_path(rel_path_no_enc) {
+                    if !crate::config::is_safe_dotfile_path(rel_path_no_enc)
+                        || tether.contains(&home.join(rel_path_no_enc))
+                    {
                         Output::warning(&format!("  {} (unsafe path, skipping)", rel_path_no_enc));
                         continue;
                     }
@@ -1778,6 +1784,7 @@ pub fn sync_directories(
 
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
+    let tether = crate::config::TetherDir::new(home);
 
     for dir_path in &config.effective_dirs(machine_id) {
         // Validate path is safe (security: prevents path traversal via synced config)
@@ -1794,6 +1801,10 @@ pub fn sync_directories(
 
         if !expanded_path.exists() {
             Output::warning(&format!("  {} (not found, skipping)", dir_path));
+            continue;
+        }
+        if tether.contains(&expanded_path) {
+            Output::warning(&format!("  {} (in ~/.tether, skipping)", dir_path));
             continue;
         }
 
@@ -1831,11 +1842,12 @@ pub fn sync_directories(
                 }
             }
         } else if expanded_path.is_dir() {
-            let tether_dir = home.join(".tether");
+            // The walk follows no symlink below the root, so a file is in ~/.tether only
+            // when its directory is
             for entry in WalkDir::new(&expanded_path)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|e| e.path() != tether_dir)
+                .filter_entry(|e| !(e.file_type().is_dir() && tether.contains(e.path())))
             {
                 let entry = match entry {
                     Ok(e) => e,
@@ -2796,6 +2808,43 @@ mod tests {
                 .packages
                 .min_release_age_days,
             3
+        );
+    }
+
+    /// A synced directory that resolves into ~/.tether, or holds it, never syncs its files
+    #[cfg(unix)]
+    #[test]
+    fn synced_dirs_leave_out_the_tether_dir() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::write(home.join(".tether/signing_key"), b"secret").unwrap();
+        std::fs::create_dir_all(home.join(".config/app")).unwrap();
+        std::fs::write(home.join(".config/app/a.conf"), b"a").unwrap();
+        std::os::unix::fs::symlink(home.join(".tether"), home.join("tlink")).unwrap();
+        let mut config = Config::default();
+        config.security.encrypt_dotfiles = false;
+        config.dotfiles.dirs = vec![
+            "~/tlink".into(),
+            "~/.config".into(),
+            "~/./.tether".into(),
+            "~".into(),
+        ];
+        let mut state = new_state("me");
+        sync_directories(&config, "me", &mut state, &repo, &home, false).unwrap();
+        let synced: Vec<String> = walkdir::WalkDir::new(repo.join("configs"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+        assert!(synced.iter().any(|p| p.ends_with(".config/app/a.conf")));
+        assert!(
+            !synced
+                .iter()
+                .any(|p| std::fs::read(p).unwrap() == b"secret"),
+            "{synced:?}"
         );
     }
 
