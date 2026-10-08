@@ -383,6 +383,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             git.push()?;
             pb.finish_and_clear();
         }
+        commit_config_base(&home)?;
     }
 
     // Check and push team repo changes (if write access enabled)
@@ -1447,15 +1448,13 @@ pub fn sync_tether_config(
     home: &Path,
     state: &mut SyncState,
 ) -> Result<Option<Config>> {
-    if !synced_config_path(sync_path).exists() {
-        return Ok(None);
-    }
-    let key = crate::security::get_encryption_key()?;
-    Ok(if merge_tether_config(sync_path, home, state, &key)? {
-        Some(Config::load()?)
-    } else {
-        None
-    })
+    Ok(
+        if merge_tether_config(sync_path, home, state, crate::security::get_encryption_key)? {
+            Some(Config::load()?)
+        } else {
+            None
+        },
+    )
 }
 
 /// The synced config.toml, at its legacy path in a repo that has not moved it yet.
@@ -1474,9 +1473,19 @@ fn merge_tether_config(
     sync_path: &Path,
     home: &Path,
     state: &mut SyncState,
-    key: &[u8],
+    key: impl FnOnce() -> Result<Vec<u8>>,
 ) -> Result<bool> {
-    let encrypted_content = std::fs::read(synced_config_path(sync_path))?;
+    // An export that a previous sync did not push is not in the repo, so it is no base
+    match std::fs::remove_file(config_base_pending_path(home)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    let path = synced_config_path(sync_path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let key = &key()?;
+    let encrypted_content = std::fs::read(path)?;
 
     let remote = match crate::security::decrypt(&encrypted_content, key) {
         Ok(plaintext) => plaintext,
@@ -1576,14 +1585,17 @@ fn load_config_base(
     Ok(recover_config_base(sync_path, state, local, key))
 }
 
-/// The base holds the synced config, so only the user may read it.
 fn write_config_base(home: &Path, content: &[u8]) -> Result<()> {
-    let path = config_base_path(home);
-    crate::sync::atomic_write(&path, content)?;
+    write_private(&config_base_path(home), content)
+}
+
+/// The base holds the synced config, so only the user may read it.
+fn write_private(path: &Path, content: &[u8]) -> Result<()> {
+    crate::sync::atomic_write(path, content)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -1591,6 +1603,19 @@ fn write_config_base(home: &Path, content: &[u8]) -> Result<()> {
 /// The remote config.toml of the last merge, kept on this machine only.
 fn config_base_path(home: &Path) -> PathBuf {
     home.join(".tether/config.base.toml")
+}
+
+/// The copy this sync exported, which becomes the base once the push holds it.
+fn config_base_pending_path(home: &Path) -> PathBuf {
+    home.join(".tether/config.base.pending.toml")
+}
+
+/// Makes the exported copy the merge base. Call it after the push that holds the export.
+pub fn commit_config_base(home: &Path) -> Result<()> {
+    match std::fs::rename(config_base_pending_path(home), config_base_path(home)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 /// A base for a machine that has none yet, as after an upgrade. The local file when its hash
@@ -1706,10 +1731,11 @@ fn write_synced_config(
     let exported = export_text(&String::from_utf8_lossy(&content), newest + 1)?.into_bytes();
     std::fs::create_dir_all(sync_path.join("configs/tether"))?;
     std::fs::write(&dest, crate::security::encrypt(&exported, key)?)?;
-    // The repo now holds this config, so it is the next merge's base. With the pulled
-    // remote as base, a kept conflict reads as a local edit forever and two machines
-    // export their values in turn
-    write_config_base(home, &exported)?;
+    // Once pushed, the repo holds this config, so it is the next merge's base. With the
+    // pulled remote as base, a kept conflict reads as a local edit forever and two machines
+    // export their values in turn. Until the push, the base stays: a pull that discards
+    // the commit must not leave a base that holds local edits the repo never got
+    write_private(&config_base_pending_path(home), &exported)?;
     state.config_generation = newest + 1;
     state.config_export_hash = Some(crate::sha256_hex(&exported));
     state.update_file(".tether/config.toml", crate::sha256_hex(&content));
@@ -2527,11 +2553,16 @@ mod tests {
         }
         /// Merges the repo copy, as a sync does first
         fn pull(&mut self, repo: &Path) -> bool {
-            synced_config_path(repo).exists()
-                && merge_tether_config(repo, self.home.path(), &mut self.state, &KEY).unwrap()
+            merge_tether_config(repo, self.home.path(), &mut self.state, || Ok(KEY.to_vec()))
+                .unwrap()
         }
         /// Exports, as a sync does last, and pushes
         fn push(&mut self, repo: &Path) {
+            self.export(repo);
+            commit_config_base(self.home.path()).unwrap();
+        }
+        /// Exports, and the push fails
+        fn export(&mut self, repo: &Path) {
             write_synced_config(repo, self.home.path(), &mut self.state, &KEY).unwrap();
         }
         fn sync(&mut self, repo: &Path) {
@@ -2656,6 +2687,49 @@ mod tests {
         );
         a.sync(repo);
         assert!(a.config().packages.brew.sync_casks);
+    }
+
+    /// An export becomes the base only once pushed. A pull that discards the commit merges
+    /// against the base before the export, so the local edit is not taken as merged.
+    #[test]
+    fn a_discarded_export_does_not_advance_the_base() {
+        let repo = TempDir::new().unwrap();
+        let repo = repo.path();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new("a", Some(&start));
+        let mut b = Peer::new("b", Some(&start));
+        a.sync(repo);
+        b.sync(repo);
+        let base = std::fs::read(config_base_path(a.home.path())).unwrap();
+
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull(repo);
+        a.export(repo);
+        assert_eq!(
+            std::fs::read(config_base_path(a.home.path())).unwrap(),
+            base
+        );
+        // The push fails, and the pull resets the repo to b's export
+        b.edit(|c| {
+            c.packages.min_release_age_days = 14;
+            c.dashboard.theme = Some("mocha".into());
+        });
+        b.sync(repo);
+        a.pull(repo);
+        assert!(!config_base_pending_path(a.home.path()).exists());
+        let c = a.config();
+        assert_eq!(
+            c.packages.min_release_age_days, 3,
+            "the local edit was lost"
+        );
+        assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+
+        // A pushed export is the base
+        a.push(repo);
+        assert_eq!(
+            std::fs::read(config_base_path(a.home.path())).unwrap(),
+            repo_copy(repo)
+        );
     }
 
     /// state.json records the local file; the hash of the exported copy is kept apart

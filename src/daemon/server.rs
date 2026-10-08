@@ -463,6 +463,7 @@ impl DaemonServer {
         } else {
             log::debug!("No changes to sync");
         }
+        crate::cli::commands::sync::commit_config_base(&home)?;
 
         state.mark_synced();
 
