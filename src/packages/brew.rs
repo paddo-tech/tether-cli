@@ -158,6 +158,48 @@ struct BrewVersions {
     stable: Option<String>,
 }
 
+/// Entries of brew's trust store, as `brew trust --json=v1` prints them
+#[derive(Debug, Deserialize)]
+struct BrewTrust {
+    #[serde(default)]
+    taps: Vec<String>,
+    #[serde(default)]
+    formulae: Vec<String>,
+    #[serde(default)]
+    casks: Vec<String>,
+}
+
+/// The taps Tether trusts and the items it approved that brew's trust store lacks.
+/// brew trusts `homebrew/*` without an entry and stores names in lower case.
+fn missing_brew_trust(policy: &PackagePolicy, brew: &BrewTrust) -> BrewTrust {
+    let missing = |names: Vec<String>, have: &[String]| -> Vec<String> {
+        let mut names: Vec<String> = names
+            .into_iter()
+            .map(|n| n.to_ascii_lowercase())
+            .filter(|n| {
+                !n.starts_with("homebrew/") && !have.iter().any(|h| h.eq_ignore_ascii_case(n))
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    };
+    let approved = |manager: &str| {
+        policy
+            .approved_from_taps
+            .iter()
+            .filter(|(m, _, _)| m == manager)
+            // brew_allowed matches an approval on its short name and its tap
+            .map(|(_, n, t)| format!("{}/{}", t, n.rsplit('/').next().unwrap_or(n)))
+            .collect()
+    };
+    BrewTrust {
+        taps: missing(policy.trusted_taps.clone(), &brew.taps),
+        formulae: missing(approved("brew_formulae"), &brew.formulae),
+        casks: missing(approved("brew_casks"), &brew.casks),
+    }
+}
+
 impl BrewInfoEntry {
     fn installed_version(&self) -> Option<&str> {
         match &self.installed {
@@ -476,8 +518,14 @@ impl BrewManager {
     async fn check_package(&self, name: &str, cask: bool) -> Result<()> {
         validate_name(Ecosystem::Brew, name)?;
         let manager = if cask { "brew_casks" } else { "brew_formulae" };
+        let policy = self.policy();
         match self.tap_for(name, cask).await {
-            Some(tap) if self.policy().brew_allowed(manager, name, &tap) => Ok(()),
+            Some(tap) if policy.brew_allowed(manager, name, &tap) => {
+                if let Err(e) = self.mirror_trust(&policy).await {
+                    crate::cli::Output::warning(&format!("Cannot update Homebrew trust: {}", e));
+                }
+                Ok(())
+            }
             Some(tap) => anyhow::bail!("{} is from untrusted tap {}", name, tap),
             None => anyhow::bail!("cannot find the tap of {}", name),
         }
@@ -581,6 +629,35 @@ impl BrewManager {
             }
         }
 
+        Ok(())
+    }
+
+    /// brew refuses a formula or cask from a tap missing from its trust store, unless the
+    /// full name is on the command line. Synced Brewfiles use short names, so Tether copies
+    /// its trusted taps and approved items there. A brew without `brew trust` has no check.
+    async fn mirror_trust(&self, policy: &PackagePolicy) -> Result<()> {
+        let output = command("brew")?
+            .args(["trust", "--json=v1"])
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Ok(());
+        }
+        let missing = missing_brew_trust(policy, &serde_json::from_slice(&output.stdout)?);
+        for (flag, names) in [
+            ("--tap", &missing.taps),
+            ("--formula", &missing.formulae),
+            ("--cask", &missing.casks),
+        ] {
+            // brew stops at the first name it refuses, such as a renamed formula, so each
+            // name gets its own call
+            for name in names {
+                crate::cli::Output::info(&format!("Trusting {} in Homebrew", name));
+                if let Err(e) = self.run_brew(&["trust", flag, name]).await {
+                    crate::cli::Output::warning(&format!("Cannot update Homebrew trust: {}", e));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -825,6 +902,9 @@ impl PackageManager for BrewManager {
         let mut packages = BrewfilePackages::parse(manifest_content);
         let local_taps = self.list_taps().await?;
         self.filter_brewfile(&mut packages, &local_taps);
+        if let Err(e) = self.mirror_trust(&self.policy()).await {
+            crate::cli::Output::warning(&format!("Cannot update Homebrew trust: {}", e));
+        }
         let manifest = packages.generate();
         let manifest_content = manifest.as_str();
 
@@ -1210,6 +1290,39 @@ brew "git"
         assert_eq!(untrusted.taps, vec!["evil/tap"]);
         assert_eq!(untrusted.formulae, vec!["evil/tap/payload"]);
         assert_eq!(untrusted.casks, vec!["evil/tap/app"]);
+    }
+
+    #[test]
+    fn brew_trust_gets_tethers_trusted_taps_and_approved_items() {
+        let policy = PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec![
+                "Oven-sh/Bun".to_string(),
+                "hashicorp/tap".to_string(),
+                "homebrew/cask-fonts".to_string(),
+            ],
+            approved_from_taps: vec![
+                (
+                    "brew_formulae".to_string(),
+                    "fuse-t".to_string(),
+                    "gromgit/fuse".to_string(),
+                ),
+                (
+                    "brew_casks".to_string(),
+                    "evil/tap/app".to_string(),
+                    "evil/tap".to_string(),
+                ),
+            ],
+        };
+        let brew: BrewTrust = serde_json::from_str(
+            r#"{"taps": ["hashicorp/tap"], "formulae": [], "casks": ["evil/tap/app"], "commands": []}"#,
+        )
+        .unwrap();
+        let missing = missing_brew_trust(&policy, &brew);
+        assert_eq!(missing.taps, vec!["oven-sh/bun"]);
+        assert_eq!(missing.formulae, vec!["gromgit/fuse/fuse-t"]);
+        assert!(missing.casks.is_empty());
     }
 
     #[test]
