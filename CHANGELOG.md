@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.4] - 2026-10-10
+
+### Fixed
+
+- Homebrew 7 refuses formulae and casks from a tap that its own trust store does not list, unless the full name is on the command line. Synced Brewfiles use short names, so `brew bundle` skipped packages from taps that Tether trusts. Before each Homebrew install, Tether now adds its trusted taps, the taps approved in the inbox and the formulae and casks approved from an untrusted tap to Homebrew's trust store. Each name gets its own `brew trust` call, so one name that Homebrew refuses does not block the others. A tap that Tether does not trust stays untrusted in Homebrew, and Tether never removes entries from Homebrew's trust store
+- On macOS, each upgrade no longer asks again for App Management and adds another `tether` entry in System Settings. macOS keeps the grant per executable path, and each Homebrew version has a new path. launchd now runs a copy at `~/.tether/bin/tether`. The plist names the installed binary in `TETHER_DAEMON_SOURCE`, and the daemon replaces the copy and restarts when that binary changes. Run `tether sync` once in a terminal to move an installed daemon to the copy. macOS asks once more for the new path; you can then remove the old `tether` entries. `tether daemon uninstall` removes the copy
+
 ## [2.0.0-beta.3] - 2026-10-08
 
 ### Fixed
