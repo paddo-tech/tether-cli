@@ -50,7 +50,10 @@ async fn installed() -> Vec<Installed> {
 }
 
 /// List installed packages by manager key, with the profiles each belongs to.
-pub async fn list(json: bool) -> Result<()> {
+pub async fn list(json: bool, other_profiles: bool) -> Result<()> {
+    if other_profiles {
+        return list_other_profiles(json);
+    }
     let installed = installed().await;
     let membership = crate::config::Config::load()
         .and_then(|config| Membership::load_current(&config))
@@ -86,6 +89,73 @@ pub async fn list(json: bool) -> Result<()> {
     Output::dim(
         "A package id is manager:name, such as npm:typescript. Run 'tether packages share <id> --to <profile>' to add a profile",
     );
+    Ok(())
+}
+
+/// `packages list --other-profiles`: the packages a sync names in its one-time notice.
+/// The JSON has `profile` and `packages`, each with `id`, `manager`, `name` and `profiles`.
+fn list_other_profiles(json: bool) -> Result<()> {
+    // Without a sync repo or a readable profiles table, as for `list`, there is nothing to show
+    let membership =
+        match crate::config::Config::load().and_then(|config| Membership::load_current(&config)) {
+            Ok(m) => m,
+            Err(e) => {
+                if json {
+                    return Output::json(&serde_json::json!({ "profile": null, "packages": [] }));
+                }
+                Output::info(&format!("Nothing to show: {}", e));
+                return Ok(());
+            }
+        };
+    let excluded: Vec<(String, String, Vec<String>)> = membership
+        .excluded_packages()
+        .into_iter()
+        .map(|(manager, name)| {
+            let profiles = membership.members(&manager, &name).into_iter().collect();
+            (manager, name, profiles)
+        })
+        .collect();
+    if json {
+        let packages: Vec<serde_json::Value> = excluded
+            .iter()
+            .map(|(manager, name, profiles)| {
+                serde_json::json!({
+                    "id": format!("{}:{}", manager, name),
+                    "manager": manager,
+                    "name": name,
+                    "profiles": profiles,
+                })
+            })
+            .collect();
+        return Output::json(&serde_json::json!({
+            "profile": membership.profile,
+            "packages": packages,
+        }));
+    }
+    if excluded.is_empty() {
+        Output::info(&format!(
+            "This machine (profile {}) installs every package that trusted machines list",
+            membership.profile
+        ));
+        return Ok(());
+    }
+    Output::info(&format!(
+        "Packages of other profiles that this machine (profile {}) does not install",
+        membership.profile
+    ));
+    let mut manager = "";
+    for (m, name, profiles) in &excluded {
+        if m != manager {
+            Output::section(m);
+            manager = m;
+        }
+        Output::list_item(&format!("{}  ({})", name, profiles.join(", ")));
+    }
+    println!();
+    Output::dim(&format!(
+        "Run 'tether packages share <manager:name> --to {}' to install one here",
+        membership.profile
+    ));
     Ok(())
 }
 

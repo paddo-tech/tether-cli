@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod config_merge;
 pub mod conflict;
 pub mod discovery;
 pub mod engine;
@@ -320,10 +321,15 @@ pub fn is_glob_pattern(pattern: &str) -> bool {
 /// Expand glob patterns in dotfile paths.
 /// Returns vec of relative paths (e.g., ".config/gcloud/foo.json").
 /// If pattern has no glob chars, returns it unchanged.
-/// Logs warning if glob pattern matches nothing.
+/// Logs warning if glob pattern matches nothing. Paths in `~/.tether` are left out.
 pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
+    let tether = crate::config::TetherDir::new(home);
+    let outside = |p: &String| !crate::config::in_tether_dir(p) && !tether.contains(&home.join(p));
     if !is_glob_pattern(pattern) {
-        return vec![pattern.to_string()];
+        return Some(pattern.to_string())
+            .filter(outside)
+            .into_iter()
+            .collect();
     }
 
     let full_pattern = home.join(pattern);
@@ -336,6 +342,7 @@ pub fn expand_dotfile_glob(pattern: &str, home: &Path) -> Vec<String> {
                         .ok()
                         .map(|r| r.to_string_lossy().to_string())
                 })
+                .filter(outside)
                 .collect();
             if expanded.is_empty() {
                 log::warn!("Glob pattern '{}' matched no files", pattern);
@@ -443,10 +450,36 @@ pub fn migrate_dotfile_shared_change(
 }
 
 /// Atomically write content to a file by writing to a temp file and renaming.
-/// This prevents file corruption from interrupted writes.
+/// This prevents file corruption from interrupted writes. A new file is 0600, and a file that
+/// exists keeps its mode. A symlink at `path` stays a symlink: the write replaces the file it
+/// points to, which keeps its own mode. A symlink to a missing file is refused.
 pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomically(path, content, false)
+}
+
+/// As `atomic_write`, but the file is 0600 whatever mode it had. For files that hold settings
+/// or secrets of this user only, such as config.toml.
+pub fn atomic_write_private(path: &Path, content: &[u8]) -> Result<()> {
+    write_atomically(path, content, true)
+}
+
+fn write_atomically(path: &Path, content: &[u8], private: bool) -> Result<()> {
     use std::io::Write;
 
+    let target;
+    let path = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            target = std::fs::canonicalize(path).map_err(|e| {
+                anyhow::anyhow!(
+                    "{} is a symlink to a file that does not exist: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            target.as_path()
+        }
+        _ => path,
+    };
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid path: no parent directory"))?;
@@ -456,6 +489,12 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(content)?;
     temp.flush()?;
+    // The temp file is 0600, so a new file is private
+    if !private {
+        if let Ok(meta) = std::fs::metadata(path) {
+            temp.as_file().set_permissions(meta.permissions())?;
+        }
+    }
 
     // Persist atomically renames the temp file to the target
     temp.persist(path)?;
@@ -466,6 +505,56 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let new = temp.path().join("new");
+        atomic_write(&new, b"a").unwrap();
+        assert_eq!(mode(&new), 0o600);
+        let shared = temp.path().join("shared");
+        std::fs::write(&shared, b"a").unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o644)).unwrap();
+        atomic_write(&shared, b"b").unwrap();
+        assert_eq!(mode(&shared), 0o644);
+        assert_eq!(std::fs::read(&shared).unwrap(), b"b");
+        // A private write fixes the mode of a file that exists
+        atomic_write_private(&shared, b"c").unwrap();
+        assert_eq!(mode(&shared), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("dotfiles/config.toml");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"a").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let link = temp.path().join("config.toml");
+        std::os::unix::fs::symlink("dotfiles/config.toml", &link).unwrap();
+        for (write, mode) in [
+            (atomic_write as fn(&Path, &[u8]) -> Result<()>, 0o644),
+            (atomic_write_private, 0o600),
+        ] {
+            write(&link, b"b").unwrap();
+            assert!(std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read(&target).unwrap(), b"b");
+            let m = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(m, mode);
+        }
+        let dangling = temp.path().join("dangling");
+        std::os::unix::fs::symlink("missing", &dangling).unwrap();
+        assert!(atomic_write(&dangling, b"x").is_err());
+        assert!(!temp.path().join("missing").exists());
+    }
 
     #[test]
     fn test_dotfile_to_repo_path() {

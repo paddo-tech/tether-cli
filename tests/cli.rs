@@ -395,6 +395,87 @@ fn install_runs_the_gates_of_a_sync() {
 }
 
 #[test]
+fn list_other_profiles_names_what_this_profile_skips() {
+    let h = home();
+    let sync = h.path().join(".tether/sync");
+    std::fs::create_dir_all(sync.join("machines")).unwrap();
+    let key =
+        ssh_key::PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+            .unwrap();
+    let mut server = tether::sync::MachineState::new("server1");
+    server.profile = Some("server".to_string());
+    server
+        .packages
+        .insert("npm".to_string(), vec!["pm2".to_string()]);
+    tether::sync::signing::save_record(&sync, &server).unwrap();
+    tether::sync::signing::sign_record(&sync, "server1", &key).unwrap();
+    let public = key.public_key();
+    std::fs::write(
+        h.path().join(".tether/trusted_keys"),
+        format!(
+            "version = 1\n[machines.server1]\npublic_key = \"{}\"\nfingerprint = \"{}\"\n",
+            public.to_openssh().unwrap(),
+            tether::sync::signing::fingerprint(public)
+        ),
+    )
+    .unwrap();
+
+    let list = json(
+        h.path(),
+        &["packages", "list", "--other-profiles", "--json"],
+    );
+    assert_eq!(list["profile"], "dev");
+    assert_eq!(
+        list["packages"],
+        serde_json::json!([{
+            "id": "npm:pm2", "manager": "npm", "name": "pm2", "profiles": ["server"]
+        }])
+    );
+    tether(h.path())
+        .args(["packages", "list", "--other-profiles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pm2  (server)"));
+}
+
+#[test]
+fn list_other_profiles_without_a_profiles_table_shows_nothing() {
+    let h = home();
+    let table = h.path().join(".tether/sync/packages/profiles.toml");
+    std::fs::create_dir_all(table.parent().unwrap()).unwrap();
+    std::fs::write(&table, "not = [toml").unwrap();
+    let list = json(
+        h.path(),
+        &["packages", "list", "--other-profiles", "--json"],
+    );
+    assert_eq!(list["profile"], serde_json::Value::Null);
+    assert_eq!(list["packages"], serde_json::json!([]));
+    tether(h.path())
+        .args(["packages", "list", "--other-profiles"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing to show"));
+}
+
+#[test]
+fn trust_without_a_pull_names_the_missing_signature() {
+    let h = home();
+    let sync = h.path().join(".tether/sync");
+    tether::sync::MachineState::new("m1")
+        .save_to_repo(&sync)
+        .unwrap();
+    // The sync dir is no repo, so the pull fails; the local record still decides
+    tether(h.path())
+        .args(["machines", "trust", "m1", "--fingerprint", "SHA256:x"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "Could not pull the latest changes",
+        ))
+        .stderr(predicate::str::contains("m1 has no signed machine record"));
+}
+
+#[test]
 fn daemon_status_and_logs() {
     let h = home();
     tether(h.path())
@@ -506,6 +587,17 @@ fn json_output_has_the_documented_fields() {
     );
     let machines = json(h.path(), &["machines", "list", "--json"]);
     assert!(machines.is_array());
+}
+
+/// A dry run without config.toml runs with the defaults, up to the missing key, and writes
+/// no config.toml
+#[test]
+fn dry_run_without_config_uses_defaults() {
+    let h = home();
+    let config = h.path().join(".tether/config.toml");
+    std::fs::remove_file(&config).unwrap();
+    fails(h.path(), &["sync", "--dry-run"], "No encryption key found");
+    assert!(!config.exists());
 }
 
 #[test]

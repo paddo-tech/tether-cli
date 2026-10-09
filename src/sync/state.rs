@@ -37,6 +37,14 @@ pub struct SyncState {
     /// daemon notifies once per error
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_error: Option<String>,
+    /// SHA-256 of the synced config.toml copy this machine last exported. `files` records
+    /// the local file, which differs from the exported bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_export_hash: Option<String>,
+    /// SHA-256 of the synced config.toml that did not read, once warned, so the daemon warns
+    /// once per copy
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -484,6 +492,8 @@ impl SyncState {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
+            config_export_hash: None,
+            config_error: None,
         }
     }
 

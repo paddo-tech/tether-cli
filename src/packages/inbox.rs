@@ -46,6 +46,10 @@ pub enum Reason {
     /// The version that only machines on another OS list failed to install here. The item
     /// holds the release that suits this machine, which no trusted record lists.
     OtherOsVersion,
+    /// A trusted record pins a release newer than `packages.min_release_age_days`, so it
+    /// failed to install here. The item holds the newest release older than the limit, which
+    /// no trusted record lists.
+    PinnedTooNew,
 }
 
 impl Reason {
@@ -65,6 +69,7 @@ impl Reason {
             Reason::KeyChanged => "key changed",
             Reason::SignatureFailed => "signature failed",
             Reason::OtherOsVersion => "other OS version",
+            Reason::PinnedTooNew => "pinned too new",
         }
     }
 }
@@ -755,7 +760,10 @@ fn shown_key(
     shown: &str,
 ) -> Result<PublicKey> {
     let Some((_, key)) = signers.into_iter().find(|(id, _)| id == machine_id) else {
-        bail!("Machine {} has no signed machine record", machine_id);
+        bail!(
+            "Machine {} has no signed machine record. Run 'tether sync' on that machine first",
+            machine_id
+        );
     };
     let current = signing::fingerprint(&key);
     if current != shown {

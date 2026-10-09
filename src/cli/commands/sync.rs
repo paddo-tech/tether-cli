@@ -59,7 +59,17 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
         }
     }
 
-    let config = Config::load()?;
+    // A dry run reads config.toml without saving a migration. Without one, a sync would take
+    // the synced config; a dry run does not pull it, so it shows what the defaults do
+    let config = if dry_run {
+        match std::fs::read_to_string(Config::config_path()?) {
+            Ok(text) => Config::parse(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => return Err(e.into()),
+        }
+    } else {
+        Config::load()?
+    };
 
     // No personal features: skip personal sync, only sync teams
     if !config.has_personal_features() {
@@ -109,14 +119,14 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
 
     // Always sync tether config first (hardcoded, not dependent on config)
     // This ensures config changes from other machines are applied before using config
+    let mut state = SyncState::load()?;
     if config.security.encrypt_dotfiles && !dry_run {
-        if let Some(new_config) = sync_tether_config(&sync_path, &home)? {
-            warn_changed_profile(&config, &new_config);
+        if let Some(new_config) = sync_tether_config(&sync_path, &home, &mut state)? {
+            warn_changed_profile(&config, &new_config, &state.machine_id);
             config = new_config;
         }
     }
 
-    let mut state = SyncState::load()?;
     if !git.has_unpushed_commits() {
         state.discard_unpushed();
     }
@@ -127,16 +137,21 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             state.machine_id.clone(),
             crate::config::DEFAULT_PROFILE.to_string(),
         );
-        config.save()?;
+        if !dry_run {
+            config.save()?;
+        }
     }
 
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
         crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
 
-    // Apply dotfiles from sync repo (if encrypted) - with conflict detection
-    // Interactive mode when run manually, non-interactive when run by daemon
-    let interactive = !crate::daemon::is_daemon_mode();
+    // Without a terminal, a sync runs as the daemon does: conflicts wait for 'tether resolve'
+    // and casks that need a password wait for a sync in a terminal. -y still answers prompts,
+    // but never a conflict: its merge tool or editor needs a terminal.
+    let daemon_like = crate::daemon::is_daemon_mode() || !Prompt::is_interactive();
+    let interactive =
+        !crate::daemon::is_daemon_mode() && (Prompt::is_interactive() || Prompt::assume_yes());
     if config.security.encrypt_dotfiles && !dry_run {
         decrypt_from_repo(
             &config,
@@ -144,7 +159,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             &home,
             &mut state,
             &machine_state_for_decrypt,
-            interactive,
+            !daemon_like,
         )?;
     }
 
@@ -165,11 +180,14 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
                     &home,
                     &mut state,
                     &machine_state_for_decrypt,
-                    interactive,
+                    !daemon_like,
                 )?;
             }
         }
     }
+
+    // A pending conflict keeps the remote file until 'tether resolve'
+    let conflict_state = crate::sync::ConflictState::load().unwrap_or_default();
 
     // Sync dotfiles (local → Git) - only if personal dotfiles enabled
     if config.features.personal_dotfiles {
@@ -189,6 +207,9 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
 
             for file in expanded {
+                if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
+                    continue;
+                }
                 if !dry_run {
                     crate::sync::migrate_dotfile_shared_change(
                         &sync_path,
@@ -301,19 +322,23 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
     let mut machine_state = build_machine_state(&config, &state, &sync_path).await?;
 
     // Import packages from manifests (install missing packages, respecting removed_packages)
-    // Interactive mode: install deferred casks from daemon syncs
+    // In a terminal: install deferred casks from daemon syncs
     if config.features.personal_packages && !dry_run {
         let deferred_casks = state.deferred_casks.clone();
 
-        import_packages(
+        let outcome = import_packages(
             &config,
             &sync_path,
             &mut state,
             &machine_state,
-            false, // interactive mode
+            daemon_like,
             &deferred_casks,
         )
         .await?;
+        // A sync in a terminal installs casks now, so only a sync without one defers them
+        if daemon_like {
+            crate::sync::packages::defer_casks(&mut state, &outcome.deferred_casks)?;
+        }
 
         if crate::cli::Prompt::is_interactive() && !crate::cli::Prompt::assume_yes() {
             // A cancelled prompt defers the review; the sync must still save and push
@@ -322,8 +347,8 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             }
         }
 
-        // Clear deferred casks after interactive sync (user had their chance)
-        if !state.deferred_casks.is_empty() {
+        // Clear deferred casks after a sync in a terminal (user had their chance)
+        if !daemon_like && !state.deferred_casks.is_empty() {
             state.deferred_casks.clear();
             state.deferred_casks_hash = None;
             state.save()?;
@@ -347,7 +372,7 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
     // This ensures config settings (including features) are synced across machines
     // even when personal features are disabled, allowing remote config changes
     if config.security.encrypt_dotfiles && !dry_run {
-        export_tether_config(&sync_path, &home, &mut state)?;
+        export_tether_config(&sync_path, &home)?;
     }
 
     // Commit and push changes
@@ -363,6 +388,12 @@ pub async fn run_locked(dry_run: bool, _force: bool, rediscover: bool) -> Result
             git.push()?;
             pb.finish_and_clear();
         }
+        promote_config_base(
+            &sync_path,
+            &home,
+            &mut state,
+            crate::security::get_encryption_key,
+        )?;
     }
 
     // Check and push team repo changes (if write access enabled)
@@ -711,6 +742,47 @@ fn backup_and_write_dotfile(
     Ok(())
 }
 
+/// Path of the synced Tether config under `configs/`, without `.enc`.
+const TETHER_CONFIG_REL: &str = "tether/config.toml";
+
+/// The lowercase names of a relative path, without `.` components
+fn rel_names(rel: &Path) -> Vec<String> {
+    rel.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a home-relative file maps to the repo path of Tether's own synced config, as
+/// ~/tether/config.toml does. Its export would replace the synced config, and its import
+/// would write the synced config to ~/tether. The case folds: on a volume that ignores
+/// case, the repo holds one file for both spellings.
+fn is_tether_config_rel(rel: &Path) -> bool {
+    rel_names(rel) == ["tether", "config.toml"]
+}
+
+/// Whether a synced dir names ~/tether/config.toml or a directory below the home that holds
+/// it. The home itself does not count: it syncs everything, so it warns at the export only
+/// when the file exists.
+fn dir_holds_tether_config(dir: &str) -> bool {
+    let names = rel_names(Path::new(dir.strip_prefix('~').unwrap_or(dir)));
+    !names.is_empty()
+        && names.len() <= 2
+        && names
+            .iter()
+            .zip(["tether", "config.toml"])
+            .all(|(n, t)| n == t)
+}
+
+fn warn_tether_config_dir(path: &str) {
+    Output::warning(&format!(
+        "  {} (its repo path is the synced Tether config, skipping)",
+        path
+    ));
+}
+
 pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
@@ -725,6 +797,7 @@ pub fn decrypt_from_repo(
     let key = crate::security::get_encryption_key()?;
     let dotfiles_dir = sync_path.join("dotfiles");
     let mut conflict_state = ConflictState::load().unwrap_or_default();
+    let tether = crate::config::TetherDir::new(home);
     let mut new_conflicts = Vec::new();
 
     // Create backup directory for this sync (lazily - only if needed)
@@ -777,6 +850,9 @@ pub fn decrypt_from_repo(
         for file in expanded {
             // Skip if this dotfile is ignored on this machine
             if machine_state.ignored_dotfiles.iter().any(|f| f == &file) {
+                continue;
+            }
+            if tether.contains(&home.join(&file)) {
                 continue;
             }
 
@@ -943,8 +1019,22 @@ pub fn decrypt_from_repo(
                     let rel_path_str = rel_path.to_string_lossy();
                     let rel_path_no_enc = rel_path_str.trim_end_matches(".enc");
 
+                    // Tether's own synced config merges into ~/.tether/config.toml, never into ~/tether
+                    if is_tether_config_rel(Path::new(rel_path_no_enc)) {
+                        if config
+                            .effective_dirs(machine_id)
+                            .iter()
+                            .any(|d| dir_holds_tether_config(d))
+                        {
+                            warn_tether_config_dir(&format!("~/{}", rel_path_no_enc));
+                        }
+                        continue;
+                    }
+
                     // Validate path is safe (defense-in-depth)
-                    if !crate::config::is_safe_dotfile_path(rel_path_no_enc) {
+                    if !crate::config::is_safe_dotfile_path(rel_path_no_enc)
+                        || tether.contains(&home.join(rel_path_no_enc))
+                    {
                         Output::warning(&format!("  {} (unsafe path, skipping)", rel_path_no_enc));
                         continue;
                     }
@@ -1420,135 +1510,355 @@ fn decrypt_project_configs(
     Ok(())
 }
 
-/// Sync tether config from remote (always, independent of config file list)
-/// Only applies remote if local config hasn't changed since last sync (to avoid overwriting local edits)
-/// Returns Some(config) if remote config was applied, None otherwise
-pub fn sync_tether_config(sync_path: &Path, home: &Path) -> Result<Option<Config>> {
-    let new_path = sync_path.join("configs/tether/config.toml.enc");
+/// Merges the synced config.toml into the local one (always, independent of config file
+/// list). Returns Some(config) if the local config changed.
+pub fn sync_tether_config(
+    sync_path: &Path,
+    home: &Path,
+    state: &mut SyncState,
+) -> Result<Option<Config>> {
+    Ok(
+        if merge_tether_config(sync_path, home, state, crate::security::get_encryption_key)? {
+            Some(Config::load()?)
+        } else {
+            None
+        },
+    )
+}
+
+/// The synced config.toml, at its legacy path in a repo that has not moved it yet.
+fn synced_config_path(sync_path: &Path) -> PathBuf {
+    let new_path = sync_path.join(format!("configs/{}.enc", TETHER_CONFIG_REL));
     let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
-    let enc_file = if new_path.exists() {
+    if new_path.exists() {
         new_path
     } else {
         legacy_path
-    };
-
-    if !enc_file.exists() {
-        return Ok(None);
     }
+}
 
-    let key = crate::security::get_encryption_key()?;
-    let encrypted_content = std::fs::read(&enc_file)?;
+/// Merges the synced config.toml into the local one. Returns true when the local one changed.
+fn merge_tether_config(
+    sync_path: &Path,
+    home: &Path,
+    state: &mut SyncState,
+    key: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<bool> {
+    // An export that a previous sync did not push is not in the repo, so it is no base
+    match std::fs::remove_file(config_base_pending_path(home)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    let path = synced_config_path(sync_path);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let key = &key()?;
+    let encrypted_content = std::fs::read(&path)?;
+    // A copy that origin/main lacks is this machine's own unpushed export. A pull can still
+    // discard it, so it must not become the base: the base would then hold local edits that
+    // the remote never got, and the next merge would drop them
+    let pushed = path
+        .strip_prefix(sync_path)
+        .ok()
+        .and_then(|rel| {
+            GitBackend::open(sync_path)
+                .ok()?
+                .show_pushed(&rel.to_string_lossy())
+                .ok()
+        })
+        .is_some_and(|copy| copy == encrypted_content);
 
-    match crate::security::decrypt(&encrypted_content, &key) {
-        Ok(plaintext) => {
-            let local_config_path = home.join(".tether/config.toml");
-            let local_content = std::fs::read(&local_config_path).ok();
-
-            let remote_hash = crate::sha256_hex(&plaintext);
-            let local_hash = local_content.as_ref().map(|c| crate::sha256_hex(c));
-
-            let mut state = SyncState::load().ok();
-            if apply_remote_config(state.as_mut(), local_hash.as_deref(), &remote_hash) {
-                if let Some(parent) = local_config_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&local_config_path, &plaintext)?;
-                if let Some(state) = state {
-                    state.save()?;
-                }
-
-                // Reload config
-                let new_config = Config::load()?;
-                return Ok(Some(new_config));
+    let remote = match crate::security::decrypt(&encrypted_content, key) {
+        Ok(plaintext) => plaintext,
+        Err(e) => {
+            let hash = crate::sha256_hex(&encrypted_content);
+            warn_config_error(state, hash, &format!("does not decrypt: {}", e));
+            return Ok(false);
+        }
+    };
+    // The unpushed export waits again as the pending base, so a later push that succeeds
+    // promotes it even when this sync exports nothing new
+    if !pushed {
+        crate::sync::atomic_write_private(&config_base_pending_path(home), &remote)?;
+    }
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    if let Some(version) = crate::sync::config_merge::newer_version(&text(&remote)) {
+        Output::warning(&format!(
+            "The synced config.toml has config_version {}, which this Tether cannot read. \
+             This machine keeps its config.toml until you upgrade Tether",
+            version
+        ));
+        return Ok(false);
+    }
+    if let Some(e) = crate::sync::config_merge::read_error(&remote) {
+        warn_config_error(
+            state,
+            crate::sha256_hex(&remote),
+            &format!("does not read: {}", e),
+        );
+        return Ok(false);
+    }
+    state.config_error = None;
+    let local_config_path = home.join(".tether/config.toml");
+    let local = match std::fs::read(&local_config_path) {
+        Ok(local) => local,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let text = crate::sync::config_merge::without_legacy_keys(&text(&remote))?;
+            crate::sync::atomic_write_private(&local_config_path, text.as_bytes())?;
+            if pushed {
+                write_config_base(home, &remote)?;
             }
-            // If local changed, local wins - it will be exported later
+            return Ok(true);
         }
         Err(e) => {
-            Output::warning(&format!("Failed to decrypt tether config: {}", e));
+            return Err(anyhow::anyhow!(
+                "Could not read {}: {}",
+                local_config_path.display(),
+                e
+            ))
         }
-    }
-
-    Ok(None)
-}
-
-/// Whether the remote config.toml replaces the local one: only when the local file is
-/// missing, or unchanged since the last sync while the remote changed. Applying records the
-/// remote hash. Without it, the next remote change looks like a local edit, and the stale
-/// copy is exported over it.
-fn apply_remote_config(
-    state: Option<&mut SyncState>,
-    local_hash: Option<&str>,
-    remote_hash: &str,
-) -> bool {
-    let last_synced_hash = state
-        .as_ref()
-        .and_then(|s| s.files.get(".tether/config.toml"))
-        .map(|f| f.hash.clone());
-    let local_changed = local_hash != last_synced_hash.as_deref();
-    let remote_changed = Some(remote_hash) != last_synced_hash.as_deref();
-    let apply = local_hash.is_none() || (!local_changed && remote_changed);
-    if apply {
-        if let Some(state) = state {
-            state.record_remote_file(".tether/config.toml", remote_hash.to_string());
-        }
-    }
-    apply
-}
-
-/// A synced config.toml can change this machine's profile assignment, and the packages this
-/// machine installs with it: a user on another machine, or a 1.x machine that saved an
-/// older config.
-pub fn warn_changed_profile(old: &Config, new: &Config) {
-    let Ok(state) = SyncState::load() else {
-        return;
     };
-    let Some(profile) = old.machine_profiles.get(&state.machine_id) else {
-        return;
-    };
-    if new.machine_profiles.get(&state.machine_id) != Some(profile) {
+
+    let base = load_config_base(sync_path, home, state, &local, key)?;
+    let merged = crate::sync::config_merge::merge(
+        base.as_deref().map(text).as_deref(),
+        &text(&local),
+        &text(&remote),
+        &state.machine_id,
+    )
+    .map_err(|e| anyhow::anyhow!("Could not merge the synced config.toml: {}", e))?;
+    for path in &merged.conflicts {
         Output::warning(&format!(
-            "The synced config changed this machine's profile from {} to {}, so it now \
-             installs the packages of profile {}. If nobody meant to change it, run 'tether \
-             machines profile set {}'",
-            profile,
-            new.profile_name(&state.machine_id),
-            new.profile_name(&state.machine_id),
+            "config.toml: {} changed on this machine and on another; this machine's value stays",
+            path
+        ));
+    }
+    for profile in &merged.kept_profiles {
+        Output::warning(&format!(
+            "config.toml: another machine deleted profile {}, which a machine still uses; \
+             the profile stays",
             profile
         ));
     }
+    // The merged config holds every remote change, so this remote is the next merge's base.
+    // The base follows the local write: a failed write must not mark remote changes as merged
+    if merged.changed {
+        crate::sync::atomic_write_private(&local_config_path, merged.text.as_bytes())?;
+    }
+    if pushed {
+        write_config_base(home, merged.base.as_bytes())?;
+    }
+    Ok(merged.changed)
+}
+
+/// A synced config.toml that does not decrypt or read stops only the config step: the merge
+/// and the export skip it, so this machine never replaces a copy it cannot read, such as
+/// one from a newer Tether. The warning shows once per copy; later syncs log it.
+fn warn_config_error(state: &mut SyncState, hash: String, error: &str) {
+    let message = format!(
+        "The synced config.toml {}. This machine keeps its config.toml and does not export it \
+         until the sync repo holds a copy it can read",
+        error
+    );
+    if state.config_error.as_ref() == Some(&hash) {
+        log::warn!("{}", message);
+    } else {
+        Output::warning(&message);
+        state.config_error = Some(hash);
+    }
+}
+
+/// The base of the next merge. A base file that does not read is replaced by one from the
+/// sync history.
+fn load_config_base(
+    sync_path: &Path,
+    home: &Path,
+    state: &SyncState,
+    local: &[u8],
+    key: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let path = config_base_path(home);
+    match std::fs::read(&path) {
+        Ok(base) if crate::sync::config_merge::reads(&base) => return Ok(Some(base)),
+        Ok(_) => Output::warning(&format!(
+            "{} does not read; the merge takes its base from the sync history",
+            path.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("Could not read {}: {}", path.display(), e)),
+    }
+    Ok(recover_config_base(sync_path, state, local, key))
+}
+
+/// The base holds the synced config, so only the user may read it.
+fn write_config_base(home: &Path, content: &[u8]) -> Result<()> {
+    crate::sync::atomic_write_private(&config_base_path(home), content)
+}
+
+/// The remote config.toml of the last merge, kept on this machine only.
+fn config_base_path(home: &Path) -> PathBuf {
+    home.join(".tether/config.base.toml")
+}
+
+/// The copy this sync exported, which becomes the base once the push holds it.
+fn config_base_pending_path(home: &Path) -> PathBuf {
+    home.join(".tether/config.base.pending.toml")
+}
+
+/// Makes the exported copy the merge base once origin/main holds it. The sync and the daemon
+/// call it after their push. A copy that origin/main does not hold, as after a push that a
+/// conflicting pull discarded, never becomes the base.
+pub fn promote_config_base(
+    sync_path: &Path,
+    home: &Path,
+    state: &mut SyncState,
+    key: impl FnOnce() -> Result<Vec<u8>>,
+) -> Result<()> {
+    let pending_path = config_base_pending_path(home);
+    let pending = match std::fs::read(&pending_path) {
+        Ok(pending) => pending,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    // Without a key, as when encryption is off or the key is locked, the pending copy waits;
+    // a failure here must not fail every sync
+    let key = match key() {
+        Ok(key) => key,
+        Err(e) => {
+            log::debug!("Pending config base not promoted: {}", e);
+            return Ok(());
+        }
+    };
+    let pushed = GitBackend::open(sync_path)
+        .ok()
+        .and_then(|git| {
+            git.show_pushed(&format!("configs/{}.enc", TETHER_CONFIG_REL))
+                .ok()
+        })
+        .and_then(|enc| crate::security::decrypt(&enc, &key).ok());
+    if pushed.as_deref() == Some(&pending[..]) {
+        std::fs::rename(&pending_path, config_base_path(home))?;
+        state.config_export_hash = Some(crate::sha256_hex(&pending));
+    } else {
+        std::fs::remove_file(&pending_path)?;
+    }
+    Ok(())
+}
+
+/// A base for a machine that has none yet, as after an upgrade. The local file when its hash
+/// is the one the last export recorded; else the exported copy from the sync repo's history,
+/// by the hash of the export (1.x and earlier betas recorded the exported bytes in `files`).
+/// No match gives no base, so the merge keeps additions from both sides and reports
+/// conflicts. A machine that never synced its config joins the fleet's: its local config is
+/// the base, so every remote setting applies, and it keeps only its own profile assignment.
+fn recover_config_base(
+    sync_path: &Path,
+    state: &SyncState,
+    local: &[u8],
+    key: &[u8],
+) -> Option<Vec<u8>> {
+    let entry = state.files.get(".tether/config.toml").map(|e| &e.hash);
+    if entry.is_none() && state.config_export_hash.is_none() {
+        return Some(local.to_vec());
+    }
+    if entry == Some(&crate::sha256_hex(local)) {
+        return Some(local.to_vec());
+    }
+    let hashes = [entry, state.config_export_hash.as_ref()];
+    let git = GitBackend::open(sync_path).ok()?;
+    for repo_path in [
+        "configs/tether/config.toml.enc",
+        "dotfiles/tether/config.toml.enc",
+    ] {
+        for entry in git.file_log(repo_path, 100).unwrap_or_default() {
+            let Ok(enc) = git.show_at_commit(&entry.commit_hash, repo_path) else {
+                continue;
+            };
+            if let Ok(plain) = crate::security::decrypt(&enc, key) {
+                if hashes.contains(&Some(&crate::sha256_hex(&plain))) {
+                    return Some(plain);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A machine sets only its own profile: the merge keeps this machine's `machine_profiles`
+/// entry, whatever another machine or a 1.x copy holds. So the profile changes only when
+/// the sync copies the synced config over a missing config.toml, or when the local file
+/// changed during the sync. The warning names the packages that change with it.
+pub fn warn_changed_profile(old: &Config, new: &Config, machine_id: &str) {
+    if let Some(message) = changed_profile_warning(old, new, machine_id) {
+        Output::warning(&message);
+    }
+}
+
+/// A missing assignment counts as the default profile, so only a different profile warns.
+fn changed_profile_warning(old: &Config, new: &Config, machine_id: &str) -> Option<String> {
+    let before = old.profile_name(machine_id);
+    let after = new.profile_name(machine_id);
+    if before == after {
+        return None;
+    }
+    let restore = if old.machine_profiles.contains_key(machine_id) {
+        format!("tether machines profile set {}", before)
+    } else {
+        "tether machines profile unset".to_string()
+    };
+    Some(format!(
+        "The synced config changed this machine's profile from {} to {}, so it now installs \
+         the packages of profile {}. If nobody meant to change it, run '{}'",
+        before, after, after, restore
+    ))
 }
 
 /// Export tether config to sync repo (always, independent of config file list)
-pub fn export_tether_config(sync_path: &Path, home: &Path, state: &mut SyncState) -> Result<()> {
+pub fn export_tether_config(sync_path: &Path, home: &Path) -> Result<()> {
     let config_path = home.join(".tether/config.toml");
 
     if !config_path.exists() {
         return Ok(());
     }
+    let key = crate::security::get_encryption_key()?;
+    write_synced_config(sync_path, home, &key)
+}
 
-    let content = std::fs::read(&config_path)?;
-    let hash = crate::sha256_hex(&content);
-
-    let dest_dir = sync_path.join("configs/tether");
-    std::fs::create_dir_all(&dest_dir)?;
-
-    let dest = dest_dir.join("config.toml.enc");
-
-    // Check if file on disk differs
-    let file_hash = std::fs::read(&dest).ok().and_then(|enc| {
-        let key = crate::security::get_encryption_key().ok()?;
-        crate::security::decrypt(&enc, &key)
-            .ok()
-            .map(|plain| crate::sha256_hex(&plain))
-    });
-
-    if file_hash.as_ref() != Some(&hash) {
-        let key = crate::security::get_encryption_key()?;
-        let encrypted = crate::security::encrypt(&content, &key)?;
-        std::fs::write(&dest, encrypted)?;
-        state.update_file(".tether/config.toml", hash);
+fn write_synced_config(sync_path: &Path, home: &Path, key: &[u8]) -> Result<()> {
+    use crate::sync::config_merge::{export_text, has_marker};
+    let content = std::fs::read(home.join(".tether/config.toml"))?;
+    let dest = sync_path.join(format!("configs/{}.enc", TETHER_CONFIG_REL));
+    let repo = match std::fs::read(&dest) {
+        Ok(enc) => match crate::security::decrypt(&enc, key) {
+            Ok(plain) => Some(plain),
+            // The merge warned (warn_config_error)
+            Err(_) => return Ok(()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(repo) = &repo {
+        // A newer Tether wrote the repo config; this machine leaves it alone until it upgrades
+        if crate::sync::config_merge::newer_version(&String::from_utf8_lossy(repo)).is_some()
+            || !crate::sync::config_merge::reads(repo)
+        {
+            return Ok(());
+        }
+        // A format-only difference is no change: exporting it would make 1.x machines see
+        // one. A copy without the marker is replaced, so that 1.x copies get the marker
+        if has_marker(repo) && crate::sync::config_merge::same_settings(repo, &content) {
+            return Ok(());
+        }
     }
-
+    let exported = export_text(&String::from_utf8_lossy(&content))?.into_bytes();
+    crate::sync::atomic_write(&dest, &crate::security::encrypt(&exported, key)?)?;
+    // Once pushed, the repo holds this config, so it is the next merge's base. With the
+    // pulled remote as base, a kept conflict reads as a local edit forever and two machines
+    // export their values in turn. Until the push, the base and the recorded hashes stay: a
+    // pull that discards the commit must not leave a base, or a hash that recovers one, that
+    // holds local edits the repo never got
+    crate::sync::atomic_write_private(&config_base_pending_path(home), &exported)?;
     Ok(())
 }
 
@@ -1564,6 +1874,7 @@ pub fn sync_directories(
 
     let configs_dir = sync_path.join("configs");
     std::fs::create_dir_all(&configs_dir)?;
+    let tether = crate::config::TetherDir::new(home);
 
     for dir_path in &config.effective_dirs(machine_id) {
         // Validate path is safe (security: prevents path traversal via synced config)
@@ -1582,8 +1893,16 @@ pub fn sync_directories(
             Output::warning(&format!("  {} (not found, skipping)", dir_path));
             continue;
         }
+        if tether.contains(&expanded_path) {
+            Output::warning(&format!("  {} (in ~/.tether, skipping)", dir_path));
+            continue;
+        }
 
         if expanded_path.is_file() {
+            if is_tether_config_rel(expanded_path.strip_prefix(home).unwrap_or(&expanded_path)) {
+                warn_tether_config_dir(dir_path);
+                continue;
+            }
             if let Ok(content) = std::fs::read(&expanded_path) {
                 let hash = crate::sha256_hex(&content);
                 let file_changed = state
@@ -1617,7 +1936,13 @@ pub fn sync_directories(
                 }
             }
         } else if expanded_path.is_dir() {
-            for entry in WalkDir::new(&expanded_path).follow_links(false) {
+            // Every entry that resolves into ~/.tether stays out: a directory, a file, and a
+            // symlink to either, so a later change to what the loop reads cannot leak one
+            for entry in WalkDir::new(&expanded_path)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| !tether.contains(e.path()))
+            {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(_) => continue,
@@ -1627,6 +1952,10 @@ pub fn sync_directories(
                     let file_path = entry.path();
                     let rel_to_home = file_path.strip_prefix(home).unwrap_or(file_path);
                     let state_key = format!("~/{}", rel_to_home.display());
+                    if is_tether_config_rel(rel_to_home) {
+                        warn_tether_config_dir(&state_key);
+                        continue;
+                    }
 
                     if let Ok(content) = std::fs::read(file_path) {
                         let hash = crate::sha256_hex(&content);
@@ -2304,7 +2633,610 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::config_merge::has_marker;
     use tempfile::TempDir;
+
+    const KEY: [u8; 32] = [7u8; 32];
+
+    fn new_state(id: &str) -> SyncState {
+        serde_json::from_value(serde_json::json!({
+            "machine_id": id,
+            "last_sync": "2026-01-01T00:00:00Z",
+            "files": {},
+            "packages": {},
+        }))
+        .unwrap()
+    }
+
+    const COPY: &str = "configs/tether/config.toml.enc";
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = crate::sync::git::git_command()
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// A clone of `origin` on branch main
+    fn clone(origin: &Path, dir: &Path) -> GitBackend {
+        let git_dir = GitBackend::clone(origin.to_str().unwrap(), dir).unwrap();
+        git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git_dir
+    }
+
+    /// The bare repository that the machines push to, and a clone that writes copies as a
+    /// 1.x machine does
+    struct Remote {
+        dir: TempDir,
+    }
+
+    impl Remote {
+        fn new() -> Remote {
+            let dir = TempDir::new().unwrap();
+            git(
+                dir.path(),
+                &["init", "-q", "--bare", "-b", "main", "origin.git"],
+            );
+            let writer = clone(&dir.path().join("origin.git"), &dir.path().join("writer"));
+            // A sync repo has a first commit before any machine clones it
+            std::fs::write(dir.path().join("writer/README"), "sync").unwrap();
+            writer.commit_with_key("init", "writer", None).unwrap();
+            writer.push().unwrap();
+            Remote { dir }
+        }
+        fn origin(&self) -> PathBuf {
+            self.dir.path().join("origin.git")
+        }
+        /// The plaintext of the synced config on the remote
+        fn copy(&self) -> Vec<u8> {
+            crate::security::decrypt(&self.raw(), &KEY).unwrap()
+        }
+        fn raw(&self) -> Vec<u8> {
+            let out = crate::sync::git::git_command()
+                .args(["show", &format!("main:{COPY}")])
+                .current_dir(self.origin())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            out.stdout
+        }
+        /// Pushes `plain` as the synced config, as another machine does
+        fn set_copy(&self, plain: &[u8]) {
+            self.set_raw(&crate::security::encrypt(plain, &KEY).unwrap());
+        }
+        fn set_raw(&self, bytes: &[u8]) {
+            let writer = GitBackend::open(&self.dir.path().join("writer")).unwrap();
+            writer.pull().unwrap();
+            let path = self.dir.path().join("writer").join(COPY);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            writer.commit_with_key("copy", "writer", None).unwrap();
+            writer.push().unwrap();
+        }
+    }
+
+    /// A machine with its own home and clone, syncing config.toml as a sync does
+    struct Peer {
+        home: TempDir,
+        repo: TempDir,
+        state: SyncState,
+    }
+
+    impl Peer {
+        fn new(remote: &Remote, id: &str, config: Option<&str>) -> Peer {
+            let home = TempDir::new().unwrap();
+            std::fs::create_dir_all(home.path().join(".tether")).unwrap();
+            let repo = TempDir::new().unwrap();
+            clone(&remote.origin(), &repo.path().join("sync"));
+            let peer = Peer {
+                home,
+                repo,
+                state: new_state(id),
+            };
+            if let Some(config) = config {
+                peer.write(config);
+            }
+            peer
+        }
+        fn sync_path(&self) -> PathBuf {
+            self.repo.path().join("sync")
+        }
+        fn git(&self) -> GitBackend {
+            GitBackend::open(&self.sync_path()).unwrap()
+        }
+        fn config_path(&self) -> PathBuf {
+            self.home.path().join(".tether/config.toml")
+        }
+        fn base(&self) -> Vec<u8> {
+            std::fs::read(config_base_path(self.home.path())).unwrap()
+        }
+        fn read(&self) -> String {
+            std::fs::read_to_string(self.config_path()).unwrap()
+        }
+        fn write(&self, text: &str) {
+            std::fs::write(self.config_path(), text).unwrap();
+        }
+        fn edit(&self, f: impl FnOnce(&mut Config)) {
+            let text = self.read();
+            let mut c = Config::parse(&text).unwrap();
+            f(&mut c);
+            self.write(&crate::sync::config_merge::save_text(Some(&text), &c).unwrap());
+        }
+        fn config(&self) -> Config {
+            Config::parse(&self.read()).unwrap()
+        }
+        /// Pulls and merges the synced config, as a sync does first
+        fn pull(&mut self) -> bool {
+            self.git().pull().unwrap();
+            merge_tether_config(&self.sync_path(), self.home.path(), &mut self.state, || {
+                Ok(KEY.to_vec())
+            })
+            .unwrap()
+        }
+        /// Exports and commits; the push fails
+        fn export(&mut self) {
+            write_synced_config(&self.sync_path(), self.home.path(), &KEY).unwrap();
+            self.git().commit_with_key("sync", "peer", None).unwrap();
+        }
+        /// Pushes the commits and makes the export the base, as a sync does last
+        fn try_push(&mut self) -> Result<()> {
+            self.git().push()?;
+            promote_config_base(&self.sync_path(), self.home.path(), &mut self.state, || {
+                Ok(KEY.to_vec())
+            })
+        }
+        fn push(&mut self) {
+            self.export();
+            self.try_push().unwrap();
+        }
+        fn sync(&mut self) {
+            self.pull();
+            self.push();
+        }
+    }
+
+    /// The text 1.13.1 saves: no marker, none of the keys only 2.0 knows
+    fn saved_by_1x(text: &[u8], f: impl FnOnce(&mut toml::Table)) -> Vec<u8> {
+        let mut t: toml::Table = toml::from_str(std::str::from_utf8(text).unwrap()).unwrap();
+        for key in ["config_writer", "dashboard"] {
+            t.remove(key);
+        }
+        let packages = t["packages"].as_table_mut().unwrap();
+        for key in [
+            "allow_scripts",
+            "min_release_age_days",
+            "auto_install_from_trusted",
+        ] {
+            packages.remove(key);
+        }
+        f(&mut t);
+        toml::to_string_pretty(&t).unwrap().into_bytes()
+    }
+
+    fn days(c: &Config) -> u32 {
+        c.packages.min_release_age_days
+    }
+
+    fn days_of(copy: &[u8]) -> u32 {
+        days(&Config::parse(&String::from_utf8_lossy(copy)).unwrap())
+    }
+
+    /// An unpatched 1.x machine pushes its copy of an earlier export again verbatim. The copy
+    /// has the marker, so it merges as a 2.0 copy and reverts the change made since: the
+    /// documented limit. No machine exports to restore the change, so the fleet settles.
+    #[test]
+    fn a_replayed_copy_reverts_the_change_and_settles() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.sync();
+        let r1 = remote.copy();
+        b.sync();
+        a.edit(|c| c.packages.min_release_age_days = 14);
+        a.sync();
+        b.sync();
+        assert_eq!(days(&b.config()), 14);
+
+        remote.set_copy(&r1);
+        for p in [&mut b, &mut a] {
+            p.sync();
+            assert_eq!(days(&p.config()), 3);
+            assert_eq!(remote.copy(), r1);
+        }
+    }
+
+    /// A 1.x user who sets a value back saves a copy without the marker: it merges
+    #[test]
+    fn a_value_a_1x_user_sets_back_merges() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+        a.edit(|c| {
+            c.packages.brew.sync_casks = false;
+            c.packages.min_release_age_days = 14;
+        });
+        a.sync();
+        b.sync();
+        assert!(!b.config().packages.brew.sync_casks);
+
+        let from_1x = saved_by_1x(&remote.copy(), |t| {
+            t["packages"]["brew"]
+                .as_table_mut()
+                .unwrap()
+                .insert("sync_casks".into(), true.into());
+        });
+        remote.set_copy(&from_1x);
+        assert!(b.pull());
+        let c = b.config();
+        assert!(c.packages.brew.sync_casks);
+        assert_eq!(days(&c), 14);
+        // The export puts the marker and the 2.0 settings back
+        b.push();
+        let r = remote.copy();
+        assert!(has_marker(&r));
+        assert_eq!(days_of(&r), 14);
+        a.sync();
+        assert!(a.config().packages.brew.sync_casks);
+    }
+
+    /// An export becomes the base only once pushed. A pull that discards the commit merges
+    /// against the base before the export, so the local edit is not taken as merged.
+    #[test]
+    fn a_discarded_export_does_not_advance_the_base() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+        let base = a.base();
+
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull();
+        a.export();
+        assert_eq!(a.base(), base);
+        // The push fails, and the pull resets the repo to b's export
+        b.edit(|c| {
+            c.packages.min_release_age_days = 14;
+            c.dashboard.theme = Some("mocha".into());
+        });
+        b.sync();
+        a.pull();
+        assert!(!config_base_pending_path(a.home.path()).exists());
+        let c = a.config();
+        assert_eq!(
+            c.packages.min_release_age_days, 3,
+            "the local edit was lost"
+        );
+        assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+
+        // A pushed export is the base
+        a.push();
+        assert_eq!(a.base(), remote.copy());
+    }
+
+    /// A push that succeeds only on a later sync still makes the export the base, so the
+    /// next remote change applies without a false conflict.
+    #[test]
+    fn an_export_pushed_on_retry_becomes_the_base() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull();
+        a.export();
+        // The next sync merges its own unpushed copy, exports nothing new, and its push works
+        a.pull();
+        a.try_push().unwrap();
+        assert_eq!(a.base(), remote.copy());
+
+        b.sync();
+        b.edit(|c| c.packages.min_release_age_days = 14);
+        b.sync();
+        a.pull();
+        assert_eq!(a.config().packages.min_release_age_days, 14);
+    }
+
+    /// Without the encryption key the pending base waits; the sync does not fail.
+    #[test]
+    fn a_pending_base_without_a_key_does_not_fail() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        a.sync();
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull();
+        a.export();
+        a.git().push().unwrap();
+        promote_config_base(&a.sync_path(), a.home.path(), &mut a.state, || {
+            Err(anyhow::anyhow!("locked"))
+        })
+        .unwrap();
+        assert!(config_base_pending_path(a.home.path()).exists());
+    }
+
+    /// The next sync after a failed push merges the copy of its own unpushed commit. That
+    /// copy is no base: when a conflicting remote later discards the commit, the edit stays.
+    #[test]
+    fn an_unpushed_export_never_becomes_the_base() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+        let base = a.base();
+        let hash = a.state.config_export_hash.clone();
+
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.pull();
+        a.export();
+        // Promoted without a push, the export stays out of the base
+        promote_config_base(&a.sync_path(), a.home.path(), &mut a.state, || {
+            Ok(KEY.to_vec())
+        })
+        .unwrap();
+        assert_eq!(a.base(), base);
+        assert!(a.git().has_unpushed_commits());
+        assert!(!a.pull());
+        assert_eq!(a.base(), base, "the unpushed export became the base");
+        assert!(!a.state.files.contains_key(".tether/config.toml"));
+        assert_eq!(a.state.config_export_hash, hash);
+
+        b.edit(|c| c.dashboard.theme = Some("mocha".into()));
+        b.sync();
+        // The push is rejected, and the pull that follows discards the commit
+        a.export();
+        assert!(a.try_push().is_err());
+        assert!(!a.git().has_unpushed_commits());
+        a.pull();
+        let c = a.config();
+        assert_eq!(days(&c), 3, "the local edit was lost");
+        assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+        a.sync();
+        b.sync();
+        assert_eq!(days(&b.config()), 3);
+        assert_eq!(a.base(), remote.copy());
+    }
+
+    /// A synced copy that does not read stops neither this sync nor the next: the merge and
+    /// the export skip it, and the warning shows once per copy
+    #[test]
+    fn an_unreadable_synced_config_skips_the_config_step() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        a.sync();
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        for corrupt in [&b"not = [toml"[..], b"\xff\xfe", b"packages = 1\n"] {
+            remote.set_copy(corrupt);
+            for _ in 0..2 {
+                assert!(!a.pull());
+                assert_eq!(
+                    a.state.config_error.as_deref(),
+                    Some(crate::sha256_hex(corrupt).as_str())
+                );
+                a.push();
+                assert_eq!(remote.copy(), corrupt);
+            }
+        }
+        // A copy that does not decrypt
+        remote.set_raw(b"garbage");
+        assert!(!a.pull());
+        a.push();
+        assert_eq!(remote.raw(), b"garbage");
+        assert!(a.read().contains("min_release_age_days = 3"));
+
+        // A readable copy merges again, and the export follows
+        remote.set_copy(start.as_bytes());
+        a.sync();
+        assert_eq!(a.state.config_error, None);
+        assert_eq!(days_of(&remote.copy()), 3);
+    }
+
+    /// A synced dir that maps a file to the repo path of the synced Tether config never
+    /// exports it
+    #[test]
+    fn a_synced_dir_never_replaces_the_tether_config() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::create_dir_all(home.join("tether")).unwrap();
+        std::fs::write(home.join("tether/config.toml"), b"mine").unwrap();
+        std::fs::write(home.join("tether/other"), b"other").unwrap();
+        let synced_config = repo.join("configs/tether/config.toml");
+        for dirs in [
+            vec!["~/tether"],
+            vec!["~/tether/config.toml"],
+            vec!["~/./tether"],
+        ] {
+            let mut config = Config::default();
+            config.security.encrypt_dotfiles = false;
+            config.dotfiles.dirs = dirs.iter().map(|d| d.to_string()).collect();
+            let mut state = new_state("me");
+            sync_directories(&config, "me", &mut state, &repo, &home, false).unwrap();
+            assert!(!synced_config.exists(), "{dirs:?}");
+            assert!(
+                !state.files.contains_key("~/tether/config.toml"),
+                "{dirs:?}"
+            );
+            assert!(dirs.iter().all(|d| dir_holds_tether_config(d)));
+        }
+        assert!(repo.join("configs/tether/other").exists());
+        assert!(is_tether_config_rel(Path::new("Tether/config.toml")));
+        assert!(!is_tether_config_rel(Path::new("tether/other")));
+        for dir in ["~", "~/.config", "~/tether2"] {
+            assert!(!dir_holds_tether_config(dir), "{dir}");
+        }
+    }
+
+    /// A merge or a first copy writes config.toml 0600, also over a file that was 0644
+    #[cfg(unix)]
+    #[test]
+    fn a_synced_config_write_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        a.sync();
+        b.sync();
+        a.edit(|c| c.packages.min_release_age_days = 3);
+        a.sync();
+        std::fs::set_permissions(b.config_path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(b.pull());
+        assert_eq!(mode(&b.config_path()), 0o600);
+        let mut c = Peer::new(&remote, "c", None);
+        assert!(c.pull());
+        assert_eq!(mode(&c.config_path()), 0o600);
+    }
+
+    /// Only a pushed export records its hash, and that hash recovers a lost base
+    #[test]
+    fn a_pushed_export_records_its_hash() {
+        let remote = Remote::new();
+        // Without the marker, so the export differs from the local file
+        let start = format!(
+            "# mine\n{}",
+            toml::to_string_pretty(&Config::default())
+                .unwrap()
+                .replace("config_writer = 2\n", "")
+        );
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        a.export();
+        assert_eq!(a.state.config_export_hash, None);
+        a.try_push().unwrap();
+        let exported = remote.copy();
+        assert_ne!(exported, start.as_bytes());
+        assert!(!a.state.files.contains_key(".tether/config.toml"));
+        assert_eq!(
+            a.state.config_export_hash.as_deref(),
+            Some(crate::sha256_hex(&exported).as_str())
+        );
+        // Without a base file, the history holds the exported copy
+        std::fs::remove_file(config_base_path(a.home.path())).unwrap();
+        let base = load_config_base(
+            &a.sync_path(),
+            a.home.path(),
+            &a.state,
+            start.as_bytes(),
+            &KEY,
+        );
+        assert_eq!(base.unwrap(), Some(exported));
+    }
+
+    /// A recorded hash that matches nothing gives no base: additions from both sides stay and
+    /// a setting both changed is a conflict. Only a machine with no recorded hash takes the
+    /// remote values.
+    #[test]
+    fn a_base_that_cannot_be_recovered_merges_without_one() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let mut theirs = Config::parse(&start).unwrap();
+        theirs.dashboard.theme = Some("mocha".into());
+        theirs.packages.min_release_age_days = 14;
+        theirs.packages.brew.sync_casks = false;
+        let theirs = crate::sync::config_merge::save_text(Some(&start), &theirs).unwrap();
+        remote.set_copy(theirs.as_bytes());
+
+        let mut a = Peer::new(&remote, "a", Some(&start));
+        a.edit(|c| {
+            c.packages.allow_scripts = vec!["esbuild".into()];
+            c.packages.min_release_age_days = 3;
+        });
+        a.state
+            .update_file(".tether/config.toml", crate::sha256_hex(b"lost"));
+        assert!(a.pull());
+        let c = a.config();
+        assert_eq!(c.packages.allow_scripts, vec!["esbuild"]);
+        assert_eq!(c.dashboard.theme.as_deref(), Some("mocha"));
+        assert_eq!(c.packages.min_release_age_days, 3);
+        // Without a base, a setting that differs is a change on both sides
+        assert!(c.packages.brew.sync_casks);
+
+        // A new machine joins the fleet's config
+        let mut b = Peer::new(&remote, "b", Some(&start));
+        assert!(b.pull());
+        let c = b.config();
+        assert_eq!(c.packages.min_release_age_days, 14);
+        assert!(!c.packages.brew.sync_casks);
+    }
+
+    /// A new machine copies a 1.x remote without the marker, and its export has the marker
+    #[test]
+    fn a_copied_1x_config_exports_with_the_marker() {
+        let remote = Remote::new();
+        let start = toml::to_string_pretty(&Config::default()).unwrap();
+        let from_1x = saved_by_1x(start.as_bytes(), |_| {});
+        remote.set_copy(&from_1x);
+        let mut c = Peer::new(&remote, "c", None);
+        assert!(c.pull());
+        assert_eq!(c.read().as_bytes(), &from_1x[..]);
+        c.push();
+        let r = remote.copy();
+        assert!(has_marker(&r), "{}", String::from_utf8_lossy(&r));
+        // Exported once: the next sync has nothing to export
+        c.sync();
+        assert_eq!(remote.copy(), r);
+    }
+
+    /// A synced directory that resolves into ~/.tether, or holds it, never syncs its files
+    #[cfg(unix)]
+    #[test]
+    fn synced_dirs_leave_out_the_tether_dir() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::write(home.join(".tether/signing_key"), b"secret").unwrap();
+        std::fs::create_dir_all(home.join(".config/app")).unwrap();
+        std::fs::write(home.join(".config/app/a.conf"), b"a").unwrap();
+        std::os::unix::fs::symlink(home.join(".tether"), home.join("tlink")).unwrap();
+        std::os::unix::fs::symlink(
+            home.join(".tether/signing_key"),
+            home.join(".config/app/key"),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.security.encrypt_dotfiles = false;
+        config.dotfiles.dirs = vec![
+            "~/tlink".into(),
+            "~/.config".into(),
+            "~/./.tether".into(),
+            "~".into(),
+        ];
+        let mut state = new_state("me");
+        sync_directories(&config, "me", &mut state, &repo, &home, false).unwrap();
+        let synced: Vec<String> = walkdir::WalkDir::new(repo.join("configs"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_file())
+            .map(|e| e.path().to_string_lossy().into_owned())
+            .collect();
+        assert!(synced.iter().any(|p| p.ends_with(".config/app/a.conf")));
+        assert!(
+            !synced
+                .iter()
+                .any(|p| std::fs::read(p).unwrap() == b"secret"),
+            "{synced:?}"
+        );
+    }
 
     #[test]
     fn test_package_uninstalled_since_the_last_record_is_tombstoned() {
@@ -2436,7 +3368,27 @@ mod tests {
     }
 
     #[test]
-    fn applied_remote_config_does_not_look_like_a_local_edit() {
+    fn config_base_recovers_from_repo_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let git = |args: &[&str]| {
+            let status = crate::sync::git::git_command()
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let key = [7u8; 32];
+        let enc = dir.join("configs/tether/config.toml.enc");
+        std::fs::create_dir_all(enc.parent().unwrap()).unwrap();
+        for text in ["synced = 1\n", "remote = 2\n"] {
+            let data = crate::security::encrypt(text.as_bytes(), &key).unwrap();
+            std::fs::write(&enc, data).unwrap();
+            git(&["add", "-A"]);
+            git(&["commit", "-qm", "config"]);
+        }
         let mut state: SyncState = serde_json::from_value(serde_json::json!({
             "machine_id": "me",
             "last_sync": "2026-01-01T00:00:00Z",
@@ -2444,15 +3396,91 @@ mod tests {
             "packages": {},
         }))
         .unwrap();
-        state.update_file(".tether/config.toml", "a".to_string());
-        // Another machine pushed b; this machine's config is still a
-        assert!(apply_remote_config(Some(&mut state), Some("a"), "b"));
-        // Then c. Before, the stale hash a made b look like a local edit, and b was
-        // exported over c
-        assert!(apply_remote_config(Some(&mut state), Some("b"), "c"));
-        // A real local edit still wins
-        assert!(!apply_remote_config(Some(&mut state), Some("edited"), "d"));
-        // A missing local config always takes the remote one
-        assert!(apply_remote_config(Some(&mut state), None, "d"));
+        // A machine that never synced its config takes the fleet's
+        assert_eq!(
+            recover_config_base(dir, &state, b"local", &key).as_deref(),
+            Some(&b"local"[..])
+        );
+        state.update_file(".tether/config.toml", crate::sha256_hex(b"unknown"));
+        assert_eq!(recover_config_base(dir, &state, b"local", &key), None);
+        // The hash of the export finds the exported copy
+        state.config_export_hash = Some(crate::sha256_hex(b"remote = 2\n"));
+        assert_eq!(
+            recover_config_base(dir, &state, b"local", &key).as_deref(),
+            Some(&b"remote = 2\n"[..])
+        );
+        state.config_export_hash = None;
+        state.update_file(".tether/config.toml", crate::sha256_hex(b"synced = 1\n"));
+        // The local file was rewritten since, so the base comes from history
+        assert_eq!(
+            recover_config_base(dir, &state, b"# rewritten\nsynced = 1\n", &key).as_deref(),
+            Some(&b"synced = 1\n"[..])
+        );
+        assert_eq!(
+            recover_config_base(dir, &state, b"synced = 1\n", &key).as_deref(),
+            Some(&b"synced = 1\n"[..])
+        );
+    }
+
+    #[test]
+    fn config_base_that_does_not_read_comes_from_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state: SyncState = serde_json::from_value(serde_json::json!({
+            "machine_id": "me",
+            "last_sync": "2026-01-01T00:00:00Z",
+            "files": {},
+            "packages": {},
+        }))
+        .unwrap();
+        let local = toml::to_string_pretty(&Config::default()).unwrap();
+        write_config_base(home, b"not = [toml").unwrap();
+        let base = load_config_base(home, home, &state, local.as_bytes(), &[7u8; 32]).unwrap();
+        assert_eq!(base.as_deref(), Some(local.as_bytes()));
+        write_config_base(home, local.as_bytes()).unwrap();
+        let base = load_config_base(home, home, &state, b"other", &[7u8; 32]).unwrap();
+        assert_eq!(base.as_deref(), Some(local.as_bytes()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_base_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = config_base_path(temp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_config_base(temp.path(), b"new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn profile_warning_only_for_a_different_profile() {
+        let assigned = |profile: Option<&str>| {
+            let mut c = Config::default();
+            if let Some(p) = profile {
+                c.machine_profiles.insert("me".into(), p.into());
+            }
+            c
+        };
+        // An explicit dev and a missing assignment are the same profile
+        assert_eq!(
+            changed_profile_warning(&assigned(Some("dev")), &assigned(None), "me"),
+            None
+        );
+        assert_eq!(
+            changed_profile_warning(&assigned(None), &assigned(Some("dev")), "me"),
+            None
+        );
+        let warning =
+            changed_profile_warning(&assigned(Some("server")), &assigned(None), "me").unwrap();
+        assert!(warning.contains("from server to dev"), "{warning}");
+        assert!(warning.contains("'tether machines profile set server'"));
+        let warning =
+            changed_profile_warning(&assigned(None), &assigned(Some("server")), "me").unwrap();
+        assert!(warning.contains("from dev to server"), "{warning}");
+        assert!(warning.contains("'tether machines profile unset'"));
     }
 }

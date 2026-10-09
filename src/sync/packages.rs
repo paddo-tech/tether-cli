@@ -74,6 +74,36 @@ const SIMPLE_MANAGERS: &[PackageManagerDef] = &[
     },
 ];
 
+/// Add casks that need a password to the list a sync in a terminal installs. Notifies only
+/// when the list changes.
+pub fn defer_casks(state: &mut SyncState, casks: &[String]) -> Result<()> {
+    if casks.is_empty() {
+        return Ok(());
+    }
+    let mut all: std::collections::BTreeSet<String> =
+        state.deferred_casks.iter().cloned().collect();
+    all.extend(casks.iter().cloned());
+    state.deferred_casks = all.into_iter().collect();
+
+    let hash = crate::sha256_hex(state.deferred_casks.join(",").as_bytes());
+    if state.deferred_casks_hash.as_ref() != Some(&hash) {
+        crate::sync::notify_deferred_casks(&state.deferred_casks).ok();
+        state.deferred_casks_hash = Some(hash);
+        Output::info(&format!(
+            "Deferred {} cask{} that need a password: {}. Run 'tether sync' in a terminal to \
+             install them",
+            state.deferred_casks.len(),
+            if state.deferred_casks.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            state.deferred_casks.join(", ")
+        ));
+    }
+    state.save()
+}
+
 /// What an import did beyond installing.
 #[derive(Debug, Default)]
 pub struct ImportOutcome {
@@ -217,19 +247,49 @@ fn notify_excluded(scope: &Membership, shown: &mut bool) {
     if *shown {
         return;
     }
-    let excluded = scope.excluded();
-    if excluded.is_empty() {
-        return;
+    if let Some(notice) = excluded_notice(scope) {
+        Output::warning(&notice);
+        *shown = true;
     }
-    Output::warning(&format!(
-        "This machine (profile {}) installs only the packages of its profile. It does not \
-         install these packages from other profiles: {}. To install one here, run 'tether \
-         packages share <manager:name> --to {}'",
+}
+
+/// Counts, not names: a machine that joins a large fleet can miss hundreds of packages.
+fn excluded_notice(scope: &Membership) -> Option<String> {
+    let excluded = scope.excluded_packages();
+    if excluded.is_empty() {
+        return None;
+    }
+    let mut managers: HashMap<&str, usize> = HashMap::new();
+    let mut profiles: HashMap<String, usize> = HashMap::new();
+    for (manager, name) in &excluded {
+        *managers.entry(manager).or_default() += 1;
+        for profile in scope.members(manager, name) {
+            *profiles.entry(profile).or_default() += 1;
+        }
+    }
+    let counts = |map: HashMap<&str, usize>| {
+        let mut counts: Vec<(&str, usize)> = map.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        counts
+            .iter()
+            .map(|(name, n)| format!("{} {}", name, n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let profiles = counts(profiles.iter().map(|(p, n)| (p.as_str(), *n)).collect());
+    Some(format!(
+        "This machine (profile {}) installs only the packages of its profile. {} package{} of \
+         other profiles {} not install here. By manager: {}. By profile: {}. Run 'tether \
+         packages list --other-profiles' to see them, and 'tether packages share \
+         <manager:name> --to {}' to install one here",
         scope.profile,
-        excluded.join(", "),
+        excluded.len(),
+        if excluded.len() == 1 { "" } else { "s" },
+        if excluded.len() == 1 { "does" } else { "do" },
+        counts(managers),
+        profiles,
         scope.profile
-    ));
-    *shown = true;
+    ))
 }
 
 /// The ids of failing records not reported before. `warned` keeps only records that still
@@ -1122,34 +1182,73 @@ async fn import_simple_manager(
                 installed_any = true;
                 failures.remove(&InstallFailure::key(def.state_key, &name));
             }
-            Err(e) if foreign.contains(&name) => {
+            Err(e) => {
                 let error = e.to_string();
-                let first_line = error.lines().next().unwrap_or_default();
-                match fallback(def, manager.as_ref(), trust, &name, asked.as_deref()).await {
+                let first_line = error_line(&error);
+                let min_age = PackagePolicy::load().min_release_age_days;
+                let age =
+                    refused_version(&error) && too_new(def, &name, asked.as_deref(), min_age).await;
+                // Only a release that this machine cannot take falls back to an older one
+                if !age && !foreign.contains(&name) {
+                    record_failure(failures, def.state_key, &name, asked.as_deref(), &error);
+                    continue;
+                }
+                let reason = if age {
+                    Reason::PinnedTooNew
+                } else {
+                    Reason::OtherOsVersion
+                };
+                match fallback(
+                    def,
+                    manager.as_ref(),
+                    trust,
+                    &name,
+                    asked.as_deref(),
+                    reason,
+                )
+                .await
+                {
                     Ok(Fallback::Installed(version)) => {
                         installed_any = true;
                         failures.remove(&InstallFailure::key(def.state_key, &name));
+                        let why = if age {
+                            format!("is newer than the release-age limit of {} days", min_age)
+                        } else {
+                            format!(
+                                "a machine on another OS lists and which failed here: {}",
+                                first_line
+                            )
+                        };
                         Output::info(&format!(
-                            "Installed {} {} as approved, instead of {}, which a machine on \
-                             another OS lists and which failed here: {}",
+                            "Installed {} {} as approved, instead of {}, which {}",
                             name,
                             version,
                             asked.as_deref().unwrap_or("the pinned version"),
-                            first_line
+                            why
                         ));
                     }
                     Ok(Fallback::Held(item)) => {
-                        record_failure(
-                            failures,
-                            def.state_key,
-                            &name,
-                            asked.as_deref(),
-                            &format!(
-                                "{}; holding {} for approval",
+                        let older = item.version.as_deref().unwrap_or_default();
+                        let message = if age {
+                            format!(
+                                "{} {} is newer than the release-age limit of {} days. The \
+                                 older release {} waits in the inbox for approval",
+                                name,
+                                asked.as_deref().unwrap_or_default(),
+                                min_age,
+                                older
+                            )
+                        } else {
+                            format!(
+                                "{} {} cannot be installed here: {}. The release {} waits in \
+                                 the inbox for approval",
+                                name,
+                                asked.as_deref().unwrap_or_default(),
                                 first_line,
-                                item.version.as_deref().unwrap_or_default()
-                            ),
-                        );
+                                older
+                            )
+                        };
+                        record_failure(failures, def.state_key, &name, asked.as_deref(), &message);
                         // The held item replaces the pass the failed version got
                         gated
                             .passed
@@ -1165,16 +1264,65 @@ async fn import_simple_manager(
                     ),
                 }
             }
-            Err(e) => record_failure(
-                failures,
-                def.state_key,
-                &name,
-                asked.as_deref(),
-                &e.to_string(),
-            ),
         }
     }
     installed_any
+}
+
+/// Whether the registry shows that the pinned release came out within the release-age
+/// limit, so that the limit is why it failed. A publish time that Tether cannot read does
+/// not count.
+async fn too_new(def: &PackageManagerDef, name: &str, pinned: Option<&str>, min_age: u32) -> bool {
+    let Some(pinned) = pinned.filter(|_| min_age > 0) else {
+        return false;
+    };
+    matches!(
+        crate::packages::resolve::old_enough(def.state_key, def.ecosystem, name, pinned, min_age)
+            .await,
+        Ok(false)
+    )
+}
+
+/// Whether a manager's install error says that no release matched the version, as npm, pnpm,
+/// bun and uv report a release that the release-age limit holds back. Other failures, such as
+/// a full disk, the network or an install script, never make an older release install.
+fn refused_version(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        // npm: "code ETARGET", "notarget No matching version found for x@1 with a date before"
+        "etarget",
+        "notarget",
+        "no matching version",
+        // pnpm
+        "no_mature_matching_version",
+        "no_matching_version",
+        // bun: "No version matching \"1.0.0\" found for specifier"
+        "no version matching",
+        // uv: "No solution found ... there is no version of x==1.0.0"
+        "no solution found",
+        "there is no version of",
+        "minimum release age",
+        "minimum-release-age",
+        "minimumreleaseage",
+    ]
+    .iter()
+    .any(|p| error.contains(p))
+}
+
+/// The line of a manager's error that says what failed. Managers print progress first,
+/// such as bun's "Resolving dependencies".
+fn error_line(error: &str) -> &str {
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    lines
+        .iter()
+        .find(|l| l.to_ascii_lowercase().contains("error"))
+        .or(lines.last())
+        .copied()
+        .unwrap_or_default()
 }
 
 /// What happened to the release that suits this machine.
@@ -1195,6 +1343,7 @@ async fn fallback(
     trust: &Trust,
     name: &str,
     failed: Option<&str>,
+    reason: Reason,
 ) -> Result<Fallback> {
     let min_age = PackagePolicy::load().min_release_age_days;
     let version = resolve_version(def.state_key, def.ecosystem, name, min_age).await?;
@@ -1206,7 +1355,7 @@ async fn fallback(
         .into_iter()
         .next()
         .unwrap_or_default();
-    let decided = fallback_decision(def, trust, name, version, advisories)?;
+    let decided = fallback_decision(def, trust, name, version, advisories, reason)?;
     if let Fallback::Installed(version) = &decided {
         manager
             .install(&PackageInfo {
@@ -1226,6 +1375,7 @@ fn fallback_decision(
     name: &str,
     version: String,
     advisories: Vec<String>,
+    reason: Reason,
 ) -> Result<Fallback> {
     let key = def.state_key;
     if trust.inbox.is_rejected(key, name, Some(&version), None) {
@@ -1246,11 +1396,7 @@ fn fallback_decision(
         }
         return Ok(Fallback::Installed(version));
     }
-    let reason = if malicious {
-        Reason::Malicious
-    } else {
-        Reason::OtherOsVersion
-    };
+    let reason = if malicious { Reason::Malicious } else { reason };
     let mut item = trust.item(key, name, Some(version), None, vec![reason]);
     item.advisories = advisories;
     Ok(Fallback::Held(Box::new(item)))
@@ -1719,6 +1865,94 @@ fn write_manifest(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn release_age_rejection_reads_as_such() {
+        // Without a limit or a pin, the limit is never the reason, and no registry is asked
+        let npm = &SIMPLE_MANAGERS[0];
+        assert!(!too_new(npm, "example", Some("2.0.0"), 0).await);
+        assert!(!too_new(npm, "example", None, 7).await);
+        assert_eq!(
+            error_line("bun command failed: Resolving dependencies\nerror: No version matching"),
+            "error: No version matching"
+        );
+        assert_eq!(
+            error_line("bun command failed: Resolving dependencies\nResolved, downloaded\n"),
+            "Resolved, downloaded"
+        );
+    }
+
+    /// Only an error that says no release matched can be the release-age limit; other
+    /// install failures get no fallback release
+    #[test]
+    fn only_a_version_refusal_can_be_too_new() {
+        for refused in [
+            // npm 11.19 with --min-release-age
+            "npm command failed: npm error code ETARGET\nnpm error notarget No matching \
+             version found for typescript@7.1.0-dev.20261007.1 with a date before \
+             10/1/2026, 2:53:47 AM.",
+            " ERR_PNPM_NO_MATURE_MATCHING_VERSION  No matching version found for x@1.0.0",
+            "bun command failed: Resolving dependencies\nerror: No version matching \"1.0.0\" \
+             found for specifier \"x\"",
+            "× No solution found when resolving tool dependencies:\n  ╰─▶ Because there is no \
+             version of ruff==0.99.0",
+        ] {
+            assert!(refused_version(refused), "{refused}");
+        }
+        for other in [
+            "npm error code ENOSPC\nnpm error syscall write\nnpm error no space left on device",
+            "npm error code ECONNRESET\nnpm error network aborted",
+            "npm error code ELIFECYCLE\nnpm error command failed\nnpm error command sh -c \
+             node install.js",
+            "error: EACCES: permission denied, mkdir '/usr/lib/node_modules/x'",
+            "bun command failed: error: ConnectionRefused downloading package manifest x",
+            "uv command failed: error: Failed to fetch: `https://pypi.org/simple/x/`",
+        ] {
+            assert!(!refused_version(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn excluded_notice_counts_instead_of_naming() {
+        let mut config = Config::default();
+        config.machine_profiles.insert("me".into(), "server".into());
+        let me = MachineState::new("me");
+        let mut dev = MachineState::new("dev1");
+        let mut laptop = MachineState::new("laptop1");
+        dev.profile = Some("dev".into());
+        laptop.profile = Some("laptop".into());
+        for i in 0..200 {
+            dev.packages
+                .entry("brew_formulae".into())
+                .or_default()
+                .push(format!("formula-{i}"));
+        }
+        dev.packages
+            .insert("npm".into(), vec!["shared".into(), "only-dev".into()]);
+        laptop.packages.insert("npm".into(), vec!["shared".into()]);
+        let scope = Membership::new(
+            &config,
+            &Default::default(),
+            &me,
+            &[(&dev, true), (&laptop, true)],
+        );
+        let notice = excluded_notice(&scope).unwrap();
+        assert!(notice.contains("202 packages of other profiles do not install here"));
+        assert!(
+            notice.contains("By manager: brew_formulae 200, npm 2."),
+            "{notice}"
+        );
+        assert!(
+            notice.contains("By profile: dev 202, laptop 1."),
+            "{notice}"
+        );
+        assert!(notice.contains("'tether packages list --other-profiles'"));
+        assert!(notice.contains("--to server"));
+        assert!(!notice.contains("formula-1"), "{notice}");
+
+        let alone = Membership::new(&config, &Default::default(), &me, &[]);
+        assert_eq!(excluded_notice(&alone), None);
+    }
+
     #[test]
     fn manifests_are_names_only() {
         let packages = vec!["@types/node".to_string(), "left-pad".to_string()];
@@ -2106,7 +2340,14 @@ mod tests {
         let npm = &SIMPLE_MANAGERS[0];
         let decide = |trust: &Trust, advisories: &[&str]| {
             let advisories = advisories.iter().map(|a| a.to_string()).collect();
-            fallback_decision(npm, trust, "example", "1.5.0".to_string(), advisories)
+            fallback_decision(
+                npm,
+                trust,
+                "example",
+                "1.5.0".to_string(),
+                advisories,
+                Reason::OtherOsVersion,
+            )
         };
         let held = |decision: Result<Fallback>| match decision.unwrap() {
             Fallback::Held(item) => (item.version.unwrap(), item.reasons),
@@ -2121,6 +2362,16 @@ mod tests {
             held(decide(&trust, &["MAL-2026-1"])).1,
             vec![Reason::Malicious]
         );
+        // A pin newer than the release-age limit holds the older release the same way
+        let too_new = fallback_decision(
+            npm,
+            &trust,
+            "example",
+            "1.5.0".to_string(),
+            Vec::new(),
+            Reason::PinnedTooNew,
+        );
+        assert_eq!(held(too_new).1, vec![Reason::PinnedTooNew]);
 
         let decision = |version: &str| inbox::Decision {
             manager: "npm".to_string(),
@@ -2633,6 +2884,8 @@ mod tests {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
+            config_export_hash: None,
+            config_error: None,
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -2663,6 +2916,8 @@ mod tests {
             warned_signatures: Default::default(),
             profile_notice_shown: false,
             membership_error: None,
+            config_export_hash: None,
+            config_error: None,
         };
 
         state.packages.insert(
