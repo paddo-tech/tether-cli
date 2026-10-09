@@ -197,6 +197,13 @@ def brew(args):
         if cask:
             return json.dumps({"formulae": [], "casks": [{"token": base, "full_token": n, "tap": tap, "version": REGISTRY_VERSION, "installed": None}]})
         return json.dumps({"formulae": [{"name": base, "full_name": n, "tap": tap, "versions": {"stable": REGISTRY_VERSION}}], "casks": []})
+    if args[:1] == ["trust"]:
+        kind = {"--tap": "taps", "--formula": "formulae", "--cask": "casks"}
+        store = {k: list(installed(f"brew_trust_{k}")) for k in kind.values()}
+        if args[1:] == ["--json=v1"]:
+            return json.dumps(store)
+        write(f"brew_trust_{kind[args[1]]}", {n: "" for n in store[kind[args[1]]] + args[2:]})
+        return ""
     if args[:1] == ["install"]:
         key = "brew_casks" if "--cask" in args else "brew_formulae"
         for n in positional(args[1:]):

@@ -3,9 +3,7 @@ use crate::packages::{
     BrewManager, BunManager, Cooldown, GemManager, NpmManager, PackageManager, PnpmManager,
     UvManager,
 };
-use crate::sync::{
-    import_packages, notify_deferred_casks, notify_inbox, GitBackend, SyncEngine, SyncState,
-};
+use crate::sync::{import_packages, notify_inbox, GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
 use chrono::Local;
 use std::path::{Path, PathBuf};
@@ -274,18 +272,22 @@ impl DaemonServer {
             }
         }
 
+        // Load state and machine state
+        let mut state = SyncState::load()?;
+
         // Import remote config before using it
         if config.security.encrypt_dotfiles {
             if let Some(new_config) =
-                crate::cli::commands::sync::sync_tether_config(&sync_path, &home)?
+                crate::cli::commands::sync::sync_tether_config(&sync_path, &home, &mut state)?
             {
-                crate::cli::commands::sync::warn_changed_profile(&config, &new_config);
+                crate::cli::commands::sync::warn_changed_profile(
+                    &config,
+                    &new_config,
+                    &state.machine_id,
+                );
                 config = new_config;
             }
         }
-
-        // Load state and machine state
-        let mut state = SyncState::load()?;
         if !git.has_unpushed_commits() {
             state.discard_unpushed();
         }
@@ -481,36 +483,7 @@ impl DaemonServer {
                 notify_inbox(&names).ok();
             }
 
-            // Handle newly deferred casks
-            if !deferred_casks.is_empty() {
-                // Merge with existing deferred casks (dedupe)
-                let mut all_deferred: std::collections::HashSet<_> =
-                    state.deferred_casks.iter().cloned().collect();
-                for cask in &deferred_casks {
-                    all_deferred.insert(cask.clone());
-                }
-                state.deferred_casks = all_deferred.into_iter().collect();
-                state.deferred_casks.sort();
-
-                // Only notify if list changed (avoid repeated notifications)
-                let hash = crate::sha256_hex(state.deferred_casks.join(",").as_bytes());
-                if state.deferred_casks_hash.as_ref() != Some(&hash) {
-                    notify_deferred_casks(&state.deferred_casks).ok();
-                    state.deferred_casks_hash = Some(hash);
-                    log::info!(
-                        "Deferred {} cask{} (require password): {}",
-                        state.deferred_casks.len(),
-                        if state.deferred_casks.len() == 1 {
-                            ""
-                        } else {
-                            "s"
-                        },
-                        state.deferred_casks.join(", ")
-                    );
-                }
-
-                state.save()?;
-            }
+            crate::sync::packages::defer_casks(&mut state, &deferred_casks)?;
 
             // Rebuild machine state after import to capture newly installed packages
             machine_state =
@@ -529,7 +502,7 @@ impl DaemonServer {
 
         // Export tether config to sync repo
         if config.security.encrypt_dotfiles {
-            crate::cli::commands::sync::export_tether_config(&sync_path, &home, &mut state)?;
+            crate::cli::commands::sync::export_tether_config(&sync_path, &home)?;
         }
 
         // Commit and push if changes made
@@ -545,6 +518,12 @@ impl DaemonServer {
         } else {
             log::debug!("No changes to sync");
         }
+        crate::cli::commands::sync::promote_config_base(
+            &sync_path,
+            &home,
+            &mut state,
+            crate::security::get_encryption_key,
+        )?;
 
         state.mark_synced();
 

@@ -14,6 +14,95 @@ use std::path::PathBuf;
 ///   Migration: creates "dev" profile from global dotfiles/dirs/packages.
 pub const CURRENT_CONFIG_VERSION: u32 = 2;
 pub const DEFAULT_PROFILE: &str = "dev";
+/// Written as `config_writer` by Tether 2.0 and later. 1.x drops keys it does not know when
+/// it saves config.toml, so a synced config without it came from 1.x, and a key it lacks
+/// was not deleted. A constant, so an upgrade does not change the synced config.
+pub const CONFIG_WRITER: u32 = 2;
+
+/// Whether 1.x fails to load a config.toml without the key
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum V1Key {
+    Required,
+    Optional,
+}
+
+/// The config.toml keys that every 1.x release since 1.11.10 reads and writes: the
+/// intersection of the `Config` structs of 1.11.10, 1.12.0 and 1.13.1. They are the same,
+/// except for `on_conflict` in dotfile entries, which only 1.13 has. The intersection, not the
+/// union: a 1.11 or 1.12 save drops `on_conflict`, so a missing one is no deletion. Only a
+/// key in this list that a 1.x copy lacks is a deletion or a skipped default.
+///
+/// A key is a dotted path. `*` matches any key of a map and `[]` any item of a list. A table
+/// that holds a listed key is known too: `team` is known through `team.url`. A key is
+/// `Required` when 1.x has no default for it: when its table is present, 1.x needs it.
+pub const V1_KEYS: &[(&str, V1Key)] = &[
+    ("config_version", V1Key::Optional),
+    ("team_only", V1Key::Optional),
+    ("features.personal_dotfiles", V1Key::Optional),
+    ("features.personal_packages", V1Key::Optional),
+    ("features.team_dotfiles", V1Key::Optional),
+    ("features.collab_secrets", V1Key::Optional),
+    ("features.team_layering", V1Key::Optional),
+    ("sync", V1Key::Required),
+    ("sync.interval", V1Key::Required),
+    ("sync.strategy", V1Key::Required),
+    ("backend", V1Key::Required),
+    ("backend.type", V1Key::Required),
+    ("backend.url", V1Key::Required),
+    ("packages", V1Key::Required),
+    ("packages.remove_unlisted", V1Key::Optional),
+    ("packages.brew.enabled", V1Key::Required),
+    ("packages.brew.sync_casks", V1Key::Required),
+    ("packages.brew.sync_taps", V1Key::Required),
+    ("packages.npm.enabled", V1Key::Required),
+    ("packages.npm.sync_versions", V1Key::Required),
+    ("packages.pnpm.enabled", V1Key::Required),
+    ("packages.pnpm.sync_versions", V1Key::Required),
+    ("packages.bun.enabled", V1Key::Required),
+    ("packages.bun.sync_versions", V1Key::Required),
+    ("packages.gem.enabled", V1Key::Required),
+    ("packages.gem.sync_versions", V1Key::Required),
+    ("packages.uv.enabled", V1Key::Required),
+    ("packages.uv.sync_versions", V1Key::Required),
+    ("dotfiles", V1Key::Required),
+    ("dotfiles.files", V1Key::Required),
+    ("dotfiles.files.[].path", V1Key::Required),
+    ("dotfiles.files.[].create_if_missing", V1Key::Optional),
+    ("dotfiles.dirs", V1Key::Optional),
+    ("security.encrypt_dotfiles", V1Key::Required),
+    ("security.scan_secrets", V1Key::Required),
+    ("merge.command", V1Key::Optional),
+    ("merge.args", V1Key::Optional),
+    ("team.enabled", V1Key::Required),
+    ("team.url", V1Key::Required),
+    ("team.auto_inject", V1Key::Required),
+    ("team.read_only", V1Key::Required),
+    ("team.orgs", V1Key::Optional),
+    ("teams.active", V1Key::Optional),
+    ("teams.teams", V1Key::Required),
+    ("teams.teams.*.enabled", V1Key::Required),
+    ("teams.teams.*.url", V1Key::Required),
+    ("teams.teams.*.auto_inject", V1Key::Required),
+    ("teams.teams.*.read_only", V1Key::Required),
+    ("teams.teams.*.orgs", V1Key::Optional),
+    ("teams.allowed_orgs", V1Key::Optional),
+    ("teams.collabs.*.sync_url", V1Key::Required),
+    ("teams.collabs.*.projects", V1Key::Optional),
+    ("teams.collabs.*.members_cache", V1Key::Optional),
+    ("teams.collabs.*.last_refresh", V1Key::Optional),
+    ("teams.collabs.*.enabled", V1Key::Optional),
+    ("project_configs.enabled", V1Key::Required),
+    ("project_configs.search_paths", V1Key::Required),
+    ("project_configs.patterns", V1Key::Required),
+    ("project_configs.only_if_gitignored", V1Key::Required),
+    ("machine_profiles.*", V1Key::Optional),
+    ("profiles.*.dotfiles", V1Key::Optional),
+    ("profiles.*.dotfiles.[].path", V1Key::Required),
+    ("profiles.*.dotfiles.[].shared", V1Key::Optional),
+    ("profiles.*.dotfiles.[].create_if_missing", V1Key::Optional),
+    ("profiles.*.dirs", V1Key::Optional),
+    ("profiles.*.packages", V1Key::Optional),
+];
 
 fn default_config_version() -> u32 {
     1
@@ -39,6 +128,9 @@ pub struct Config {
     /// Config format version - prevents older tether from corrupting newer configs
     #[serde(default = "default_config_version")]
     pub config_version: u32,
+    /// CONFIG_WRITER when Tether 2.0 or later wrote the file; 0 when 1.x did
+    #[serde(default)]
+    pub config_writer: u32,
     /// Team-only mode: no personal dotfiles/packages, only team sync
     /// DEPRECATED: Use features.personal_dotfiles and features.personal_packages instead
     #[serde(default, skip_serializing_if = "is_false")]
@@ -385,7 +477,75 @@ pub fn is_safe_dotfile_path(path: &str) -> bool {
         return false;
     }
 
-    true
+    // Tether's own directory holds keys, the merge base and state; it never syncs as a dotfile
+    !in_tether_dir(path_to_check)
+}
+
+/// Whether a home-relative path names Tether's own directory or a path in it. `.` components
+/// do not count. The name compares exactly: `TetherDir` decides by file identity, which also
+/// covers `~/.Tether` on a volume that ignores case, and symlinks and aliases.
+pub fn in_tether_dir(path: &str) -> bool {
+    let path = path.strip_prefix("~/").unwrap_or(path);
+    path.split('/')
+        .find(|c| !c.is_empty() && *c != ".")
+        .is_some_and(|first| first == ".tether")
+}
+
+/// Tether's own directory, to test the paths that a sync reads or writes. It holds keys, the
+/// merge base and state, so nothing in it syncs, also through a symlink or an alias such as
+/// /var for /private/var. A path is in it when the path or an ancestor is the same directory
+/// (device and inode), so whether `.Tether` is `.tether` follows the volume, not the OS.
+pub struct TetherDir {
+    path: PathBuf,
+    id: Option<(u64, u64)>,
+}
+
+impl TetherDir {
+    pub fn new(home: &std::path::Path) -> Self {
+        let path = resolve(&home.join(".tether"));
+        let id = file_id(&path);
+        Self { path, id }
+    }
+
+    /// Whether `path` resolves to the directory or a path in it
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        let path = resolve(path);
+        match self.id {
+            Some(id) => path.ancestors().any(|a| file_id(a) == Some(id)),
+            // Nothing exists in a directory that does not exist yet
+            None => path.starts_with(&self.path),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn file_id(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(_path: &std::path::Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// The canonical path; for a path that does not exist yet, the canonical path of the nearest
+/// ancestor that exists, with the rest appended.
+fn resolve(path: &std::path::Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(current) {
+            return rest.iter().rev().fold(canonical, |p, name| p.join(name));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// A dotfile entry within a profile — extends DotfileEntry with `shared` flag.
@@ -1032,7 +1192,21 @@ impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
         let content = std::fs::read_to_string(&path)?;
-        let mut config: Self = toml::from_str(&content)?;
+        let (config, migrated) = Self::parse_migrated(&content)?;
+        if migrated {
+            // Best-effort save (don't fail load if save fails)
+            let _ = config.save();
+        }
+        Ok(config)
+    }
+
+    /// Parses config.toml text as `load` reads it, without saving a migration.
+    pub fn parse(content: &str) -> Result<Self> {
+        Ok(Self::parse_migrated(content)?.0)
+    }
+
+    fn parse_migrated(content: &str) -> Result<(Self, bool)> {
+        let mut config: Self = toml::from_str(content)?;
 
         if config.config_version > CURRENT_CONFIG_VERSION {
             bail!(
@@ -1050,14 +1224,13 @@ impl Config {
         }
 
         // v1 → v2 migration: create "dev" profile from global dotfiles/dirs/packages
-        if config.config_version < 2 && config.profiles.is_empty() {
+        let migrated = config.config_version < 2 && config.profiles.is_empty();
+        if migrated {
             config.migrate_v1_to_v2();
             config.config_version = CURRENT_CONFIG_VERSION;
-            // Best-effort save (don't fail load if save fails)
-            let _ = config.save();
         }
 
-        Ok(config)
+        Ok((config, migrated))
     }
 
     /// Migrate v1 config to v2: create "dev" profile from global settings.
@@ -1109,13 +1282,21 @@ impl Config {
         // (machines already in machine_profiles keep their existing assignment)
     }
 
+    /// Writes only the settings that changed into the existing file, so comments, layout and
+    /// keys from a newer Tether stay.
     pub fn save(&self) -> Result<()> {
         let mut config = self.clone();
         config.config_version = CURRENT_CONFIG_VERSION;
+        config.config_writer = CONFIG_WRITER;
 
         let path = Self::config_path()?;
-        let content = toml::to_string_pretty(&config)?;
-        crate::sync::atomic_write(&path, content.as_bytes())
+        let current = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let content = crate::sync::config_merge::save_text(current.as_deref(), &config)?;
+        crate::sync::atomic_write_private(&path, content.as_bytes())
     }
 }
 
@@ -1123,6 +1304,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
+            config_writer: CONFIG_WRITER,
             team_only: false,
             features: FeaturesConfig::default(),
             sync: SyncConfig {
@@ -1329,6 +1511,34 @@ mod tests {
         }
         #[derive(Deserialize)]
         #[allow(dead_code)]
+        struct OldTeam {
+            enabled: bool,
+            url: String,
+            auto_inject: bool,
+            read_only: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldCollab {
+            sync_url: String,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldTeams {
+            teams: HashMap<String, OldTeam>,
+            #[serde(default)]
+            collabs: HashMap<String, OldCollab>,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldProjectConfigs {
+            enabled: bool,
+            search_paths: Vec<String>,
+            patterns: Vec<String>,
+            only_if_gitignored: bool,
+        }
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct OldConfig {
             config_version: u32,
             sync: OldSync,
@@ -1336,6 +1546,9 @@ mod tests {
             packages: OldPackages,
             dotfiles: OldDotfiles,
             security: OldSecurity,
+            team: Option<OldTeam>,
+            teams: Option<OldTeams>,
+            project_configs: Option<OldProjectConfigs>,
         }
 
         let mut config = Config::default();
@@ -1354,6 +1567,90 @@ mod tests {
         let without_field = saved.replace("sync_versions = false\n", "");
         let config: Config = toml::from_str(&without_field).unwrap();
         assert!(!config.packages.npm.sync_versions);
+
+        // The synced copy of a local file that leaves out fields 1.x requires has them again,
+        // also with teams, collabs and project configs, and as written by a merge or save
+        let mut config = Config::default();
+        let team = TeamConfig {
+            enabled: true,
+            url: "git@example.com:acme/dotfiles.git".to_string(),
+            auto_inject: false,
+            read_only: true,
+            orgs: vec!["github.com/acme".to_string()],
+        };
+        config.team = Some(team.clone());
+        let mut teams = TeamsConfig::default();
+        teams.teams.insert("acme".to_string(), team);
+        teams.collabs.insert(
+            "c".to_string(),
+            CollabConfig {
+                sync_url: "git@example.com:acme/collab.git".to_string(),
+                projects: vec![],
+                members_cache: vec![],
+                last_refresh: Some(chrono::Utc::now()),
+                enabled: true,
+            },
+        );
+        config.teams = Some(teams);
+        config.project_configs.enabled = true;
+        config.team_only = true;
+        config.dotfiles.files.push(DotfileEntry::WithOptions {
+            path: ".vimrc".to_string(),
+            create_if_missing: true,
+            on_conflict: OnConflict::Local,
+        });
+        config.profiles.insert(
+            "dev".to_string(),
+            ProfileConfig {
+                dotfiles: vec![ProfileDotfileEntry::WithOptions {
+                    path: ".zshrc".to_string(),
+                    shared: true,
+                    create_if_missing: true,
+                    on_conflict: OnConflict::Local,
+                }],
+                dirs: vec![".config/a".to_string()],
+                packages: vec!["npm".to_string()],
+            },
+        );
+        config
+            .machine_profiles
+            .insert("m".to_string(), "dev".to_string());
+        let local = toml::to_string_pretty(&config)
+            .unwrap()
+            .replace("sync_versions = false\n", "");
+        assert!(toml::from_str::<OldConfig>(&local).is_err());
+        let exported = crate::sync::config_merge::export_text(&local).unwrap();
+        let old = toml::from_str::<OldConfig>(&exported).unwrap();
+        assert!(old.config_version <= 2);
+        assert!(old.teams.is_some() && old.team.is_some() && old.project_configs.is_some());
+
+        /// The values at a V1_KEYS path
+        fn at<'a>(v: &'a toml::Value, path: &[&str]) -> Vec<&'a toml::Value> {
+            let Some((key, rest)) = path.split_first() else {
+                return vec![v];
+            };
+            let children: Vec<&toml::Value> = match (*key, v) {
+                ("*", toml::Value::Table(t)) => t.values().collect(),
+                ("[]", toml::Value::Array(a)) => a.iter().collect(),
+                (key, toml::Value::Table(t)) => t.get(key).into_iter().collect(),
+                _ => Vec::new(),
+            };
+            children.into_iter().flat_map(|c| at(c, rest)).collect()
+        }
+        let full: toml::Value = toml::from_str(&toml::to_string_pretty(&config).unwrap()).unwrap();
+        let exported: toml::Value = toml::from_str(&exported).unwrap();
+        for (key, kind) in V1_KEYS {
+            let path: Vec<&str> = key.split('.').collect();
+            // Every key 1.x knows is a key 2.0 writes
+            assert!(!at(&full, &path).is_empty(), "{key} is not a 2.0 key");
+            // An export has every key 1.x requires, in each table that holds it
+            if *kind == V1Key::Required {
+                let (last, parent) = path.split_last().unwrap();
+                for table in at(&exported, parent).iter().filter_map(|v| v.as_table()) {
+                    assert!(table.contains_key(*last), "the export lacks {key}");
+                }
+            }
+        }
     }
 
     // Path safety tests
@@ -1392,6 +1689,85 @@ mod tests {
     #[test]
     fn test_unsafe_empty_path() {
         assert!(!is_safe_dotfile_path(""));
+    }
+
+    #[test]
+    fn tether_dir_never_syncs() {
+        assert!(!is_safe_dotfile_path(".tether"));
+        assert!(!is_safe_dotfile_path("~/.tether/config.base.toml"));
+        assert!(!is_safe_dotfile_path(".tether/*"));
+        assert!(is_safe_dotfile_path(".tetherrc"));
+        assert!(!is_safe_dotfile_path("~/./.tether/*"));
+        assert!(!is_safe_dotfile_path(".//.tether/x"));
+        assert!(!is_safe_dotfile_path("./././.tether"));
+        assert!(is_safe_dotfile_path(".config/.tether"));
+        // A distinct ~/.Tether exists on a volume that keeps case; TetherDir decides by identity
+        assert!(is_safe_dotfile_path("~/.Tether/*"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tether_dir_contains_resolved_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::create_dir_all(home.join(".config")).unwrap();
+        std::os::unix::fs::symlink(home.join(".tether"), home.join(".config/link")).unwrap();
+        // The home through another name, as /var is /private/var on macOS
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+
+        let tether = TetherDir::new(&home);
+        assert!(tether.contains(&home.join(".tether")));
+        assert!(tether.contains(&home.join(".tether/config.toml")));
+        assert!(tether.contains(&home.join("./.tether/new/file")));
+        assert!(tether.contains(&home.join(".config/link/config.toml")));
+        assert!(tether.contains(&alias.join(".tether/state.json")));
+        assert!(TetherDir::new(&alias).contains(&home.join(".tether/x")));
+        assert!(!tether.contains(&home.join(".config/nvim/init.lua")));
+        assert!(!tether.contains(&home.join(".tetherrc")));
+        assert!(!tether.contains(&home));
+        // On a volume that ignores case, .TETHER is the same directory
+        assert_eq!(
+            tether.contains(&home.join(".TETHER/x")),
+            home.join(".TETHER").exists()
+        );
+        if cfg!(target_os = "macos") {
+            let canonical = std::fs::canonicalize(&home).unwrap();
+            assert_ne!(canonical, home, "a macOS temp dir is under /private/var");
+            assert!(tether.contains(&canonical.join(".tether/x")));
+        }
+
+        for pattern in [".tether/*", "./.tether/config.toml", ".config/link/*"] {
+            std::fs::write(home.join(".tether/config.toml"), "x").unwrap();
+            assert!(
+                crate::sync::expand_dotfile_glob(pattern, &home).is_empty(),
+                "{pattern}"
+            );
+        }
+    }
+
+    /// ~/.Tether is Tether's directory only when the volume ignores case
+    #[cfg(unix)]
+    #[test]
+    fn tether_dir_case_follows_the_volume() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        std::fs::create_dir_all(home.join(".tether")).unwrap();
+        std::fs::write(home.join(".tether/signing_key"), "secret").unwrap();
+        let ignores_case = home.join(".Tether").exists();
+        if !ignores_case {
+            std::fs::create_dir_all(home.join(".Tether")).unwrap();
+            std::fs::write(home.join(".Tether/notes"), "mine").unwrap();
+        }
+        let tether = TetherDir::new(home);
+        assert_eq!(tether.contains(&home.join(".Tether/x")), ignores_case);
+        let expanded = crate::sync::expand_dotfile_glob(".Tether/*", home);
+        if ignores_case {
+            assert!(expanded.is_empty(), "{expanded:?}");
+        } else {
+            assert_eq!(expanded, vec![".Tether/notes"]);
+        }
     }
 
     #[test]

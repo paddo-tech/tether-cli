@@ -188,6 +188,10 @@ pub enum PackagesAction {
         /// Print JSON (experimental in 2.0: field names may still change)
         #[arg(long)]
         json: bool,
+        /// List instead the packages of other profiles that trusted machines list and this
+        /// machine does not install
+        #[arg(long)]
+        other_profiles: bool,
     },
     /// List the inbox: packages and machine keys that wait for your approval
     Inbox {
@@ -761,7 +765,7 @@ impl Cli {
                     }
                     | Commands::Packages {
                         action: Some(
-                            PackagesAction::List { json: true }
+                            PackagesAction::List { json: true, .. }
                                 | PackagesAction::Inbox { json: true }
                         ),
                         ..
@@ -945,8 +949,11 @@ impl Cli {
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade { dry_run } => upgrade::run(*dry_run).await,
             Commands::Packages { list: _, action } => match action {
-                None => packages::list(false).await,
-                Some(PackagesAction::List { json }) => packages::list(*json).await,
+                None => packages::list(false, false).await,
+                Some(PackagesAction::List {
+                    json,
+                    other_profiles,
+                }) => packages::list(*json, *other_profiles).await,
                 Some(PackagesAction::Inbox { json }) => packages::inbox_list(*json).await,
                 Some(PackagesAction::Approve {
                     id,
