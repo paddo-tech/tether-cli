@@ -93,6 +93,7 @@ Nothing in it syncs as a dotfile or a dir, in either direction. Paths compare af
 - `teams/<name>/` - Team sync repos
 - `collabs/` - Collab project configs
 - `identity.pub` - Age public key
+- `bin/tether` - macOS: the copy of tether that launchd runs. The plist names the installed binary in `TETHER_DAEMON_SOURCE`, and the daemon copies it again and restarts when it changes. macOS stores an App Management grant per executable path, so the fixed path keeps one grant across upgrades
 - `daemon.pid` - Daemon process ID
 - `daemon.log` - Daemon logs
 - `backups/` - File backups

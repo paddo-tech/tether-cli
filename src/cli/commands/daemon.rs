@@ -391,6 +391,13 @@ fn launchd_plist_path() -> Result<PathBuf> {
         .join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
+/// launchd runs this copy of the installed binary. macOS stores an App Management grant per
+/// executable path, and Homebrew puts each version in a new Cellar path.
+#[cfg(target_os = "macos")]
+fn launchd_binary_path() -> Result<PathBuf> {
+    Ok(Config::config_dir()?.join("bin").join("tether"))
+}
+
 /// launchd and systemd start services with a minimal PATH, which hides Homebrew and
 /// version-managed tools, so the installing shell's environment is baked in.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -402,11 +409,19 @@ fn service_env() -> Vec<(&'static str, String)> {
 }
 
 #[cfg(target_os = "macos")]
-fn generate_plist(exe: &std::path::Path) -> Result<String> {
+fn generate_plist(
+    exe: &std::path::Path,
+    source: &std::path::Path,
+    service_env: &[(String, String)],
+) -> Result<String> {
     let paths = DaemonPaths::new()?;
 
     let mut env = String::new();
-    for (key, value) in service_env() {
+    let source = (
+        crate::daemon::server::SOURCE_ENV.to_string(),
+        source.display().to_string(),
+    );
+    for (key, value) in service_env.iter().cloned().chain([source]) {
         let value = value
             .replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -622,9 +637,14 @@ pub async fn install() -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    // Write plist
-    let plist = generate_plist(&std::env::current_exe()?)?;
-    fs::write(&plist_path, plist)?;
+    let source = std::env::current_exe()?;
+    let exe = launchd_binary_path()?;
+    crate::daemon::server::refresh_binary_copy(&source, &exe)?;
+    let env: Vec<(String, String)> = service_env()
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+    fs::write(&plist_path, generate_plist(&exe, &source, &env)?)?;
 
     // Load the service
     let output = Command::new("launchctl")
@@ -645,35 +665,87 @@ pub async fn install() -> Result<()> {
     Ok(())
 }
 
-/// Plists written before 1.12.1 have no EnvironmentVariables, so launchd runs the
-/// daemon with its default PATH and package commands resolve to system tools
-/// (e.g. macOS Ruby 2.6 `gem`). Rewrite such a plist from the caller's shell, keeping
-/// the installed binary and whether the user has the service loaded.
+/// A value from the plist, read with `plutil -extract`. None when the plist lacks it.
 #[cfg(target_os = "macos")]
-pub async fn refresh_stale_launchd_service() -> Result<()> {
-    let plist_path = launchd_plist_path()?;
-    match fs::read_to_string(&plist_path) {
-        Ok(plist) if !plist.contains("<key>EnvironmentVariables</key>") => {}
-        _ => return Ok(()),
-    }
-
+fn plist_value(
+    plist_path: &std::path::Path,
+    key_path: &str,
+    format: &str,
+) -> Result<Option<String>> {
     let output = Command::new("plutil")
-        .args(["-extract", "ProgramArguments.0", "raw"])
-        .arg(&plist_path)
+        .args(["-extract", key_path, format, "-o", "-"])
+        .arg(plist_path)
         .output()?;
     if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "cannot read the daemon path from the plist"
-        ));
+        return Ok(None);
     }
-    let exe = PathBuf::from(String::from_utf8(output.stdout)?.trim());
-    let loaded = Command::new("launchctl")
+    Ok(Some(String::from_utf8(output.stdout)?.trim().to_string()))
+}
+
+/// Plists written before 1.12.1 have no EnvironmentVariables, so launchd runs the
+/// daemon with its default PATH and package commands resolve to system tools
+/// (e.g. macOS Ruby 2.6 `gem`). Plists written before 2.0 run the installed binary, so each
+/// upgrade asks for App Management again. Rewrite such a plist to run the copy, keeping
+/// the installed binary as the source, the baked environment and whether the service is loaded.
+#[cfg(target_os = "macos")]
+fn launchd_loaded() -> Result<bool> {
+    Ok(Command::new("launchctl")
         .args(["list", LAUNCHD_LABEL])
         .output()?
         .status
-        .success();
+        .success())
+}
 
-    Output::info("Updating the daemon service with your shell PATH...");
+#[cfg(target_os = "macos")]
+pub async fn refresh_stale_launchd_service() -> Result<()> {
+    let plist_path = launchd_plist_path()?;
+    if !plist_path.exists() {
+        return Ok(());
+    }
+    let exe = launchd_binary_path()?;
+    let source_key = format!("EnvironmentVariables.{}", crate::daemon::server::SOURCE_ENV);
+    if let Some(source) = plist_value(&plist_path, &source_key, "raw")? {
+        // A 1.x daemon, run after a downgrade, ignores the source and keeps its binary in the copy
+        if crate::daemon::server::refresh_binary_copy(&PathBuf::from(source), &exe)?
+            && launchd_loaded()?
+        {
+            let target = format!("gui/{}/{LAUNCHD_LABEL}", unsafe { libc::getuid() });
+            let output = Command::new("launchctl")
+                .args(["kickstart", "-k", &target])
+                .output()?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to restart launchd service: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    let source = plist_value(&plist_path, "ProgramArguments.0", "raw")?
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("cannot read the daemon path from the plist"))?;
+    // A binary removed since the install leaves only this one to follow
+    let source = if source.exists() {
+        source
+    } else {
+        std::env::current_exe()?
+    };
+    let env: Vec<(String, String)> = match plist_value(&plist_path, "EnvironmentVariables", "json")?
+    {
+        Some(json) => serde_json::from_str::<std::collections::BTreeMap<String, String>>(&json)?
+            .into_iter()
+            .collect(),
+        None => service_env()
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect(),
+    };
+    crate::daemon::server::refresh_binary_copy(&source, &exe)?;
+    let loaded = launchd_loaded()?;
+
+    Output::info("Updating the daemon service...");
     // Write only once the old job is gone: a still-loaded job keeps its cached
     // environment, and the new key would stop later syncs from retrying.
     if loaded {
@@ -688,7 +760,7 @@ pub async fn refresh_stale_launchd_service() -> Result<()> {
             ));
         }
     }
-    fs::write(&plist_path, generate_plist(&exe)?)?;
+    fs::write(&plist_path, generate_plist(&exe, &source, &env)?)?;
     if loaded {
         let output = Command::new("launchctl")
             .arg("load")
@@ -732,6 +804,10 @@ pub async fn uninstall() -> Result<()> {
 #[cfg(target_os = "macos")]
 pub async fn uninstall() -> Result<()> {
     let plist_path = launchd_plist_path()?;
+    let exe = launchd_binary_path()?;
+    if exe.exists() {
+        fs::remove_file(exe)?;
+    }
 
     if !plist_path.exists() {
         Output::info("Launchd service is not installed");
