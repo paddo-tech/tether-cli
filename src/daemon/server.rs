@@ -8,7 +8,7 @@ use crate::sync::{
 };
 use anyhow::Result;
 use chrono::Local;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::time::Interval;
@@ -32,11 +32,40 @@ enum TickResult {
     Exit,
 }
 
+/// The binary that launchd's copy of tether follows. The copy keeps one path across
+/// upgrades, and macOS stores an App Management grant per executable path.
+pub const SOURCE_ENV: &str = "TETHER_DAEMON_SOURCE";
+
+/// Replace `copy` with `source` when their bytes differ, and say whether it did. The rename
+/// swaps the file in one step, so a running daemon keeps its old image.
+pub fn refresh_binary_copy(source: &Path, copy: &Path) -> Result<bool> {
+    let new = std::fs::read(source)?;
+    if std::fs::read(copy).is_ok_and(|old| old == new) {
+        return Ok(false);
+    }
+    let dir = copy
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", copy.display()))?;
+    std::fs::create_dir_all(dir)?;
+    // Write the compared bytes, not a second read: a source replaced in between would
+    // leave a copy that differs from the bytes this check saw. A fresh temporary name per
+    // attempt, because Homebrew installs the binary read-only and a leftover would block retries.
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(&mut tmp, &new)?;
+    tmp.as_file()
+        .set_permissions(std::fs::metadata(source)?.permissions())?;
+    tmp.persist(copy)?;
+    Ok(true)
+}
+
 pub struct DaemonServer {
     sync_interval: Duration,
     last_update_date: Option<chrono::NaiveDate>,
     binary_path: PathBuf,
     binary_mtime: Option<SystemTime>,
+    source: Option<PathBuf>,
+    /// Size and mtime of `source` at its last compare
+    source_stamp: Option<(u64, SystemTime)>,
 }
 
 impl DaemonServer {
@@ -51,6 +80,8 @@ impl DaemonServer {
             last_update_date: None,
             binary_path,
             binary_mtime,
+            source: std::env::var_os(SOURCE_ENV).map(PathBuf::from),
+            source_stamp: None,
         }
     }
 
@@ -58,8 +89,28 @@ impl DaemonServer {
         tokio::time::interval(self.sync_interval)
     }
 
-    /// Check if the binary has been updated since daemon started
-    fn binary_updated(&self) -> bool {
+    /// Check if the binary has been updated since daemon started. A launchd copy takes a new
+    /// source binary first, so the restart runs it.
+    fn binary_updated(&mut self) -> bool {
+        if let Some(source) = self.source.clone() {
+            // The compare reads the binary twice, so it runs only when the source changed
+            let stamp = std::fs::metadata(&source)
+                .ok()
+                .and_then(|m| Some((m.len(), m.modified().ok()?)));
+            if stamp.is_some() && stamp == self.source_stamp {
+                return false;
+            }
+            return match refresh_binary_copy(&source, &self.binary_path) {
+                Ok(updated) => {
+                    self.source_stamp = stamp;
+                    updated
+                }
+                Err(e) => {
+                    log::warn!("Cannot copy {}: {}", source.display(), e);
+                    false
+                }
+            };
+        }
         let current_mtime = std::fs::metadata(&self.binary_path)
             .and_then(|m| m.modified())
             .ok();
@@ -76,6 +127,10 @@ impl DaemonServer {
 
         log::info!("Daemon starting (pid {})", std::process::id());
         log::info!("Sync interval: {} seconds", self.sync_interval.as_secs());
+        if self.binary_updated() {
+            log::info!("Binary updated, exiting for restart");
+            return Ok(());
+        }
 
         #[cfg(unix)]
         {
@@ -738,18 +793,20 @@ mod tests {
 
     #[test]
     fn test_binary_updated_false_when_unchanged() {
-        let server = DaemonServer::new();
+        let mut server = DaemonServer::new();
         // Binary hasn't changed since construction
         assert!(!server.binary_updated());
     }
 
     #[test]
     fn test_binary_updated_false_when_no_mtime() {
-        let server = DaemonServer {
+        let mut server = DaemonServer {
             sync_interval: Duration::from_secs(300),
             last_update_date: None,
             binary_path: PathBuf::from("/nonexistent/binary"),
             binary_mtime: None,
+            source: None,
+            source_stamp: None,
         };
         assert!(!server.binary_updated());
     }
@@ -758,13 +815,38 @@ mod tests {
     fn test_binary_updated_detects_newer_mtime() {
         use std::time::SystemTime;
 
-        let server = DaemonServer {
+        let mut server = DaemonServer {
             sync_interval: Duration::from_secs(300),
             last_update_date: None,
             binary_path: std::env::current_exe().unwrap(),
             // Set start mtime to epoch so current binary is always "newer"
             binary_mtime: Some(SystemTime::UNIX_EPOCH),
+            source: None,
+            source_stamp: None,
         };
         assert!(server.binary_updated());
+    }
+
+    #[test]
+    fn launchd_copy_follows_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let copy = dir.path().join("bin").join("tether");
+        std::fs::write(&source, b"v1").unwrap();
+        let mut server = DaemonServer {
+            sync_interval: Duration::from_secs(300),
+            last_update_date: None,
+            binary_path: copy.clone(),
+            binary_mtime: None,
+            source: Some(source.clone()),
+            source_stamp: None,
+        };
+        assert!(server.binary_updated());
+        assert!(!server.binary_updated());
+        std::fs::write(&source, b"v22").unwrap();
+        assert!(server.binary_updated());
+        assert_eq!(std::fs::read(&copy).unwrap(), b"v22");
+        std::fs::remove_file(&source).unwrap();
+        assert!(!server.binary_updated());
     }
 }
