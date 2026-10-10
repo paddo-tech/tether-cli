@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.6] - 2026-10-11
+
+### Fixed
+
+- One formula that Homebrew refuses no longer stops all formula installs in a sync. Homebrew 7's `brew bundle` installs every formula with one `brew install` call, so one refused formula, such as a name that a formula from another tap already uses, failed all of them, and each waited 24 hours to retry. When `brew bundle` fails, Tether now installs each remaining formula on its own and records only the real failures, with Homebrew's own error
+- A synced package that failed to install on this machine can now be uninstalled: `x` in the dashboard's Packages tab, or `tether packages remove`. Tether records it as removed on this machine, clears the failure and stops installing it here. The profile rules are the same as for an installed package. A package installed by hand since its failure is uninstalled as usual
+- The warning about a machine key that this machine does not trust now names `--fingerprint` in the `tether machines trust` command it suggests. Before, the suggested command failed
+
 ## [2.0.0-beta.5] - 2026-10-10
 
 ### Fixed
