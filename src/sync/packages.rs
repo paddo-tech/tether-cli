@@ -1114,18 +1114,26 @@ async fn import_simple_manager(
         .unwrap_or_default();
 
     // Filter to only missing packages whose version the user has not rejected
-    let missing: Vec<(String, Option<String>, String)> = manifest_names(def.ecosystem, &manifest)
-        .into_iter()
-        .filter(|name| !removed_packages.contains(name) && !local_packages.contains(name))
-        .filter(|name| scope.includes(def.state_key, name))
-        .map(|name| trust.trusted_pin(def, name))
-        .filter(|(name, version, _)| {
-            !trust
-                .inbox
-                .is_rejected(def.state_key, name, version.as_deref(), None)
-        })
-        .filter(|(name, version, _)| retry_due(failures, def.state_key, name, version.as_deref()))
-        .collect();
+    let mut missing: Vec<(String, Option<String>, String)> =
+        manifest_names(def.ecosystem, &manifest)
+            .into_iter()
+            .filter(|name| !removed_packages.contains(name) && !local_packages.contains(name))
+            .filter(|name| scope.includes(def.state_key, name))
+            .map(|name| trust.trusted_pin(def, name))
+            .filter(|(name, version, _)| {
+                !trust
+                    .inbox
+                    .is_rejected(def.state_key, name, version.as_deref(), None)
+            })
+            .filter(|(name, version, _)| {
+                retry_due(failures, def.state_key, name, version.as_deref())
+            })
+            .collect();
+    if !missing.is_empty() {
+        // A failed listing only costs an install that finds the package present
+        let installed = manager.installed_names().await.unwrap_or_default();
+        missing.retain(|(name, _, _)| !installed.contains(name));
+    }
 
     if missing.is_empty() {
         return false;
