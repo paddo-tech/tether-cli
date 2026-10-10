@@ -94,14 +94,72 @@ pub fn manager_for_key(key: &str) -> Option<Box<dyn PackageManager>> {
     })
 }
 
-/// Uninstall a package by its machine-state key, such as `brew_casks` or `npm`.
-pub async fn uninstall(manager_key: &str, name: &str) -> anyhow::Result<()> {
+/// Uninstall a package by its machine-state key, such as `brew_casks` or `npm`. A synced
+/// package whose install failed here is not installed, so it becomes a removal in this
+/// machine's local record instead, and the sync stops installing it. The next sync signs and
+/// publishes that record; writing the repo copy now would block the profile save that
+/// follows. Returns true for such a package, which this only stops installing. The caller
+/// holds the sync lock.
+pub async fn uninstall(manager_key: &str, name: &str) -> anyhow::Result<bool> {
+    let mut state = crate::sync::SyncState::load()?;
+    // A failure is keyed by the manifest's name, which can carry a tap
+    let id = crate::sync::membership::canonical_id(manager_key, name);
+    let failed = state.install_failures.keys().find_map(|key| {
+        let (manager, recorded) = key.split_once(':')?;
+        (manager == manager_key && crate::sync::membership::canonical_id(manager, recorded) == id)
+            .then(|| (key.clone(), recorded.to_string()))
+    });
+    if let Some((key, recorded)) = failed {
+        // A failure stays until the next sync, also when the user installed it since
+        if !installed_here(manager_key, name).await? {
+            let sync_path = crate::sync::SyncEngine::sync_path()?;
+            // Without a record, the next sync builds one on this record's removals
+            let mut record = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
+                .unwrap_or_else(|| crate::sync::MachineState::new(&state.machine_id));
+            record.add_removals(manager_key, &[&recorded]);
+            crate::sync::signing::save_local_record(&record)?;
+            state.install_failures.remove(&key);
+            state.save()?;
+            return Ok(true);
+        }
+    }
     let manager: Box<dyn PackageManager> = match manager_key {
         "brew_formulae" | "brew_casks" => Box::new(BrewManager),
         _ => manager_for_key(manager_key)
             .ok_or_else(|| anyhow::anyhow!("Unknown manager: {}", manager_key))?,
     };
-    manager.uninstall(name).await
+    manager.uninstall(name).await?;
+    Ok(false)
+}
+
+/// Whether the manager lists the package as installed now. This machine's record lists it
+/// only after the next sync.
+pub async fn installed_here(manager: &str, name: &str) -> anyhow::Result<bool> {
+    let brew = BrewManager::new();
+    let names: Vec<String> = match manager {
+        "brew_formulae" | "brew_casks" | "brew_taps" if !brew.is_available().await => Vec::new(),
+        "brew_formulae" => brew
+            .list_installed()
+            .await?
+            .into_iter()
+            .map(|p| p.name)
+            .collect(),
+        "brew_casks" => brew.list_installed_casks().await?,
+        "brew_taps" => brew.list_taps().await?,
+        key => match crate::packages::manager_for_key(key) {
+            Some(m) if m.is_available().await => m
+                .list_installed()
+                .await?
+                .into_iter()
+                .map(|p| p.name)
+                .collect(),
+            _ => Vec::new(),
+        },
+    };
+    let canonical = crate::sync::membership::canonical_id(manager, name);
+    Ok(names
+        .iter()
+        .any(|n| crate::sync::membership::canonical_id(manager, n) == canonical))
 }
 
 #[cfg(test)]

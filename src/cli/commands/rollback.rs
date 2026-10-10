@@ -122,7 +122,7 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     // removals; else the next sync would install them again.
     let mut record = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
         .unwrap_or_else(|| crate::sync::MachineState::new(&state.machine_id));
-    if add_tombstones(&mut record, manager, &to_uninstall) {
+    if record.add_removals(manager, &to_uninstall) {
         crate::sync::signing::save_record(&sync_path, &record)?;
     }
 
@@ -189,25 +189,6 @@ fn snapshot_versions(
         .collect()
 }
 
-/// Add `names` to the record's removals for `manager`. Returns true when the record changed.
-fn add_tombstones(
-    record: &mut crate::sync::MachineState,
-    manager: &str,
-    names: &[&String],
-) -> bool {
-    let removed = record
-        .removed_packages
-        .entry(manager.to_string())
-        .or_default();
-    let before = removed.len();
-    for name in names {
-        if !removed.contains(name) {
-            removed.push((*name).clone());
-        }
-    }
-    removed.len() != before
-}
-
 fn describe(line: &RollbackLine) -> String {
     if line.needs_confirmation() {
         let otherwise = match &line.trusted {
@@ -261,14 +242,14 @@ mod tests {
     }
 
     #[test]
-    fn add_tombstones_records_each_removal_once() {
+    fn add_removals_records_each_removal_once() {
         let mut record = crate::sync::MachineState::new("this");
         record
             .removed_packages
             .insert("npm".to_string(), vec!["old".to_string()]);
         let (old, new) = ("old".to_string(), "new".to_string());
-        assert!(add_tombstones(&mut record, "npm", &[&old, &new]));
+        assert!(record.add_removals("npm", &[&old, &new]));
         assert_eq!(record.removed_packages["npm"], vec!["old", "new"]);
-        assert!(!add_tombstones(&mut record, "npm", &[&new]));
+        assert!(!record.add_removals("npm", &[&new]));
     }
 }
