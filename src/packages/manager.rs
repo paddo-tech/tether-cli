@@ -343,6 +343,12 @@ pub trait PackageManager: Send + Sync {
     /// non-empty list: an upgrade command without names would upgrade every package.
     async fn upgrade(&self, planned: &[Upgrade]) -> Result<()>;
 
+    /// Installed package names, including those `list_installed` leaves out, such as
+    /// dependencies. A synced name among them needs no install.
+    async fn installed_names(&self) -> Result<HashSet<String>> {
+        Ok(HashSet::new())
+    }
+
     /// Installed packages with their versions, for the report after an upgrade.
     async fn installed_versions(&self) -> Result<Vec<PackageInfo>> {
         self.list_installed().await

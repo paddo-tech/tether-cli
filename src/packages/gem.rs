@@ -29,6 +29,15 @@ impl GemManager {
         PackagePolicy::load()
     }
 
+    async fn run_ruby(&self, script: &str) -> Result<String> {
+        let output = command("ruby")?.args(["-e", script]).output().await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("gem listing failed: {}", stderr));
+        }
+        Ok(String::from_utf8(output.stdout)?)
+    }
+
     async fn run_gem(&self, args: &[&str]) -> Result<String> {
         let output = command("gem")?.args(args).output().await?;
 
@@ -76,19 +85,9 @@ impl Default for GemManager {
 #[async_trait]
 impl PackageManager for GemManager {
     async fn list_installed(&self) -> Result<Vec<PackageInfo>> {
-        let output = command("ruby")?
-            .args(["-e", TOP_LEVEL_GEMS])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("gem listing failed: {}", stderr));
-        }
-
         let mut packages = Vec::new();
 
-        for line in String::from_utf8(output.stdout)?.lines() {
+        for line in self.run_ruby(TOP_LEVEL_GEMS).await?.lines() {
             let mut parts = line.split_whitespace();
             let Some(name) = parts.next() else {
                 continue;
@@ -102,6 +101,17 @@ impl PackageManager for GemManager {
 
         packages.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(packages)
+    }
+
+    /// The listing leaves out dependencies and gems that ship with Ruby, and
+    /// `gem install --conservative` skips them. All installed gems, listed ones included
+    async fn installed_names(&self) -> Result<std::collections::HashSet<String>> {
+        Ok(self
+            .run_ruby("puts Gem::Specification.map(&:name).uniq")
+            .await?
+            .lines()
+            .map(str::to_string)
+            .collect())
     }
 
     async fn install(&self, package: &PackageInfo) -> Result<()> {

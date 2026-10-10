@@ -382,6 +382,17 @@ fn installed_taps(taps_dir: &std::path::Path) -> Vec<(String, PathBuf)> {
     taps
 }
 
+/// The name in brew's `No available formula with the name "x"` error, or in its
+/// `Cask 'x' is unavailable` error.
+fn unavailable_name(stderr: &str) -> Option<&str> {
+    if let Some((_, rest)) = stderr.split_once("with the name \"") {
+        return rest.split_once('"').map(|(name, _)| name);
+    }
+    let (_, rest) = stderr.split_once("Cask '")?;
+    let (name, rest) = rest.split_once('\'')?;
+    rest.starts_with(" is unavailable").then_some(name)
+}
+
 /// The `user/repo` tap of a qualified `user/repo/name` formula or cask.
 fn tap_of(name: &str) -> Option<&str> {
     name.rsplit_once('/').map(|(tap, _)| tap)
@@ -686,26 +697,50 @@ impl BrewManager {
         ];
         let mut outdated = Vec::new();
         for (kind, installed) in installed {
-            let names = trusted_names(installed, policy);
-            if names.is_empty() {
-                continue;
-            }
-            let output = brew_without_installed_scan()?
-                .args(["info", "--json=v2", kind])
-                .args(&names)
-                .output()
-                .await?;
-            if !output.status.success() {
+            let mut names = trusted_names(installed, policy);
+            while !names.is_empty() {
+                let output = brew_without_installed_scan()?
+                    .args(["info", "--json=v2", kind])
+                    .args(&names)
+                    .output()
+                    .await?;
+                if output.status.success() {
+                    let info: BrewInfo = serde_json::from_slice(&output.stdout)?;
+                    let (formulae, casks) = trusted_upgrades(info, policy);
+                    outdated.push((kind, Ok(formulae.into_iter().chain(casks).collect())));
+                    break;
+                }
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                outdated.push((
-                    kind,
-                    Err(format!("brew info {} failed: {}", kind, stderr.trim())),
-                ));
-                continue;
+                // brew fails the whole call on one name it cannot load, such as a formula
+                // that moved to a cask, so that name is dropped and the rest are checked
+                let before = names.len();
+                let unknown = unavailable_name(&stderr);
+                if let Some(unknown) = unknown {
+                    // An unqualified name in the error says nothing about the tap
+                    names.retain(|n| {
+                        n != unknown
+                            && (unknown.contains('/') || normalize_formula_name(n) != unknown)
+                    });
+                }
+                match unknown {
+                    Some(unknown) if names.len() < before => crate::cli::Output::warning(&format!(
+                        "Skipping {} in the upgrade check: brew cannot load it as {}",
+                        unknown,
+                        if kind == "--cask" {
+                            "a cask"
+                        } else {
+                            "a formula"
+                        }
+                    )),
+                    _ => {
+                        outdated.push((
+                            kind,
+                            Err(format!("brew info {} failed: {}", kind, stderr.trim())),
+                        ));
+                        break;
+                    }
+                }
             }
-            let info: BrewInfo = serde_json::from_slice(&output.stdout)?;
-            let (formulae, casks) = trusted_upgrades(info, policy);
-            outdated.push((kind, Ok(formulae.into_iter().chain(casks).collect())));
         }
         Ok(outdated)
     }
@@ -1290,6 +1325,18 @@ brew "git"
         assert_eq!(untrusted.taps, vec!["evil/tap"]);
         assert_eq!(untrusted.formulae, vec!["evil/tap/payload"]);
         assert_eq!(untrusted.casks, vec!["evil/tap/app"]);
+    }
+
+    #[test]
+    fn unavailable_name_reads_brews_error() {
+        let stderr = "Error: No available formula with the name \"homebrew/cask/azure-cli\".\n\
+                      This command requires the tap homebrew/cask.\n";
+        assert_eq!(unavailable_name(stderr), Some("homebrew/cask/azure-cli"));
+        assert_eq!(
+            unavailable_name("Error: Cask 'app' is unavailable: No Cask with this name exists."),
+            Some("app")
+        );
+        assert_eq!(unavailable_name("Error: Cannot download"), None);
     }
 
     #[test]
