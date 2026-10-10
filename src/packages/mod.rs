@@ -94,8 +94,26 @@ pub fn manager_for_key(key: &str) -> Option<Box<dyn PackageManager>> {
     })
 }
 
-/// Uninstall a package by its machine-state key, such as `brew_casks` or `npm`.
+/// Uninstall a package by its machine-state key, such as `brew_casks` or `npm`. A synced
+/// package whose install failed here is not installed, so it becomes a removal in this
+/// machine's record instead, and the sync stops installing it. The caller holds the sync lock.
 pub async fn uninstall(manager_key: &str, name: &str) -> anyhow::Result<()> {
+    let mut state = crate::sync::SyncState::load()?;
+    let failure = crate::sync::state::InstallFailure::key(manager_key, name);
+    if state.install_failures.remove(&failure).is_some() {
+        let sync_path = crate::sync::SyncEngine::sync_path()?;
+        if let Some(mut record) = crate::sync::signing::own_record(&sync_path, &state.machine_id)? {
+            let removed = record
+                .removed_packages
+                .entry(manager_key.to_string())
+                .or_default();
+            if !removed.iter().any(|n| n == name) {
+                removed.push(name.to_string());
+                crate::sync::signing::save_record(&sync_path, &record)?;
+            }
+        }
+        return state.save();
+    }
     let manager: Box<dyn PackageManager> = match manager_key {
         "brew_formulae" | "brew_casks" => Box::new(BrewManager),
         _ => manager_for_key(manager_key)

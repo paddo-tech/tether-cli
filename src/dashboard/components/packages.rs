@@ -90,7 +90,11 @@ fn collapse(app: &mut App) {
 /// Ask before uninstalling the package at the cursor.
 fn confirm_uninstall(app: &mut App) {
     let rows = build_rows(&app.state, &app.packages);
-    let Some(PkgRow::Package { manager_key, name }) = rows.get(app.packages.cursor) else {
+    let (Some(PkgRow::Package { manager_key, name })
+    | Some(PkgRow::Failed {
+        manager_key, name, ..
+    })) = rows.get(app.packages.cursor)
+    else {
         return;
     };
     if app.uninstalling.is_some() || app.installing.is_some() || app.running.is_some() {
@@ -293,9 +297,12 @@ pub enum PkgRow {
     DiffRow {
         line: DiffLine,
     },
-    /// A synced package that failed to install on this machine
+    /// A synced package that failed to install on this machine. `x` stops installing it here
     Failed {
+        manager_key: String,
         name: String,
+        /// The name with the version Tether tried
+        label: String,
         error: String,
         attempted: String,
     },
@@ -367,7 +374,9 @@ pub fn build_rows(state: &DashboardState, pt: &PackagesTabState) -> Vec<PkgRow> 
         if pt.expanded.as_deref() == Some(key.as_str()) {
             for (_, name, failure) in failed {
                 rows.push(PkgRow::Failed {
-                    name: match &failure.version {
+                    manager_key: key.clone(),
+                    name: name.to_string(),
+                    label: match &failure.version {
                         Some(v) => format!("{} {}", name, v),
                         None => name.to_string(),
                     },
@@ -516,16 +525,17 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             }
             PkgRow::DiffRow { line } => diff::render_line(f, r, line, selected, t),
             PkgRow::Failed {
-                name,
+                label,
                 error,
                 attempted,
+                ..
             } => {
                 row(
                     f,
                     r,
                     Line::from(vec![
                         Span::styled("    ✗ ", Style::default().fg(t.warn)),
-                        Span::styled(name.as_str(), Style::default().fg(t.warn)),
+                        Span::styled(label.as_str(), Style::default().fg(t.warn)),
                         Span::styled(format!("  {}", error), Style::default().fg(t.dim)),
                     ]),
                     Line::from(Span::styled(

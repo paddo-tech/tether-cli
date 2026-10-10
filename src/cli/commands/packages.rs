@@ -480,6 +480,8 @@ pub async fn remove(id: &str) -> Result<()> {
             }
         }
     }
+    // No sync may save the record between the uninstall and the profile save
+    let _lock = crate::sync::acquire_sync_lock(true)?;
     // The profile leaves the package only once it is gone here
     crate::packages::uninstall(manager, name).await?;
     Output::success(&format!("Uninstalled {}", id));
@@ -491,9 +493,7 @@ pub async fn remove(id: &str) -> Result<()> {
         remove: [membership.profile.clone()].into(),
         ..Edit::default()
     };
-    let saved = crate::sync::acquire_sync_lock(true)
-        .and_then(|_lock| membership::save_edit(&config, manager, name, &edit));
-    match saved {
+    match membership::save_edit(&config, manager, name, &edit) {
         Ok(Some(keep)) => Output::info(&format!(
             "Other machines in profile {} no longer install {}, but keep any copy they have. \
              Profiles {} keep it",

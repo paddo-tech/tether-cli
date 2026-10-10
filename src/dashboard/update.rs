@@ -1279,6 +1279,32 @@ mod tests {
     }
 
     #[test]
+    fn x_on_a_failed_install_offers_to_uninstall_it() {
+        let mut app = packages_app();
+        app.state
+            .sync_state
+            .as_mut()
+            .unwrap()
+            .install_failures
+            .insert(
+                "npm:left-pad".into(),
+                crate::sync::state::InstallFailure {
+                    version: Some("1.3.0".into()),
+                    attempted: chrono::Utc::now(),
+                    error: "E404".into(),
+                },
+            );
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::Uninstall { manager_key, name, .. }))
+                if manager_key == "npm" && name == "left-pad"
+        ));
+    }
+
+    #[test]
     fn enter_and_double_click_never_uninstall() {
         let mut app = packages_app();
         key(&mut app, KeyCode::Enter);
