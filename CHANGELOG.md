@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.5] - 2026-10-10
+
+### Fixed
+
+- A synced gem that is installed on this machine only as a dependency of another gem, or that ships with Ruby, no longer installs again on every sync. Tether records only top-level gems, so such a gem counted as missing, and the daemon ran a `gem install` that did nothing every 5 minutes. The sync now skips a synced gem that is installed in any form
+- One formula that Homebrew moved to a cask, such as `azure-cli`, no longer stops the daily upgrade check for all formulae. When `brew info` cannot load a name, Tether skips that name with a warning and checks the others. Run `brew migrate <name>` to move such a formula to its cask
+
 ## [2.0.0-beta.4] - 2026-10-10
 
 ### Fixed
