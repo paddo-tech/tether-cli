@@ -290,6 +290,15 @@ fn local_record_path() -> Result<PathBuf> {
     Ok(crate::home_dir()?.join(".tether").join("machine.json"))
 }
 
+/// Save this machine's local copy of its record only. The next sync builds its record from
+/// it, then signs and publishes that record.
+pub fn save_local_record(record: &MachineState) -> Result<()> {
+    let mut record = record.clone();
+    record.validate()?;
+    let content = serde_json::to_string_pretty(&serde_json::to_value(&record)?)?;
+    crate::sync::atomic_write(&local_record_path()?, content.as_bytes())
+}
+
 /// This machine's last saved record, the base for its next one.
 pub fn own_record(sync_path: &Path, machine_id: &str) -> Result<Option<MachineState>> {
     let key = load_or_create(machine_id)?;

@@ -394,7 +394,7 @@ pub async fn install(id: &str) -> Result<()> {
     if sources.is_empty() {
         anyhow::bail!("No other machine lists {}", id);
     }
-    if installed_here(manager, name).await? {
+    if crate::packages::installed_here(manager, name).await? {
         anyhow::bail!("{} is already installed here", id);
     }
     let checked = match inbox::check_manual_install(manager, name, true).await {
@@ -427,36 +427,6 @@ pub async fn install(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether the manager lists the package as installed now. This machine's record lists it
-/// only after the next sync.
-async fn installed_here(manager: &str, name: &str) -> Result<bool> {
-    let brew = BrewManager::new();
-    let names: Vec<String> = match manager {
-        "brew_formulae" | "brew_casks" | "brew_taps" if !brew.is_available().await => Vec::new(),
-        "brew_formulae" => brew
-            .list_installed()
-            .await?
-            .into_iter()
-            .map(|p| p.name)
-            .collect(),
-        "brew_casks" => brew.list_installed_casks().await?,
-        "brew_taps" => brew.list_taps().await?,
-        key => match crate::packages::manager_for_key(key) {
-            Some(m) if m.is_available().await => m
-                .list_installed()
-                .await?
-                .into_iter()
-                .map(|p| p.name)
-                .collect(),
-            _ => Vec::new(),
-        },
-    };
-    let canonical = membership::canonical_id(manager, name);
-    Ok(names
-        .iter()
-        .any(|n| membership::canonical_id(manager, n) == canonical))
-}
-
 pub async fn remove(id: &str) -> Result<()> {
     let (manager, name) = split_id(id)?;
     if manager == "brew_taps" {
@@ -483,8 +453,14 @@ pub async fn remove(id: &str) -> Result<()> {
     // No sync may save the record between the uninstall and the profile save
     let _lock = crate::sync::acquire_sync_lock(true)?;
     // The profile leaves the package only once it is gone here
-    crate::packages::uninstall(manager, name).await?;
-    Output::success(&format!("Uninstalled {}", id));
+    if crate::packages::uninstall(manager, name).await? {
+        Output::success(&format!(
+            "{} failed to install here, so this machine no longer installs it",
+            id
+        ));
+    } else {
+        Output::success(&format!("Uninstalled {}", id));
+    }
     let members = membership.members(manager, name);
     if !members.contains(&membership.profile) || members.len() == 1 {
         return Ok(());

@@ -198,6 +198,21 @@ pub fn local_os_version() -> String {
 }
 
 impl MachineState {
+    /// Add `names` to the removals for `manager`. Returns true when the record changed.
+    pub fn add_removals(&mut self, manager: &str, names: &[&String]) -> bool {
+        let removed = self
+            .removed_packages
+            .entry(manager.to_string())
+            .or_default();
+        let before = removed.len();
+        for name in names {
+            if !removed.contains(name) {
+                removed.push((*name).clone());
+            }
+        }
+        removed.len() != before
+    }
+
     /// The OS family of the machine that wrote this record. Records from before the `os`
     /// field name only an OS version: "macOS ..." on macOS, the os-release name on Linux.
     pub fn os_family(&self) -> &str {
