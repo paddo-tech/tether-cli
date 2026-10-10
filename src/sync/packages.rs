@@ -921,18 +921,33 @@ async fn import_brew(
         let result = brew.import_manifest(&formulae_manifest.generate()).await;
         installed_any = result.is_ok();
         // brew bundle reports one exit code, so the installed list tells which formula failed
-        let error = match &result {
-            Ok(()) => "brew bundle did not install it".to_string(),
-            Err(e) => e.to_string(),
-        };
         match brew.installed_formulae().await {
             Ok(installed) => {
                 for formula in &missing_formulae {
                     if installed.contains(normalize_formula_name(formula)) {
                         failures.remove(&InstallFailure::key("brew_formulae", formula));
-                    } else {
-                        record_failure(failures, "brew_formulae", formula, None, &error);
+                        continue;
                     }
+                    // brew bundle installs every formula with one `brew install`, so one
+                    // formula that brew refuses fails all of them; each one left gets its own
+                    let error = match &result {
+                        Ok(()) => "brew bundle did not install it".to_string(),
+                        Err(_) => {
+                            let package = PackageInfo {
+                                name: formula.clone(),
+                                version: None,
+                            };
+                            match brew.install(&package).await {
+                                Ok(()) => {
+                                    installed_any = true;
+                                    failures.remove(&InstallFailure::key("brew_formulae", formula));
+                                    continue;
+                                }
+                                Err(e) => e.to_string(),
+                            }
+                        }
+                    };
+                    record_failure(failures, "brew_formulae", formula, None, &error);
                 }
             }
             Err(e) => Output::warning(&format!("Cannot list installed formulae: {}", e)),
