@@ -783,6 +783,15 @@ fn warn_tether_config_dir(path: &str) {
     ));
 }
 
+/// Whether the dotfile entry `pattern` covers `file`. Either may start with `~/`.
+fn entry_matches(pattern: &str, file: &str) -> bool {
+    let pattern = pattern.trim_start_matches("~/");
+    let file = file.trim_start_matches("~/");
+    pattern == file
+        || (crate::sync::is_glob_pattern(pattern)
+            && glob::Pattern::new(pattern).is_ok_and(|p| p.matches(file)))
+}
+
 pub fn decrypt_from_repo(
     config: &Config,
     sync_path: &Path,
@@ -799,7 +808,6 @@ pub fn decrypt_from_repo(
     let mut conflict_state = ConflictState::load().unwrap_or_default();
     let tether = crate::config::TetherDir::new(home);
     let mut new_conflicts = Vec::new();
-    let mut synced = std::collections::HashSet::new();
 
     // Create backup directory for this sync (lazily - only if needed)
     let mut backup_dir: Option<PathBuf> = None;
@@ -856,7 +864,6 @@ pub fn decrypt_from_repo(
             if tether.contains(&home.join(&file)) {
                 continue;
             }
-            synced.insert(file.clone());
 
             // Resolve repo path: profile dir first, flat fallback
             let repo_path = crate::sync::resolve_dotfile_repo_path(
@@ -979,10 +986,14 @@ pub fn decrypt_from_repo(
         }
     }
 
-    // A file that no longer syncs here can never be resolved by a sync
-    conflict_state
-        .conflicts
-        .retain(|c| synced.contains(&c.file_path));
+    // A conflict blocks the file's upload, so only one whose file no entry syncs any more
+    // goes; the upload works from the same entries and never sends that file
+    let entries = config.effective_dotfiles(machine_id);
+    conflict_state.conflicts.retain(|c| {
+        entries
+            .iter()
+            .any(|e| entry_matches(e.path(), &c.file_path))
+    });
 
     // Notify only for files not already pending, so an unresolved conflict
     // does not toast on every daemon tick.
@@ -2640,6 +2651,27 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conflicts_stay_while_an_entry_covers_the_file() {
+        assert!(entry_matches(".zshrc", ".zshrc"));
+        assert!(entry_matches(
+            "~/.config/zsh/*.zsh",
+            "~/.config/zsh/docker.zsh"
+        ));
+        assert!(entry_matches(
+            ".config/zsh/*.zsh",
+            "~/.config/zsh/docker.zsh"
+        ));
+        assert!(!entry_matches(
+            ".zshrc",
+            ".claude/plugins/known_marketplaces.json"
+        ));
+        assert!(!entry_matches(
+            ".claude/commands/*.md",
+            ".claude/settings.json"
+        ));
+    }
     use crate::sync::config_merge::has_marker;
     use tempfile::TempDir;
 

@@ -38,49 +38,66 @@ pub fn git_command() -> Command {
 /// Run a git command that talks to the remote. Without a terminal it runs in its own process
 /// group, which is killed with its ssh child after [`NETWORK_TIMEOUT`]. In a terminal it keeps
 /// the terminal, so ssh can ask for a passphrase or a host key.
-fn network_output(cmd: Command) -> Result<Output> {
-    output_within(cmd, NETWORK_TIMEOUT)
-}
-
-fn output_within(mut cmd: Command, limit: Duration) -> Result<Output> {
-    use std::io::{IsTerminal, Read};
-    use std::os::unix::process::CommandExt;
-
+fn network_output(mut cmd: Command) -> Result<Output> {
+    use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         return Ok(cmd.stdin(Stdio::inherit()).output()?);
     }
+    output_within(cmd, NETWORK_TIMEOUT)
+}
+
+/// Run `cmd` in its own process group and kill the group when it, or a helper that keeps its
+/// output open, runs past `limit`.
+fn output_within(mut cmd: Command, limit: Duration) -> Result<Output> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+
     let mut child = cmd
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let read = |mut pipe: Box<dyn Read + Send>| {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let read = |mut pipe: Box<dyn Read + Send>, stream: usize| {
+        let tx = tx.clone();
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             let _ = pipe.read_to_end(&mut bytes);
-            bytes
-        })
+            let _ = tx.send((stream, bytes));
+        });
     };
-    let stdout = read(Box::new(child.stdout.take().expect("stdout is piped")));
-    let stderr = read(Box::new(child.stderr.take().expect("stderr is piped")));
+    read(Box::new(child.stdout.take().expect("stdout is piped")), 0);
+    read(Box::new(child.stderr.take().expect("stderr is piped")), 1);
     let deadline = Instant::now() + limit;
+    let timed_out = |child: &mut std::process::Child| {
+        // The group id is the child's pid
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = child.wait();
+        anyhow::anyhow!("git timed out after {} seconds", limit.as_secs())
+    };
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline {
-            // The group id is the child's pid
-            unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
-            let _ = child.wait();
-            anyhow::bail!("git timed out after {} seconds", limit.as_secs());
+            return Err(timed_out(&mut child));
         }
         std::thread::sleep(Duration::from_millis(200));
     };
+    let mut streams = [Vec::new(), Vec::new()];
+    for _ in 0..2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok((stream, bytes)) => streams[stream] = bytes,
+            Err(_) => return Err(timed_out(&mut child)),
+        }
+    }
+    let [stdout, stderr] = streams;
     Ok(Output {
         status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
+        stdout,
+        stderr,
     })
 }
 
@@ -131,17 +148,18 @@ impl GitBackend {
         }
     }
 
-    /// Check if remote branch exists
-    fn remote_branch_exists(&self, branch: &str) -> bool {
+    /// Check if remote branch exists. A failed check is an error, not a missing branch: a pull
+    /// would otherwise skip its fetch and report success.
+    fn remote_branch_exists(&self, branch: &str) -> Result<bool> {
         let mut cmd = git_command();
         cmd.args(["ls-remote", "--heads", "origin", branch])
             .current_dir(&self.repo_path);
-        let output = network_output(cmd);
-
-        match output {
-            Ok(out) => out.status.success() && !out.stdout.is_empty(),
-            Err(_) => false,
+        let output = network_output(cmd)?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to check the remote branch: {}", error.trim());
         }
+        Ok(!output.stdout.is_empty())
     }
 
     pub fn clone(url: &str, path: &Path) -> Result<Self> {
@@ -382,7 +400,7 @@ impl GitBackend {
         }
 
         // Skip pull if remote branch doesn't exist (empty repository)
-        if !self.remote_branch_exists("main") {
+        if !self.remote_branch_exists("main")? {
             return Ok(false);
         }
 
@@ -480,7 +498,7 @@ impl GitBackend {
     }
 
     pub fn push(&self) -> Result<()> {
-        let args = if self.remote_branch_exists("main") {
+        let args = if self.remote_branch_exists("main")? {
             vec!["push", "origin", "main"]
         } else {
             vec!["push", "-u", "origin", "main"]
