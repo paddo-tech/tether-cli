@@ -35,12 +35,12 @@ pub fn git_command() -> Command {
     cmd
 }
 
-/// Run a git command that talks to the remote. Without a terminal it runs in its own process
-/// group, which is killed with its ssh child after [`NETWORK_TIMEOUT`]. In a terminal it keeps
-/// the terminal, so ssh can ask for a passphrase or a host key.
+/// Run a git command that talks to the remote. Without a controlling terminal it runs in its
+/// own process group, which is killed with its ssh child after [`NETWORK_TIMEOUT`]. With one it
+/// stays in the foreground group, so ssh can ask for a passphrase or a host key on /dev/tty
+/// even when stdin is redirected; a background group would stop on that read.
 fn network_output(mut cmd: Command) -> Result<Output> {
-    use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
+    if std::fs::File::open("/dev/tty").is_ok() {
         return Ok(cmd.stdin(Stdio::inherit()).output()?);
     }
     output_within(cmd, NETWORK_TIMEOUT)
@@ -76,15 +76,6 @@ fn output_within(mut cmd: Command, limit: Duration) -> Result<Output> {
         let _ = child.wait();
         anyhow::anyhow!("git timed out after {} seconds", limit.as_secs())
     };
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            return Err(timed_out(&mut child));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
     let mut streams = [Vec::new(), Vec::new()];
     for _ in 0..2 {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -93,6 +84,16 @@ fn output_within(mut cmd: Command, limit: Duration) -> Result<Output> {
             Err(_) => return Err(timed_out(&mut child)),
         }
     }
+    // Both pipes closed, so git has exited or is about to
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            return Err(timed_out(&mut child));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let [stdout, stderr] = streams;
     Ok(Output {
         status,

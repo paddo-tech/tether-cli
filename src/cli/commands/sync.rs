@@ -789,7 +789,16 @@ fn entry_matches(pattern: &str, file: &str) -> bool {
     let file = file.trim_start_matches("~/");
     pattern == file
         || (crate::sync::is_glob_pattern(pattern)
-            && glob::Pattern::new(pattern).is_ok_and(|p| p.matches(file)))
+            && glob::Pattern::new(pattern).is_ok_and(|p| {
+                // As glob::glob in the sync loops, `*` stays within one path segment
+                p.matches_with(
+                    file,
+                    glob::MatchOptions {
+                        require_literal_separator: true,
+                        ..Default::default()
+                    },
+                )
+            }))
 }
 
 pub fn decrypt_from_repo(
@@ -987,12 +996,15 @@ pub fn decrypt_from_repo(
     }
 
     // A conflict blocks the file's upload, so only one whose file no entry syncs any more
-    // goes; the upload works from the same entries and never sends that file
+    // goes; the upload works from the same entries and never sends that file. The upload does
+    // not skip ignored files, so their conflicts stay until 'tether resolve'. Files in
+    // ~/.tether never sync
     let entries = config.effective_dotfiles(machine_id);
     conflict_state.conflicts.retain(|c| {
-        entries
-            .iter()
-            .any(|e| entry_matches(e.path(), &c.file_path))
+        !tether.contains(&home.join(&c.file_path))
+            && entries
+                .iter()
+                .any(|e| entry_matches(e.path(), &c.file_path))
     });
 
     // Notify only for files not already pending, so an unresolved conflict
@@ -2651,6 +2663,8 @@ async fn run_team_only_sync(config: &Config, dry_run: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::config_merge::has_marker;
+    use tempfile::TempDir;
 
     #[test]
     fn conflicts_stay_while_an_entry_covers_the_file() {
@@ -2671,9 +2685,11 @@ mod tests {
             ".claude/commands/*.md",
             ".claude/settings.json"
         ));
+        assert!(!entry_matches(
+            ".claude/commands/*.md",
+            ".claude/commands/nested/task.md"
+        ));
     }
-    use crate::sync::config_merge::has_marker;
-    use tempfile::TempDir;
 
     const KEY: [u8; 32] = [7u8; 32];
 
