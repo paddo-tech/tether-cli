@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.8] - 2026-10-11
+
+### Fixed
+
+- A git command that talks to the remote can no longer stop the daemon. A push that hung after the machine slept mid-push kept the daemon waiting for hours. Without a terminal, `ls-remote`, `fetch` and `push` now stop after 5 minutes, together with their ssh process, and the next sync tries again. In a terminal they keep the terminal, so ssh can still ask for a passphrase or a host key
+- A remote branch check that fails is now an error. Before, it counted as a missing branch, so a pull skipped its fetch and reported success
+- A conflict on a dotfile that no dotfile entry covers any more is dropped. Before, it stayed pending forever. A conflict on a file that still syncs, also one ignored on this machine, stays until `tether resolve`, because it keeps the file from uploading over another machine's change
+
 ## [2.0.0-beta.7] - 2026-10-11
 
 ### Fixed
