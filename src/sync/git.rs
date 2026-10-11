@@ -4,7 +4,12 @@ use git2::{Repository, Signature};
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Longest a git command that talks to the remote may run without a terminal. A connection
+/// that died while the machine slept leaves ssh waiting forever, and the daemon with it.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Config for every git command Tether runs. Rebase and stash write commits with the
 /// committer from git config, and a new machine may have none, so Tether gives the
@@ -28,6 +33,73 @@ pub fn git_command() -> Command {
     let mut cmd = Command::new("git");
     cmd.args(identity_args());
     cmd
+}
+
+/// Run a git command that talks to the remote. Without a controlling terminal it runs in its
+/// own process group, which is killed with its ssh child after [`NETWORK_TIMEOUT`]. With one it
+/// stays in the foreground group, so ssh can ask for a passphrase or a host key on /dev/tty
+/// even when stdin is redirected; a background group would stop on that read.
+fn network_output(mut cmd: Command) -> Result<Output> {
+    if std::fs::File::open("/dev/tty").is_ok() {
+        return Ok(cmd.stdin(Stdio::inherit()).output()?);
+    }
+    output_within(cmd, NETWORK_TIMEOUT)
+}
+
+/// Run `cmd` in its own process group and kill the group when it, or a helper that keeps its
+/// output open, runs past `limit`.
+fn output_within(mut cmd: Command, limit: Duration) -> Result<Output> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+
+    let mut child = cmd
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let read = |mut pipe: Box<dyn Read + Send>, stream: usize| {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            let _ = tx.send((stream, bytes));
+        });
+    };
+    read(Box::new(child.stdout.take().expect("stdout is piped")), 0);
+    read(Box::new(child.stderr.take().expect("stderr is piped")), 1);
+    let deadline = Instant::now() + limit;
+    let timed_out = |child: &mut std::process::Child| {
+        // The group id is the child's pid
+        unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = child.wait();
+        anyhow::anyhow!("git timed out after {} seconds", limit.as_secs())
+    };
+    let mut streams = [Vec::new(), Vec::new()];
+    for _ in 0..2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok((stream, bytes)) => streams[stream] = bytes,
+            Err(_) => return Err(timed_out(&mut child)),
+        }
+    }
+    // Both pipes closed, so git has exited or is about to
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            return Err(timed_out(&mut child));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let [stdout, stderr] = streams;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn write_signed(
@@ -77,18 +149,18 @@ impl GitBackend {
         }
     }
 
-    /// Check if remote branch exists
-    fn remote_branch_exists(&self, branch: &str) -> bool {
-        let output = git_command()
-            .args(["ls-remote", "--heads", "origin", branch])
-            .current_dir(&self.repo_path)
-            .stdin(Stdio::inherit())
-            .output();
-
-        match output {
-            Ok(out) => out.status.success() && !out.stdout.is_empty(),
-            Err(_) => false,
+    /// Check if remote branch exists. A failed check is an error, not a missing branch: a pull
+    /// would otherwise skip its fetch and report success.
+    fn remote_branch_exists(&self, branch: &str) -> Result<bool> {
+        let mut cmd = git_command();
+        cmd.args(["ls-remote", "--heads", "origin", branch])
+            .current_dir(&self.repo_path);
+        let output = network_output(cmd)?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to check the remote branch: {}", error.trim());
         }
+        Ok(!output.stdout.is_empty())
     }
 
     pub fn clone(url: &str, path: &Path) -> Result<Self> {
@@ -283,11 +355,10 @@ impl GitBackend {
 
     /// Fetch origin/main without changing the local branch.
     pub fn fetch(&self) -> Result<()> {
-        let output = git_command()
-            .args(["fetch", "origin", "main"])
-            .current_dir(&self.repo_path)
-            .stdin(Stdio::inherit())
-            .output()?;
+        let mut cmd = git_command();
+        cmd.args(["fetch", "origin", "main"])
+            .current_dir(&self.repo_path);
+        let output = network_output(cmd)?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!("Failed to fetch changes: {}", error));
@@ -297,7 +368,15 @@ impl GitBackend {
 
     /// Push main once. A rejected push fails and leaves the local commits as they are.
     pub fn push_once(&self) -> Result<()> {
-        self.git(&["push", "origin", "main"])
+        let mut cmd = git_command();
+        cmd.args(["push", "origin", "main"])
+            .current_dir(&self.repo_path);
+        let output = network_output(cmd)?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("git push origin main failed: {}", error));
+        }
+        Ok(())
     }
 
     /// Reset local branch to match remote
@@ -322,17 +401,16 @@ impl GitBackend {
         }
 
         // Skip pull if remote branch doesn't exist (empty repository)
-        if !self.remote_branch_exists("main") {
+        if !self.remote_branch_exists("main")? {
             return Ok(false);
         }
 
         // Fetch first, then rebase explicitly onto origin/main
         // This avoids "Cannot rebase onto multiple branches" errors
-        let fetch_output = git_command()
-            .args(["fetch", "origin", "main"])
-            .current_dir(&self.repo_path)
-            .stdin(Stdio::inherit())
-            .output()?;
+        let mut cmd = git_command();
+        cmd.args(["fetch", "origin", "main"])
+            .current_dir(&self.repo_path);
+        let fetch_output = network_output(cmd)?;
 
         if !fetch_output.status.success() {
             let error = String::from_utf8_lossy(&fetch_output.stderr);
@@ -421,18 +499,16 @@ impl GitBackend {
     }
 
     pub fn push(&self) -> Result<()> {
-        let args = if self.remote_branch_exists("main") {
+        let args = if self.remote_branch_exists("main")? {
             vec!["push", "origin", "main"]
         } else {
             vec!["push", "-u", "origin", "main"]
         };
 
         for attempt in 1..=3 {
-            let output = git_command()
-                .args(&args)
-                .current_dir(&self.repo_path)
-                .stdin(Stdio::inherit())
-                .output()?;
+            let mut cmd = git_command();
+            cmd.args(&args).current_dir(&self.repo_path);
+            let output = network_output(cmd)?;
 
             if output.status.success() {
                 return Ok(());
@@ -478,11 +554,10 @@ impl GitBackend {
     /// Check if the current user has write access to the remote repository
     pub fn has_write_access(&self) -> Result<bool> {
         // Try a dry-run push to check write permissions
-        let output = git_command()
-            .args(["push", "--dry-run", "origin", "HEAD"])
-            .current_dir(&self.repo_path)
-            .stdin(Stdio::inherit())
-            .output()?;
+        let mut cmd = git_command();
+        cmd.args(["push", "--dry-run", "origin", "HEAD"])
+            .current_dir(&self.repo_path);
+        let output = network_output(cmd)?;
 
         // If dry-run succeeds or gives specific errors, we have write access
         // If we get "permission denied" or "403", we don't have write access
@@ -901,6 +976,17 @@ fn find_git_repos_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hung_network_command_dies_with_its_children() {
+        // Like git waiting on ssh: the grandchild holds the output pipes open
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 30 & sleep 30"]);
+        let started = Instant::now();
+        let error = output_within(cmd, Duration::from_secs(1)).unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 
     // URL normalization tests
     #[test]
