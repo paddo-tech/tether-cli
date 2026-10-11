@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.7] - 2026-10-11
+
+### Fixed
+
+- After a push conflict, a sync no longer warns that this machine's own record looks like a replayed old record. The reset to the remote leaves an older copy of it in the repo, and the next save replaces it. Records of other machines still warn
+- A dotfile glob pattern that matches no files in the sync repo now warns once per daemon run, not on every sync. A profile can list a pattern that only other machines have files for
+- bun without a global lockfile now counts as having no global packages, as bun itself reports. Before, the daily upgrade check failed with "missing lockfile"
+- A failed install now records its error from the first line that names the error. Before, Homebrew's warnings about untrusted taps could fill the recorded text and hide the error
+
 ## [2.0.0-beta.6] - 2026-10-11
 
 ### Fixed
