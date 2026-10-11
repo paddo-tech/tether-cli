@@ -799,6 +799,7 @@ pub fn decrypt_from_repo(
     let mut conflict_state = ConflictState::load().unwrap_or_default();
     let tether = crate::config::TetherDir::new(home);
     let mut new_conflicts = Vec::new();
+    let mut synced = std::collections::HashSet::new();
 
     // Create backup directory for this sync (lazily - only if needed)
     let mut backup_dir: Option<PathBuf> = None;
@@ -855,6 +856,7 @@ pub fn decrypt_from_repo(
             if tether.contains(&home.join(&file)) {
                 continue;
             }
+            synced.insert(file.clone());
 
             // Resolve repo path: profile dir first, flat fallback
             let repo_path = crate::sync::resolve_dotfile_repo_path(
@@ -976,6 +978,11 @@ pub fn decrypt_from_repo(
             }
         }
     }
+
+    // A file that no longer syncs here can never be resolved by a sync
+    conflict_state
+        .conflicts
+        .retain(|c| synced.contains(&c.file_path));
 
     // Notify only for files not already pending, so an unresolved conflict
     // does not toast on every daemon tick.
