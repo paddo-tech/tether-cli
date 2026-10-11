@@ -216,10 +216,12 @@ impl PackageManager for BunManager {
             .output()
             .await?;
         if !output.status.success() {
-            anyhow::bail!(
-                "bun outdated failed: {}",
-                super::command_error_message(&output)
-            );
+            let message = super::command_error_message(&output);
+            // bun has no global lockfile until a global package is installed
+            if message.contains("missing lockfile") {
+                return Ok(Vec::new());
+            }
+            anyhow::bail!("bun outdated failed: {}", message);
         }
         Ok(parse_outdated_table(&String::from_utf8_lossy(
             &output.stdout,

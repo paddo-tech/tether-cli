@@ -404,7 +404,8 @@ fn record_failure(
     error: &str,
 ) {
     let key = InstallFailure::key(manager, name);
-    let error: String = error.trim().chars().take(300).collect();
+    // brew prints warnings, such as untrusted taps, before the line that names the error
+    let error: String = error_line(error).chars().take(300).collect();
     if failures
         .get(&key)
         .is_none_or(|f| f.version.as_deref() != version)
@@ -591,6 +592,9 @@ impl Provenance {
             let id = &r.record.machine_id;
             let status = signing::record_status(r, this_machine, Some(own_key), store, generations);
             match status {
+                // This machine's own copy is older after a reset to the remote, and its
+                // next save replaces it
+                RecordStatus::Replayed if id == this_machine => continue,
                 // A record that grants trust must be the newest its key has signed
                 RecordStatus::Replayed => {
                     Output::warning(&format!(
@@ -2869,6 +2873,18 @@ mod tests {
         assert!(failure.should_retry(Some("1.0.0"), now + chrono::Duration::hours(24)));
         assert!(failure.should_retry(Some("1.1.0"), now));
         assert!(failure.should_retry(None, now));
+    }
+
+    #[test]
+    fn record_failure_stores_the_line_that_names_the_error() {
+        let mut failures = HashMap::new();
+        let stderr = "Failed to install cask app: Warning: The following taps are not trusted:\n  \
+                      gromgit/fuse\nError: app: Cask 'app' has been disabled\n";
+        record_failure(&mut failures, "brew_casks", "app", None, stderr);
+        assert_eq!(
+            failures["brew_casks:app"].error,
+            "Error: app: Cask 'app' has been disabled"
+        );
     }
 
     #[test]
