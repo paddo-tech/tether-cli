@@ -60,10 +60,6 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Skip conflict prompts
-        #[arg(long)]
-        force: bool,
-
         /// Re-prompt for previously dismissed file imports
         #[arg(long)]
         rediscover: bool,
@@ -790,9 +786,8 @@ impl Cli {
             } => init::run(repo.as_deref(), *no_daemon, *team_only).await,
             Commands::Sync {
                 dry_run,
-                force,
                 rediscover,
-            } => sync::run(*dry_run, *force, *rediscover).await,
+            } => sync::run(*dry_run, *rediscover).await,
             Commands::Status { json } => status::run(*json).await,
             Commands::Diff { machine } => diff::run(machine.as_deref()).await,
             Commands::Daemon { action } => match action {
