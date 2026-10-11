@@ -1,0 +1,54 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Conflicts — Tether CLI" description="What happens when a dotfile changes on two machines, and how to resolve the conflict.">
+  <section>
+    <p class="eyebrow">GUIDES</p>
+    <h1>Conflicts</h1>
+    <p>A conflict happens when a dotfile changed on this machine and on another machine since the last sync.</p>
+
+    <h2>In a terminal</h2>
+    <p><code>tether sync</code> asks how to resolve each conflict:</p>
+    <ul>
+      <li><strong>Keep local version</strong></li>
+      <li><strong>Use remote version</strong></li>
+      <li><strong>Launch merge tool</strong></li>
+      <li><strong>Skip (decide later)</strong></li>
+    </ul>
+    <p><code>-y</code> never picks a side. With <code>-y</code>, the sync skips the conflict.</p>
+
+    <h2>Without a terminal</h2>
+    <p>The daemon, and a sync from cron or ssh, do not ask. For each conflict, the sync:</p>
+    <ul>
+      <li>records the conflict for <code>tether resolve</code></li>
+      <li>sends a notification</li>
+      <li>keeps the local file out of the push until you resolve the conflict, so it does not overwrite the other machine's change</li>
+    </ul>
+    <p><code>tether status</code> counts the files with conflicts.</p>
+
+    <h2>Resolve a conflict</h2>
+    <Code code={`tether resolve           # every conflict
+tether resolve .zshrc    # one file`} />
+    <ul>
+      <li>A conflict on a file that still syncs stays until <code>tether resolve</code>. This includes a file that this machine ignores with <code>tether ignore files</code></li>
+      <li>A conflict on a file that no dotfile entry covers any more is dropped</li>
+    </ul>
+
+    <h2 id="on-conflict">Settle conflicts without a question</h2>
+    <p>Some apps rewrite a file on every machine, for example with timestamps or caches. Give that file a rule in <code>config.toml</code>, and Tether settles its conflicts on its own:</p>
+    <Code lang="toml" code={`[[profiles.dev.dotfiles]]
+path = ".claude/plugins/known_marketplaces.json"
+on_conflict = "local"   # or "remote"; the default is "prompt"`} />
+    <p>Machines on 1.11 and 1.12 drop <code>on_conflict</code> when they save the config. 1.13 keeps it.</p>
+
+    <h2 id="merge-tool">Merge tool</h2>
+    <p>"Launch merge tool" runs <code>merge.command</code> with <code>merge.args</code>. The default is <code>opendiff</code> on macOS and <code>vimdiff</code> on Linux. A machine without <code>opendiff</code> uses <code>vimdiff</code> when the synced tool is <code>opendiff</code>.</p>
+    <p>Tether runs only merge tools from a built-in list, such as <code>vimdiff</code>, <code>nvim</code>, <code>meld</code>, <code>kdiff3</code> and <code>p4merge</code>. A synced config cannot make it run another command.</p>
+    <p>To use another tool on one machine, set it in <code>~/.tether/local.toml</code>:</p>
+    <Code lang="toml" code={`[merge]
+command = "vimdiff"
+args = ["{local}", "{remote}", "{merged}"]   # the default when args is missing`} />
+  </section>
+</DocsLayout>

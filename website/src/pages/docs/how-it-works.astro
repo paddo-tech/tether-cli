@@ -1,0 +1,49 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import FlowDiagram from '../../components/FlowDiagram.astro';
+---
+
+<DocsLayout title="How sync works — Tether CLI" description="What a Tether sync does: scan, encrypt, sign the machine record, push, and check packages on the other machines.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>How sync works</h1>
+    <p>Tether connects your machines through one Git repository. Each machine pushes its changes there and pulls the changes of the other machines.</p>
+    <FlowDiagram label="FROM YOUR MACHINE TO YOUR REPO" caption="Other machines pull these changes, decrypt the dotfiles, and check each package before it installs." steps={[
+      { icon: 'file', title: 'Scan changes', detail: 'Check files and package lists' },
+      { icon: 'lock', title: 'Encrypt dotfiles', detail: 'Use your local encryption key' },
+      { icon: 'git', title: 'Sync through Git', detail: 'Commit and push to your repo' },
+    ]} />
+
+    <h2>One sync, step by step</h2>
+    <ol>
+      <li>The daemon starts a sync every 5 minutes. <code>tether sync</code> starts one at once</li>
+      <li>Tether pulls the sync repo and merges the synced <code>config.toml</code> into the local one. See <a href="/docs/config-merge">Config merge</a></li>
+      <li>Tether syncs the dotfiles. It scans them for credentials, encrypts local changes, and applies changes from other machines. A file that changed on both sides is a <a href="/docs/conflicts">conflict</a></li>
+      <li>Tether syncs project configs</li>
+      <li>Tether verifies the signed records of the other machines against its trust list. See <a href="/docs/trust">Machine trust</a></li>
+      <li>Tether checks each synced package that this machine does not have. It installs it, or holds it in the <a href="/docs/inbox">Inbox</a></li>
+      <li>Tether signs this machine's record, which lists its packages and versions</li>
+      <li>Tether commits and pushes</li>
+    </ol>
+
+    <h2>What syncs</h2>
+    <ul>
+      <li><strong>Dotfiles</strong>, such as <code>.zshrc</code> and <code>.gitconfig</code>, and folders that you add. Tether stores them encrypted in Git. Locally they stay plaintext, so your shell reads them</li>
+      <li><strong>Package lists</strong> for Homebrew, npm, pnpm, bun, gem and uv. They stay readable in Git. See <a href="/docs/packages">Packages and versions</a></li>
+      <li><strong>Project configs</strong>, such as <code>.env</code> files, matched by the Git remote of the project</li>
+      <li><strong>Machine records</strong>: one signed file per machine, with its packages, versions, profile and OS</li>
+      <li><strong>config.toml</strong>, encrypted, so all machines share one configuration</li>
+    </ul>
+    <p>Some files never sync: <code>~/.tether/local.toml</code>, the trust list, the Inbox and the signing key. See <a href="/docs/data-layout">Data layout</a>.</p>
+
+    <h2 id="daemon">The daemon</h2>
+    <p>The daemon runs a sync every 5 minutes. It does not ask questions. It holds new packages and machine keys in the Inbox and sends one notification for each new batch. It records conflicts for <code>tether resolve</code>.</p>
+    <ul>
+      <li>Without a terminal, the git commands that reach the remote stop after 5 minutes. The next sync tries again</li>
+      <li>An idle machine signs its record again once an hour, so other machines see that it runs</li>
+      <li>On macOS, launchd runs the daemon. On Linux, a systemd user service runs it. See <a href="/docs/linux">Linux and systemd</a></li>
+    </ul>
+    <p>Control the daemon with <code>tether daemon</code>. See <a href="/docs/commands#cmd-daemon">Commands</a>.</p>
+
+  </section>
+</DocsLayout>

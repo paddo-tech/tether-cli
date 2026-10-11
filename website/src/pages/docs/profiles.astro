@@ -1,0 +1,57 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+import ProfileDiagram from '../../components/ProfileDiagram.astro';
+---
+
+<DocsLayout title="Profiles — Tether CLI" description="Machine profiles choose the dotfiles and package managers of each machine. Package profiles choose which machines install each package.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>Profiles</h1>
+    <ProfileDiagram />
+    <p>A profile chooses what a machine gets. A "work" profile can have IDE configs that a "server" profile does not need. Each machine has one profile. A machine without one is in profile <code>dev</code>.</p>
+
+    <h2 id="machine-profiles">Machine profiles</h2>
+    <p>Each profile has its own dotfiles, folders and package managers. Tether stores the dotfiles of a profile under <code>profiles/&lt;name&gt;/</code> in the sync repo.</p>
+    <Code code={`tether machines profile create work
+tether machines profile create server --from work --managers brew,npm
+tether machines profile set work      # on this machine
+tether machines profile list
+tether machines profile edit work`} />
+    <ul>
+      <li>In a terminal, <code>profile create</code> asks about each dotfile, folder and package manager. <code>-y</code> takes every default. <code>--from</code> copies a profile without questions. <code>--managers</code> sets its package managers</li>
+      <li>Each machine sets only its own profile with <code>profile set</code></li>
+      <li>In a terminal, a sync offers dotfiles from other profiles that yours does not have</li>
+    </ul>
+
+    <h2 id="package-profiles">Packages per profile</h2>
+    <p>Each package belongs to one or more profiles. A machine installs a synced package only when its own profile is one of them, and a trusted record lists the package. So a server does not get the desktop apps of your laptops.</p>
+    <ul>
+      <li>By default, a package belongs to the profile of this machine and the profiles of the trusted machines whose signed records list it</li>
+      <li><code>tether packages share &lt;ID&gt; --to &lt;PROFILES&gt;</code> adds profiles. Machines in those profiles then install the package</li>
+      <li><code>tether packages unshare &lt;ID&gt; --from &lt;PROFILES&gt;</code> takes profiles off. Nothing is uninstalled. Machines keep any copy they have</li>
+      <li><code>tether packages uninstall &lt;ID&gt;</code> uninstalls the package on this machine, then takes this machine's profile off it. Other profiles keep it. Other machines in this profile stop new installs of it, but keep any copy they have. If the uninstall fails, the profiles do not change</li>
+      <li><code>uninstall</code> does not remove Homebrew taps. A formula or cask from a tap brings its tap to the profiles that have it</li>
+      <li><code>tether packages list --other-profiles</code> lists the packages of other profiles that this machine does not install</li>
+      <li>On the dashboard Packages tab, each package shows its profiles. Press <code>t</code> to pick them in a checklist. <code>x</code> uninstalls and leaves the other profiles enrolled</li>
+      <li>A sync drops Inbox items for packages that leave this machine's profile</li>
+    </ul>
+    <p>Tether keeps these choices in <code>packages/profiles.toml</code> in the sync repo. An entry in this file replaces the default for that package.</p>
+    <Code lang="toml" code={`[profiles]
+"npm:typescript" = ["dev", "server"]`} />
+    <ul>
+      <li>Each change starts from the remote branch, adds or removes only the profiles you named, and pushes. Changes from two machines both stay, also for the same package</li>
+      <li>A change does not start while the sync repo has changes that are not pushed</li>
+      <li>Anyone who can push can edit this file. A package still installs on its own only when a trusted, signed record lists it</li>
+      <li>If <code>packages/profiles.toml</code> exists but Tether cannot read it, a sync installs no synced packages and warns. The daemon notifies once. <code>share</code>, <code>unshare</code> and <code>uninstall</code> stop with an error until you fix or delete the file</li>
+    </ul>
+    <p>For a worked example, see <a href="/docs/servers">Keep servers clean</a>.</p>
+
+    <h2 id="profiles-1x">Profiles and machines on 1.x</h2>
+    <ul>
+      <li>Only machines on 2.0 apply package profiles. A machine on 1.x installs the packages of every profile</li>
+      <li>A 1.x machine before 1.13.2 can revert a profile assignment in <code>config.toml</code>. A sync on 2.0 then warns that this machine's profile changed, and names the command that restores it</li>
+      <li>So set profiles after the 1.x machines are on 1.13.2, or after they upgrade. See <a href="/docs/upgrade#machines-on-1x">Machines on 1.x</a></li>
+    </ul>
+  </section>
+</DocsLayout>

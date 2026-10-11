@@ -1,0 +1,101 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+
+const keys = [
+  ['backend.url', 'Git repository URL of the personal sync repo'],
+  ['security.encrypt_dotfiles', 'Encrypt dotfiles with AES-256-GCM. Default true'],
+  ['security.scan_secrets', 'Scan files for secrets before a sync. Default true'],
+  ['dotfiles.files', 'Dotfiles to sync'],
+  ['dotfiles.dirs', 'Folders to sync'],
+  ['profiles.<name>.dotfiles', 'Dotfiles of a profile. An entry can be a table with path and on_conflict'],
+  ['profiles.<name>.dirs', 'Folders of a profile'],
+  ['profiles.<name>.packages', 'Package managers of a profile, such as ["brew", "npm"]. Empty means all enabled managers'],
+  ['machine_profiles', 'The profile of each machine. Set it with tether machines profile set'],
+  ['project_configs.enabled', 'Sync project configs, such as .env files'],
+  ['project_configs.search_paths', 'Folders to search for projects'],
+  ['project_configs.patterns', 'File patterns to sync in each project'],
+  ['packages.<manager>.enabled', 'Sync this manager: brew, npm, pnpm, bun, gem or uv'],
+  ['packages.min_release_age_days', 'Install only releases at least this many days old. Default 7. 0 turns it off. Homebrew has no limit'],
+  ['packages.allow_scripts', 'npm, pnpm and bun packages that may run their install scripts'],
+  ['packages.auto_install_from_trusted', 'Install packages from trusted machine records without a question. Default true'],
+  ['packages.brew.trusted_taps', 'Homebrew taps outside homebrew/* that Tether may install from'],
+  ['packages.brew.sync_casks', 'Sync Homebrew casks. Tether never installs casks on Linux'],
+  ['merge.command, merge.args', 'The merge tool for conflicts. See Conflicts'],
+  ['dashboard.theme', 'Dashboard colors: auto, mocha, latte or ansi'],
+];
+
+const features = [
+  ['personal_dotfiles', 'true', 'Sync personal dotfiles'],
+  ['personal_packages', 'true', 'Sync personal package manifests'],
+  ['team_dotfiles', 'false', 'Sync team dotfiles. Needs a team'],
+  ['collab_secrets', 'false', 'Share project secrets with GitHub collaborators'],
+  ['team_layering', 'false', 'Merge team and personal dotfiles'],
+];
+---
+
+<DocsLayout title="Configuration — Tether CLI" description="Tether's config.toml keys, local.toml for one machine, and feature toggles.">
+  <section>
+    <p class="eyebrow">REFERENCE</p>
+    <h1>Configuration</h1>
+    <p>The configuration lives in <code>~/.tether/config.toml</code>. It syncs, encrypted, so all machines share it. A sync merges changes from two machines. See <a href="/docs/config-merge">Config merge</a>.</p>
+    <Code code={`tether config get packages.min_release_age_days
+tether config set packages.brew.trusted_taps '["oven-sh/bun"]'
+tether config edit`} />
+    <p><code>tether config set</code> reads the value as TOML, so arrays work. It refuses a key that the config does not have. The dashboard Config tab edits the same settings.</p>
+
+    <h2>Example</h2>
+    <Code lang="toml" label="~/.tether/config.toml" code={`[backend]
+url = "git@github.com:you/dotfiles.git"
+
+[security]
+encrypt_dotfiles = true
+scan_secrets = true
+
+[dotfiles]
+files = [".zshrc", ".gitconfig"]
+dirs = [".config/nvim"]
+
+[packages]
+min_release_age_days = 7          # 0 turns the limit off
+allow_scripts = ["esbuild"]       # packages that may run install scripts
+auto_install_from_trusted = true  # false holds every synced package
+
+[packages.brew]
+enabled = true
+sync_casks = true
+trusted_taps = ["oven-sh/bun"]    # taps outside homebrew/*
+
+[packages.npm]
+enabled = true`} />
+
+    <h2>Keys</h2>
+    <table>
+      <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+      <tbody>{keys.map(([key, meaning]) => <tr><td><code>{key}</code></td><td>{meaning}</td></tr>)}</tbody>
+    </table>
+    <p>Tether also writes keys that you do not edit: <code>config_version</code>, <code>config_writer</code>, and <code>sync_versions = false</code> for each manager, which 1.x builds need.</p>
+
+    <h2 id="local-config">Settings for one machine</h2>
+    <p><code>~/.tether/local.toml</code> holds settings for this machine only. Tether never syncs it. Its values override <code>config.toml</code> on this machine. It takes these keys:</p>
+    <Code lang="toml" label="~/.tether/local.toml" code={`[packages]
+min_release_age_days = 14
+
+[merge]
+command = "vimdiff"
+args = ["{local}", "{remote}", "{merged}"]   # the default when args is missing`} />
+
+    <h2 id="feature-toggles">Feature toggles</h2>
+    <Code code={`tether config features                   # list the toggles
+tether config features enable <FEATURE>
+tether config features disable <FEATURE>`} />
+    <table>
+      <thead><tr><th>Feature</th><th>Default</th><th>Meaning</th></tr></thead>
+      <tbody>{features.map(([name, def, meaning]) => <tr><td><code>{name}</code></td><td>{def}</td><td>{meaning}</td></tr>)}</tbody>
+    </table>
+    <p>Example, team sync only:</p>
+    <Code code={`tether config features disable personal_dotfiles
+tether config features disable personal_packages
+tether config features enable team_dotfiles`} />
+  </section>
+</DocsLayout>

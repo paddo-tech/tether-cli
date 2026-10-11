@@ -27,7 +27,7 @@ Astro writes the static site to `dist/`.
 | Route | Content |
 |-------|---------|
 | `/` | Product overview, supply-chain checks, machine profiles, setup, and installation |
-| `/docs` | Upgrade guide, Linux, commands, configuration, package security, machine trust, and troubleshooting |
+| `/docs/*` | Documentation: get started, upgrade from 1.x, concepts, guides, reference, and troubleshooting. The sidebar in `src/layouts/DocsLayout.astro` lists the pages |
 | `/teams` | Team repositories, recipient keys, and project sharing |
 | `/supply-chain` | Supply-chain threats, package checks, machine trust, approval inbox, and limits |
 | `/security` | Encryption, key management, scanning, and security boundaries |

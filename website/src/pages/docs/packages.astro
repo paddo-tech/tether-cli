@@ -1,0 +1,50 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Packages and versions — Tether CLI" description="How Tether syncs Homebrew, npm, pnpm, bun, gem and uv packages: manifests, signed versions and the newest-version rule.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>Packages and versions</h1>
+    <p>Tether syncs the global packages of Homebrew, npm, pnpm, bun, gem and uv. Turn a manager on or off in the config:</p>
+    <Code code={`tether config set packages.brew.enabled true
+tether config set packages.uv.enabled true`} />
+
+    <h2>Manifests</h2>
+    <p>The sync repo has one manifest per manager in <code>manifests/</code>. A manifest lists package names only, one per line, as 1.x writes them. So machines on 1.x read them as before.</p>
+    <Code lang="text" label="manifests/npm.txt" code={`typescript
+eslint
+prettier`} />
+    <p>Homebrew uses a Brewfile with formulae, casks and taps:</p>
+    <Code lang="ruby" label="manifests/Brewfile" code={`brew "ripgrep"
+cask "visual-studio-code"`} />
+    <p>Tether does not install casks on Linux, or when <code>packages.brew.sync_casks</code> is <code>false</code>.</p>
+    <p>A sync merges into the manifests. It adds names only from this machine's record and the records it trusts. It keeps the lines of other machines. It removes a name only when no machine record in the repo lists that package. A line in a manifest grants no trust.</p>
+
+    <h2>Versions</h2>
+    <p>Versions live in the signed machine records, not in the manifests. Each record lists the installed version of each npm, pnpm, bun, uv and gem package.</p>
+    <ul>
+      <li>A version must be a concrete release: semver for npm, pnpm and bun, PEP 440 for uv, and a RubyGems version for gem. Tether drops a record entry with a dist-tag such as <code>latest</code>, or with a range</li>
+      <li>When records differ, the newest version wins, by the rules of each ecosystem</li>
+      <li>A sync installs the newest version that a trusted record lists, when it passes the <a href="/docs/package-security">package checks</a></li>
+      <li>Without a trusted version, a package installs the newest release that passes the release-age limit</li>
+      <li>Homebrew installs the current release. The Brewfile has no versions</li>
+    </ul>
+    <p>Pre-release 2.0 builds wrote lines such as <code>name@1.2.3</code>. Tether still reads such a line as its name, and the next write drops the version.</p>
+
+    <h2>Other OS</h2>
+    <p>Machine records name their OS. When only machines on another OS list a version, this machine tries it first. If it fails, Tether holds the newest release that suits this machine in the Inbox as "other OS version". Approve it to install exactly that release.</p>
+
+    <h2>Install, uninstall and upgrade</h2>
+    <Code code={`tether packages list                      # installed packages, with their profiles
+tether packages install npm:typescript    # a package another machine lists
+tether packages uninstall npm:typescript  # uninstall here
+tether upgrade --dry-run                  # what an upgrade would change`} />
+    <ul>
+      <li><code>tether upgrade</code> installs the newest release that the release-age limit allows. It never downgrades a package. It asks first</li>
+      <li><code>tether rollback packages &lt;MANAGER&gt; &lt;COMMIT&gt;</code> rolls npm, pnpm, bun, gem or uv back to a manifest commit. It does not support Homebrew</li>
+      <li>A package that fails to install waits 24 hours before Tether tries it again. See <a href="/docs/failed-installs">Failed installs</a></li>
+    </ul>
+  </section>
+</DocsLayout>

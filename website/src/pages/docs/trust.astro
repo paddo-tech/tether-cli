@@ -1,0 +1,68 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+import FlowDiagram from '../../components/FlowDiagram.astro';
+---
+
+<DocsLayout title="Machine trust — Tether CLI" description="Signed machine records, the local trust list, and how to trust, untrust and remove machines.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>Machine trust</h1>
+    <p>Anyone who can push to your sync repo can edit a manifest. So a line in a manifest grants no trust. Instead, each machine signs a record of the packages it installed. Each machine decides for itself which machine keys it trusts.</p>
+    <FlowDiagram label="ON EACH SYNC" caption="Tether never moves trust to another machine id on its own." steps={[
+      { icon: 'key', title: 'Sign the record', detail: 'machines/<id>.json · ed25519 key' },
+      { icon: 'shield', title: 'Verify locally', detail: 'Match the key in ~/.tether/trusted_keys' },
+      { icon: 'box', title: 'Install listed packages', detail: 'Hold all other packages in the Inbox' },
+    ]} />
+
+    <h2>Signed machine records</h2>
+    <p>Each machine has an SSH signing key in <code>~/.tether/signing_key</code>. Tether makes it on <code>tether init</code>, or on the first sync after an upgrade from 1.x. Each sync signs this machine's record, <code>machines/&lt;id&gt;.json</code>, in <code>machines/&lt;id&gt;.json.sig</code>. The record lists the machine's packages and versions, its profile and its OS.</p>
+    <p>Tether also signs its commits in the personal sync repo. Commit signatures are an audit trail only. They do not grant trust.</p>
+
+    <h2>The trust list</h2>
+    <p>Each machine keeps its own trust list in <code>~/.tether/trusted_keys</code>. The list never syncs. It starts with this machine's own key.</p>
+    <ul>
+      <li>A package installs on its own only when a trusted, signed record lists it</li>
+      <li>Trust is transitive. A signed record lists every package its machine installed. So when you trust a machine, you also trust those packages, whoever installed them. A package you rejected on this machine stays blocked</li>
+      <li>A sync adds manifest lines only from this machine's record and the records it trusts</li>
+    </ul>
+
+    <h2 id="trust-a-machine">Trust a machine</h2>
+    <p>A key that signs a new machine's record waits in the Inbox as "new machine key". Before you trust it, compare its fingerprint. On the new machine, read its id and full fingerprint:</p>
+    <Code code="tether machines show" />
+    <p>On each of your other machines, trust it with that fingerprint:</p>
+    <Code code={`tether machines trust work-laptop --fingerprint SHA256:...
+# or
+tether packages approve machine:work-laptop --expect SHA256:...`} />
+    <ul>
+      <li>Tether trusts the key only if the fingerprint matches</li>
+      <li>Without <code>--fingerprint</code>, Tether shows the current fingerprint and asks. This works in a terminal only</li>
+      <li>When this machine does not have the signed record yet, <code>machines trust</code> pulls the sync repo first. If the record is still missing, run <code>tether sync</code> on that machine</li>
+      <li>On the dashboard Machines tab, press <code>a</code> on a machine's card to trust its key, or <code>x</code> to untrust it. Both ask first</li>
+    </ul>
+    <p>To stop trusting a machine:</p>
+    <Code code="tether machines untrust work-laptop" />
+
+    <h2>Protection against changed records</h2>
+    <ul>
+      <li><strong>Changed key</strong>: when a trusted machine signs with a different key, Tether warns you and holds the new key in the Inbox as "key changed". It does not trust that record until you approve the new key</li>
+      <li><strong>Failed signature</strong>: Tether ignores a record that fails its signature and warns: "Record for &lt;id&gt; fails its signature"</li>
+      <li><strong>Replay</strong>: each record has a generation that grows with every save. An older signed record from the same key, such as one from git history, does not count</li>
+      <li><strong>Renamed machines</strong>: trust never moves to another machine id on its own. A renamed machine waits in the Inbox as a new machine</li>
+      <li><strong>Your own record</strong>: this machine builds its record from <code>~/.tether/machine.json</code>, not from the repo copy</li>
+    </ul>
+    <p><code>tether machines list</code> and the dashboard Machines cards show each record as a sync reads it. A record that a sync ignores shows "replayed (ignored)" or "signature failed (ignored)".</p>
+
+    <h2 id="old-machine-ids">Old machine ids</h2>
+    <p>Builds before random machine ids used the hostname as the id. Tether marks a record that may be an old id of this machine. This is only a guess. Check that no other machine uses that hostname before you remove it.</p>
+    <p><code>tether machines list</code> and <code>tether status</code> show the command that removes it. On the dashboard Machines tab, press <code>D</code>, then <code>y</code>.</p>
+    <Code code="tether machines remove <old-id>" />
+    <p><code>machines remove</code> also removes the machine's key from the trust list on this machine.</p>
+
+    <h2>Limits</h2>
+    <ul>
+      <li>Anyone with a machine's <code>~/.tether/signing_key</code> can sign records as that machine. Protect it like an SSH key</li>
+      <li>Machines on 1.x have no signing key. Their records grant no trust</li>
+    </ul>
+  </section>
+</DocsLayout>

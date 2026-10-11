@@ -1,0 +1,38 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Failed installs — Tether CLI" description="What Tether does when a synced package fails to install, and how to stop retrying it.">
+  <section>
+    <p class="eyebrow">GUIDES</p>
+    <h1>Failed installs</h1>
+    <p>A synced package can fail to install on one machine. For example, it does not build on this OS, or Homebrew refuses its name.</p>
+
+    <h2>What Tether does</h2>
+    <ul>
+      <li>Tether records the failure with the error line of the package manager, and warns once</li>
+      <li>It tries the package again after 24 hours, or sooner when the version to install changes</li>
+      <li>When <code>brew bundle</code> fails, Tether installs each remaining formula on its own. Only the formulae that really fail count as failed</li>
+      <li>Tether drops the failure when the package is installed, by any means</li>
+      <li>Tether drops the failure when the package leaves this machine's profile</li>
+    </ul>
+    <p>The list of failures stays on this machine, in <code>~/.tether/state.json</code>.</p>
+
+    <h2>See the failures</h2>
+    <Code code="tether packages list" />
+    <p><code>tether packages list</code> and the dashboard Packages tab show failed installs with their errors.</p>
+
+    <h2>Stop a failed install</h2>
+    <p>To stop Tether from installing the package on this machine:</p>
+    <Code code="tether packages remove <manager:name>" />
+    <p>Or press <code>x</code> on the package on the dashboard Packages tab. Tether records the package as removed on this machine, clears the failure, and stops installing it here. Other machines keep it. The profile rules are the same as for an installed package. See <a href="/docs/profiles#package-profiles">Packages per profile</a>.</p>
+
+    <h2>Common causes</h2>
+    <ul>
+      <li><strong>A release newer than the release-age limit</strong>: Tether holds an older release in the Inbox as "pinned too new". See <a href="/docs/package-security#release-age">Release age</a></li>
+      <li><strong>A version that only another OS can install</strong>: Tether holds a release for this OS in the Inbox as "other OS version"</li>
+      <li><strong>A cask that needs a password</strong>: without a terminal, Tether defers it. The next <code>tether sync</code> in a terminal installs it</li>
+    </ul>
+  </section>
+</DocsLayout>

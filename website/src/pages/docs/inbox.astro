@@ -1,0 +1,50 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="The Inbox — Tether CLI" description="Held packages, taps and machine keys wait in the Inbox. Review them in the terminal or on the dashboard Security tab.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>The Inbox</h1>
+    <p>Packages, Homebrew taps and machine keys that need your decision wait in the Inbox, <code>~/.tether/inbox.json</code>. The Inbox stays on this machine and never syncs. <code>tether status</code> counts its items, and the dashboard header shows <code>⚑ Inbox &lt;count&gt;</code>.</p>
+
+    <h2>Why an item waits</h2>
+    <p>Each item shows one or more reasons, such as "from another machine", "untrusted tap" or "new machine key". The <a href="/docs/inbox-reasons">Inbox reasons</a> page lists each reason and what it means.</p>
+    <p>Tether checks every held item again on each sync. An item leaves the Inbox once no check holds it. For example, its source machine becomes trusted, or its tap becomes trusted. A sync drops items for packages that no machine record lists any more, and for packages that leave this machine's profile.</p>
+
+    <h2>Review the Inbox</h2>
+    <Code code={`tether packages inbox
+tether packages approve npm:typescript
+tether packages reject npm:typescript`} />
+    <ul>
+      <li><code>tether packages inbox</code> groups items by source machine and reason</li>
+      <li>In a terminal, <code>approve</code> and <code>reject</code> show the item and ask. <code>-y</code> does not answer them</li>
+      <li>Without a terminal, name the version, tap or key fingerprint you reviewed with <code>--expect</code>, such as <code>--expect 5.6.3</code></li>
+      <li>On the dashboard, open the Security tab. Press <code>a</code> to approve, <code>x</code> to reject, <code>A</code> to approve all safe packages, or <code>M</code> to approve all from the item's machine</li>
+    </ul>
+    <p>In a terminal, <code>tether sync</code> asks "Install these packages?" when items wait. The answers are "Review each", "Install all", "Install all from &lt;machine&gt;" and "Decide later". The daemon does not ask. It sends one notification for each new batch.</p>
+
+    <h2 id="approve-all">Approve many at once</h2>
+    <Code code="tether packages approve --all --from work-laptop" />
+    <p><code>approve --all</code> lists the packages and asks first. Without a terminal, it needs <code>-y</code>. It is the only command where <code>-y</code> approves Inbox items. It approves exactly the items it listed.</p>
+    <p><code>approve --all</code>, "Install all" and <code>A</code> and <code>M</code> on the Security tab leave these items in the Inbox:</p>
+    <ul>
+      <li>Machine keys</li>
+      <li>Packages that OSV lists as malicious</li>
+      <li>Packages whose record fails its signature</li>
+      <li>Packages without a version or tap to name</li>
+    </ul>
+    <p>Bulk approval does approve packages from machines you do not trust and formulae from untrusted taps. Review the list before you confirm it.</p>
+
+    <h2>What a decision covers</h2>
+    <ul>
+      <li>An approval covers that version only. For Homebrew, it covers only the tap that the name resolved to. For a machine, it covers only that key</li>
+      <li>A rejected version, tap or key is not offered again</li>
+      <li>A release with a <code>MAL-</code> advisory cannot be approved</li>
+      <li>Approving a package from an untrusted tap does not trust the tap. Approve the tap item, or add the tap to <code>packages.brew.trusted_taps</code></li>
+      <li>Tether refuses a decision when the item changed after you saw it, and shows the item again</li>
+      <li>A package whose record fails its signature needs a second question in a terminal. Without a terminal, it needs <code>--expect</code> and <code>--allow-signature-failed</code></li>
+    </ul>
+  </section>
+</DocsLayout>

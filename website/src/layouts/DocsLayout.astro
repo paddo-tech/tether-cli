@@ -3,23 +3,23 @@ import BaseLayout from './BaseLayout.astro';
 interface Props { title: string; description?: string; }
 const { title, description } = Astro.props;
 const docSections = [
-  { title: 'Get started', pages: [ ['Introduction', 'introduction'], ['Installation', 'installation'], ['Quick start', 'quick-start'], ['Upgrade to 2.0', 'upgrade'], ['Linux', 'linux'] ] },
-  { title: 'Understand Tether', pages: [ ['How it works', 'how-it-works'], ['Encryption', 'encryption'], ['Package security', 'package-security'], ['Machine trust', 'machine-trust'], ['Machine profiles', 'machine-profiles'], ['Packages per profile', 'package-profiles'] ] },
-  { title: 'Use Tether', pages: [ ['Dashboard', 'dashboard'], ['Commands', 'commands'], ['Scripts and -y', 'cmd-scripting'], ['Configuration', 'configuration'], ['Feature toggles', 'feature-toggles'] ] },
-  { title: 'Connect your tools', pages: [ ['Package managers', 'package-managers'], ['Team sync', 'team-sync'], ['Troubleshooting', 'troubleshooting'] ] },
+  { title: 'Get started', pages: [ ['Overview', ''], ['Install', 'install'], ['Quick start', 'quick-start'], ['Upgrade from 1.x', 'upgrade'] ] },
+  { title: 'Concepts', pages: [ ['How sync works', 'how-it-works'], ['Encryption', 'encryption'], ['Machine trust', 'trust'], ['Package checks', 'package-security'], ['The Inbox', 'inbox'], ['Packages and versions', 'packages'], ['Profiles', 'profiles'], ['Config merge', 'config-merge'] ] },
+  { title: 'Guides', pages: [ ['Keep servers clean', 'servers'], ['Conflicts', 'conflicts'], ['Failed installs', 'failed-installs'], ['Linux and systemd', 'linux'], ['Teams and collab', 'team-sync'] ] },
+  { title: 'Reference', pages: [ ['Commands', 'commands'], ['Configuration', 'configuration'], ['Data layout', 'data-layout'], ['Dashboard', 'dashboard'], ['Inbox reasons', 'inbox-reasons'], ['Exit codes and -y', 'scripting'] ] },
+  { title: 'Help', pages: [ ['Troubleshooting', 'troubleshooting'] ] },
 ];
+const href = (slug: string) => slug ? `/docs/${slug}` : '/docs';
+const currentPath = Astro.url.pathname.replace(/\/$/, '');
+const current = (slug: string) => currentPath === href(slug) ? 'page' : undefined;
 ---
 
 <BaseLayout title={title} description={description}>
   <div class="docs-shell wrap">
-    <aside class="docs-sidebar"><p class="eyebrow">DOCUMENTATION</p><nav aria-label="Documentation sections">{docSections.map(section => <div><h2>{section.title}</h2><ul>{section.pages.map(([label, id]) => <li><a href={`#${id}`}>{label}</a></li>)}</ul></div>)}</nav><a class="sidebar-source" href="https://github.com/paddo-tech/tether-cli">View source on GitHub ↗</a></aside>
+    <aside class="docs-sidebar"><p class="eyebrow">DOCUMENTATION</p><nav aria-label="Documentation pages">{docSections.map(section => <div><h2>{section.title}</h2><ul>{section.pages.map(([label, slug]) => <li><a href={href(slug)} aria-current={current(slug)}>{label}</a></li>)}</ul></div>)}</nav><a class="sidebar-source" href="https://github.com/paddo-tech/tether-cli">View source on GitHub ↗</a></aside>
     <main id="main" class="docs-content">
-      <details class="docs-mobile-nav"><summary>On this page</summary><nav aria-label="Mobile documentation sections">{docSections.map(section => <div><strong>{section.title}</strong>{section.pages.map(([label, id]) => <a href={`#${id}`}>{label}</a>)}</div>)}</nav></details>
+      <details class="docs-mobile-nav"><summary>Documentation pages</summary><nav aria-label="Mobile documentation pages">{docSections.map(section => <div><strong>{section.title}</strong>{section.pages.map(([label, slug]) => <a href={href(slug)} aria-current={current(slug)}>{label}</a>)}</div>)}</nav></details>
       <article class="prose"><slot /></article>
     </main>
   </div>
-  <script>
-    const menu = document.querySelector<HTMLDetailsElement>('.docs-mobile-nav')!;
-    menu.querySelectorAll('a').forEach(link => link.addEventListener('click', () => { menu.open = false; }));
-  </script>
 </BaseLayout>

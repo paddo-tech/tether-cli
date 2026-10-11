@@ -1,0 +1,75 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Teams and collab — Tether CLI" description="Share team dotfiles, age-encrypted team secrets and project secrets, and share project secrets with GitHub collaborators.">
+  <section>
+    <p class="eyebrow">GUIDES</p>
+    <h1>Teams and collab</h1>
+    <p>Teams share configs and encrypted secrets through a team Git repository. Collab shares project secrets with the collaborators of a GitHub repository. For an overview, see <a href="/teams">Team sync</a>.</p>
+
+    <h2>Team setup</h2>
+    <Code code={`# Interactive setup wizard
+tether team setup
+
+# Or add a team repository
+tether team add git@github.com:org/team-dotfiles.git`} />
+    <ul>
+      <li>Tether clones the team repository and links its config folders, such as <code>.claude</code> or <code>.config</code></li>
+      <li>Tether checks whether you can push to the team repository. With write access, you can push team changes. Without it, the team sync is read-only and you receive updates only</li>
+      <li>Turn on the <code>team_dotfiles</code> feature to sync team dotfiles. See <a href="/docs/configuration#feature-toggles">Feature toggles</a></li>
+    </ul>
+
+    <h2>Team secrets</h2>
+    <p>Team secrets use <a href="https://age-encryption.org/" target="_blank" rel="noopener noreferrer">age</a> public-key encryption. Each teammate has their own age identity.</p>
+    <Code code={`# Create your age identity and show your public key
+tether identity init
+tether identity show
+
+# Add a teammate's public key as a recipient
+tether team secrets add-recipient age1... --name alice
+
+# Set and read a secret (encrypted for all recipients)
+tether team secrets set API_KEY
+tether team secrets get API_KEY`} />
+
+    <h2>Project secrets</h2>
+    <p>Map Git hosting organizations to the team. Project secrets of repositories in those organizations then go to the team repository. Tether matches projects by their Git remote URL, so each teammate can keep the checkout in another folder.</p>
+    <Code code={`tether team orgs add github.com/acme-corp
+tether team projects add .env
+tether team projects list
+
+# Move personal project secrets of mapped orgs to the team
+tether team projects migrate
+tether team projects purge-personal`} />
+
+    <h2>Team files</h2>
+    <Code code={`tether team files list             # synced team files
+tether team files diff [FILE]      # local and team version
+tether team files reset [FILE]     # take the team version
+tether team files promote <FILE>   # push a local file to the team repo
+tether team files ignore <FILE>    # keep a file personal
+tether team files unignore <FILE>  # sync it with the team again
+tether team files local-patterns   # files that never sync`} />
+
+    <h2>Manage teams</h2>
+    <Code code={`tether team list          # all teams
+tether team switch other   # switch the active team
+tether team status
+tether team disable        # stop team sync, keep the team
+tether team remove         # remove the team`} />
+
+    <h2 id="collab">Collab secrets</h2>
+    <p>Collab shares project secrets, such as <code>.env</code> files, with the collaborators who have write access to a GitHub repository. Tether reads the collaborators with the GitHub CLI, <code>gh</code>. Turn the feature on first:</p>
+    <Code code={`tether config features enable collab_secrets
+tether collab init              # for the current project
+tether collab add .env
+tether collab refresh           # re-encrypt for the current collaborators`} />
+    <p>A collaborator joins with the URL that <code>collab init</code> prints:</p>
+    <Code code={`tether collab join <URL>
+tether collab list
+tether collab add-project <PATH>   # add another project to a collab
+tether collab remove [NAME]`} />
+  </section>
+</DocsLayout>

@@ -1,0 +1,55 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Exit codes and -y — Tether CLI" description="Exit codes, the -y option, prompts without a terminal, JSON output, machine arguments and package ids.">
+  <section>
+    <p class="eyebrow">REFERENCE</p>
+    <h1>Exit codes and -y</h1>
+    <p>These rules apply to every command. Use them in scripts, cron jobs and ssh sessions.</p>
+
+    <h2 id="exit-codes">Exit codes</h2>
+    <table>
+      <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>0</code></td><td>Success</td></tr>
+        <tr><td><code>1</code></td><td>The command failed. Tether prints one <code>Error: ...</code> line on stderr</td></tr>
+        <tr><td><code>2</code></td><td>Usage error, such as an unknown command or option, or a missing argument</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="yes">-y and prompts</h2>
+    <ul>
+      <li><code>-y</code>, <code>--yes</code> answers every prompt: it confirms the action, and takes the default answer of each question</li>
+      <li>Without a terminal and without <code>-y</code>, a prompt fails with a message that names <code>-y</code></li>
+      <li><code>-y</code> never approves an Inbox item or trusts a key. Without a terminal, <code>packages approve</code> and <code>reject</code> need <code>--expect</code>, and <code>machines trust</code> needs <code>--fingerprint</code></li>
+      <li>The one exception: <code>tether packages approve --all -y</code> approves the packages it lists. It still leaves machine keys, malicious packages, packages whose record fails its signature, and packages without a version or tap to name</li>
+      <li><code>-y</code> does not pick an answer for a question that has no safe default. For example, it never picks a side of a conflict</li>
+    </ul>
+    <Code code={`tether -y upgrade
+tether packages approve npm:typescript --expect 5.6.3
+tether machines trust work-laptop --fingerprint SHA256:...`} />
+
+    <h2>Without a terminal</h2>
+    <p><code>tether sync</code> without a terminal, for example from cron or ssh, runs as the daemon does:</p>
+    <ul>
+      <li>It records conflicts for <code>tether resolve</code> and keeps those files out of the push</li>
+      <li>It holds new packages and machine keys in the Inbox</li>
+      <li>It defers casks that need a password to the next <code>tether sync</code> in a terminal</li>
+      <li>Git commands that reach the remote stop after 5 minutes. The next sync tries again</li>
+    </ul>
+
+    <h2 id="json">JSON output</h2>
+    <p><code>status</code>, <code>machines list</code>, <code>packages list</code> and <code>packages inbox</code> take <code>--json</code>. They print one JSON value on stdout. Messages go to stderr. The flag is experimental in 2.0: field names can still change.</p>
+
+    <h2>Colour</h2>
+    <p>Tether prints no colour codes when stdout is not a terminal, such as a pipe or a file, or when <code>NO_COLOR</code> is set.</p>
+
+    <h2 id="arguments">Machine arguments and package ids</h2>
+    <ul>
+      <li>A machine argument takes a machine id, or a hostname that names exactly one trusted machine or this machine. <code>machines trust</code> also takes the hostname of a new machine whose record a key signs. A name that matches no machine is an error</li>
+      <li>A package id is <code>manager:name</code>, such as <code>npm:typescript</code>. Managers: <code>brew_formulae</code> (or <code>brew</code>), <code>brew_casks</code> (or <code>cask</code>), <code>brew_taps</code>, <code>npm</code>, <code>pnpm</code>, <code>bun</code>, <code>gem</code>, <code>uv</code></li>
+    </ul>
+  </section>
+</DocsLayout>

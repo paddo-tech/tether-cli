@@ -1,0 +1,33 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+
+// The labels of Reason::label in src/packages/inbox.rs.
+const reasons = [
+  ['from another machine', 'No trusted machine record lists this package at this version, or packages.auto_install_from_trusted is off. Packages from 1.x machines wait with this reason', 'Trust the source machine, or approve the item'],
+  ['untrusted key', 'A validly signed record lists it, but this machine does not trust that key for that machine', 'Trust the machine with its fingerprint'],
+  ['untrusted tap', 'A tap outside the trusted taps, or a formula or cask from one', 'Approve the item, or add the tap to packages.brew.trusted_taps'],
+  ['age not checked', 'The manager cannot enforce the release-age limit, and the registry check failed', 'Wait for a later sync, or approve the item'],
+  ['too new', 'The manager cannot enforce the release-age limit, and the release is newer than the limit', 'Wait. The hold ends when the release is old enough'],
+  ['pinned too new', 'A trusted record names a release newer than the limit, so it failed to install here. The item holds the newest release older than the limit', 'Approve it to install that older release'],
+  ['malicious', 'OSV lists a MAL- advisory for this release', 'You cannot approve it. Reject it'],
+  ['malicious upgrade', 'OSV lists a MAL- advisory for the upgrade target. The installed version stays', 'You cannot approve it. A later clean release replaces the target'],
+  ['malicious releases', 'OSV lists a MAL- advisory for some release, and Tether could not find the release that would install', 'You can approve it after a warning'],
+  ['new machine key', 'A machine signs its record with a key this machine does not trust yet', 'Compare the fingerprint, then trust it'],
+  ['key changed', 'A trusted machine signs with a different key. The old key stays trusted until you approve the new one', 'Compare the fingerprint on that machine before you approve it'],
+  ['signature failed', 'The source machine is trusted, but its record fails its signature. Someone may have edited it in the repo', 'Run tether sync on that machine. Approval asks a second question'],
+  ['other OS version', 'The version that only machines on another OS list failed here. The item holds the release that suits this machine', 'Approve it to install exactly that release'],
+];
+---
+
+<DocsLayout title="Inbox reasons — Tether CLI" description="Every reason an item waits in the Tether Inbox, what it means and what to do.">
+  <section>
+    <p class="eyebrow">REFERENCE</p>
+    <h1>Inbox reasons</h1>
+    <p>Each item in the Inbox shows one or more of these reasons. <code>tether packages inbox</code>, the inbox review of <code>tether sync</code> and the dashboard Security tab use the same labels. See <a href="/docs/inbox">The Inbox</a>.</p>
+    <table>
+      <thead><tr><th>Reason</th><th>Meaning</th><th>What to do</th></tr></thead>
+      <tbody>{reasons.map(([label, meaning, action]) => <tr><td><code>{label}</code></td><td>{meaning}</td><td>{action}</td></tr>)}</tbody>
+    </table>
+    <p>Tether checks every held item again on each sync. When no reason is left, the item installs and leaves the Inbox.</p>
+  </section>
+</DocsLayout>

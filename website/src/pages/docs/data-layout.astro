@@ -1,0 +1,59 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Data layout — Tether CLI" description="The files Tether keeps in ~/.tether and in the sync repository.">
+  <section>
+    <p class="eyebrow">REFERENCE</p>
+    <h1>Data layout</h1>
+
+    <h2>On each machine</h2>
+    <p>Tether keeps its data in <code>~/.tether/</code>. Nothing in this folder syncs as a dotfile.</p>
+    <Code lang="text" label="~/.tether/" code={`~/.tether/
+├── config.toml              # Configuration (synced encrypted)
+├── config.base.toml         # Base of the next config merge (never synced)
+├── local.toml               # Settings for this machine only (never synced)
+├── state.json               # Sync state, including failed installs
+├── sync/                    # Personal sync repo
+├── teams/<name>/            # Team sync repos
+├── collabs/                 # Collab project configs
+├── backups/                 # File backups
+├── bin/tether               # macOS: the copy of Tether that launchd runs
+├── identity.pub             # Age public key (for team secrets)
+├── signing_key              # This machine's SSH signing key (mode 0600)
+├── trusted_keys             # Machine keys this machine trusts (never synced)
+├── record_generations.json  # Newest record accepted per key (never synced)
+├── machine.json             # This machine's last record (never synced)
+├── inbox.json               # The Inbox (never synced)
+├── inbox.lock               # Lock for Inbox and trust list changes
+├── conflicts.json           # Conflicts that wait for tether resolve
+├── run/                     # Empty working directory for package managers
+├── daemon.pid               # Daemon process id
+└── daemon.log               # Daemon log`} />
+    <ul>
+      <li><code>bin/tether</code>: on macOS, launchd runs this copy. The plist names the installed binary in <code>TETHER_DAEMON_SOURCE</code>. When that binary changes, the daemon copies it again and restarts. macOS keeps the App Management permission per program path, so the fixed path keeps one permission across upgrades. <code>tether daemon uninstall</code> removes it</li>
+      <li><code>config.base.toml</code>: the synced <code>config.toml</code> of the last merge or export. A sync merges against it. See <a href="/docs/config-merge">Config merge</a></li>
+      <li><code>signing_key</code>: anyone with this file can sign records as this machine. Protect it like an SSH key</li>
+    </ul>
+
+    <h2>In the sync repo</h2>
+    <Code lang="text" label="sync/" code={`sync/
+├── encryption.key.age      # Encryption key, encrypted with your passphrase
+├── profiles/<name>/        # Dotfiles of each profile (encrypted)
+├── dotfiles/               # Dotfiles in the flat layout
+├── configs/                # App configs, including the Tether config
+├── projects/               # Project configs and secrets
+├── manifests/              # Package names per manager, and the Brewfile
+├── packages/profiles.toml  # The profiles of each package
+└── machines/               # Machine records (<id>.json) and signatures (<id>.json.sig)`} />
+    <ul>
+      <li>Manifests list package names only, one per line, as 1.x reads them. Versions come from the signed machine records</li>
+      <li><code>packages/profiles.toml</code> maps <code>"manager:name"</code> to profile names. 1.x does not read it. See <a href="/docs/profiles#package-profiles">Packages per profile</a></li>
+      <li>Each record in <code>machines/</code> lists the machine's packages, versions, profile and OS. Its signature decides trust. See <a href="/docs/trust">Machine trust</a></li>
+    </ul>
+
+    <h2>Files that earlier versions wrote</h2>
+    <p>Earlier versions wrote a plaintext copy of the synced config to <code>~/tether/config.toml</code> once, on the first sync of a new machine. Tether no longer writes it. You can delete it.</p>
+  </section>
+</DocsLayout>
