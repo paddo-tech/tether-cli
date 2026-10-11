@@ -404,8 +404,7 @@ fn record_failure(
     error: &str,
 ) {
     let key = InstallFailure::key(manager, name);
-    // brew prints warnings, such as untrusted taps, before the line that names the error
-    let error: String = error_line(error).chars().take(300).collect();
+    let error: String = from_error_line(error).chars().take(300).collect();
     if failures
         .get(&key)
         .is_none_or(|f| f.version.as_deref() != version)
@@ -1338,6 +1337,20 @@ fn refused_version(error: &str) -> bool {
 
 /// The line of a manager's error that says what failed. Managers print progress first,
 /// such as bun's "Resolving dependencies".
+/// `error` from its first line that names an error. Warnings that brew prints before it, such
+/// as untrusted taps, would fill the stored text; the lines after it hold the cause.
+fn from_error_line(error: &str) -> &str {
+    let error = error.trim();
+    let mut start = 0;
+    for line in error.split_inclusive('\n') {
+        if line.to_ascii_lowercase().contains("error") {
+            return &error[start..];
+        }
+        start += line.len();
+    }
+    error
+}
+
 fn error_line(error: &str) -> &str {
     let lines: Vec<&str> = error
         .lines()
@@ -2884,6 +2897,13 @@ mod tests {
         assert_eq!(
             failures["brew_casks:app"].error,
             "Error: app: Cask 'app' has been disabled"
+        );
+        // The cause after a generic error header stays
+        let stderr = "gem command failed: ERROR:  Error installing x:\n\tx requires Ruby >= 3.2\n";
+        record_failure(&mut failures, "gem", "x", None, stderr);
+        assert_eq!(
+            failures["gem:x"].error,
+            "gem command failed: ERROR:  Error installing x:\n\tx requires Ruby >= 3.2"
         );
     }
 

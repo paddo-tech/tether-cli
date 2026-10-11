@@ -86,9 +86,10 @@ impl PackageManager for BunManager {
             Ok(out) => out,
             Err(err) => {
                 let message = err.to_string();
-                if message.contains("No package.json was found") {
-                    // Bun hasn't created the global install metadata yet.
-                    // Treat this as "no global packages" instead of failing the sync.
+                // Without the global package.json or lockfile, bun lists no global packages
+                if message.contains("No package.json was found")
+                    || message.contains("missing lockfile")
+                {
                     return Ok(Vec::new());
                 }
                 return Err(err);
@@ -217,8 +218,9 @@ impl PackageManager for BunManager {
             .await?;
         if !output.status.success() {
             let message = super::command_error_message(&output);
-            // bun has no global lockfile until a global package is installed
-            if message.contains("missing lockfile") {
+            // bun has no global lockfile until a global package is installed. Packages it lists
+            // without a lockfile cannot be checked, so that stays an error
+            if message.contains("missing lockfile") && self.list_installed().await?.is_empty() {
                 return Ok(Vec::new());
             }
             anyhow::bail!("bun outdated failed: {}", message);
