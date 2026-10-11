@@ -385,7 +385,11 @@ pub fn expand_from_sync_repo(pattern: &str, dotfiles_dir: &Path) -> Vec<String> 
                 })
                 .collect();
             if expanded.is_empty() {
-                log::warn!("Glob pattern '{}' matched no files in sync repo", pattern);
+                // A profile can list a pattern that only other machines have files for
+                let message = format!("Glob pattern '{}' matched no files in sync repo", pattern);
+                if crate::packages::policy::first_warning(&message) {
+                    log::warn!("{}", message);
+                }
                 vec![]
             } else {
                 expanded
