@@ -25,7 +25,7 @@ env:
 
 jobs:
   build:
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: ushr-mac
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
