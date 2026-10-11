@@ -174,6 +174,11 @@ pub async fn import_packages(
     };
     let scope = Membership::load(config, sync_path, machine_state, &table)?;
     notify_excluded(&scope, &mut state.profile_notice_shown);
+    // A package that left this machine's profile never retries, so its failure would stay
+    state.install_failures.retain(|key, _| {
+        key.split_once(':')
+            .is_none_or(|(m, n)| scope.includes(m, n))
+    });
     let mut gated = Gated::default();
 
     // Homebrew - special handling for formulae/casks/taps
