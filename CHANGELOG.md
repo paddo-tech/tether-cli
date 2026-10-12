@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.9] - 2026-10-12
+
+### Changed
+
+- `tether sync --force` is removed. The sync ignored it. A script that passes it now gets a usage error and exit code 2
+
+### Fixed
+
+- The daily upgrade now upgrades casks one at a time. A cask that needs a password, such as one that runs an installer with sudo, can not upgrade without a terminal. Before, it also stopped the other casks of the same run. Now it gets a warning to run `tether upgrade` in a terminal, and the other casks upgrade
+- A formula that Homebrew moved to a cask, such as `azure-cli`, no longer stops the formula upgrade check. Homebrew names the new tap in its error, and Tether now matches that name by its short name
+- A failed install of a package that left this machine's profile is dropped. Such a package never retries, so its failure stayed for good
+- `security.scan_secrets = false` now turns off the secret scan before a team push, and a line that holds a pattern from `tether ignore secrets add` is no longer a finding. Before, both settings had no effect. A pattern needs at least 4 characters, because a shorter one matches nearly every line. Personal dotfiles are not scanned: they reach Git only encrypted
+
 ## [2.0.0-beta.8] - 2026-10-11
 
 ### Fixed
