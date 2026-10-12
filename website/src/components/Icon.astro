@@ -1,7 +1,6 @@
 ---
-import { iconPaths } from './icons';
-interface Props { name: 'link' | 'arrow' | 'sun' | 'moon' | 'git' | 'lock' | 'laptop' | 'monitor' | 'check' | 'box' | 'copy' | 'key' | 'file' | 'users' | 'shield'; size?: number; }
+import { iconPaths, type IconName } from './icons';
+interface Props { name: IconName; size?: number; }
 const { name, size = 24 } = Astro.props;
-const paths = iconPaths;
 ---
-<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>
+<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={iconPaths[name]} /></svg>

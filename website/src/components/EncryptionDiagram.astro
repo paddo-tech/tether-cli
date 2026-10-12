@@ -12,7 +12,7 @@ const loop = { dur: DUR, repeatCount: 'indefinite' };
 
 <figure class="diagram" aria-label="A dotfile is encrypted on this machine with the local key, the dotfile enters the Git repo only as ciphertext, and another machine decrypts it with its own copy of the key">
   <div class="diagram-label"><span>ENCRYPTED BEFORE GIT</span><span><i class="status-dot"></i> AES-256-GCM</span></div>
-  <div class="sd-scroll"><svg viewBox="0 0 880 320" role="presentation" data-end="7">
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" aria-hidden="true" data-end="7">
     {[20, 540].map((x, i) => (
       <g>
         <rect class="sd-zone" x={x} y="40" width="320" height="250" rx="16" />

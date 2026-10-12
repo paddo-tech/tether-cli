@@ -17,7 +17,7 @@ const SKIP = 0.5;
 
 <figure class="diagram" aria-label="Each package lists its profiles. A dev package reaches the dev machines and skips the server. A package shared with both profiles reaches all three machines.">
   <div class="diagram-label"><span>PACKAGES PER PROFILE</span><span><i class="status-dot"></i> Machines on 2.0</span></div>
-  <div class="sd-scroll"><svg viewBox="0 0 880 320" role="presentation" data-end="9.4">
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" aria-hidden="true" data-end="9.4">
     <g class="sd-lines">{machines.map(m => <path d={m.path} />)}</g>
     <g class="sd-flow">{machines.map(m => <path d={m.path} />)}</g>
 

@@ -16,7 +16,7 @@ import DaemonCopyDiagram from '../../components/DaemonCopyDiagram.astro';
     <h2 id="before">Before you start</h2>
     <ul>
       <li>You can upgrade one machine at a time. A sync repo can hold 1.x and 2.0 machines together. Machines on 1.11.10, 1.12.0, 1.13.1 and 1.13.2 read the files that 2.0 writes</li>
-      <li>Patch each machine that stays on 1.x for a while to 1.13.2 first. Earlier 1.x builds push their old copy of <code>config.toml</code> back after they apply a synced one. That reverts config changes from other machines. See <a href="#machines-on-1x">Machines on 1.x</a></li>
+      <li>Patch each machine that stays on 1.x for a while to 1.13.2 first. Earlier 1.x builds push their old copy of <code>config.toml</code> back after they apply a synced one. That reverts config changes from other machines. Homebrew now installs 2.0, so install 1.13.2 from its <a href="https://github.com/paddo-tech/tether-cli/releases/tag/v1.13.2">GitHub release</a> (macOS), or build it: <code>cargo install --locked --git https://github.com/paddo-tech/tether-cli --tag v1.13.2</code>. See <a href="#machines-on-1x">Machines on 1.x</a></li>
       <li>Plan to make config changes, such as profiles, after the upgrade. See <a href="/docs/config-merge">Config merge</a></li>
     </ul>
 
@@ -25,6 +25,7 @@ import DaemonCopyDiagram from '../../components/DaemonCopyDiagram.astro';
     <h3>1. Upgrade the binary</h3>
     <Code code="brew upgrade tether-cli" />
     <p>If you installed a release download or built from source, install the new version the same way. See <a href="/docs/install">Install</a>.</p>
+    <p>On Linux, run <code>tether daemon install</code> again after the upgrade. The systemd unit names the path of the binary that installed it, and Homebrew removes the old version's path.</p>
 
     <h3>2. Sync once in a terminal</h3>
     <Code code="tether sync" />

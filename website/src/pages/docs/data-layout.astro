@@ -20,7 +20,11 @@ import Code from '../../components/Code.astro';
 ├── collabs/                 # Collab project configs
 ├── backups/                 # File backups
 ├── bin/tether               # macOS: the copy of Tether that launchd runs
+├── identity.age             # Age identity, encrypted with your passphrase (for team secrets)
 ├── identity.pub             # Age public key (for team secrets)
+├── identity.cache           # Unlocked age identity (tether identity lock clears it)
+├── key.cache                # Unlocked encryption key (tether lock clears it)
+├── ignore                   # Patterns the secret scanner skips
 ├── signing_key              # This machine's SSH signing key (mode 0600)
 ├── trusted_keys             # Machine keys this machine trusts (never synced)
 ├── record_generations.json  # Newest record accepted per key (never synced)

@@ -21,7 +21,7 @@ const gates: { x: number; label: string; glyph: IconName; a: number; b: [number,
 
 <figure class="diagram" aria-label="A synced package passes four checks and installs. A package outside this profile is skipped. A package that fails a later check waits in the Inbox.">
   <div class="diagram-label"><span>BEFORE A SYNCED PACKAGE INSTALLS</span><span><i class="status-dot"></i> On every sync</span></div>
-  <div class="sd-scroll"><svg viewBox="0 0 880 320" role="presentation" data-end="9.5">
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" aria-hidden="true" data-end="9.5">
     <g class="sd-lines">
       <path d={main} />{branches.map(d => <path d={d} />)}
     </g>

@@ -58,9 +58,10 @@ ls ~/.tether/sync/encryption.key.age  # the encrypted key exists?`} />
     <Code code="tether ignore secrets add 'MY_SAFE_PATTERN='" />
 
     <h2>Start over on one machine</h2>
-    <Code code={`tether daemon stop
+    <Code code={`tether daemon uninstall
 rm -rf ~/.tether
 tether init`} />
-    <p>This deletes the machine's id, signing key and trust list. Tether makes a new id and a new key. Your other machines see a new machine and must trust it. Remove the old record with <code>tether machines remove &lt;old-id&gt;</code>. This machine must trust your other machines again.</p>
+    <p>Uninstall the daemon first. launchd and systemd restart a stopped daemon, and it would then run while you delete its files.</p>
+    <p>This deletes the machine's id, signing key, trust list, backups and age identity. Without the age identity, this machine cannot read team secrets until a teammate adds its new public key. Tether makes a new id and a new key. Your other machines see a new machine and must trust it. Remove the old record with <code>tether machines remove &lt;old-id&gt;</code>. This machine must trust your other machines again.</p>
   </section>
 </DocsLayout>

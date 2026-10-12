@@ -35,7 +35,7 @@ const arcs = [
 
 <figure class="diagram" aria-label="A fleet moves from 1.x to 2.0 one machine at a time. Upgraded machines sign their records and trust each other by fingerprint. Packages from a 1.x machine wait in the Inbox. Approve them one by one, or upgrade and trust that machine.">
   <div class="diagram-label"><span>ONE MACHINE AT A TIME</span><span><i class="status-dot"></i> 1.x and 2.0 in one repo</span></div>
-  <div class="sd-scroll"><svg viewBox="0 10 880 350" role="presentation" data-end="11.6">
+  <div class="sd-scroll"><svg viewBox="0 10 880 350" aria-hidden="true" data-end="11.6">
     <g class="sd-lines">{machines.map(m => <path d={m.down} />)}{arcs.map(a => <path d={a.d} />)}</g>
     <g class="sd-flow">{machines.map(m => <path d={m.down} />)}</g>
     {arcs.map(a => (
