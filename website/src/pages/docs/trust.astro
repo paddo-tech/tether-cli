@@ -12,7 +12,7 @@ import TrustDiagram from '../../components/TrustDiagram.astro';
     <TrustDiagram />
 
     <h2>Signed machine records</h2>
-    <p>Each machine has an SSH signing key in <code>~/.tether/signing_key</code>. Tether makes it on <code>tether init</code>, or on the first sync after an upgrade from 1.x. Each sync signs this machine's record, <code>machines/&lt;id&gt;.json</code>, in <code>machines/&lt;id&gt;.json.sig</code>. The record lists the machine's packages and versions, its profile and its OS.</p>
+    <p>Each machine has an SSH signing key in <code>~/.tether/signing_key</code>. Tether makes it on <code>tether init</code>, or on the first sync after an upgrade from 1.x. Tether signs this machine's record, <code>machines/&lt;id&gt;.json</code>, in <code>machines/&lt;id&gt;.json.sig</code>. A sync signs it again when its content changed, or when the signed copy is 60 minutes old. The record lists the machine's packages and versions, its profile and its OS.</p>
     <p>Tether also signs its commits in the personal sync repo. Commit signatures are an audit trail only. They do not grant trust.</p>
 
     <h2>The trust list</h2>

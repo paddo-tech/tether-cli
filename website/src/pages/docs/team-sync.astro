@@ -18,7 +18,6 @@ tether team add git@github.com:org/team-dotfiles.git`} />
     <ul>
       <li>Tether clones the team repository and links its config folders, such as <code>.claude</code> or <code>.config</code></li>
       <li>Tether checks whether you can push to the team repository. With write access, you can push team changes. Without it, the team sync is read-only and you receive updates only</li>
-      <li>Turn on the <code>team_dotfiles</code> feature to sync team dotfiles. See <a href="/docs/configuration#feature-toggles">Feature toggles</a></li>
     </ul>
 
     <h2>Team secrets</h2>
@@ -55,7 +54,7 @@ tether team files local-patterns   # files that never sync`} />
 
     <h2>Manage teams</h2>
     <Code code={`tether team list          # all teams
-tether team switch other   # switch the active team
+tether team switch other   # turn one team on or off; other teams stay as they are
 tether team status
 tether team disable        # stop team sync, keep the team
 tether team remove         # remove the team`} />

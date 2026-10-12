@@ -28,17 +28,17 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
     <h2 id="release-age">Release age</h2>
     <p><code>packages.min_release_age_days</code> sets the limit. The default is 7 days. 0 turns it off. To set another limit on one machine only, use <a href="/docs/configuration#local-config"><code>~/.tether/local.toml</code></a>.</p>
     <ul>
-      <li>npm 11.10 and later, pnpm 10.16 and later, bun 1.3 and later, and uv enforce the limit themselves. Tether passes it to them</li>
+      <li>npm 11.10 and later, pnpm 10.16 and later except the 12.0.0 prereleases, bun 1.3 and later, and uv enforce the limit themselves. Tether passes it to them</li>
       <li>gem, and older npm, pnpm and bun, cannot enforce it. For these, Tether checks the publish time in the registry itself. It installs the exact release it checked: the newest release older than the limit, or the version a trusted record lists when that version is old enough</li>
       <li>Tether holds such a package only when the release is too new ("too new") or the registry check fails ("age not checked"). A "too new" hold ends when the release is old enough</li>
       <li>When a trusted record names a release that is newer than the limit, and the manager rejects it, Tether holds the newest release older than the limit as "pinned too new"</li>
-      <li>Tether asks the registry about a package once per day</li>
+      <li>A running process, such as the daemon, asks the registry about a package once per day. Each CLI command asks again</li>
       <li>The daemon does not auto-upgrade a manager that cannot enforce the limit. <code>tether upgrade</code> asks first</li>
     </ul>
 
     <h2 id="osv">OSV checks</h2>
-    <p>Tether finds the release that would install: the newest stable release older than the release-age limit. It checks that release against OSV and installs it pinned. So the release that OSV checked is the release that installs.</p>
-    <p>Sometimes Tether cannot find that release, for example from a registry that needs a login. OSV then checks all releases, and only <code>MAL-</code> advisories count. The package waits in the Inbox as "malicious releases". Unlike a malicious release that would install, you can approve it, after a warning.</p>
+    <p>Tether finds the release that would install: the newest version that a trusted record lists. Without one, it is the newest stable release older than the release-age limit. It checks that release against OSV and installs it pinned. So the release that OSV checked is the release that installs.</p>
+    <p>Sometimes Tether cannot find that release, for example from a registry that needs a login. OSV then checks all releases, and only <code>MAL-</code> advisories count. When any release has one, the package waits in the Inbox as "malicious releases". Unlike a malicious release that would install, you can approve it, after a warning.</p>
     <p>A network failure does not block a sync. The dashboard and <code>tether packages approve</code> ask before they install without an OSV result. Tether uses <code>curl</code> with a 10-second limit.</p>
     <p>Upgrades get the same check. An upgrade target with a <code>MAL-</code> advisory waits as "malicious upgrade", and the installed version stays.</p>
 
@@ -54,7 +54,7 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
       <li>Tether finds the tap of a short name, such as <code>bun</code>, before it installs it</li>
       <li>An approved formula or cask installs by its qualified name, such as <code>homebrew/core/wget</code>. Approving a formula from an untrusted tap does not trust the tap</li>
       <li>Homebrew 7 keeps its own trust store. Before each Homebrew install, Tether copies its trusted taps, the taps approved in the Inbox, and the formulae and casks approved from an untrusted tap there, with <code>brew trust</code></li>
-      <li>Tether never removes entries from Homebrew's trust store. A tap that Tether does not trust stays untrusted in Homebrew</li>
+      <li>Tether only adds entries to Homebrew's trust store. It never removes them. So Homebrew can still trust a tap that Tether does not trust</li>
       <li>Upgrades include only outdated packages from trusted taps. Tether updates trusted taps with <code>git pull --ff-only</code>. It does not run <code>brew update</code>. Run it yourself to update Homebrew</li>
     </ul>
 

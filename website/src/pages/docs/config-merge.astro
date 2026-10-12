@@ -11,7 +11,7 @@ import ConfigMergeDiagram from '../../components/ConfigMergeDiagram.astro';
     <ConfigMergeDiagram />
 
     <h2>Three-way merge</h2>
-    <p>Tether compares settings, not bytes. It merges against the copy of the last merge or export, which it keeps in <code>~/.tether/config.base.toml</code>. That file never syncs.</p>
+    <p>Tether compares settings, not bytes. It merges against a base: the synced copy of the last merge, or of the last export once the remote branch holds it. Tether keeps the base in <code>~/.tether/config.base.toml</code>. That file never syncs.</p>
     <ul>
       <li>Edits to different settings on two machines both stay</li>
       <li>Lists without an order, such as <code>dotfiles.files</code>, <code>dotfiles.dirs</code> and <code>packages.allow_scripts</code>, keep the additions of both machines. Tether writes them sorted</li>

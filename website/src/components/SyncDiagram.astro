@@ -39,7 +39,7 @@ const toBottom = 'M480 165C585 165 585 245 690 245';
       <rect x="400" y="125" width="80" height="80" rx="18" />
       <g class="sd-icon-on" set:html={icon('git', 440, 165, 30)} />
       <text class="sd-title" x="440" y="232">Your Git repo</text>
-      <text class="sd-sub" x="440" y="251">ciphertext only</text>
+      <text class="sd-sub" x="440" y="251">encrypted dotfiles</text>
       <rect class="sd-ring" x="394" y="119" width="92" height="92" rx="22">
         <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.4;0.44;0.54;1" />
       </rect>
@@ -84,7 +84,7 @@ const toBottom = 'M480 165C585 165 585 245 690 245';
       </g>
     ))}
   </svg></div>
-  <figcaption class="diagram-caption"><span>Plaintext never leaves the machine. Each machine checks a package before it installs it.</span><span>↔</span></figcaption>
+  <figcaption class="diagram-caption"><span>Dotfiles leave the machine encrypted. Each machine checks a package before it installs it.</span><span>↔</span></figcaption>
 </figure>
 
 <script>import '../scripts/diagrams';</script>

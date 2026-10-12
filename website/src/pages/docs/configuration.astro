@@ -5,7 +5,7 @@ import Code from '../../components/Code.astro';
 const keys = [
   ['backend.url', 'Git repository URL of the personal sync repo'],
   ['security.encrypt_dotfiles', 'Encrypt dotfiles with AES-256-GCM. Default true'],
-  ['security.scan_secrets', 'Scan team dotfiles for secrets before a team push. Default true'],
+  ['security.scan_secrets', 'Scan team dotfiles for secrets. See Secret detection for the commands that scan. Default true'],
   ['dotfiles.files', 'Dotfiles to sync'],
   ['dotfiles.dirs', 'Folders to sync'],
   ['profiles.<name>.dotfiles', 'Dotfiles of a profile. An entry can be a table with path and on_conflict'],
@@ -28,9 +28,7 @@ const keys = [
 const features = [
   ['personal_dotfiles', 'true', 'Sync personal dotfiles'],
   ['personal_packages', 'true', 'Sync personal package manifests'],
-  ['team_dotfiles', 'false', 'Sync team dotfiles. Needs a team'],
   ['collab_secrets', 'false', 'Share project secrets with GitHub collaborators'],
-  ['team_layering', 'false', 'Merge team and personal dotfiles'],
 ];
 ---
 
@@ -59,7 +57,7 @@ dirs = [".config/nvim"]
 [packages]
 min_release_age_days = 7          # 0 turns the limit off
 allow_scripts = ["esbuild"]       # packages that may run install scripts
-auto_install_from_trusted = true  # false holds every synced package
+auto_install_from_trusted = true  # false holds other machines' packages until you approve them
 
 [packages.brew]
 enabled = true
@@ -74,7 +72,7 @@ enabled = true`} />
       <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
       <tbody>{keys.map(([key, meaning]) => <tr><td><code>{key}</code></td><td>{meaning}</td></tr>)}</tbody>
     </table>
-    <p>Tether also writes keys that you do not edit: <code>config_version</code>, <code>config_writer</code>, and <code>sync_versions = false</code> for each manager, which 1.x builds need.</p>
+    <p>Tether also writes keys that you do not edit: <code>config_version</code>, <code>config_writer</code>, and <code>sync_versions</code> for each manager, which 1.x builds need. A new config gets <code>sync_versions = false</code>, and an existing value stays.</p>
 
     <h2 id="local-config">Settings for one machine</h2>
     <p><code>~/.tether/local.toml</code> holds settings for this machine only. Tether never syncs it. Its values override <code>config.toml</code> on this machine. It takes these keys:</p>
@@ -95,7 +93,6 @@ tether config features disable <FEATURE>`} />
     </table>
     <p>Example, team sync only:</p>
     <Code code={`tether config features disable personal_dotfiles
-tether config features disable personal_packages
-tether config features enable team_dotfiles`} />
+tether config features disable personal_packages`} />
   </section>
 </DocsLayout>

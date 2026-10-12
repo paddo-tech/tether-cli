@@ -77,7 +77,7 @@ tether packages approve --all --from <machine>   # after you review the list`} /
     <p><code>tether status</code>, <code>tether machines list</code> and the dashboard Machines tab mark each machine that still runs 1.x as "on 1.x".</p>
     <ul>
       <li>A machine on 1.x does not run the new checks. It still installs every synced package without them</li>
-      <li>Its record has no signature. Its packages wait in the Inbox of 2.0 machines as "from another machine" until it upgrades and you trust it</li>
+      <li>Its record has no signature. Its packages wait in the Inbox of 2.0 machines as "from another machine". Approve them one by one, or upgrade that machine and trust it</li>
       <li>It ignores profiles. It installs the packages of every profile</li>
       <li>A 1.x machine before 1.13.2 pushes its old copy of <code>config.toml</code> again after it applies a synced one. That copy reverts config changes made since, and 2.0 cannot tell it from a real change. Patch or upgrade the 1.x machines, then make the change again</li>
       <li>When a synced config changes this machine's profile, a 2.0 sync warns, names both profiles, and names the command that restores it</li>
@@ -88,7 +88,7 @@ tether packages approve --all --from <machine>   # after you review the list`} /
       <li>A synced package installs on its own only when a trusted machine record lists it. A line in a manifest grants no trust</li>
       <li>A machine installs only the packages of its own profile. Nothing is uninstalled. The first sync counts the packages that no longer come to this machine, and names the commands that list and share them</li>
       <li>Packages from untrusted Homebrew taps now wait in the Inbox. Before, Tether skipped them with a warning</li>
-      <li>For gem, and for npm before 11.10, pnpm before 10.16 and bun before 1.3, Tether checks the release age itself in the registry. It installs the release it checked. It holds a package only when the release is too new or the registry check fails</li>
+      <li>For gem, and for npm before 11.10, pnpm before 10.16 or at a 12.0.0 prerelease, and bun before 1.3, Tether checks the release age itself in the registry. It installs the release it checked. It holds a package only when the release is too new or the registry check fails</li>
       <li>Tether checks npm, pnpm, bun, uv and gem packages against OSV before it installs or upgrades them</li>
       <li>npm, pnpm and bun install with install scripts off</li>
       <li>Tether no longer runs <code>brew update</code>. Run it yourself to update Homebrew</li>
@@ -96,10 +96,10 @@ tether packages approve --all --from <machine>   # after you review the list`} /
       <li><code>tether packages</code> now lists packages. <code>tether packages uninstall</code> replaces <code>remove</code>, which stays as an alias</li>
       <li><code>tether ignore secrets</code> and <code>tether ignore files</code> replace the old <code>tether ignore</code> forms, which still work</li>
       <li><code>tether machines rename &lt;NEW&gt;</code> renames only the machine it runs on</li>
-      <li><code>-y</code> answers every prompt. It does not approve Inbox items or trust keys. See <a href="/docs/scripting">Exit codes and -y</a></li>
-      <li>Every failed command exits with status 1 and prints one <code>Error:</code> line</li>
+      <li><code>-y</code> confirms prompts and takes their defaults. It does not trust keys. It approves Inbox items only in <code>tether packages approve --all -y</code>. See <a href="/docs/scripting">Exit codes and -y</a></li>
+      <li>A failed command exits with status 1 and prints one <code>Error:</code> line. A usage error, such as an unknown flag, exits with status 2</li>
       <li>A sync merges <code>config.toml</code> three ways, so edits from two machines both stay. See <a href="/docs/config-merge">Config merge</a></li>
-      <li>The Config tab no longer shows the <code>sync_versions</code> settings. Tether still writes them as <code>false</code>, because 1.x builds need them to read the synced config</li>
+      <li>The Config tab no longer shows the <code>sync_versions</code> settings. Tether still writes them, because 1.x builds need them to read the synced config. A new config gets <code>false</code>, and an existing value stays</li>
     </ul>
   </section>
 </DocsLayout>

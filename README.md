@@ -12,7 +12,7 @@
 
 Tether syncs your shell configs, such as `.zshrc` and `.gitconfig`, and your global Homebrew, npm, pnpm, bun, gem and uv packages. It encrypts dotfiles with AES-256-GCM before they reach Git. A background daemon syncs every 5 minutes.
 
-Each machine signs a record of the packages it installed. A synced package installs on another machine only when that machine trusts the signing machine, and the package passes the checks: a release-age limit and an OSV malware check for npm, pnpm, bun, uv and gem, and a tap allowlist for Homebrew. Other packages wait in an Inbox for your approval.
+Each machine signs a record of the packages it installed. A synced package installs on another machine only when that machine trusts the signing machine, and the package passes the checks: a release-age limit and an OSV malware check for npm, pnpm, bun, uv and gem, and a tap allowlist for Homebrew. Other packages for the machine's profile wait in an Inbox. You can approve them, unless OSV lists them as malware.
 
 ## Install
 

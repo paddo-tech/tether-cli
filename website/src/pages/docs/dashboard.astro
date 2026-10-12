@@ -99,7 +99,7 @@ const keyTables = [
       <thead><tr><th>Tab</th><th>Key</th><th>Shows</th></tr></thead>
       <tbody>{tabs.map(([tab, key, shows]) => <tr><td>{tab}</td><td><code>{key}</code></td><td>{shows}</td></tr>)}</tbody>
     </table>
-    <p>A machine is online when its record is at most 90 minutes old. An idle machine updates its record once an hour. After 24 hours without an update, the card shows the machine as stale. A machine that still runs 1.x shows "on 1.x".</p>
+    <p>A machine is online when its record is at most 90 minutes old. A running daemon saves an unchanged record once an hour. A record from 90 minutes to 24 hours old shows the machine as idle. After 24 hours without an update, the card shows the machine as stale. A machine that still runs 1.x shows "on 1.x".</p>
     <p>The header shows this machine, its profile, the daemon state, and a spinner while a sync runs. When items wait in the Inbox, the header shows <code>⚑ Inbox &lt;count&gt;</code>. The badge is red when an item is malicious.</p>
 
     <h2 id="keys">Keys</h2>
@@ -122,7 +122,7 @@ const keyTables = [
     <h2>Questions</h2>
     <p>These actions ask first: restore, rollback, uninstall, remove, reject, trust, untrust, approve all, stop the daemon, and an approval that needs a second look, such as a machine key, a failed signature, or a package that OSV could not check.</p>
     <ul>
-      <li>A question ignores keys for 0.4 seconds after it opens. Until then, it shows dim buttons with a countdown. A key that you typed for another screen cannot answer it</li>
+      <li>A question ignores <code>y</code> for 0.4 seconds after it opens. Until then, it shows dim buttons with a countdown. A <code>y</code> that you typed for another screen cannot accept it. Cancel and scroll keys work at once</li>
       <li>After that, only <code>y</code> accepts</li>
       <li><code>n</code>, <code>Esc</code> and <code>Enter</code> cancel. A click on the tab under the question does not accept it</li>
     </ul>

@@ -14,17 +14,17 @@ import SyncDiagram from '../../components/SyncDiagram.astro';
     <ol>
       <li>The daemon starts a sync every 5 minutes. <code>tether sync</code> starts one at once</li>
       <li>Tether pulls the sync repo and merges the synced <code>config.toml</code> into the local one. See <a href="/docs/config-merge">Config merge</a></li>
-      <li>Tether syncs the dotfiles. It scans them for credentials, encrypts local changes, and applies changes from other machines. A file that changed on both sides is a <a href="/docs/conflicts">conflict</a></li>
+      <li>Tether syncs the dotfiles. It encrypts local changes and applies changes from other machines. A file that changed on both sides is a <a href="/docs/conflicts">conflict</a></li>
       <li>Tether syncs project configs</li>
       <li>Tether verifies the signed records of the other machines against its trust list. See <a href="/docs/trust">Machine trust</a></li>
       <li>Tether checks each synced package that this machine does not have. It installs it, or holds it in the <a href="/docs/inbox">Inbox</a></li>
-      <li>Tether signs this machine's record, which lists its packages and versions</li>
+      <li>Tether signs this machine's record again when its content changed, or when the signed copy is 60 minutes old. The record lists the packages and versions of this machine</li>
       <li>Tether commits and pushes</li>
     </ol>
 
     <h2>What syncs</h2>
     <ul>
-      <li><strong>Dotfiles</strong>, such as <code>.zshrc</code> and <code>.gitconfig</code>, and folders that you add. Tether stores them encrypted in Git. Locally they stay plaintext, so your shell reads them</li>
+      <li><strong>Dotfiles</strong>, such as <code>.zshrc</code> and <code>.gitconfig</code>, and folders that you add. Tether stores them encrypted in Git, unless you set <code>security.encrypt_dotfiles = false</code>. Locally they stay plaintext, so your shell reads them</li>
       <li><strong>Package lists</strong> for Homebrew, npm, pnpm, bun, gem and uv. They stay readable in Git. See <a href="/docs/packages">Packages and versions</a></li>
       <li><strong>Project configs</strong>, such as <code>.env</code> files, matched by the Git remote of the project</li>
       <li><strong>Machine records</strong>: one signed file per machine, with its packages, versions, profile and OS</li>

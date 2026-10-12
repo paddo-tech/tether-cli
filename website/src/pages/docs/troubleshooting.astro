@@ -27,7 +27,7 @@ tether machines list                    # is the source machine trusted?`} />
       <li>If the source machine is not trusted, see <a href="/docs/trust">Machine trust</a></li>
       <li>For each reason in the Inbox, see <a href="/docs/inbox-reasons">Inbox reasons</a></li>
       <li>A package that failed to install waits 24 hours before Tether tries it again. See <a href="/docs/failed-installs">Failed installs</a></li>
-      <li>A package from a 1.x machine waits until that machine upgrades and you trust it</li>
+      <li>A package from a 1.x machine waits until you approve it, or until that machine upgrades and you trust it</li>
     </ul>
 
     <h2>"Record for &lt;id&gt; fails its signature"</h2>
@@ -53,8 +53,8 @@ tether machines list                    # is the source machine trusted?`} />
     <Code code={`tether unlock                         # enter your passphrase
 ls ~/.tether/sync/encryption.key.age  # the encrypted key exists?`} />
 
-    <h2>"Secret detected" blocks a sync</h2>
-    <p>Remove the secret from the file, or add an ignore pattern for a false positive:</p>
+    <h2>"Team push blocked" stops a sync</h2>
+    <p><code>tether sync</code> stops with "Team push blocked: &lt;file&gt; contains &lt;n&gt; secret(s)". The daemon logs the same line. Remove the secret from the file, or add an ignore pattern for a false positive:</p>
     <Code code="tether ignore secrets add 'MY_SAFE_PATTERN='" />
 
     <h2>Start over on one machine</h2>

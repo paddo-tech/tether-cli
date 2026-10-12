@@ -29,10 +29,10 @@ tether machines profile edit work`} />
     <p>Each package belongs to one or more profiles. A machine installs a synced package only when its own profile is one of them, and a trusted record lists the package. So a server does not get the desktop apps of your laptops.</p>
     <PackageProfilesDiagram />
     <ul>
-      <li>By default, a package belongs to the profile of this machine and the profiles of the trusted machines whose signed records list it</li>
+      <li>By default, a package belongs to the profiles of the machines whose trusted, signed records list it. This machine's own record counts too</li>
       <li><code>tether packages share &lt;ID&gt; --to &lt;PROFILES&gt;</code> adds profiles. Machines in those profiles then install the package</li>
       <li><code>tether packages unshare &lt;ID&gt; --from &lt;PROFILES&gt;</code> takes profiles off. Nothing is uninstalled. Machines keep any copy they have</li>
-      <li><code>tether packages uninstall &lt;ID&gt;</code> uninstalls the package on this machine, then takes this machine's profile off it. Other profiles keep it. Other machines in this profile stop new installs of it, but keep any copy they have. If the uninstall fails, the profiles do not change</li>
+      <li><code>tether packages uninstall &lt;ID&gt;</code> uninstalls the package on this machine. When other profiles share the package, it then takes this machine's profile off it. Other profiles keep it. When this profile is the only one, the profiles do not change. Other machines in this profile stop new installs of it, but keep any copy they have. If the uninstall fails, the profiles do not change</li>
       <li><code>uninstall</code> does not remove Homebrew taps. A formula or cask from a tap brings its tap to the profiles that have it</li>
       <li><code>tether packages list --other-profiles</code> lists the packages of other profiles that this machine does not install</li>
       <li>On the dashboard Packages tab, each package shows its profiles. Press <code>t</code> to pick them in a checklist. <code>x</code> uninstalls and leaves the other profiles enrolled</li>
@@ -52,8 +52,8 @@ tether machines profile edit work`} />
     <h2 id="profiles-1x">Profiles and machines on 1.x</h2>
     <ul>
       <li>Only machines on 2.0 apply package profiles. A machine on 1.x installs the packages of every profile</li>
-      <li>A 1.x machine before 1.13.2 can revert a profile assignment in <code>config.toml</code>. A sync on 2.0 then warns that this machine's profile changed, and names the command that restores it</li>
-      <li>So set profiles after the 1.x machines are on 1.13.2, or after they upgrade. See <a href="/docs/upgrade#machines-on-1x">Machines on 1.x</a></li>
+      <li>A 1.x machine before 1.13.2 can revert changes in <code>config.toml</code>, such as profile definitions. It cannot change the profile of a 2.0 machine, because each 2.0 machine keeps its own assignment</li>
+      <li>So change profile definitions after the 1.x machines are on 1.13.2, or after they upgrade. See <a href="/docs/upgrade#machines-on-1x">Machines on 1.x</a></li>
     </ul>
   </section>
 </DocsLayout>

@@ -29,7 +29,12 @@ import EncryptionDiagram from '../../components/EncryptionDiagram.astro';
     <Code code="tether lock" />
 
     <h2 id="secret-detection">Secret detection</h2>
-    <p>Before a team push, Tether scans the team dotfiles for common secret patterns. It blocks the push when it finds one. Personal dotfiles are not scanned, because they reach Git only encrypted. Tether looks for patterns such as:</p>
+    <p>Tether scans team dotfiles for common secret patterns in these places:</p>
+    <ul>
+      <li><code>tether sync</code> and the daemon scan before they push the team repo. A finding blocks the push</li>
+      <li><code>tether team add</code> scans the team repo. A finding asks you whether to continue</li>
+    </ul>
+    <p>A sync with only team features on does not scan. <code>tether team files promote</code> does not scan. Tether does not scan personal dotfiles. They reach Git encrypted, unless you set <code>security.encrypt_dotfiles = false</code>. Tether looks for patterns such as:</p>
     <ul>
       <li>AWS credentials (<code>AKIA...</code>)</li>
       <li>GitHub tokens (<code>ghp_...</code>, <code>gho_...</code>)</li>

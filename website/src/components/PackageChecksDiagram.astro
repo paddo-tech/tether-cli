@@ -19,7 +19,7 @@ const gates: { x: number; label: string; glyph: IconName; a: number; b: [number,
 ];
 ---
 
-<figure class="diagram" aria-label="A synced package passes four checks and installs. A package that fails a check waits in the Inbox.">
+<figure class="diagram" aria-label="A synced package passes four checks and installs. A package outside this profile is skipped. A package that fails a later check waits in the Inbox.">
   <div class="diagram-label"><span>BEFORE A SYNCED PACKAGE INSTALLS</span><span><i class="status-dot"></i> On every sync</span></div>
   <div class="sd-scroll"><svg viewBox="0 0 880 320" role="presentation" data-end="9.5">
     <g class="sd-lines">
@@ -67,7 +67,7 @@ const gates: { x: number; label: string; glyph: IconName; a: number; b: [number,
       <rect x="390" y="250" width="190" height="56" rx="12" />
       <g class="sd-icon" set:html={icon('inbox', 420, 278, 22)} />
       <text class="sd-title sd-start" x="444" y="275">Inbox</text>
-      <text class="sd-sub sd-start" x="444" y="293">approve or reject</text>
+      <text class="sd-sub sd-start" x="444" y="293">MAL-: reject only</text>
       <rect class="sd-glow" x="390" y="250" width="190" height="56" rx="12">
         <animate attributeName="opacity" {...loop} {...pulse([[0.87, 0.96]])} />
       </rect>
@@ -102,7 +102,7 @@ const gates: { x: number; label: string; glyph: IconName; a: number; b: [number,
       <animate attributeName="opacity" {...loop} {...pulse([[0.8, 0.88]], 0)} />
     </g>
   </svg></div>
-  <figcaption class="diagram-caption"><span>A failed check holds the package in the Inbox. Homebrew gets the tap allowlist instead of release age and OSV.</span><span>↔</span></figcaption>
+  <figcaption class="diagram-caption"><span>A failed trust, age or OSV check holds the package in the Inbox. Homebrew gets the tap allowlist instead of release age and OSV.</span><span>↔</span></figcaption>
 </figure>
 
 <script>import '../scripts/diagrams';</script>

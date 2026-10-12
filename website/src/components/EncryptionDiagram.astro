@@ -10,7 +10,7 @@ const into = 'M480 160H690';
 const loop = { dur: DUR, repeatCount: 'indefinite' };
 ---
 
-<figure class="diagram" aria-label="A dotfile is encrypted on this machine with the local key, only ciphertext enters the Git repo, and another machine decrypts it with its own copy of the key">
+<figure class="diagram" aria-label="A dotfile is encrypted on this machine with the local key, the dotfile enters the Git repo only as ciphertext, and another machine decrypts it with its own copy of the key">
   <div class="diagram-label"><span>ENCRYPTED BEFORE GIT</span><span><i class="status-dot"></i> AES-256-GCM</span></div>
   <div class="sd-scroll"><svg viewBox="0 0 880 320" role="presentation" data-end="7">
     {[20, 540].map((x, i) => (
@@ -55,7 +55,7 @@ const loop = { dur: DUR, repeatCount: 'indefinite' };
       <rect x="400" y="120" width="80" height="80" rx="18" />
       <g class="sd-icon-on" set:html={icon('git', 440, 160, 30)} />
       <text class="sd-title" x="440" y="227">Your Git repo</text>
-      <text class="sd-sub" x="440" y="246">ciphertext only</text>
+      <text class="sd-sub" x="440" y="246">dotfile as ciphertext</text>
       <text class="sd-sub" x="440" y="262">+ key sealed by passphrase</text>
       <rect class="sd-ring" x="394" y="114" width="92" height="92" rx="22">
         <animate attributeName="opacity" {...loop} {...pulse([[0.41, 0.5]])} />
@@ -100,7 +100,7 @@ const loop = { dur: DUR, repeatCount: 'indefinite' };
       <animate attributeName="opacity" {...loop} {...pulse([[0.47, 0.79]])} />
     </g>
   </svg></div>
-  <figcaption class="diagram-caption"><span>The plaintext key never leaves your machines. Git holds ciphertext and a copy of the key sealed with your passphrase.</span><span>↔</span></figcaption>
+  <figcaption class="diagram-caption"><span>The plaintext key never leaves your machines. Git holds the dotfile as ciphertext and a copy of the key sealed with your passphrase.</span><span>↔</span></figcaption>
 </figure>
 
 <script>import '../scripts/diagrams';</script>

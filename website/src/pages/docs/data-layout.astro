@@ -33,7 +33,7 @@ import Code from '../../components/Code.astro';
 └── daemon.log               # Daemon log`} />
     <ul>
       <li><code>bin/tether</code>: on macOS, launchd runs this copy. The plist names the installed binary in <code>TETHER_DAEMON_SOURCE</code>. When that binary changes, the daemon copies it again and restarts. macOS keeps the App Management permission per program path, so the fixed path keeps one permission across upgrades. <code>tether daemon uninstall</code> removes it</li>
-      <li><code>config.base.toml</code>: the synced <code>config.toml</code> of the last merge or export. A sync merges against it. See <a href="/docs/config-merge">Config merge</a></li>
+      <li><code>config.base.toml</code>: the synced <code>config.toml</code> of the last merge, or of the last export once the remote branch holds it. A sync merges against it. See <a href="/docs/config-merge">Config merge</a></li>
       <li><code>signing_key</code>: anyone with this file can sign records as this machine. Protect it like an SSH key</li>
     </ul>
 

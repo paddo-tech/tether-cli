@@ -80,7 +80,7 @@ tether machines profile <set|unset|create|edit|list>`} />
 
     <h3 id="cmd-packages">tether packages</h3>
     <p>List, install, share and uninstall packages, and decide on the Inbox.</p>
-    <Code code={`tether packages [list] [--json] [--other-profiles]
+    <Code code={`tether packages list [--json] [--other-profiles]
 tether packages install <ID>
 tether packages share <ID> --to <PROFILES>
 tether packages unshare <ID> --from <PROFILES>
@@ -90,12 +90,12 @@ tether packages approve <ID> [--expect <VERSION|TAP|KEY>] [--allow-signature-fai
 tether packages approve --all [--from <MACHINE>]
 tether packages reject <ID> [--expect <VERSION|TAP|KEY>]`} />
     <ul>
-      <li><code>list</code>: installed packages by manager, with the profiles of each and this machine's profile. It also shows failed installs. A bare <code>tether packages</code> lists too</li>
+      <li><code>list</code>: installed packages by manager, with the profiles of each and this machine's profile. It also shows failed installs. A bare <code>tether packages</code> lists too, but takes no flags</li>
       <li><code>list --other-profiles</code>: instead, the packages of other profiles that trusted machines list and this machine does not install</li>
       <li><code>install &lt;ID&gt;</code>: install a package that another machine lists, as the dashboard's Import does. OSV checks the release first. A package that waits in the Inbox needs <code>approve</code> instead</li>
       <li><code>share &lt;ID&gt; --to &lt;PROFILES&gt;</code>: add profiles to the package, so machines in those profiles install it. Separate profiles with commas</li>
       <li><code>unshare &lt;ID&gt; --from &lt;PROFILES&gt;</code>: take profiles off the package. Nothing is uninstalled</li>
-      <li><code>uninstall [ID]</code>: uninstall the package here, and take this machine's profile off it. For a package that failed to install, it stops the retries on this machine. Without a package, pick packages in a terminal</li>
+      <li><code>uninstall [ID]</code>: uninstall the package here. When other profiles share the package, take this machine's profile off it. For a package that failed to install, it stops the retries on this machine. Without a package, pick packages in a terminal</li>
       <li><code>inbox</code>: list the packages, taps and machine keys that wait for your approval, grouped by source machine and reason</li>
       <li><code>approve &lt;ID&gt;</code>: install the package, or trust the machine key. <code>machine:&lt;id&gt;</code> works as <code>tether machines trust &lt;id&gt;</code></li>
       <li><code>approve --all [--from &lt;MACHINE&gt;]</code>: approve every package in the Inbox, or every package from one machine. It lists the packages and asks first. Without a terminal, it needs <code>-y</code>. It leaves machine keys, malicious packages, packages whose record fails its signature, and packages without a version or tap to name</li>
@@ -103,7 +103,7 @@ tether packages reject <ID> [--expect <VERSION|TAP|KEY>]`} />
       <li><code>reject &lt;ID&gt;</code>: stop offering that version, tap or key</li>
       <li><code>--expect</code>: the version, Homebrew tap or key fingerprint you reviewed, as <code>packages inbox</code> shows it. Required without a terminal. Tether refuses the decision when the item changed</li>
     </ul>
-    <p>The 1.x forms still work: <code>packages remove</code>, and <code>approve &lt;ID&gt; &lt;EXPECTED&gt;</code> without <code>--expect</code>.</p>
+    <p>Older forms still work: <code>packages remove</code> from 1.x, and <code>approve &lt;ID&gt; &lt;EXPECTED&gt;</code> without <code>--expect</code> from the 2.0 betas.</p>
 
     <h3 id="cmd-upgrade">tether upgrade</h3>
     <p>Upgrade installed packages to the newest release that the release-age limit allows.</p>
