@@ -382,6 +382,30 @@ fn installed_taps(taps_dir: &std::path::Path) -> Vec<(String, PathBuf)> {
     taps
 }
 
+/// Whether a cask failed only because sudo had no terminal to ask for a password. A rollback
+/// after another failure can also run sudo, so an `Error:` line that is not about sudo means
+/// the cask failed for that reason.
+fn needs_password(stderr: &str) -> bool {
+    (stderr.contains("sudo: no tty present")
+        || stderr.contains("Password:")
+        || stderr.contains("password is required"))
+        && stderr
+            .lines()
+            .filter(|l| l.trim_start().starts_with("Error:"))
+            .all(|l| l.contains("sudo"))
+}
+
+/// Drop the name that brew's error names. brew follows a tap migration and names the new
+/// tap, such as homebrew/cask for a formula that moved to a cask, and an unqualified name
+/// gives no tap, so without an exact match the short name decides.
+fn drop_unavailable(names: &mut Vec<String>, unknown: &str) {
+    let before = names.len();
+    names.retain(|n| n != unknown);
+    if names.len() == before {
+        names.retain(|n| normalize_formula_name(n) != normalize_formula_name(unknown));
+    }
+}
+
 /// The name in brew's `No available formula with the name "x"` error, or in its
 /// `Cask 'x' is unavailable` error.
 fn unavailable_name(stderr: &str) -> Option<&str> {
@@ -716,11 +740,7 @@ impl BrewManager {
                 let before = names.len();
                 let unknown = unavailable_name(&stderr);
                 if let Some(unknown) = unknown {
-                    // An unqualified name in the error says nothing about the tap
-                    names.retain(|n| {
-                        n != unknown
-                            && (unknown.contains('/') || normalize_formula_name(n) != unknown)
-                    });
+                    drop_unavailable(&mut names, unknown);
                 }
                 match unknown {
                     Some(unknown) if names.len() < before => crate::cli::Output::warning(&format!(
@@ -820,13 +840,9 @@ impl BrewManager {
                 return Ok(true);
             }
 
-            // Check if failed due to password prompt
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("sudo: no tty present")
-                || stderr.contains("Password:")
-                || stderr.contains("password is required")
-            {
-                return Ok(false); // needs password
+            if needs_password(&stderr) {
+                return Ok(false);
             }
 
             // Other error - propagate
@@ -1065,6 +1081,7 @@ impl PackageManager for BrewManager {
 
     async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
         let mut failures = Vec::new();
+        let mut need_password = Vec::new();
         // One failed kind must not stop the other kind's upgrades
         for (kind, cask) in [("--formula", false), ("--cask", true)] {
             let names: Vec<&str> = planned
@@ -1075,15 +1092,35 @@ impl PackageManager for BrewManager {
             if names.is_empty() {
                 continue;
             }
-            let output = brew_without_installed_scan()?
-                .args(["upgrade", kind])
-                .args(&names)
-                .output()
-                .await?;
-            if !output.status.success() {
+            // A cask that needs sudo fails without a terminal and would stop the other casks
+            // of the same call, so each cask upgrades on its own
+            let batches: Vec<Vec<&str>> = if cask {
+                names.iter().map(|n| vec![*n]).collect()
+            } else {
+                vec![names]
+            };
+            for batch in batches {
+                let output = brew_without_installed_scan()?
+                    .args(["upgrade", kind])
+                    .args(&batch)
+                    .output()
+                    .await?;
+                if output.status.success() {
+                    continue;
+                }
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                failures.push(format!("brew upgrade {} failed: {}", kind, stderr.trim()));
+                if cask && needs_password(&stderr) {
+                    need_password.extend(batch);
+                } else {
+                    failures.push(format!("brew upgrade {} failed: {}", kind, stderr.trim()));
+                }
             }
+        }
+        if !need_password.is_empty() {
+            crate::cli::Output::warning(&format!(
+                "{} need a password to upgrade. Run 'tether upgrade' in a terminal",
+                need_password.join(", ")
+            ));
         }
         if !failures.is_empty() {
             return Err(anyhow::anyhow!(failures.join("; ")));
@@ -1325,6 +1362,35 @@ brew "git"
         assert_eq!(untrusted.taps, vec!["evil/tap"]);
         assert_eq!(untrusted.formulae, vec!["evil/tap/payload"]);
         assert_eq!(untrusted.casks, vec!["evil/tap/app"]);
+    }
+
+    #[test]
+    fn a_migrated_formula_drops_by_its_short_name() {
+        let mut names = vec![
+            "homebrew/core/azure-cli".to_string(),
+            "homebrew/core/jq".to_string(),
+        ];
+        drop_unavailable(&mut names, "homebrew/cask/azure-cli");
+        assert_eq!(names, vec!["homebrew/core/jq"]);
+        let mut names = vec!["a/tap/tool".to_string(), "b/tap/tool".to_string()];
+        drop_unavailable(&mut names, "b/tap/tool");
+        assert_eq!(names, vec!["a/tap/tool"]);
+    }
+
+    #[test]
+    fn a_cask_without_a_terminal_for_sudo_needs_a_password() {
+        assert!(needs_password(
+            "sudo: a terminal is required to read the password\nsudo: a password is required\n"
+        ));
+        assert!(!needs_password("Error: Download failed"));
+        // Homebrew's own line for a sudo failure names sudo
+        assert!(needs_password(
+            "sudo: a password is required\nError: app: Failure while executing; `/usr/bin/sudo -u root` exited with 1\n"
+        ));
+        // A rollback's sudo error after another failure keeps that failure
+        assert!(!needs_password(
+            "Error: app: pkg file is missing\nsudo: a password is required\n"
+        ));
     }
 
     #[test]
