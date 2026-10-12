@@ -68,4 +68,4 @@ pub use recipients::{
     get_public_key, get_public_key_from_identity, has_identity, is_identity_unlocked,
     load_identity, load_recipients, load_recipients_authorized, store_identity, validate_pubkey,
 };
-pub use secrets::{scan_for_secrets, SecretFinding, SecretType};
+pub use secrets::{ignored_patterns, scan_team_file, SecretFinding, SecretType};

@@ -538,12 +538,15 @@ impl DaemonServer {
                     if has_changes || team_git.has_unpushed_commits() {
                         let dotfiles_dir = team_sync_dir.join("dotfiles");
                         if dotfiles_dir.exists() {
+                            let ignored = crate::security::ignored_patterns(&config)?;
                             for entry in std::fs::read_dir(&dotfiles_dir)? {
                                 let entry = entry?;
                                 if entry.file_type()?.is_file() {
-                                    if let Ok(findings) =
-                                        crate::security::scan_for_secrets(&entry.path())
-                                    {
+                                    if let Ok(findings) = crate::security::scan_team_file(
+                                        &config,
+                                        &ignored,
+                                        &entry.path(),
+                                    ) {
                                         if !findings.is_empty() {
                                             log::error!(
                                                 "Team push blocked: {} contains {} secret(s)",
