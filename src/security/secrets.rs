@@ -100,10 +100,14 @@ impl SecretScanner {
         Ok(Self { patterns })
     }
 
-    pub fn scan_content(&self, content: &str) -> Vec<SecretFinding> {
+    /// Findings in `content`. A line that holds one of the `ignored` patterns is skipped.
+    pub fn scan_content(&self, content: &str, ignored: &[String]) -> Vec<SecretFinding> {
         let mut findings = Vec::new();
 
         for (line_num, line) in content.lines().enumerate() {
+            if ignored.iter().any(|p| line.contains(p.as_str())) {
+                continue;
+            }
             for (pattern, secret_type) in &self.patterns {
                 if pattern.is_match(line) {
                     // Redact the actual secret value for display
@@ -145,12 +149,39 @@ impl Default for SecretScanner {
     }
 }
 
-/// Scan a file for potential secrets
 static GLOBAL_SCANNER: LazyLock<SecretScanner> = LazyLock::new(SecretScanner::default);
 
-pub fn scan_for_secrets(file_path: &Path) -> Result<Vec<SecretFinding>> {
+/// Patterns that `tether ignore secrets` keeps, one per line.
+pub fn ignore_file_path() -> Result<std::path::PathBuf> {
+    Ok(crate::config::Config::config_dir()?.join("ignore"))
+}
+
+/// The patterns in the ignore file. Without the file there are none.
+pub fn ignored_patterns() -> Result<Vec<String>> {
+    match std::fs::read_to_string(ignore_file_path()?) {
+        Ok(text) => Ok(text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Findings in a team dotfile, which the team scan checks before a push. Personal dotfiles
+/// reach Git only encrypted, so only team files are scanned. None when
+/// `security.scan_secrets` is off.
+pub fn scan_team_file(
+    config: &crate::config::Config,
+    ignored: &[String],
+    file_path: &Path,
+) -> Result<Vec<SecretFinding>> {
+    if !config.security.scan_secrets {
+        return Ok(Vec::new());
+    }
     let content = std::fs::read_to_string(file_path)?;
-    Ok(GLOBAL_SCANNER.scan_content(&content))
+    Ok(GLOBAL_SCANNER.scan_content(&content, ignored))
 }
 
 #[cfg(test)]
@@ -161,7 +192,7 @@ mod tests {
     fn test_aws_key_detection() {
         let scanner = SecretScanner::new().unwrap();
         let content = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
-        let findings = scanner.scan_content(content);
+        let findings = scanner.scan_content(content, &[]);
         assert!(!findings.is_empty());
         assert!(matches!(findings[0].secret_type, SecretType::AwsAccessKey));
     }
@@ -170,7 +201,7 @@ mod tests {
     fn test_github_token_detection() {
         let scanner = SecretScanner::new().unwrap();
         let content = "GITHUB_TOKEN=ghp_123456789012345678901234567890123456";
-        let findings = scanner.scan_content(content);
+        let findings = scanner.scan_content(content, &[]);
         assert!(!findings.is_empty());
         assert!(matches!(findings[0].secret_type, SecretType::GitHubToken));
     }
@@ -179,16 +210,26 @@ mod tests {
     fn test_private_key_detection() {
         let scanner = SecretScanner::new().unwrap();
         let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...";
-        let findings = scanner.scan_content(content);
+        let findings = scanner.scan_content(content, &[]);
         assert!(!findings.is_empty());
         assert!(matches!(findings[0].secret_type, SecretType::PrivateKey));
+    }
+
+    #[test]
+    fn an_ignored_pattern_skips_its_line() {
+        let scanner = SecretScanner::new().unwrap();
+        let content =
+            "GITHUB_TOKEN=ghp_123456789012345678901234567890123456\nAWS=AKIAIOSFODNN7EXAMPLE";
+        let findings = scanner.scan_content(content, &["GITHUB_TOKEN=".to_string()]);
+        assert_eq!(findings.len(), 1);
+        assert!(matches!(findings[0].secret_type, SecretType::AwsAccessKey));
     }
 
     #[test]
     fn test_no_false_positives() {
         let scanner = SecretScanner::new().unwrap();
         let content = "export PATH=/usr/local/bin:$PATH";
-        let findings = scanner.scan_content(content);
+        let findings = scanner.scan_content(content, &[]);
         assert!(findings.is_empty());
     }
 }

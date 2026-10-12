@@ -1,15 +1,9 @@
 use crate::cli::Output;
-use crate::config::Config;
 use crate::sync::{MachineState, SyncEngine, SyncState};
 use anyhow::Result;
-use std::path::PathBuf;
-
-fn ignore_file_path() -> Result<PathBuf> {
-    Ok(Config::config_dir()?.join("ignore"))
-}
 
 pub async fn add(pattern: &str) -> Result<()> {
-    let path = ignore_file_path()?;
+    let path = crate::security::secrets::ignore_file_path()?;
 
     // Read existing patterns
     let mut patterns = if path.exists() {
@@ -38,7 +32,7 @@ pub async fn add(pattern: &str) -> Result<()> {
 }
 
 pub async fn list() -> Result<()> {
-    let path = ignore_file_path()?;
+    let path = crate::security::secrets::ignore_file_path()?;
 
     if !path.exists() {
         Output::info("No ignore patterns configured");
@@ -66,7 +60,7 @@ pub async fn list() -> Result<()> {
 }
 
 pub async fn remove(pattern: &str) -> Result<()> {
-    let path = ignore_file_path()?;
+    let path = crate::security::secrets::ignore_file_path()?;
 
     if !path.exists() {
         anyhow::bail!("No ignore patterns configured");

@@ -359,6 +359,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
     let mut secrets_found = false;
 
     if dotfiles_dir.exists() {
+        let ignored = crate::security::ignored_patterns()?;
         for entry in walkdir::WalkDir::new(&dotfiles_dir)
             .min_depth(1)
             .follow_links(false)
@@ -381,7 +382,9 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
                 team_files.push(rel_str.to_string());
 
                 // Scan for secrets
-                if let Ok(findings) = crate::security::scan_for_secrets(entry.path()) {
+                if let Ok(findings) =
+                    crate::security::scan_team_file(&config, &ignored, entry.path())
+                {
                     if !findings.is_empty() {
                         secrets_found = true;
                         Output::warning(&format!(
