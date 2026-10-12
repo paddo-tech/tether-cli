@@ -1,0 +1,90 @@
+---
+import { icon, type IconName } from './icons';
+import '../styles/diagrams.css';
+
+// One 7 s clock drives every animation, so keyTimes are fractions of the same loop
+const DUR = '7s';
+const toRepo = 'M180 165H400';
+const toTop = 'M480 165C585 165 585 85 690 85';
+const toBottom = 'M480 165C585 165 585 245 690 245';
+---
+
+<figure class="sync-diagram diagram" aria-label="A changed file leaves this machine, is encrypted, goes to your Git repo, and reaches your other machines">
+  <div class="diagram-label"><span>ONE SYNC, END TO END</span><span><i class="status-dot"></i> Every 5 minutes</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 330" role="presentation" data-end="6">
+    <g class="sd-lines">
+      <path d={toRepo} /><path d={toTop} /><path d={toBottom} />
+    </g>
+    <g class="sd-flow">
+      <path d={toRepo} /><path d={toTop} /><path d={toBottom} />
+    </g>
+
+    <g class="sd-node">
+      <rect x="30" y="105" width="150" height="120" rx="12" />
+      <g class="sd-icon" set:html={icon('laptop', 105, 140, 34)} />
+      <text class="sd-title" x="105" y="188">This machine</text>
+      <text class="sd-sub" x="105" y="207">edits .zshrc</text>
+    </g>
+
+    <g class="sd-node">
+      <rect x="255" y="130" width="70" height="70" rx="14" />
+      <g class="sd-icon" set:html={icon('lock', 290, 165, 28)} />
+      <text class="sd-sub" x="290" y="225">encrypt</text>
+      <rect class="sd-glow" x="255" y="130" width="70" height="70" rx="14">
+        <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.2;0.24;0.29;0.34;1" />
+      </rect>
+    </g>
+
+    <g class="sd-repo">
+      <rect x="400" y="125" width="80" height="80" rx="18" />
+      <g class="sd-icon-on" set:html={icon('git', 440, 165, 30)} />
+      <text class="sd-title" x="440" y="232">Your Git repo</text>
+      <text class="sd-sub" x="440" y="251">ciphertext only</text>
+      <rect class="sd-ring" x="394" y="119" width="92" height="92" rx="22">
+        <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;0;0" keyTimes="0;0.4;0.44;0.54;1" />
+      </rect>
+    </g>
+
+    <text class="sd-mono" x="618" y="169">pull · decrypt · check</text>
+
+    {[{ y: 30, name: 'Mac mini', sub: 'dev profile', glyph: 'monitor' }, { y: 190, name: 'Home server', sub: 'server profile', glyph: 'box' }].map(m => (
+      <g class="sd-node">
+        <rect x="690" y={m.y} width="160" height="110" rx="12" />
+        <g class="sd-icon" set:html={icon(m.glyph as IconName, 770, m.y + 32, 30)} />
+        <text class="sd-title" x="770" y={m.y + 74}>{m.name}</text>
+        <text class="sd-sub" x="770" y={m.y + 92}>{m.sub}</text>
+        <rect class="sd-glow" x="690" y={m.y} width="160" height="110" rx="12">
+          <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.74;0.78;0.9;0.96;1" />
+        </rect>
+        <g class="sd-check" transform={`translate(836 ${m.y + 14})`}>
+          <circle r="11" />
+          <path d="m-5 0 3.5 3.5L5-4" />
+          <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.77;0.81;0.92;0.97;1" />
+        </g>
+      </g>
+    ))}
+
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">.zshrc
+        <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="1;1;0;0" keyTimes="0;0.24;0.25;1" />
+      </text>
+      <text class="sd-cipher" y="4" opacity="0">a9f3·e1
+        <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;1" keyTimes="0;0.24;0.25;1" />
+      </text>
+      <animateMotion dur={DUR} repeatCount="indefinite" path={toRepo} calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.08;0.4;1" />
+      <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.05;0.09;0.38;0.42;1" />
+    </g>
+    {[toTop, toBottom].map(path => (
+      <g class="sd-packet" opacity="0">
+        <rect x="-34" y="-12" width="68" height="24" rx="6" />
+        <text class="sd-cipher" y="4">a9f3·e1</text>
+        <animateMotion dur={DUR} repeatCount="indefinite" path={path} calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.44;0.74;1" />
+        <animate attributeName="opacity" dur={DUR} repeatCount="indefinite" values="0;0;1;1;0;0" keyTimes="0;0.43;0.46;0.72;0.76;1" />
+      </g>
+    ))}
+  </svg></div>
+  <figcaption class="diagram-caption"><span>Plaintext never leaves the machine. Each machine checks a package before it installs it.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

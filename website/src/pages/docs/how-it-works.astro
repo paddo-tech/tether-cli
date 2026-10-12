@@ -1,6 +1,6 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
-import FlowDiagram from '../../components/FlowDiagram.astro';
+import SyncDiagram from '../../components/SyncDiagram.astro';
 ---
 
 <DocsLayout title="How sync works — Tether CLI" description="What a Tether sync does: scan, encrypt, sign the machine record, push, and check packages on the other machines.">
@@ -8,11 +8,7 @@ import FlowDiagram from '../../components/FlowDiagram.astro';
     <p class="eyebrow">CONCEPTS</p>
     <h1>How sync works</h1>
     <p>Tether connects your machines through one Git repository. Each machine pushes its changes there and pulls the changes of the other machines.</p>
-    <FlowDiagram label="FROM YOUR MACHINE TO YOUR REPO" caption="Other machines pull these changes, decrypt the dotfiles, and check each package before it installs." steps={[
-      { icon: 'file', title: 'Scan changes', detail: 'Check files and package lists' },
-      { icon: 'lock', title: 'Encrypt dotfiles', detail: 'Use your local encryption key' },
-      { icon: 'git', title: 'Sync through Git', detail: 'Commit and push to your repo' },
-    ]} />
+    <SyncDiagram />
 
     <h2>One sync, step by step</h2>
     <ol>

@@ -5,7 +5,7 @@ import Code from '../../components/Code.astro';
 const keys = [
   ['backend.url', 'Git repository URL of the personal sync repo'],
   ['security.encrypt_dotfiles', 'Encrypt dotfiles with AES-256-GCM. Default true'],
-  ['security.scan_secrets', 'Scan files for secrets before a sync. Default true'],
+  ['security.scan_secrets', 'Scan team dotfiles for secrets before a team push. Default true'],
   ['dotfiles.files', 'Dotfiles to sync'],
   ['dotfiles.dirs', 'Folders to sync'],
   ['profiles.<name>.dotfiles', 'Dotfiles of a profile. An entry can be a table with path and on_conflict'],

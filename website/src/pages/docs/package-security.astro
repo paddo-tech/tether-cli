@@ -1,7 +1,7 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
-import FlowDiagram from '../../components/FlowDiagram.astro';
+import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
 ---
 
 <DocsLayout title="Package checks — Tether CLI" description="The checks Tether runs before a synced package installs: trusted records, release age, OSV, install scripts and Homebrew taps.">
@@ -9,11 +9,7 @@ import FlowDiagram from '../../components/FlowDiagram.astro';
     <p class="eyebrow">CONCEPTS</p>
     <h1>Package checks</h1>
     <p>Tether checks each synced package before a package manager runs. A package that fails a check waits in the <a href="/docs/inbox">Inbox</a>. Tether runs the checks again on every sync, for new and held packages. For the threats and limits, see <a href="/supply-chain">Supply-chain security</a>.</p>
-    <FlowDiagram label="BEFORE A SYNCED PACKAGE INSTALLS" caption="A package installs when no check holds it." steps={[
-      { icon: 'key', title: 'Trusted record', detail: 'A trusted machine lists it' },
-      { icon: 'shield', title: 'Policy checks', detail: 'Name · Tap · Release age · OSV' },
-      { icon: 'box', title: 'Install or hold', detail: 'Hold it in the Inbox if a check fails' },
-    ]} />
+    <PackageChecksDiagram />
 
     <h2>Checks by package manager</h2>
     <table>

@@ -1,13 +1,15 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
+import EncryptionDiagram from '../../components/EncryptionDiagram.astro';
 ---
 
-<DocsLayout title="Encryption — Tether CLI" description="How Tether encrypts dotfiles with AES-256-GCM, protects the key with your passphrase, and scans files for secrets.">
+<DocsLayout title="Encryption — Tether CLI" description="How Tether encrypts dotfiles with AES-256-GCM, protects the key with your passphrase, and scans team dotfiles for secrets.">
   <section>
     <p class="eyebrow">CONCEPTS</p>
     <h1>Encryption</h1>
     <p>Tether encrypts your dotfiles on your machine before they reach Git. Locally they stay plaintext, so your shell reads them as usual. For the threat model, see <a href="/security">Security</a>.</p>
+    <EncryptionDiagram />
 
     <h2>How encryption works</h2>
     <ol>
@@ -27,14 +29,14 @@ import Code from '../../components/Code.astro';
     <Code code="tether lock" />
 
     <h2 id="secret-detection">Secret detection</h2>
-    <p>Before a sync, Tether scans files for common secret patterns, such as:</p>
+    <p>Before a team push, Tether scans the team dotfiles for common secret patterns. It blocks the push when it finds one. Personal dotfiles are not scanned, because they reach Git only encrypted. Tether looks for patterns such as:</p>
     <ul>
       <li>AWS credentials (<code>AKIA...</code>)</li>
       <li>GitHub tokens (<code>ghp_...</code>, <code>gho_...</code>)</li>
       <li>Generic patterns (<code>API_KEY=</code>, <code>password=</code>)</li>
     </ul>
-    <p>Add an ignore pattern for a false positive:</p>
+    <p>A line that holds an ignore pattern is not a finding. Add one for a false positive:</p>
     <Code code="tether ignore secrets add 'EXAMPLE_KEY='" />
-    <p>Turn the scan off with <code>security.scan_secrets = false</code>.</p>
+    <p>Turn the team scan off with <code>security.scan_secrets = false</code>.</p>
   </section>
 </DocsLayout>

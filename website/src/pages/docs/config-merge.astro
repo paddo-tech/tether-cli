@@ -1,5 +1,6 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
+import ConfigMergeDiagram from '../../components/ConfigMergeDiagram.astro';
 ---
 
 <DocsLayout title="Config merge — Tether CLI" description="How a sync merges config.toml three ways, so edits from two machines both stay.">
@@ -7,6 +8,7 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
     <p class="eyebrow">CONCEPTS</p>
     <h1>Config merge</h1>
     <p>All machines share one <code>config.toml</code>. The sync repo holds an encrypted copy. Each sync merges that copy into the local file, then exports the result.</p>
+    <ConfigMergeDiagram />
 
     <h2>Three-way merge</h2>
     <p>Tether compares settings, not bytes. It merges against the copy of the last merge or export, which it keeps in <code>~/.tether/config.base.toml</code>. That file never syncs.</p>

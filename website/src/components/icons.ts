@@ -1,0 +1,30 @@
+// Stroke paths on a 24 by 24 grid, shared by Icon and the SVG diagrams
+export const iconPaths = {
+  link: 'M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2',
+  arrow: 'M5 12h14m-6-6 6 6-6 6',
+  sun: 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
+  moon: 'M20 14A8 8 0 0 1 10 4a8 8 0 1 0 10 10Z',
+  git: 'M6 6v12m12-12v4a4 4 0 0 1-4 4h-4M8 4a2 2 0 1 1-4 0 2 2 0 0 1 4 0M8 20a2 2 0 1 1-4 0 2 2 0 0 1 4 0M20 4a2 2 0 1 1-4 0 2 2 0 0 1 4 0',
+  lock: 'M5 10h14v11H5ZM8 10V6a4 4 0 0 1 8 0v4m-4 5v2',
+  laptop: 'M5 4h14v12H5ZM2 19h20l-3-3H5Z',
+  monitor: 'M3 3h18v13H3Zm9 13v5m-5 0h10',
+  check: 'm5 12 4 4L19 6',
+  box: 'm12 2 9 5v10l-9 5-9-5V7Zm0 10v10M3 7l9 5 9-5M7 4l10 6v4',
+  copy: 'M8 8h12v13H8ZM16 8V3H3v13h5',
+  key: 'M14 14a6 6 0 1 0-4-4L2 18v4h4v-3h3v-3ZM16 6h.01',
+  file: 'M14 2H5v20h14V7Zm0 0v5h5M8 12h8m-8 4h6',
+  shield: 'M12 2 4 5v6c0 5 3.5 9.5 8 11 4.5-1.5 8-6 8-11V5Zm-3 10 2 2 4-4',
+  users: 'M9 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM2 21v-2a7 7 0 0 1 14 0v2M16 4a4 4 0 0 1 0 8m3 3a6 6 0 0 1 3 5v1',
+  unlock: 'M5 10h14v11H5ZM8 10V6a4 4 0 0 1 7.5-2m-3.5 11v2',
+  inbox: 'M3 13h5l1 3h6l1-3h5M6 4h12l3 9v7H3v-7Z',
+  server: 'M3 4h18v7H3Zm0 9h18v7H3ZM7 7.5h.01M7 16.5h.01',
+  clock: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 7v5l3 3',
+  alert: 'M12 3 2 21h20ZM12 10v5m0 3h.01',
+  merge: 'M6 3v5a7 7 0 0 0 6 7M18 3v5a7 7 0 0 1-6 7v6',
+  terminal: 'M3 4h18v16H3Zm4 5 3 3-3 3m5 0h5',
+} as const;
+
+export type IconName = keyof typeof iconPaths;
+
+export const icon = (name: IconName, x: number, y: number, size: number) =>
+  `<path d="${iconPaths[name]}" transform="translate(${x - size / 2} ${y - size / 2}) scale(${size / 24})" />`;

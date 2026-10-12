@@ -1,0 +1,118 @@
+---
+import { icon } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 10 s clock drives every animation
+const DUR = '10s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const fromOld = 'M290 78C345 78 345 140 400 140';
+const fromNew = 'M290 198C345 198 345 140 400 140';
+const toFixed = 'M470 140H560';
+// brew upgrade puts the new version in its own Cellar path
+const UPGRADE = 0.36;
+const COPIED = 0.68;
+const versions = [
+  { y: 78, v: '2.0.0', path: fromOld },
+  { y: 198, v: '2.0.1', path: fromNew },
+];
+---
+
+<figure class="diagram" aria-label="Each Homebrew version lives in a new Cellar path. launchd runs a fixed copy at ~/.tether/bin/tether that follows the installed binary, so the App Management grant stays on one path across upgrades.">
+  <div class="diagram-label"><span>THE DAEMON ON MACOS</span><span><i class="status-dot"></i> One path, one grant</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 280" role="presentation" data-end="9.4">
+    <g class="sd-lines">
+      <path d={fromOld} /><path d={fromNew} /><path d={toFixed} /><path d="M710 61V95" /><path d="M710 185V215" />
+    </g>
+    <g class="sd-flow">
+      <path d={toFixed} />
+      <path d={fromOld} opacity="0">
+        <animate attributeName="opacity" {...loop} values=".75;.75;0;0;.75" keyTimes={`0;${UPGRADE};${UPGRADE + 0.04};0.97;1`} />
+      </path>
+      <path d={fromNew} opacity="0">
+        <animate attributeName="opacity" {...loop} {...pulse([[UPGRADE + 0.04, 0.97]])} />
+      </path>
+    </g>
+    <text class="sd-zlabel sd-start" x="20" y="38">HOMEBREW CELLAR</text>
+
+    {versions.map((n, i) => (
+      <g class="sd-node" opacity={i ? 0 : 1}>
+        <rect x="20" y={n.y - 28} width="270" height="56" rx="12" />
+        <g class="sd-icon" set:html={icon('box', 46, n.y, 22)} />
+        <text class="sd-title sd-start" x="70" y={n.y - 3}>tether {n.v}</text>
+        <text class="sd-sub sd-start" x="70" y={n.y + 15}>Cellar/tether-cli/{n.v}/bin</text>
+        {i ? (
+          <animate attributeName="opacity" {...loop} {...pulse([[UPGRADE, 0.96]])} />
+        ) : (
+          <animate attributeName="opacity" {...loop} values="1;1;.45;.45;1" keyTimes={`0;${UPGRADE};${UPGRADE + 0.04};0.97;1`} />
+        )}
+      </g>
+    ))}
+    <text class="sd-mono" x="155" y="252" opacity="0">brew upgrade
+      <animate attributeName="opacity" {...loop} {...pulse([[UPGRADE, UPGRADE + 0.14]])} />
+    </text>
+
+    <g class="sd-node">
+      <rect x="400" y="105" width="70" height="70" rx="14" />
+      <g class="sd-icon" set:html={icon('copy', 435, 140, 26)} />
+      <text class="sd-sub" x="435" y="198">copy when it changes</text>
+      <rect class="sd-glow" x="400" y="105" width="70" height="70" rx="14">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.56, 0.62]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="600" y="15" width="220" height="46" rx="10" />
+      <text class="sd-title" x="710" y="35" style="font-size: 13px">launchd job</text>
+      <text class="sd-sub" x="710" y="51">always runs this path</text>
+      <rect class="sd-glow" x="600" y="15" width="220" height="46" rx="10">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.04, 0.12], [0.72, 0.8]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="560" y="95" width="300" height="90" rx="12" />
+      <g class="sd-icon" set:html={icon('terminal', 592, 140, 26)} />
+      <text class="sd-title sd-start" x="618" y="136">~/.tether/bin/tether</text>
+      <text class="sd-sub sd-start" x="618" y="154">copy of 2.0.0
+        <animate attributeName="opacity" {...loop} {...pulse([[0, COPIED - 0.01], [0.99, 1]], 0.01)} />
+      </text>
+      <text class="sd-sub sd-start" x="618" y="154" opacity="0">copy of 2.0.1
+        <animate attributeName="opacity" {...loop} {...pulse([[COPIED + 0.01, 0.97]], 0.01)} />
+      </text>
+      <rect class="sd-glow" x="560" y="95" width="300" height="90" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[COPIED, 0.76]])} />
+      </rect>
+      <g class="sd-check" transform="translate(846 109)">
+        <circle r="11" />
+        <path d="m-5 0 3.5 3.5L5-4" />
+        <animate attributeName="opacity" {...loop} {...pulse([[COPIED + 0.01, 0.96]])} />
+      </g>
+    </g>
+
+    <g class="sd-pill">
+      <rect x="590" y="215" width="240" height="34" rx="17" />
+      <g class="sd-icon" set:html={icon('shield', 614, 232, 18)} />
+      <text x="634" y="236" style="text-anchor: start">App Management: allowed</text>
+    </g>
+    <rect class="sd-ring" x="585" y="210" width="250" height="44" rx="22">
+      <animate attributeName="opacity" {...loop} {...pulse([[0.12, 0.2], [0.8, 0.9]])} />
+    </rect>
+
+    <g class="sd-packet" opacity="0">
+      <rect x="-30" y="-12" width="60" height="24" rx="6" />
+      <text class="sd-cipher" y="4">2.0.1</text>
+      <animateMotion {...loop} path={fromNew} calcMode="linear" {...move([0.47, 0], [0.57, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.46, 0.57]], 0)} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-30" y="-12" width="60" height="24" rx="6" />
+      <text class="sd-cipher" y="4">2.0.1</text>
+      <animateMotion {...loop} path={toFixed} calcMode="linear" {...move([0.6, 0], [COPIED, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.6, COPIED - 0.01]], 0.01)} />
+    </g>
+  </svg></div>
+  <figcaption class="diagram-caption"><span>Each Homebrew version lives in a new Cellar path. launchd runs the copy, so macOS keeps one App Management grant.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

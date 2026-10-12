@@ -1,7 +1,7 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
-import FlowDiagram from '../../components/FlowDiagram.astro';
+import TrustDiagram from '../../components/TrustDiagram.astro';
 ---
 
 <DocsLayout title="Machine trust — Tether CLI" description="Signed machine records, the local trust list, and how to trust, untrust and remove machines.">
@@ -9,11 +9,7 @@ import FlowDiagram from '../../components/FlowDiagram.astro';
     <p class="eyebrow">CONCEPTS</p>
     <h1>Machine trust</h1>
     <p>Anyone who can push to your sync repo can edit a manifest. So a line in a manifest grants no trust. Instead, each machine signs a record of the packages it installed. Each machine decides for itself which machine keys it trusts.</p>
-    <FlowDiagram label="ON EACH SYNC" caption="Tether never moves trust to another machine id on its own." steps={[
-      { icon: 'key', title: 'Sign the record', detail: 'machines/<id>.json · ed25519 key' },
-      { icon: 'shield', title: 'Verify locally', detail: 'Match the key in ~/.tether/trusted_keys' },
-      { icon: 'box', title: 'Install listed packages', detail: 'Hold all other packages in the Inbox' },
-    ]} />
+    <TrustDiagram />
 
     <h2>Signed machine records</h2>
     <p>Each machine has an SSH signing key in <code>~/.tether/signing_key</code>. Tether makes it on <code>tether init</code>, or on the first sync after an upgrade from 1.x. Each sync signs this machine's record, <code>machines/&lt;id&gt;.json</code>, in <code>machines/&lt;id&gt;.json.sig</code>. The record lists the machine's packages and versions, its profile and its OS.</p>

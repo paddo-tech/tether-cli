@@ -1,6 +1,8 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
+import UpgradeDiagram from '../../components/UpgradeDiagram.astro';
+import DaemonCopyDiagram from '../../components/DaemonCopyDiagram.astro';
 ---
 
 <DocsLayout title="Upgrade from 1.x — Tether CLI" description="A checklist to upgrade your machines from Tether 1.x to 2.0 one at a time: sync, trust your machines, and review the Inbox.">
@@ -8,6 +10,7 @@ import Code from '../../components/Code.astro';
     <p class="eyebrow">GET STARTED</p>
     <h1>Upgrade from 1.x</h1>
     <p>Tether 2.0 signs machine records, checks synced packages before it installs them, and gives packages to profiles. After the upgrade, each machine must trust your other machines once. Until then, packages from those machines wait in the Inbox.</p>
+    <UpgradeDiagram />
     <p>Work through this checklist on each machine, one machine at a time.</p>
 
     <h2 id="before">Before you start</h2>
@@ -47,6 +50,7 @@ tether packages approve --all --from <machine>   # after you review the list`} /
 
     <h3 id="macos-app-management">5. Allow App Management on macOS</h3>
     <p>On macOS, launchd now runs a copy of Tether at <code>~/.tether/bin/tether</code>. The plist names the installed binary in <code>TETHER_DAEMON_SOURCE</code>. When that binary changes, the daemon copies it again and restarts. So the daemon follows each upgrade by itself.</p>
+    <DaemonCopyDiagram />
     <p>macOS keeps the App Management permission per program path. The fixed path keeps one permission across upgrades. Before, each upgrade asked again.</p>
     <ul>
       <li>The first <code>tether sync</code> in a terminal after the upgrade moves an installed daemon to the copy. <code>tether daemon install</code> does this too</li>

@@ -1,6 +1,7 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
+import ConflictDiagram from '../../components/ConflictDiagram.astro';
 ---
 
 <DocsLayout title="Conflicts — Tether CLI" description="What happens when a dotfile changes on two machines, and how to resolve the conflict.">
@@ -8,6 +9,7 @@ import Code from '../../components/Code.astro';
     <p class="eyebrow">GUIDES</p>
     <h1>Conflicts</h1>
     <p>A conflict happens when a dotfile changed on this machine and on another machine since the last sync.</p>
+    <ConflictDiagram />
 
     <h2>In a terminal</h2>
     <p><code>tether sync</code> asks how to resolve each conflict:</p>

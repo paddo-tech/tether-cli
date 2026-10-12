@@ -1,0 +1,89 @@
+---
+import { icon, type IconName } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 10 s clock drives every animation
+const DUR = '10s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const inputs: { y: number; title: string; sub: string; chip: string; glyph: IconName; path: string }[] = [
+  { y: 60, title: 'Base copy', sub: 'config.base.toml', chip: 'base', glyph: 'file', path: 'M220 60C275 60 275 160 330 160' },
+  { y: 160, title: 'This machine', sub: 'config.toml', chip: 'local', glyph: 'laptop', path: 'M220 160H330' },
+  { y: 260, title: 'Synced copy', sub: 'decrypted from Git', chip: 'synced', glyph: 'git', path: 'M220 260C275 260 275 160 330 160' },
+];
+const rows = [
+  { y: 125, key: 'dotfiles.files + .vimrc', from: 'from the synced copy', at: 0.42 },
+  { y: 175, key: 'dotfiles.files + .tmux.conf', from: 'from this machine', at: 0.52 },
+  { y: 225, key: 'sync.interval = "10m"', from: 'both changed: local stays', at: 0.62 },
+];
+---
+
+<figure class="diagram" aria-label="The base copy, this machine's config.toml and the synced copy meet in a three-way merge. Additions from both machines stay. When both changed one setting, this machine's value stays and the sync warns.">
+  <div class="diagram-label"><span>THREE-WAY CONFIG MERGE</span><span><i class="status-dot"></i> On every sync</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" role="presentation" data-end="9.2">
+    <g class="sd-lines">{inputs.map(i => <path d={i.path} />)}<path d="M410 160H470" /></g>
+    <g class="sd-flow">{inputs.map(i => <path d={i.path} />)}<path d="M410 160H470" /></g>
+
+    {inputs.map(i => (
+      <g class="sd-node">
+        <rect x="20" y={i.y - 32} width="200" height="64" rx="12" />
+        <g class="sd-icon" set:html={icon(i.glyph, 48, i.y, 24)} />
+        <text class="sd-title sd-start" x="72" y={i.y - 3}>{i.title}</text>
+        <text class="sd-sub sd-start" x="72" y={i.y + 15}>{i.sub}</text>
+        <rect class="sd-glow" x="20" y={i.y - 32} width="200" height="64" rx="12">
+          <animate attributeName="opacity" {...loop} {...pulse([[0.02, 0.08]])} />
+        </rect>
+      </g>
+    ))}
+
+    <g class="sd-repo">
+      <rect x="330" y="120" width="80" height="80" rx="18" />
+      <g class="sd-icon-on" set:html={icon('merge', 370, 160, 30)} />
+      <text class="sd-title" x="370" y="227">Merge</text>
+      <text class="sd-sub" x="370" y="246">by setting</text>
+      <rect class="sd-ring" x="324" y="114" width="92" height="92" rx="22">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.3, 0.38]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="470" y="50" width="390" height="220" rx="12" />
+      <g class="sd-icon" set:html={icon('file', 494, 80, 20)} />
+      <text class="sd-title sd-start" x="514" y="85">config.toml on this machine</text>
+      {rows.map(r => (
+        <g opacity="0">
+          <rect class="sd-row" x="486" y={r.y - 18} width="358" height="36" rx="8" />
+          <text class="sd-code sd-start" x="500" y={r.y + 4}>{r.key}</text>
+          <text class="sd-mono sd-end" x="830" y={r.y + 4}>{r.from}</text>
+          <rect class="sd-glow" x="486" y={r.y - 18} width="358" height="36" rx="8">
+            <animate attributeName="opacity" {...loop} {...pulse([[r.at, r.at + 0.08]])} />
+          </rect>
+          <animate attributeName="opacity" {...loop} {...pulse([[r.at, 0.96]])} />
+        </g>
+      ))}
+      <g class="sd-stop" transform="translate(836 64)">
+        <circle r="11" />
+        <path d="M0-5v5m0 4.5v.01" />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.66, 0.96]])} />
+      </g>
+      <text class="sd-sub sd-end" x="816" y="68" opacity="0">sync warns
+        <animate attributeName="opacity" {...loop} {...pulse([[0.66, 0.96]])} />
+      </text>
+      <rect class="sd-glow" x="470" y="50" width="390" height="220" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.36, 0.42]])} />
+      </rect>
+    </g>
+
+    {inputs.map(i => (
+      <g class="sd-packet" opacity="0">
+        <rect x="-30" y="-12" width="60" height="24" rx="6" />
+        <text class="sd-plain" y="4">{i.chip}</text>
+        <animateMotion {...loop} path={i.path} calcMode="linear" {...move([0.08, 0], [0.3, 1])} />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.07, 0.29]])} />
+      </g>
+    ))}
+  </svg></div>
+  <figcaption class="diagram-caption"><span>Additions from both machines stay. When both change one setting, this machine's value stays and the sync warns.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

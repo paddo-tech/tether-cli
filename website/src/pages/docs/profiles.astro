@@ -2,6 +2,7 @@
 import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
 import ProfileDiagram from '../../components/ProfileDiagram.astro';
+import PackageProfilesDiagram from '../../components/PackageProfilesDiagram.astro';
 ---
 
 <DocsLayout title="Profiles — Tether CLI" description="Machine profiles choose the dotfiles and package managers of each machine. Package profiles choose which machines install each package.">
@@ -26,6 +27,7 @@ tether machines profile edit work`} />
 
     <h2 id="package-profiles">Packages per profile</h2>
     <p>Each package belongs to one or more profiles. A machine installs a synced package only when its own profile is one of them, and a trusted record lists the package. So a server does not get the desktop apps of your laptops.</p>
+    <PackageProfilesDiagram />
     <ul>
       <li>By default, a package belongs to the profile of this machine and the profiles of the trusted machines whose signed records list it</li>
       <li><code>tether packages share &lt;ID&gt; --to &lt;PROFILES&gt;</code> adds profiles. Machines in those profiles then install the package</li>

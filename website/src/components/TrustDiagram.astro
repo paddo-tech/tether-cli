@@ -1,0 +1,133 @@
+---
+import { icon } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 11 s clock drives every animation
+const DUR = '11s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const fromB = 'M190 160H400';
+const toA = 'M480 160H690';
+const forged = 'M480 160H632';
+const push = 'M440 64V120';
+const fingerprint = 'M110 235C110 330 770 330 770 235';
+// A trusts B's key when the record arrives verified
+const TRUSTED = 0.71;
+---
+
+<figure class="diagram" aria-label="Machine B signs its record. You read B's fingerprint on B and enter it on A. A verifies B's record against that key and trusts it. A record edited in the repo fails its signature.">
+  <div class="diagram-label"><span>TRUST A MACHINE</span><span><i class="status-dot"></i> By fingerprint, not by Git</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 345" role="presentation" data-end="10.6">
+    <g class="sd-lines">
+      <path d={fromB} /><path d={toA} /><path d={push} /><path d={fingerprint} />
+    </g>
+    <g class="sd-flow">
+      <path d={fromB} /><path d={toA} /><path d={fingerprint} />
+    </g>
+    <text class="sd-mono" x="440" y="334">fingerprint: read on B, entered on A</text>
+
+    <g class="sd-node">
+      <rect x="350" y="20" width="180" height="44" rx="10" />
+      <g class="sd-icon" set:html={icon('users', 374, 42, 18)} />
+      <text class="sd-sub sd-start" x="394" y="46">anyone who can push</text>
+      <rect class="sd-glow" x="350" y="20" width="180" height="44" rx="10">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.76, 0.82]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="30" y="95" width="160" height="140" rx="12" />
+      <g class="sd-icon" set:html={icon('laptop', 110, 126, 32)} />
+      <text class="sd-title" x="110" y="166">Machine B</text>
+      <text class="sd-sub" x="110" y="185">signs its record</text>
+      <text class="sd-mono" x="110" y="205">tether machines show</text>
+      <rect class="sd-glow" x="30" y="95" width="160" height="140" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.02, 0.09], [0.27, 0.33]])} />
+      </rect>
+    </g>
+
+    <g class="sd-repo">
+      <rect x="400" y="120" width="80" height="80" rx="18" />
+      <g class="sd-icon-on" set:html={icon('git', 440, 160, 30)} />
+      <text class="sd-title" x="440" y="227">Your Git repo</text>
+      <text class="sd-sub" x="440" y="246">machines/&lt;id&gt;.json + .sig</text>
+      <rect class="sd-ring" x="394" y="114" width="92" height="92" rx="22">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.25, 0.32], [0.83, 0.87]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="690" y="95" width="160" height="140" rx="12" />
+      <g class="sd-icon" set:html={icon('monitor', 770, 126, 30)} />
+      <text class="sd-title" x="770" y="166">Machine A</text>
+      <text class="sd-sub" x="770" y="185">B key: in the Inbox
+        <animate attributeName="opacity" {...loop} {...pulse([[0, TRUSTED - 0.01]], 0.01)} />
+      </text>
+      <text class="sd-sub" x="770" y="185" opacity="0">B key: trusted
+        <animate attributeName="opacity" {...loop} {...pulse([[TRUSTED + 0.01, 0.97]], 0.01)} />
+      </text>
+      <text class="sd-mono" x="770" y="205">tether machines trust
+        <animate attributeName="opacity" {...loop} {...pulse([[0, TRUSTED - 0.01]], 0.01)} />
+      </text>
+      <text class="sd-mono" x="770" y="205" opacity="0">B's packages can install
+        <animate attributeName="opacity" {...loop} {...pulse([[TRUSTED + 0.01, 0.97]], 0.01)} />
+      </text>
+      <rect class="sd-glow" x="690" y="95" width="160" height="140" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.52, 0.57], [0.7, 0.78]])} />
+      </rect>
+      <g class="sd-check" transform="translate(836 109)">
+        <circle r="11" />
+        <path d="m-5 0 3.5 3.5L5-4" />
+        <animate attributeName="opacity" {...loop} {...pulse([[TRUSTED, 0.97]])} />
+      </g>
+    </g>
+
+    <text class="sd-sub" x="585" y="140" opacity="0">fails its signature
+      <animate attributeName="opacity" {...loop} {...pulse([[0.94, 0.98]])} />
+    </text>
+    <g class="sd-stop" transform="translate(632 160)">
+      <circle r="11" />
+      <path d="m-4-4 8 8m0-8-8 8" />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.94, 0.98]])} />
+    </g>
+
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-cipher" y="4">signed</text>
+      <animateMotion {...loop} path={fromB} calcMode="linear" {...move([0.06, 0], [0.24, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.05, 0.23]])} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-42" y="-12" width="84" height="24" rx="6" />
+      <text class="sd-plain" y="4">SHA256:9f2c…</text>
+      <animateMotion {...loop} path={fingerprint} calcMode="linear" {...move([0.3, 0], [0.52, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.29, 0.51]])} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-cipher" y="4">signed
+        <animate attributeName="opacity" {...loop} {...pulse([[0, 0.685]], 0.01)} />
+      </text>
+      <text class="sd-plain" y="4" opacity="0">verified
+        <animate attributeName="opacity" {...loop} {...pulse([[0.705, 1]], 0.01)} />
+      </text>
+      <animateMotion {...loop} path={toA} calcMode="linear" {...move([0.56, 0], [0.7, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.55, 0.7]])} />
+    </g>
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">edited</text>
+      <animateMotion {...loop} path={push} calcMode="linear" {...move([0.78, 0], [0.83, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.77, 0.83]])} />
+    </g>
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">edited</text>
+      <animateMotion {...loop} path={forged} calcMode="linear" {...move([0.85, 0], [0.94, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.85, 0.93]])} />
+    </g>
+  </svg></div>
+  <figcaption class="diagram-caption"><span>Tether trusts a key only when it matches the fingerprint you read on that machine. A record edited in Git fails its signature.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>
