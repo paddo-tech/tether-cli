@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-12
+
+The first stable 2.0 release. It has the same code as 2.0.0-beta.10. The beta entries below list each change.
+
+### Highlights
+
+- Signed machine records. A synced package installs on its own only when a machine you trust by its key fingerprint lists it. Other packages wait in the Inbox for review
+- Supply-chain checks before install and upgrade: a release-age limit, OSV malware and vulnerability checks, install scripts off by default, and an allowlist of Homebrew taps that Tether also copies into Homebrew's own trust store
+- Package profiles, so dev machines and servers each get their own packages
+- A three-way merge of config.toml, so edits from two machines both stay
+- `tether upgrade` never downgrades, and lists what it changes first. The daily upgrade upgrades casks one by one and leaves a cask that needs a password for a terminal
+- On macOS, the daemon runs a fixed copy of Tether at ~/.tether/bin/tether and follows each upgrade by itself, so the App Management permission survives upgrades
+- Static Linux binaries for x86_64 and aarch64, and a systemd user service
+- A rebuilt dashboard, with the Inbox, profiles and failed installs
+
+### Upgrading from 1.x
+
+Upgrade one machine at a time. Machines on 1.x and 2.0 can share a sync repo. On the first sync, choose "Decide later" at the package prompt, then trust your other machines by their fingerprints. Patch any machine that stays on 1.x to 1.13.2 first. The upgrade guide at https://tether-cli.com/docs/upgrade has every step.
+
 ## [2.0.0-beta.10] - 2026-10-12
 
 ### Fixed
