@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0-beta.10] - 2026-10-12
+
+### Fixed
+
+- npm upgrades and listings no longer fail when npm lists a global entry without a version. npm 11 lists `corepack` that way once Node stops shipping it. Before, `tether upgrade` reported "Upgrades failed for: npm"
+- The warning about casks that need a password now reads "needs" for one cask
+
 ## [2.0.0-beta.9] - 2026-10-12
 
 ### Changed
