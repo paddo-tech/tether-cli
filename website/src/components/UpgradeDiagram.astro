@@ -1,0 +1,124 @@
+---
+import { icon, type IconName } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 12 s clock drives every animation
+const DUR = '12s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const END = 0.97;
+type State = { text: string; on: number; off: number };
+const machines: { c: number; name: string; glyph: IconName; up: number; down: string; status: State[] }[] = [
+  {
+    c: 160, name: 'Laptop', glyph: 'laptop', up: 0.08, down: 'M160 170C160 130 440 140 440 100',
+    status: [
+      { text: 'trusts Mac mini', on: 0.46, off: 0.73 },
+      { text: '1 package in the Inbox', on: 0.75, off: 0.87 },
+      { text: 'trusts Server, installs it', on: 0.89, off: END },
+    ],
+  },
+  {
+    c: 440, name: 'Mac mini', glyph: 'monitor', up: 0.28, down: 'M440 170V100',
+    status: [{ text: 'trusts Laptop', on: 0.46, off: END }],
+  },
+  {
+    c: 720, name: 'Server', glyph: 'server', up: 0.78, down: 'M720 170C720 130 440 140 440 100',
+    status: [{ text: 'trusted by Laptop', on: 0.89, off: END }],
+  },
+];
+const toLaptop = 'M440 100C440 140 160 130 160 170';
+const arcs = [
+  { d: 'M200 270C200 300 400 300 400 270', on: 0.44 },
+  { d: 'M140 270C140 345 740 345 740 270', on: 0.84 },
+];
+---
+
+<figure class="diagram" aria-label="A fleet moves from 1.x to 2.0 one machine at a time. Upgraded machines sign their records and trust each other by fingerprint. Packages from a 1.x machine wait in the Inbox. Approve them one by one, or upgrade and trust that machine.">
+  <div class="diagram-label"><span>ONE MACHINE AT A TIME</span><span><i class="status-dot"></i> 1.x and 2.0 in one repo</span></div>
+  <div class="sd-scroll"><svg viewBox="0 10 880 350" aria-hidden="true" data-end="11.6">
+    <g class="sd-lines">{machines.map(m => <path d={m.down} />)}{arcs.map(a => <path d={a.d} />)}</g>
+    <g class="sd-flow">{machines.map(m => <path d={m.down} />)}</g>
+    {arcs.map(a => (
+      <path class="sd-link" d={a.d} opacity="0">
+        <animate attributeName="opacity" {...loop} {...pulse([[a.on, END]])} />
+      </path>
+    ))}
+    <text class="sd-mono" x="440" y="352">trust by fingerprint</text>
+
+    <g class="sd-repo">
+      <rect x="405" y="30" width="70" height="70" rx="16" />
+      <g class="sd-icon-on" set:html={icon('git', 440, 65, 26)} />
+      <text class="sd-title sd-start" x="494" y="61">Your Git repo</text>
+      <text class="sd-sub sd-start" x="494" y="79">mixed 1.x and 2.0</text>
+      <rect class="sd-ring" x="399" y="24" width="82" height="82" rx="20">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.24, 0.3], [0.4, 0.45], [0.62, 0.67]])} />
+      </rect>
+    </g>
+
+    {machines.map(m => (
+      <g class="sd-node">
+        <rect x={m.c - 100} y="170" width="200" height="100" rx="12" />
+        <g class="sd-icon" set:html={icon(m.glyph, m.c - 74, 199, 24)} />
+        <text class="sd-title sd-start" x={m.c - 52} y="204">{m.name}</text>
+        <g class="sd-pill">
+          <rect x={m.c + 38} y="186" width="46" height="22" rx="11" />
+          <text x={m.c + 61} y="201">1.x
+            <animate attributeName="opacity" {...loop} {...pulse([[0, m.up - 0.01], [0.99, 1]], 0.01)} />
+          </text>
+          <text x={m.c + 61} y="201" class="sd-cipher" opacity="0">2.0
+            <animate attributeName="opacity" {...loop} {...pulse([[m.up + 0.01, 0.97]], 0.01)} />
+          </text>
+        </g>
+        <text class="sd-sub sd-start" x={m.c - 84} y="232">unsigned record
+          <animate attributeName="opacity" {...loop} {...pulse([[0, m.up], [0.99, 1]], 0.01)} />
+        </text>
+        <text class="sd-sub sd-start" x={m.c - 84} y="232" opacity="0">signed record
+          <animate attributeName="opacity" {...loop} {...pulse([[m.up + 0.02, 0.97]], 0.01)} />
+        </text>
+        {m.status.map(s => (
+          <text class="sd-mono sd-start" x={m.c - 84} y="253" opacity="0">{s.text}
+            <animate attributeName="opacity" {...loop} {...pulse([[s.on, s.off]], 0.01)} />
+          </text>
+        ))}
+        <rect class="sd-glow" x={m.c - 100} y="170" width="200" height="100" rx="12">
+          <animate attributeName="opacity" {...loop} {...pulse([[m.up - 0.02, m.up + 0.05]])} />
+        </rect>
+      </g>
+    ))}
+
+    <g class="sd-stop" transform="translate(258 172)">
+      <circle r="11" />
+      <path d="M0-5v5m0 4.5v.01" />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.74, 0.87]])} />
+    </g>
+    <g class="sd-check" transform="translate(258 172)">
+      <circle r="11" />
+      <path d="m-5 0 3.5 3.5L5-4" />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.89, END]])} />
+    </g>
+
+    {machines.slice(0, 2).map((m, i) => (
+      <g class="sd-packet" opacity="0">
+        <rect x="-34" y="-12" width="68" height="24" rx="6" />
+        <text class="sd-cipher" y="4">signed</text>
+        <animateMotion {...loop} path={m.down} calcMode="linear" {...move([m.up + 0.04, 0], [i ? 0.4 : 0.24, 1])} />
+        <animate attributeName="opacity" {...loop} {...pulse([[m.up + 0.03, i ? 0.39 : 0.23]])} />
+      </g>
+    ))}
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">unsigned</text>
+      <animateMotion {...loop} path={machines[2].down} calcMode="linear" {...move([0.52, 0], [0.62, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.51, 0.62]], 0)} />
+    </g>
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">package</text>
+      <animateMotion {...loop} path={toLaptop} calcMode="linear" {...move([0.63, 0], [0.73, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.63, 0.73]], 0)} />
+    </g>
+  </svg></div>
+  <figcaption class="diagram-caption"><span>A 1.x record has no signature. Its packages wait in the Inbox. Approve them, or upgrade that machine and trust it.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

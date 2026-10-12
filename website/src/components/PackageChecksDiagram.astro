@@ -1,0 +1,108 @@
+---
+import { icon, type IconName } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 10 s clock drives every animation
+const DUR = '10s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const main = 'M155 130H730';
+const toOsv = 'M155 130H605';
+const held = 'M605 130C605 215 530 205 530 250';
+const branches = ['M365 130C365 215 440 205 440 250', 'M485 130V250', held];
+// a: the package that passes, at each gate. b: the package that OSV holds.
+const gates: { x: number; label: string; glyph: IconName; a: number; b: [number, number] }[] = [
+  { x: 245, label: 'in profile', glyph: 'users', a: 0.103, b: [0.535, 0.57] },
+  { x: 365, label: 'trusted record', glyph: 'key', a: 0.186, b: [0.6, 0.635] },
+  { x: 485, label: 'release age', glyph: 'clock', a: 0.27, b: [0.665, 0.7] },
+  { x: 605, label: 'OSV', glyph: 'shield', a: 0.353, b: [0.735, 0.8] },
+];
+---
+
+<figure class="diagram" aria-label="A synced package passes four checks and installs. A package outside this profile is skipped. A package that fails a later check waits in the Inbox.">
+  <div class="diagram-label"><span>BEFORE A SYNCED PACKAGE INSTALLS</span><span><i class="status-dot"></i> On every sync</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" aria-hidden="true" data-end="9.5">
+    <g class="sd-lines">
+      <path d={main} />{branches.map(d => <path d={d} />)}
+    </g>
+    <g class="sd-flow">
+      <path d={main} />
+    </g>
+
+    <g class="sd-node">
+      <rect x="20" y="80" width="135" height="100" rx="12" />
+      <g class="sd-icon" set:html={icon('file', 87, 110, 28)} />
+      <text class="sd-title" x="87" y="148">Synced package</text>
+      <text class="sd-sub" x="87" y="166">from manifests</text>
+    </g>
+
+    {gates.map(g => (
+      <g class="sd-node">
+        <rect x={g.x - 35} y="95" width="70" height="70" rx="14" />
+        <g class="sd-icon" set:html={icon(g.glyph, g.x, 130, 26)} />
+        <text class="sd-sub" x={g.x} y="82">{g.label}</text>
+        <rect class="sd-glow" x={g.x - 35} y="95" width="70" height="70" rx="14">
+          <animate attributeName="opacity" {...loop} {...pulse([[g.a - 0.02, g.a + 0.02], g.b])} />
+        </rect>
+      </g>
+    ))}
+    <text class="sd-sub" x="245" y="188">else skipped</text>
+
+    <g class="sd-repo">
+      <rect x="730" y="90" width="80" height="80" rx="18" />
+      <g class="sd-icon-on" set:html={icon('box', 770, 130, 30)} />
+      <text class="sd-title" x="770" y="197">Installs</text>
+      <text class="sd-sub" x="770" y="216">the checked release</text>
+      <rect class="sd-ring" x="724" y="84" width="92" height="92" rx="22">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.44, 0.52]])} />
+      </rect>
+      <g class="sd-check" transform="translate(812 88)">
+        <circle r="11" />
+        <path d="m-5 0 3.5 3.5L5-4" />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.45, 0.62]])} />
+      </g>
+    </g>
+
+    <g class="sd-node">
+      <rect x="390" y="250" width="190" height="56" rx="12" />
+      <g class="sd-icon" set:html={icon('inbox', 420, 278, 22)} />
+      <text class="sd-title sd-start" x="444" y="275">Inbox</text>
+      <text class="sd-sub sd-start" x="444" y="293">MAL-: reject only</text>
+      <rect class="sd-glow" x="390" y="250" width="190" height="56" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.87, 0.96]])} />
+      </rect>
+      <g class="sd-stop" transform="translate(566 262)">
+        <circle r="11" />
+        <path d="M0-5v5m0 4.5v.01" />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.88, 0.97]])} />
+      </g>
+    </g>
+
+    <g class="sd-packet" opacity="0">
+      <rect x="-38" y="-12" width="76" height="24" rx="6" />
+      <text class="sd-plain" y="4">typescript</text>
+      <animateMotion {...loop} path={main} calcMode="linear" {...move([0.04, 0], [0.44, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.03, 0.43]])} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-38" y="-12" width="76" height="24" rx="6" />
+      <text class="sd-plain" y="4">x-utils
+        <animate attributeName="opacity" {...loop} {...pulse([[0, 0.76]], 0.01)} />
+      </text>
+      <text class="sd-cipher" y="4" opacity="0">MAL- found
+        <animate attributeName="opacity" {...loop} {...pulse([[0.78, 1]], 0.01)} />
+      </text>
+      <animateMotion {...loop} path={toOsv} calcMode="linear" {...move([0.5, 0], [0.74, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.49, 0.8]], 0)} />
+    </g>
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-38" y="-12" width="76" height="24" rx="6" />
+      <text class="sd-plain" y="4">held</text>
+      <animateMotion {...loop} path={held} calcMode="linear" {...move([0.8, 0], [0.88, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.8, 0.88]], 0)} />
+    </g>
+  </svg></div>
+  <figcaption class="diagram-caption"><span>A failed trust, age or OSV check holds the package in the Inbox. Homebrew gets the tap allowlist instead of release age and OSV.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

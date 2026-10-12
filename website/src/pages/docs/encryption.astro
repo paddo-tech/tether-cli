@@ -1,0 +1,47 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+import EncryptionDiagram from '../../components/EncryptionDiagram.astro';
+---
+
+<DocsLayout title="Encryption — Tether CLI" description="How Tether encrypts dotfiles with AES-256-GCM, protects the key with your passphrase, and scans team dotfiles for secrets.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>Encryption</h1>
+    <p>Tether encrypts your dotfiles on your machine before they reach Git. Locally they stay plaintext, so your shell reads them as usual. For the threat model, see <a href="/security">Security</a>.</p>
+    <EncryptionDiagram />
+
+    <h2>How encryption works</h2>
+    <ol>
+      <li>On the first <code>tether init</code>, Tether makes a random 256-bit key</li>
+      <li>It encrypts the key with your passphrase, using <code>age</code></li>
+      <li>It stores the encrypted key in the sync repo as <code>encryption.key.age</code></li>
+      <li>It encrypts each dotfile with AES-256-GCM before it commits it</li>
+      <li>On another machine, you enter the passphrase to decrypt the key</li>
+    </ol>
+    <p>Package manifests and machine records stay readable in Git. Team secrets use age public-key encryption. See <a href="/docs/team-sync">Teams and collab</a>.</p>
+    <p>Encryption is on by default. To turn it off, set <code>security.encrypt_dotfiles = false</code>. Do not turn it off if your dotfiles hold secrets.</p>
+
+    <h2>Unlock and lock</h2>
+    <p>Each machine caches the decrypted key. If the daemon cannot decrypt, unlock the key with your passphrase:</p>
+    <Code code="tether unlock" />
+    <p>To clear the cached key:</p>
+    <Code code="tether lock" />
+
+    <h2 id="secret-detection">Secret detection</h2>
+    <p>Tether scans team dotfiles for common secret patterns in these places:</p>
+    <ul>
+      <li><code>tether sync</code> and the daemon scan before they push the team repo. A finding blocks the push</li>
+      <li><code>tether team add</code> scans the team repo. A finding asks you whether to continue</li>
+    </ul>
+    <p>A sync with only team features on does not scan. <code>tether team files promote</code> does not scan. Tether does not scan personal dotfiles. They reach Git encrypted, unless you set <code>security.encrypt_dotfiles = false</code>. Tether looks for patterns such as:</p>
+    <ul>
+      <li>AWS credentials (<code>AKIA...</code>)</li>
+      <li>GitHub tokens (<code>ghp_...</code>, <code>gho_...</code>)</li>
+      <li>Generic patterns (<code>API_KEY=</code>, <code>password=</code>)</li>
+    </ul>
+    <p>A line that holds an ignore pattern is not a finding. Add one for a false positive:</p>
+    <Code code="tether ignore secrets add 'EXAMPLE_KEY='" />
+    <p>Turn the team scan off with <code>security.scan_secrets = false</code>.</p>
+  </section>
+</DocsLayout>

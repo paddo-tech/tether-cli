@@ -1,0 +1,134 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+
+const tabs = [
+  ['Overview', '1', 'Dotfiles, packages, machines, recent activity, a chart of sync commits per day, and the daemon log'],
+  ['Files', '2', 'Synced dotfiles with file history, diffs with line numbers, restore from a commit or a backup, and sharing'],
+  ['Packages', '3', 'Packages by manager with the profiles of each package, manifest history, failed installs, install, and uninstall'],
+  ['Machines', '4', 'A card for each machine: id, profile, OS, Tether version, packages, last sync, online/idle/stale state, and key trust'],
+  ['Config', '5', 'Config editor with toggles, validated text fields, list editing, and the package security settings'],
+  ['Security', '6', 'The Inbox: held packages with their reasons, source machine, commit and OSV advisories, machine keys that wait for trust, and the trusted machines'],
+];
+
+// Keep in step with src/dashboard/components/keymap.rs, the source of the footer and the ? help.
+const keyTables = [
+  { title: 'Every tab', keys: [
+    ['s', 'Sync now'],
+    ['d', 'Start the daemon, or stop it (asks)'],
+    ['r', 'Read the state again'],
+    ['Ctrl+K', 'Command palette: search actions, tabs, files, and packages'],
+    ['Tab, 1-6', 'Next tab, or go to a tab'],
+    ['?', 'Help: every key of the current screen'],
+    ['Esc', 'Close, collapse or go back. Never quits'],
+    ['q, Ctrl+C', 'Quit'],
+    ['click', 'Select; click again to open'],
+  ] },
+  { title: 'Overview', keys: [
+    ['Enter', 'Open the whole daemon log, read-only'],
+    ['j/k, ↑ ↓', 'Scroll the file list'],
+  ] },
+  { title: 'Daemon log', keys: [
+    ['j/k, ↑ ↓', 'Scroll one line'],
+    ['PgUp, PgDn', 'Scroll one page'],
+    ['g, Home / G, End', 'Go to the oldest / newest line'],
+    ['Esc', 'Close the log'],
+  ] },
+  { title: 'Files', keys: [
+    ['Enter', 'Expand a section, open file history, show a diff'],
+    ['Esc', 'Close the diff, then the history'],
+    ['j/k, ↑ ↓', 'Move'],
+    ['R', 'Restore the file to the selected commit (asks)'],
+    ['b', 'Restore the file from a backup (asks)'],
+    ['i', 'Import a dotfile from another profile'],
+    ['t', 'Turn sharing on or off for the file'],
+    ['x', 'Remove the file from this profile (asks)'],
+  ] },
+  { title: 'Packages', keys: [
+    ['Enter', 'Expand a manager; show a history diff'],
+    ['Esc', 'Close the diff, the history, then the list'],
+    ['j/k, ↑ ↓', 'Move'],
+    ['t', 'Share: pick the profiles that install the package'],
+    ['x', 'Uninstall the package (asks). Other profiles keep it. On a failed install, stop it on this machine'],
+    ['i', 'Install a package that another machine has'],
+    ['h', "Open the manager's manifest history"],
+    ['R', 'Roll back to the selected history entry (asks)'],
+  ] },
+  { title: 'Machines', keys: [
+    ['Enter', "Open or close the machine's details"],
+    ['Esc', 'Close the details'],
+    ['h/j/k/l, ← ↓ ↑ →', 'Move between cards'],
+    ['p', "Set this machine's profile (its own card only)"],
+    ['a', "Trust the machine's key (asks)"],
+    ['x', "Untrust the machine's key (asks)"],
+    ['D', 'Remove an old id of this machine (asks)'],
+  ] },
+  { title: 'Config', keys: [
+    ['Enter', 'Turn on or off, edit a value, or open a list'],
+    ['j/k, ↑ ↓', 'Move'],
+  ] },
+  { title: 'Config list', keys: [
+    ['a', 'Add an item; Enter saves it, Esc cancels'],
+    ['x, Delete', 'Remove the item (asks)'],
+    ['t', 'Dotfiles: create the file when it is missing'],
+    ['Esc', 'Back to the Config list'],
+    ['j/k, ↑ ↓', 'Move'],
+  ] },
+  { title: 'Security', keys: [
+    ['a', 'Approve and install; a machine key or a failed signature asks first'],
+    ['x', 'Reject (asks)'],
+    ['Enter', 'Open or close the details'],
+    ['Esc', 'Close the details'],
+    ['j/k, ↑ ↓', 'Move'],
+    ['A', 'Approve all safe packages (asks)'],
+    ['M', "Approve all from the item's machine (asks)"],
+  ] },
+];
+---
+
+<DocsLayout title="Dashboard — Tether CLI" description="The Tether dashboard: its tabs, its keys, themes and questions.">
+  <section>
+    <p class="eyebrow">REFERENCE</p>
+    <h1>Dashboard</h1>
+    <p>Run <code>tether</code> with no arguments to open the dashboard in the terminal.</p>
+    <Code code="tether" />
+
+    <h2>Tabs</h2>
+    <p>Switch tabs with the number keys, <code>Tab</code>, or a mouse click.</p>
+    <table>
+      <thead><tr><th>Tab</th><th>Key</th><th>Shows</th></tr></thead>
+      <tbody>{tabs.map(([tab, key, shows]) => <tr><td>{tab}</td><td><code>{key}</code></td><td>{shows}</td></tr>)}</tbody>
+    </table>
+    <p>A machine is online when its record is at most 90 minutes old. A running daemon saves an unchanged record once an hour. A record from 90 minutes to 24 hours old shows the machine as idle. After 24 hours without an update, the card shows the machine as stale. A machine that still runs 1.x shows "on 1.x".</p>
+    <p>The header shows this machine, its profile, the daemon state, and a spinner while a sync runs. When items wait in the Inbox, the header shows <code>⚑ Inbox &lt;count&gt;</code>. The badge is red when an item is malicious.</p>
+
+    <h2 id="keys">Keys</h2>
+    <p>The footer shows the most important keys of the current tab. When it has no room for all of them, it shows <code>? more</code>. Press <code>?</code> to see every key of the current screen. You can also click a tab, a row or a key hint, and scroll lists with the mouse wheel.</p>
+    <ul>
+      <li><code>Enter</code> opens: a section, a history, a diff, details, or a value to edit</li>
+      <li><code>Esc</code> closes, collapses or goes back. It never quits. Press <code>q</code> or <code>Ctrl+C</code> to quit</li>
+      <li><code>x</code> removes, uninstalls, rejects or untrusts. It always asks first</li>
+    </ul>
+    {keyTables.map(table => (
+      <Fragment>
+        <h4>{table.title}</h4>
+        <table>
+          <thead><tr><th>Key</th><th>Action</th></tr></thead>
+          <tbody>{table.keys.map(([key, action]) => <tr><td><code>{key}</code></td><td>{action}</td></tr>)}</tbody>
+        </table>
+      </Fragment>
+    ))}
+
+    <h2>Questions</h2>
+    <p>These actions ask first: restore, rollback, uninstall, remove, reject, trust, untrust, approve all, stop the daemon, and an approval that needs a second look, such as a machine key, a failed signature, or a package that OSV could not check.</p>
+    <ul>
+      <li>A question ignores <code>y</code> for 0.4 seconds after it opens. Until then, it shows dim buttons with a countdown. A <code>y</code> that you typed for another screen cannot accept it. Cancel and scroll keys work at once</li>
+      <li>After that, only <code>y</code> accepts</li>
+      <li><code>n</code>, <code>Esc</code> and <code>Enter</code> cancel. A click on the tab under the question does not accept it</li>
+    </ul>
+
+    <h2>Themes</h2>
+    <p>On a terminal with true color, the dashboard uses Catppuccin Mocha or Latte. It picks one from the terminal background. Other terminals get a 16-color theme. To choose a theme, set <code>dashboard.theme</code>:</p>
+    <Code code="tether config set dashboard.theme mocha   # mocha, latte, ansi, or auto" />
+  </section>
+</DocsLayout>

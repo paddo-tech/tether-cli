@@ -6,11 +6,11 @@ const currentPath = Astro.url.pathname.replace(/\/$/, '');
 
 <header class="site-header wrap">
   <a class="wordmark" href="/" aria-label="Tether home"><Icon name="link" size={29} /><span>tether<span class="cli-label">CLI</span></span></a>
-  <nav class="desktop-nav" aria-label="Main navigation">{links.map(link => <a href={link.href} aria-current={currentPath === link.href ? 'page' : undefined}>{link.label}</a>)}</nav>
+  <nav class="desktop-nav" aria-label="Main navigation">{links.map(link => <a href={link.href} aria-current={currentPath === link.href || currentPath.startsWith(`${link.href}/`) ? 'page' : undefined}>{link.label}</a>)}</nav>
   <div class="nav-actions">
     <button class="theme-toggle" aria-label="Switch to dark mode"><span class="sun"><Icon name="sun" size={19} /></span><span class="moon"><Icon name="moon" size={19} /></span></button>
     <a class="github-link" href="https://github.com/paddo-tech/tether-cli">GitHub <span>↗</span></a>
-    <details class="mobile-nav"><summary aria-label="Navigation menu"><span></span><span></span></summary><nav aria-label="Mobile navigation">{links.map(link => <a href={link.href} aria-current={currentPath === link.href ? 'page' : undefined}>{link.label}</a>)}<a href="https://github.com/paddo-tech/tether-cli">GitHub ↗</a></nav></details>
+    <details class="mobile-nav"><summary aria-label="Navigation menu"><span></span><span></span></summary><nav aria-label="Mobile navigation">{links.map(link => <a href={link.href} aria-current={currentPath === link.href || currentPath.startsWith(`${link.href}/`) ? 'page' : undefined}>{link.label}</a>)}<a href="https://github.com/paddo-tech/tether-cli">GitHub ↗</a></nav></details>
   </div>
 </header>
 

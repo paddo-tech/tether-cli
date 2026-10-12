@@ -1,0 +1,48 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Quick start — Tether CLI" description="Set up your first machine, add a second machine, trust each machine's key, and review the Inbox.">
+  <section>
+    <p class="eyebrow">GET STARTED</p>
+    <h1>Quick start</h1>
+    <p>This guide connects two machines. You need a private Git repository for the sync data, such as an empty repository on GitHub. <a href="/docs/install">Install Tether</a> on both machines first.</p>
+
+    <h2>1. Set up the first machine</h2>
+    <Code code="tether init" />
+    <p>Tether asks for the repository URL and for a passphrase. The passphrase protects the encryption key of your dotfiles. You need it on each machine, so keep it safe.</p>
+    <p><code>tether init</code> runs the first sync and installs the background daemon, which syncs every 5 minutes. To skip the daemon, add <code>--no-daemon</code>.</p>
+    <Code code="tether status" />
+    <p><code>tether status</code> shows the daemon, this machine's profile and the synced files.</p>
+
+    <h2>2. Add a second machine</h2>
+    <Code code="tether init --repo git@github.com:you/dotfiles.git" />
+    <p>Use the same repository and enter the same passphrase. Tether applies your dotfiles. Your packages do not install yet: the new machine does not trust the first machine.</p>
+    <p>In a terminal, the sync asks "Install these packages?". Choose <strong>Decide later</strong>. You trust the machine in the next step, and its packages then install without a question.</p>
+
+    <h2>3. Trust each machine</h2>
+    <p>Each machine signs a record of its packages with its own key. A machine installs synced packages on its own only from machines whose key it trusts. Trust works in each direction, so do this on both machines.</p>
+    <p>On each machine, read its id and its full key fingerprint:</p>
+    <Code code="tether machines show" />
+    <p>On the other machine, trust it with the fingerprint you read:</p>
+    <Code code="tether machines trust <id> --fingerprint SHA256:..." />
+    <p>Read the fingerprint on the machine itself. Do not copy it from the sync repo. Tether trusts the key only when the fingerprint matches. See <a href="/docs/trust">Machine trust</a>.</p>
+
+    <h2>4. Sync and review the Inbox</h2>
+    <Code code={`tether sync
+tether packages inbox`} />
+    <p>The sync installs the packages that the trusted machine lists, when they pass the <a href="/docs/package-security">package checks</a>. A package that fails a check waits in the Inbox with its reason. For example, a formula from a tap outside your trusted taps waits as "untrusted tap". The <a href="/docs/inbox-reasons">Inbox reasons</a> list every reason.</p>
+    <p>Approve or reject each item:</p>
+    <Code code={`tether packages approve <manager:name>
+tether packages reject <manager:name>`} />
+    <p>You can also use the dashboard: run <code>tether</code> and open the Security tab. See <a href="/docs/inbox">The Inbox</a>.</p>
+
+    <h2>Next</h2>
+    <ul>
+      <li>Give machines different packages: <a href="/docs/profiles">Profiles</a> and <a href="/docs/servers">Keep servers clean</a></li>
+      <li>Trust a Homebrew tap: <a href="/docs/package-security#homebrew-taps">Homebrew taps</a></li>
+      <li>On Linux: <a href="/docs/linux">Linux and systemd</a></li>
+    </ul>
+  </section>
+</DocsLayout>

@@ -1,0 +1,123 @@
+---
+import { icon } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 11 s clock drives every animation
+const DUR = '11s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const push = 'M190 145H400';
+const pull = 'M400 145H190';
+const fromB = 'M690 145H480';
+// This machine's change waits here, out of the push, until the conflict is resolved
+const HOLD = 0.25;
+const CONFLICT = 0.56;
+const RESOLVED = 0.8;
+const choices = [
+  { x: 30, w: 96, label: 'keep local' },
+  { x: 134, w: 96, label: 'use remote' },
+  { x: 238, w: 72, label: 'merge' },
+];
+---
+
+<figure class="diagram" aria-label="Both machines change one dotfile. The sync records a conflict and keeps the local file out of the push. tether resolve keeps local, uses remote or merges, then the change syncs.">
+  <div class="diagram-label"><span>ONE FILE, TWO EDITS</span><span><i class="status-dot"></i> Without a terminal</span></div>
+  <div class="sd-scroll"><svg viewBox="0 50 880 260" aria-hidden="true" data-end="10.6">
+    <g class="sd-lines"><path d={push} /><path d={fromB} /></g>
+    <g class="sd-flow"><path d={push} /><path d={fromB} /></g>
+
+    <g class="sd-node">
+      <rect x="30" y="80" width="160" height="130" rx="12" />
+      <g class="sd-icon" set:html={icon('laptop', 110, 112, 32)} />
+      <text class="sd-title" x="110" y="154">This machine</text>
+      <text class="sd-sub" x="110" y="174">edits .zshrc
+        <animate attributeName="opacity" {...loop} {...pulse([[0, CONFLICT - 0.01]], 0.01)} />
+      </text>
+      <text class="sd-sub" x="110" y="174" opacity="0">conflict recorded
+        <animate attributeName="opacity" {...loop} {...pulse([[CONFLICT + 0.01, RESOLVED - 0.01]], 0.01)} />
+      </text>
+      <text class="sd-sub" x="110" y="174" opacity="0">resolved
+        <animate attributeName="opacity" {...loop} {...pulse([[RESOLVED + 0.01, 0.97]], 0.01)} />
+      </text>
+      <rect class="sd-glow" x="30" y="80" width="160" height="130" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.02, 0.08], [0.54, 0.6]])} />
+      </rect>
+      <g class="sd-stop" transform="translate(176 94)">
+        <circle r="11" />
+        <path d="M0-5v5m0 4.5v.01" />
+        <animate attributeName="opacity" {...loop} {...pulse([[CONFLICT, RESOLVED]])} />
+      </g>
+      <g class="sd-check" transform="translate(176 94)">
+        <circle r="11" />
+        <path d="m-5 0 3.5 3.5L5-4" />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.92, 0.97]])} />
+      </g>
+    </g>
+
+    <g class="sd-repo">
+      <rect x="400" y="105" width="80" height="80" rx="18" />
+      <g class="sd-icon-on" set:html={icon('git', 440, 145, 30)} />
+      <text class="sd-title" x="440" y="212">Your Git repo</text>
+      <rect class="sd-ring" x="394" y="99" width="92" height="92" rx="22">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.25, 0.32], [0.92, 0.97]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="690" y="80" width="160" height="130" rx="12" />
+      <g class="sd-icon" set:html={icon('monitor', 770, 112, 30)} />
+      <text class="sd-title" x="770" y="154">Other machine</text>
+      <text class="sd-sub" x="770" y="174">edits .zshrc
+        <animate attributeName="opacity" {...loop} {...pulse([[0, 0.23]], 0.01)} />
+      </text>
+      <text class="sd-sub" x="770" y="174" opacity="0">pushed first
+        <animate attributeName="opacity" {...loop} {...pulse([[0.25, 0.97]], 0.01)} />
+      </text>
+      <rect class="sd-glow" x="690" y="80" width="160" height="130" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.02, 0.08]])} />
+      </rect>
+    </g>
+
+    <g opacity="0">
+      <text class="sd-mono sd-start" x="30" y="252">tether resolve .zshrc</text>
+      {choices.map(c => (
+        <g class="sd-pill">
+          <rect x={c.x} y="264" width={c.w} height="26" rx="13" />
+          <text x={c.x + c.w / 2} y="281">{c.label}</text>
+        </g>
+      ))}
+      <rect class="sd-glow" x="238" y="264" width="72" height="26" rx="13">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.7, 0.97]])} />
+      </rect>
+      <animate attributeName="opacity" {...loop} {...pulse([[0.62, 0.97]])} />
+    </g>
+
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">.zshrc</text>
+      <animateMotion {...loop} path={fromB} calcMode="linear" {...move([0.06, 0], [0.24, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.05, 0.23]])} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">.zshrc</text>
+      <animateMotion {...loop} path={pull} calcMode="linear" {...move([0.36, 0], [0.54, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.35, 0.53]])} />
+    </g>
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">held</text>
+      <animateMotion {...loop} path={push} calcMode="linear" keyPoints={`${HOLD};${HOLD}`} keyTimes="0;1" />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.58, RESOLVED]], 0)} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-cipher" y="4">merged</text>
+      <animateMotion {...loop} path={push} calcMode="linear" {...move([RESOLVED, HOLD], [0.92, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[RESOLVED, 0.91]], 0)} />
+    </g>
+  </svg></div>
+  <figcaption class="diagram-caption"><span>The sync records the conflict, notifies you, and keeps the local file out of the push until you run tether resolve.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

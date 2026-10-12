@@ -1,0 +1,90 @@
+---
+import { icon, type IconName } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 10 s clock drives every animation
+const DUR = '10s';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+const machines: { y: number; name: string; profile: string; glyph: IconName; path: string }[] = [
+  { y: 58, name: 'Laptop', profile: 'dev', glyph: 'laptop', path: 'M320 160C485 160 485 58 650 58' },
+  { y: 160, name: 'Mac mini', profile: 'dev', glyph: 'monitor', path: 'M320 160H650' },
+  { y: 262, name: 'Home server', profile: 'server', glyph: 'server', path: 'M320 160C485 160 485 262 650 262' },
+];
+// The dev-only package stops here on its way to the server
+const SKIP = 0.5;
+---
+
+<figure class="diagram" aria-label="Each package lists its profiles. A dev package reaches the dev machines and skips the server. A package shared with both profiles reaches all three machines.">
+  <div class="diagram-label"><span>PACKAGES PER PROFILE</span><span><i class="status-dot"></i> Machines on 2.0</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" aria-hidden="true" data-end="9.4">
+    <g class="sd-lines">{machines.map(m => <path d={m.path} />)}</g>
+    <g class="sd-flow">{machines.map(m => <path d={m.path} />)}</g>
+
+    <g class="sd-node">
+      <rect x="20" y="95" width="300" height="130" rx="12" />
+      <g class="sd-icon" set:html={icon('git', 44, 122, 18)} />
+      <text class="sd-sub sd-start" x="62" y="126">packages/profiles.toml</text>
+      <text class="sd-code sd-start" x="44" y="167">"npm:eslint" = ["dev"]</text>
+      <text class="sd-code sd-start" x="44" y="197">"uv:httpie" = ["dev", "server"]</text>
+      <rect class="sd-glow" x="32" y="150" width="276" height="26" rx="6">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.02, 0.44]])} />
+      </rect>
+      <rect class="sd-glow" x="32" y="180" width="276" height="26" rx="6">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.5, 0.92]])} />
+      </rect>
+    </g>
+
+    {machines.map(m => {
+      const dev = m.profile === 'dev';
+      return (
+        <g class="sd-node">
+          <rect x="650" y={m.y - 38} width="200" height="76" rx="12" />
+          <g class="sd-icon" set:html={icon(m.glyph, 684, m.y, 28)} />
+          <text class="sd-title sd-start" x="712" y={m.y - 3}>{m.name}</text>
+          <text class="sd-sub sd-start" x="712" y={m.y + 15}>profile {m.profile}</text>
+          <rect class="sd-glow" x="650" y={m.y - 38} width="200" height="76" rx="12">
+            <animate attributeName="opacity" {...loop} {...pulse(dev ? [[0.33, 0.4], [0.79, 0.86]] : [[0.79, 0.86]])} />
+          </rect>
+          <g class="sd-check" transform={`translate(836 ${m.y - 24})`}>
+            <circle r="11" />
+            <path d="m-5 0 3.5 3.5L5-4" />
+            <animate attributeName="opacity" {...loop} {...pulse(dev ? [[0.34, 0.46], [0.8, 0.95]] : [[0.8, 0.95]])} />
+          </g>
+        </g>
+      );
+    })}
+
+    {machines.slice(0, 2).map(m => (
+      <g class="sd-packet" opacity="0">
+        <rect x="-34" y="-12" width="68" height="24" rx="6" />
+        <text class="sd-plain" y="4">eslint</text>
+        <animateMotion {...loop} path={m.path} calcMode="linear" {...move([0.06, 0], [0.34, 1])} />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.05, 0.33]])} />
+      </g>
+    ))}
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">eslint</text>
+      <animateMotion {...loop} path={machines[2].path} calcMode="linear" {...move([0.06, 0], [0.06 + 0.28 * SKIP, SKIP])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.05, 0.2]], 0)} />
+    </g>
+    <g class="sd-packet sd-held" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">skipped</text>
+      <animateMotion {...loop} path={machines[2].path} calcMode="linear" keyPoints={`${SKIP};${SKIP}`} keyTimes="0;1" />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.21, 0.36]], 0.01)} />
+    </g>
+    {machines.map(m => (
+      <g class="sd-packet" opacity="0">
+        <rect x="-34" y="-12" width="68" height="24" rx="6" />
+        <text class="sd-plain" y="4">httpie</text>
+        <animateMotion {...loop} path={m.path} calcMode="linear" {...move([0.52, 0], [0.8, 1])} />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.51, 0.79]])} />
+      </g>
+    ))}
+  </svg></div>
+  <figcaption class="diagram-caption"><span>A machine installs a synced package only when its profile is a member and a trusted record lists the package.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

@@ -1,0 +1,36 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Linux and systemd — Tether CLI" description="Run Tether on Linux: install, the systemd user service, notifications, and package notes.">
+  <section>
+    <p class="eyebrow">GUIDES</p>
+    <h1>Linux and systemd</h1>
+    <p>Tether runs on x86_64 and aarch64 Linux. Install it with Homebrew, a static release download, or from source. See <a href="/docs/install">Install</a>. Then run <code>tether init</code>.</p>
+
+    <h2>Daemon</h2>
+    <Code code="tether daemon install" />
+    <p>On Linux, this installs and enables a systemd user service in <code>~/.config/systemd/user/tether.service</code>. The service gets your shell's <code>PATH</code>, <code>GEM_HOME</code> and <code>GEM_PATH</code>. <code>tether daemon uninstall</code> removes it.</p>
+    <ul>
+      <li>Without a systemd user session, Tether asks you to use <code>tether daemon start</code></li>
+      <li>Paths with spaces, <code>$</code> or <code>%</code> work</li>
+      <li>systemd cannot run a program whose path has a quote, a backslash or a control character. A unit also cannot hold a newline in the log path, <code>PATH</code>, <code>GEM_HOME</code> or <code>GEM_PATH</code>. In these cases, <code>tether daemon install</code> stops with an error and writes no unit</li>
+    </ul>
+    <Code code={`tether daemon status
+tether daemon logs -f`} />
+
+    <h2>Notifications</h2>
+    <p>Tether uses <code>notify-send</code> for desktop notifications. Without it, Tether logs this once and shows no notifications.</p>
+
+    <h2>Packages</h2>
+    <ul>
+      <li>Tether does not install Homebrew casks on Linux</li>
+      <li>Tether skips gems that ship with Ruby or with Debian. On a Ruby from ruby-build or rbenv, Tether cannot identify these gems</li>
+      <li>Machine records name their OS. When only Macs list a version, Linux tries it first. If it fails, Tether holds the newest release that suits Linux in the Inbox as "other OS version". Approve it to install exactly that release</li>
+    </ul>
+
+    <h2>Merge tool</h2>
+    <p>When the synced merge tool is <code>opendiff</code>, a machine without it uses <code>vimdiff</code>. To use another tool on one machine, set it in <a href="/docs/configuration#local-config"><code>~/.tether/local.toml</code></a>. See <a href="/docs/conflicts#merge-tool">Merge tool</a>.</p>
+  </section>
+</DocsLayout>

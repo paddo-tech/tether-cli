@@ -1,0 +1,67 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Troubleshooting — Tether CLI" description="Fix common Tether problems: the daemon, packages that do not install, signatures, conflicts and encryption.">
+  <section>
+    <p class="eyebrow">HELP</p>
+    <h1>Troubleshooting</h1>
+
+    <h2>The daemon does not run</h2>
+    <Code code={`tether daemon status
+tether daemon start
+tether daemon logs -f`} />
+    <p>On Linux without a systemd user session, use <code>tether daemon start</code>. See <a href="/docs/linux">Linux and systemd</a>.</p>
+
+    <h2>macOS asks for App Management</h2>
+    <p>The daemon runs a copy of Tether at <code>~/.tether/bin/tether</code>. macOS asks once for App Management for this path. Allow it in System Settings &gt; Privacy &amp; Security &gt; App Management. In the file picker, press Cmd+Shift+. to show <code>~/.tether</code>. Remove old <code>tether</code> rows. See <a href="/docs/upgrade#macos-app-management">App Management on macOS</a>.</p>
+
+    <h2>A package from another machine does not install</h2>
+    <p>The package probably waits in the Inbox, is not in this machine's profile, or failed to install.</p>
+    <Code code={`tether packages inbox                   # held, with a reason
+tether packages list --other-profiles   # in another profile
+tether packages list                    # failed installs
+tether machines list                    # is the source machine trusted?`} />
+    <ul>
+      <li>If the source machine is not trusted, see <a href="/docs/trust">Machine trust</a></li>
+      <li>For each reason in the Inbox, see <a href="/docs/inbox-reasons">Inbox reasons</a></li>
+      <li>A package that failed to install waits 24 hours before Tether tries it again. See <a href="/docs/failed-installs">Failed installs</a></li>
+      <li>A package from a 1.x machine waits until you approve it, or until that machine upgrades and you trust it</li>
+    </ul>
+
+    <h2>"Record for &lt;id&gt; fails its signature"</h2>
+    <p>Someone edited that machine's record in the repo, or deleted its <code>.sig</code> file. Tether ignores the record until that machine signs a valid one. Run <code>tether sync</code> on that machine, then check <code>tether machines list</code>.</p>
+
+    <h2>"key changed" in the Inbox</h2>
+    <p>A trusted machine signed its record with a different key. This happens when that machine made a new signing key under the same id. Compare the fingerprint with <code>tether machines show</code> on that machine before you approve it.</p>
+
+    <h2>"Cannot read packages/profiles.toml"</h2>
+    <p>The file in the sync repo does not read as TOML. Until you fix it, a sync installs no synced packages, and <code>share</code>, <code>unshare</code> and <code>uninstall</code> stop with an error. Fix the file in the sync repo, or delete it. Without the file, each package belongs to the profiles of the trusted machines that list it.</p>
+
+    <h2>A config change comes back</h2>
+    <p>A 1.x machine before 1.13.2 can push its old copy of <code>config.toml</code> and revert your change. Patch or upgrade the 1.x machines, then make the change again. When two 2.0 machines change one setting, each keeps its own value and the sync warns. They settle within two syncs. See <a href="/docs/config-merge">Config merge</a>.</p>
+
+    <h2>A file has a conflict</h2>
+    <Code code="tether resolve" />
+    <p>For files that an app rewrites on every machine, set an <code>on_conflict</code> rule. See <a href="/docs/conflicts">Conflicts</a>.</p>
+
+    <h2>A sync seems stuck</h2>
+    <p>Without a terminal, git commands that reach the remote stop after 5 minutes, and the next sync tries again. In a terminal, ssh can wait for a passphrase or a host key. Check the terminal for a prompt.</p>
+
+    <h2>Encryption problems</h2>
+    <Code code={`tether unlock                         # enter your passphrase
+ls ~/.tether/sync/encryption.key.age  # the encrypted key exists?`} />
+
+    <h2>"Team push blocked" stops a sync</h2>
+    <p><code>tether sync</code> stops with "Team push blocked: &lt;file&gt; contains &lt;n&gt; secret(s)". The daemon logs the same line. Remove the secret from the file, or add an ignore pattern for a false positive:</p>
+    <Code code="tether ignore secrets add 'MY_SAFE_PATTERN='" />
+
+    <h2>Start over on one machine</h2>
+    <Code code={`tether daemon uninstall
+rm -rf ~/.tether
+tether init`} />
+    <p>Uninstall the daemon first. launchd and systemd restart a stopped daemon, and it would then run while you delete its files.</p>
+    <p>This deletes the machine's id, signing key, trust list, backups and age identity. Without the age identity, this machine cannot read team secrets until a teammate adds its new public key. Tether makes a new id and a new key. Your other machines see a new machine and must trust it. Remove the old record with <code>tether machines remove &lt;old-id&gt;</code>. This machine must trust your other machines again.</p>
+  </section>
+</DocsLayout>

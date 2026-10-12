@@ -1,0 +1,42 @@
+/* Animated SVG diagrams. Each diagram runs every animation on one SMIL clock. */
+.sd-scroll { overflow-x: auto; }
+.sd-scroll > svg { display: block; width: 100%; height: auto; padding: 0 12px 8px; box-sizing: border-box; }
+/* Below this width the text would be too small to read, so the diagram scrolls in its card */
+@media (max-width: 700px) { .sd-scroll > svg { min-width: var(--sd-min, 640px); } }
+.sd-lines path { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.sd-flow path { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 2 9; stroke-linecap: round; opacity: .75; animation: sd-flow 1s linear infinite; }
+.sd-node > rect:first-child { fill: var(--surface); stroke: var(--line); }
+.sd-zone { fill: none; stroke: var(--line); stroke-dasharray: 4 5; }
+.sd-icon { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.sd-icon path, .sd-icon-on path { vector-effect: non-scaling-stroke; }
+.sd-repo > rect:first-child { fill: var(--accent); stroke: var(--surface); stroke-width: 6; }
+.sd-icon-on { fill: none; stroke: var(--on-accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sd-title { fill: var(--ink); font: 500 14px var(--body); text-anchor: middle; }
+.sd-sub, .sd-mono { fill: var(--muted); font: 10px var(--mono); text-anchor: middle; letter-spacing: .3px; }
+.sd-mono { fill: var(--accent); }
+.sd-code { fill: var(--ink); font: 11px var(--mono); }
+.sd-zlabel { fill: var(--muted); font: 9px var(--mono); letter-spacing: 1px; }
+.sd-start { text-anchor: start; }
+.sd-end { text-anchor: end; }
+.sd-glow { fill: none; stroke: var(--accent); stroke-width: 1.6; opacity: 0; filter: drop-shadow(0 0 6px var(--accent)); }
+.sd-ring { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: 0; }
+.sd-link { fill: none; stroke: var(--accent); stroke-width: 1.5; filter: drop-shadow(0 0 4px var(--accent)); }
+.sd-check circle { fill: var(--accent); }
+.sd-check path { fill: none; stroke: var(--on-accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sd-check { opacity: 0; }
+.sd-stop circle { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; }
+.sd-stop path { fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; }
+.sd-stop { opacity: 0; }
+.sd-pill rect, .sd-row { fill: var(--soft); stroke: var(--line); }
+.sd-pill text { fill: var(--ink); font: 10px var(--mono); text-anchor: middle; }
+.sd-packet rect { fill: var(--soft); stroke: var(--accent); stroke-width: 1.2; }
+.sd-packet text { font: 10px var(--mono); text-anchor: middle; }
+.sd-held rect { stroke: var(--muted); stroke-dasharray: 3 3; }
+.sd-plain { fill: var(--ink); }
+.sd-cipher { fill: var(--accent); }
+.sd-dim { fill: var(--muted); }
+@keyframes sd-flow { to { stroke-dashoffset: -11; } }
+@media (prefers-reduced-motion: reduce) {
+  .sd-flow path { animation: none; }
+  .sd-packet, .sd-glow, .sd-ring { display: none; }
+}

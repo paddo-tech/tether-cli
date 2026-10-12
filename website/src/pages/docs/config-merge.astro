@@ -1,0 +1,41 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import ConfigMergeDiagram from '../../components/ConfigMergeDiagram.astro';
+---
+
+<DocsLayout title="Config merge — Tether CLI" description="How a sync merges config.toml three ways, so edits from two machines both stay.">
+  <section>
+    <p class="eyebrow">CONCEPTS</p>
+    <h1>Config merge</h1>
+    <p>All machines share one <code>config.toml</code>. The sync repo holds an encrypted copy. Each sync merges that copy into the local file, then exports the result.</p>
+    <ConfigMergeDiagram />
+
+    <h2>Three-way merge</h2>
+    <p>Tether compares settings, not bytes. It merges against a base: the synced copy of the last merge, or of the last export once the remote branch holds it. Tether keeps the base in <code>~/.tether/config.base.toml</code>. That file never syncs.</p>
+    <ul>
+      <li>Edits to different settings on two machines both stay</li>
+      <li>Lists without an order, such as <code>dotfiles.files</code>, <code>dotfiles.dirs</code> and <code>packages.allow_scripts</code>, keep the additions of both machines. Tether writes them sorted</li>
+      <li>Ordered lists, such as <code>merge.args</code>, merge as one value</li>
+      <li>When both machines change one setting, this machine's value stays and the sync warns. The machines then settle on one value within two syncs</li>
+      <li>A machine always keeps its own profile assignment. A profile that a machine is assigned to is never deleted</li>
+      <li>A new machine takes the synced config, so its defaults do not replace the settings of your other machines</li>
+      <li>The merge edits the local file in place. Comments, layout and keys from a newer Tether stay</li>
+    </ul>
+    <p>Settings for one machine only belong in <a href="/docs/configuration#local-config"><code>~/.tether/local.toml</code></a>, which never syncs.</p>
+
+    <h2>Machines on 1.x</h2>
+    <p>Every 2.0 export writes <code>config_writer = 2</code>. A synced config without it counts as a copy from 1.x.</p>
+    <ul>
+      <li>A 1.x machine drops keys it does not know when it saves, such as <code>dashboard</code> and <code>packages.allow_scripts</code>. In a 1.x copy, a missing key that 1.x does not know keeps its value</li>
+      <li>A missing key that 1.x knows is a deletion. So a 1.x machine can still delete a profile or a team</li>
+      <li>A 1.x machine before 1.13.2 pushes its old copy of <code>config.toml</code> again after it applies a synced one. That copy reverts the config changes made since, and 2.0 cannot tell it from a real change. Patch or upgrade the 1.x machines, then make the change again</li>
+    </ul>
+
+    <h2>When the synced copy does not read</h2>
+    <ul>
+      <li>A synced config with a newer <code>config_version</code> than this Tether reads does not fail the sync. The local config stays, and the sync warns</li>
+      <li>A synced config that does not decrypt or read does not fail the sync either. The sync warns once per copy, skips the merge and the export, and runs the rest</li>
+      <li><code>tether sync --dry-run</code> does not write <code>config.toml</code></li>
+    </ul>
+  </section>
+</DocsLayout>

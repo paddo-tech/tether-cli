@@ -1,0 +1,106 @@
+---
+import { icon } from './icons';
+import { pulse, move } from './timing';
+import '../styles/diagrams.css';
+
+// One 8 s clock drives every animation
+const DUR = '8s';
+const out = 'M190 160H400';
+const into = 'M480 160H690';
+const loop = { dur: DUR, repeatCount: 'indefinite' };
+---
+
+<figure class="diagram" aria-label="A dotfile is encrypted on this machine with the local key, the dotfile enters the Git repo only as ciphertext, and another machine decrypts it with its own copy of the key">
+  <div class="diagram-label"><span>ENCRYPTED BEFORE GIT</span><span><i class="status-dot"></i> AES-256-GCM</span></div>
+  <div class="sd-scroll"><svg viewBox="0 0 880 320" aria-hidden="true" data-end="7">
+    {[20, 540].map((x, i) => (
+      <g>
+        <rect class="sd-zone" x={x} y="40" width="320" height="250" rx="16" />
+        <text class="sd-zlabel sd-start" x={x + 18} y="64">{i ? 'OTHER MACHINE' : 'THIS MACHINE'}</text>
+        <g class="sd-icon" set:html={icon('key', x + 210, 60, 13)} />
+        <text class="sd-zlabel sd-start" x={x + 222} y="64">KEY STAYS</text>
+        <text class="sd-sub" x={x + 160} y="272">{i ? 'tether unlock caches the key' : 'tether lock clears the key'}</text>
+      </g>
+    ))}
+
+    <g class="sd-lines">
+      <path d="M190 160H250" /><path d="M320 160H400" /><path d="M480 160H560" /><path d="M630 160H690" />
+    </g>
+    <g class="sd-flow">
+      <path d="M190 160H250" /><path d="M320 160H400" /><path d="M480 160H560" /><path d="M630 160H690" />
+    </g>
+
+    <g class="sd-node">
+      <rect x="40" y="100" width="150" height="120" rx="12" />
+      <g class="sd-icon" set:html={icon('laptop', 115, 135, 34)} />
+      <text class="sd-title" x="115" y="183">This machine</text>
+      <text class="sd-sub" x="115" y="202">edits .zshrc</text>
+      <rect class="sd-glow" x="40" y="100" width="150" height="120" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.02, 0.08]])} />
+      </rect>
+    </g>
+
+    {[{ x: 250, glyph: 'lock', label: 'encrypt', at: 0.225 }, { x: 560, glyph: 'unlock', label: 'decrypt', at: 0.655 }].map(n => (
+      <g class="sd-node">
+        <rect x={n.x} y="125" width="70" height="70" rx="14" />
+        <g class="sd-icon" set:html={icon(n.glyph as 'lock' | 'unlock', n.x + 35, 160, 28)} />
+        <text class="sd-sub" x={n.x + 35} y="218">{n.label}</text>
+        <rect class="sd-glow" x={n.x} y="125" width="70" height="70" rx="14">
+          <animate attributeName="opacity" {...loop} {...pulse([[n.at - 0.035, n.at + 0.045]])} />
+        </rect>
+      </g>
+    ))}
+
+    <g class="sd-repo">
+      <rect x="400" y="120" width="80" height="80" rx="18" />
+      <g class="sd-icon-on" set:html={icon('git', 440, 160, 30)} />
+      <text class="sd-title" x="440" y="227">Your Git repo</text>
+      <text class="sd-sub" x="440" y="246">dotfile as ciphertext</text>
+      <text class="sd-sub" x="440" y="262">+ key sealed by passphrase</text>
+      <rect class="sd-ring" x="394" y="114" width="92" height="92" rx="22">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.41, 0.5]])} />
+      </rect>
+    </g>
+
+    <g class="sd-node">
+      <rect x="690" y="100" width="150" height="120" rx="12" />
+      <g class="sd-icon" set:html={icon('monitor', 765, 135, 32)} />
+      <text class="sd-title" x="765" y="183">Other machine</text>
+      <text class="sd-sub" x="765" y="202">gets .zshrc</text>
+      <rect class="sd-glow" x="690" y="100" width="150" height="120" rx="12">
+        <animate attributeName="opacity" {...loop} {...pulse([[0.8, 0.92]])} />
+      </rect>
+      <g class="sd-check" transform="translate(826 114)">
+        <circle r="11" />
+        <path d="m-5 0 3.5 3.5L5-4" />
+        <animate attributeName="opacity" {...loop} {...pulse([[0.81, 0.95]])} />
+      </g>
+    </g>
+
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-plain" y="4">.zshrc
+        <animate attributeName="opacity" {...loop} {...pulse([[0, 0.215]], 0.01)} />
+      </text>
+      <text class="sd-cipher" y="4" opacity="0">9c1f·a7
+        <animate attributeName="opacity" {...loop} {...pulse([[0.235, 1]], 0.01)} />
+      </text>
+      <animateMotion {...loop} path={out} calcMode="linear" {...move([0.08, 0], [0.4, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.07, 0.39]])} />
+    </g>
+    <g class="sd-packet" opacity="0">
+      <rect x="-34" y="-12" width="68" height="24" rx="6" />
+      <text class="sd-cipher" y="4">9c1f·a7
+        <animate attributeName="opacity" {...loop} {...pulse([[0, 0.645]], 0.01)} />
+      </text>
+      <text class="sd-plain" y="4" opacity="0">.zshrc
+        <animate attributeName="opacity" {...loop} {...pulse([[0.665, 1]], 0.01)} />
+      </text>
+      <animateMotion {...loop} path={into} calcMode="linear" {...move([0.48, 0], [0.8, 1])} />
+      <animate attributeName="opacity" {...loop} {...pulse([[0.47, 0.79]])} />
+    </g>
+  </svg></div>
+  <figcaption class="diagram-caption"><span>The plaintext key never leaves your machines. Git holds the dotfile as ciphertext and a copy of the key sealed with your passphrase.</span><span>↔</span></figcaption>
+</figure>
+
+<script>import '../scripts/diagrams';</script>

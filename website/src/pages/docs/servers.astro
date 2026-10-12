@@ -1,0 +1,34 @@
+---
+import DocsLayout from '../../layouts/DocsLayout.astro';
+import Code from '../../components/Code.astro';
+---
+
+<DocsLayout title="Keep servers clean — Tether CLI" description="Give servers only the command-line tools they need with a server profile and package sharing.">
+  <section>
+    <p class="eyebrow">GUIDES</p>
+    <h1>Keep servers clean</h1>
+    <p>This guide gives your servers only the command-line tools they need. Your laptops keep their desktop apps. It uses <a href="/docs/profiles">profiles</a>.</p>
+
+    <h2>1. Create the profile</h2>
+    <p>Once, on any machine:</p>
+    <Code code="tether machines profile create server --managers brew,npm" />
+
+    <h2>2. Put each server in the profile</h2>
+    <p>On each server:</p>
+    <Code code="tether machines profile set server" />
+    <p>The server then stops new installs of packages that only your laptops list. It keeps the packages it has.</p>
+
+    <h2>3. Send tools to the servers</h2>
+    <Code code="tether packages share npm:typescript --to server" />
+    <p>Machines in profile <code>server</code> install the package on their next sync.</p>
+
+    <h2>4. Remove what a server got before</h2>
+    <p>On a server, uninstall a package it got from your laptops. The laptops keep it:</p>
+    <Code code="tether packages uninstall npm:some-desktop-tool" />
+
+    <h2>Check the result</h2>
+    <Code code={`tether packages list                   # each package and its profiles
+tether packages list --other-profiles  # packages this machine does not install`} />
+    <p>Machines on 1.x ignore profiles and install the packages of every profile. Make these changes after your 1.x machines are on 1.13.2, or after they upgrade. See <a href="/docs/profiles#profiles-1x">Profiles and machines on 1.x</a>.</p>
+  </section>
+</DocsLayout>
