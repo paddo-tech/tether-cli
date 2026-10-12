@@ -156,16 +156,29 @@ pub fn ignore_file_path() -> Result<std::path::PathBuf> {
     Ok(crate::config::Config::config_dir()?.join("ignore"))
 }
 
-/// The patterns in the ignore file. Without the file there are none.
-pub fn ignored_patterns() -> Result<Vec<String>> {
-    match std::fs::read_to_string(ignore_file_path()?) {
+/// Shorter patterns match nearly every line, such as `=` or a space, and would turn the scan off.
+pub const MIN_IGNORE_PATTERN_LEN: usize = 4;
+
+/// Whether `pattern` is long enough to skip only the lines it names.
+pub fn usable_ignore_pattern(pattern: &str) -> bool {
+    pattern.trim().chars().count() >= MIN_IGNORE_PATTERN_LEN
+}
+
+/// The ignore patterns the team scan applies. None when `security.scan_secrets` is off, so the
+/// file is read only for a scan. Without the file there are none.
+pub fn ignored_patterns(config: &crate::config::Config) -> Result<Vec<String>> {
+    if !config.security.scan_secrets {
+        return Ok(Vec::new());
+    }
+    let path = ignore_file_path()?;
+    match std::fs::read_to_string(&path) {
         Ok(text) => Ok(text
             .lines()
-            .filter(|l| !l.is_empty())
+            .filter(|l| usable_ignore_pattern(l))
             .map(str::to_string)
             .collect()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(anyhow::anyhow!("Cannot read {}: {}", path.display(), e)),
     }
 }
 
@@ -223,6 +236,14 @@ mod tests {
         let findings = scanner.scan_content(content, &["GITHUB_TOKEN=".to_string()]);
         assert_eq!(findings.len(), 1);
         assert!(matches!(findings[0].secret_type, SecretType::AwsAccessKey));
+    }
+
+    #[test]
+    fn short_ignore_patterns_are_not_usable() {
+        assert!(!usable_ignore_pattern("="));
+        assert!(!usable_ignore_pattern("   "));
+        assert!(!usable_ignore_pattern(" ab "));
+        assert!(usable_ignore_pattern("EXAMPLE_KEY="));
     }
 
     #[test]

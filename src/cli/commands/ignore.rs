@@ -3,6 +3,12 @@ use crate::sync::{MachineState, SyncEngine, SyncState};
 use anyhow::Result;
 
 pub async fn add(pattern: &str) -> Result<()> {
+    if !crate::security::secrets::usable_ignore_pattern(pattern) {
+        anyhow::bail!(
+            "An ignore pattern needs at least {} characters. A shorter one matches nearly every line and would turn the scan off",
+            crate::security::secrets::MIN_IGNORE_PATTERN_LEN
+        );
+    }
     let path = crate::security::secrets::ignore_file_path()?;
 
     // Read existing patterns
@@ -25,7 +31,8 @@ pub async fn add(pattern: &str) -> Result<()> {
     patterns.push(pattern.to_string());
 
     // Write back
-    std::fs::write(&path, patterns.join("\n") + "\n")?;
+    // A scan reads this file, and must never see half a pattern
+    crate::sync::atomic_write(&path, (patterns.join("\n") + "\n").as_bytes())?;
 
     Output::success(&format!("Added ignore pattern: {}", pattern));
     Ok(())
@@ -76,7 +83,8 @@ pub async fn remove(pattern: &str) -> Result<()> {
         anyhow::bail!("Pattern '{}' not found", pattern);
     }
 
-    std::fs::write(&path, patterns.join("\n") + "\n")?;
+    // A scan reads this file, and must never see half a pattern
+    crate::sync::atomic_write(&path, (patterns.join("\n") + "\n").as_bytes())?;
 
     Output::success(&format!("Removed ignore pattern: {}", pattern));
     Ok(())

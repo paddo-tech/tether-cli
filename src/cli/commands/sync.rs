@@ -409,7 +409,7 @@ pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
                     if has_changes || team_git.has_unpushed_commits() {
                         let dotfiles_dir = team_sync_dir.join("dotfiles");
                         if dotfiles_dir.exists() {
-                            let ignored = crate::security::ignored_patterns()?;
+                            let ignored = crate::security::ignored_patterns(&config)?;
                             for entry in std::fs::read_dir(&dotfiles_dir)? {
                                 let entry = entry?;
                                 if entry.file_type()?.is_file() {

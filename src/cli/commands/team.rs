@@ -359,7 +359,7 @@ pub async fn add(url: &str, name: Option<&str>, _no_auto_inject: bool) -> Result
     let mut secrets_found = false;
 
     if dotfiles_dir.exists() {
-        let ignored = crate::security::ignored_patterns()?;
+        let ignored = crate::security::ignored_patterns(&config)?;
         for entry in walkdir::WalkDir::new(&dotfiles_dir)
             .min_depth(1)
             .follow_links(false)
