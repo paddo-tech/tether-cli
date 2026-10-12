@@ -1118,8 +1118,13 @@ impl PackageManager for BrewManager {
         }
         if !need_password.is_empty() {
             crate::cli::Output::warning(&format!(
-                "{} need a password to upgrade. Run 'tether upgrade' in a terminal",
-                need_password.join(", ")
+                "{} {} a password to upgrade. Run 'tether upgrade' in a terminal",
+                need_password.join(", "),
+                if need_password.len() == 1 {
+                    "needs"
+                } else {
+                    "need"
+                }
             ));
         }
         if !failures.is_empty() {

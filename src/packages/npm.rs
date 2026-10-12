@@ -16,7 +16,8 @@ struct NpmListOutput {
 
 #[derive(Debug, Deserialize)]
 struct NpmPackage {
-    version: String,
+    /// npm 11 lists corepack without a version when Node no longer ships it
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,11 +120,11 @@ impl PackageManager for NpmManager {
         let mut packages = Vec::new();
         if let Some(deps) = list.dependencies {
             for (name, pkg) in deps {
-                // Skip npm itself
-                if name != "npm" {
+                // Skip npm itself, and entries that are not installed
+                if name != "npm" && pkg.version.is_some() {
                     packages.push(PackageInfo {
                         name,
-                        version: Some(pkg.version),
+                        version: pkg.version,
                     });
                 }
             }
@@ -297,6 +298,17 @@ impl PackageManager for NpmManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_without_a_version_is_not_installed() {
+        let list: NpmListOutput = serde_json::from_str(
+            r#"{"name":"lib","dependencies":{"corepack":{"overridden":false},"zx":{"version":"8.1.0"}}}"#,
+        )
+        .unwrap();
+        let deps = list.dependencies.unwrap();
+        assert!(deps["corepack"].version.is_none());
+        assert_eq!(deps["zx"].version.as_deref(), Some("8.1.0"));
+    }
 
     #[test]
     fn outdated_json_yields_changed_wanted_versions() {
