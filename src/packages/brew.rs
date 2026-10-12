@@ -382,11 +382,17 @@ fn installed_taps(taps_dir: &std::path::Path) -> Vec<(String, PathBuf)> {
     taps
 }
 
-/// Whether a cask failed because sudo had no terminal to ask for a password.
+/// Whether a cask failed only because sudo had no terminal to ask for a password. A rollback
+/// after another failure can also run sudo, so an `Error:` line that is not about sudo means
+/// the cask failed for that reason.
 fn needs_password(stderr: &str) -> bool {
-    stderr.contains("sudo: no tty present")
+    (stderr.contains("sudo: no tty present")
         || stderr.contains("Password:")
-        || stderr.contains("password is required")
+        || stderr.contains("password is required"))
+        && stderr
+            .lines()
+            .filter(|l| l.trim_start().starts_with("Error:"))
+            .all(|l| l.contains("sudo"))
 }
 
 /// Drop the name that brew's error names. brew follows a tap migration and names the new
@@ -1377,6 +1383,14 @@ brew "git"
             "sudo: a terminal is required to read the password\nsudo: a password is required\n"
         ));
         assert!(!needs_password("Error: Download failed"));
+        // Homebrew's own line for a sudo failure names sudo
+        assert!(needs_password(
+            "sudo: a password is required\nError: app: Failure while executing; `/usr/bin/sudo -u root` exited with 1\n"
+        ));
+        // A rollback's sudo error after another failure keeps that failure
+        assert!(!needs_password(
+            "Error: app: pkg file is missing\nsudo: a password is required\n"
+        ));
     }
 
     #[test]
