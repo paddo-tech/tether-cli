@@ -62,7 +62,7 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
     <ul>
       <li>Every package manager runs in the empty directory <code>~/.tether/run</code>, not in your current directory</li>
       <li>Tether rejects names and versions that a manager reads as a local file, such as <code>.tgz</code>, <code>.gem</code>, <code>.whl</code> or a Homebrew <code>.rb</code> file</li>
-      <li><code>gem install</code> and <code>gem update</code> use <code>--remote</code></li>
+      <li><code>gem install</code> and <code>gem update</code> use <code>--remote</code>, and <code>--no-document</code>, so RubyGems runs no documentation hook</li>
       <li>To hold packages from trusted machines too, set <code>packages.auto_install_from_trusted = false</code></li>
     </ul>
   </section>

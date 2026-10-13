@@ -18,6 +18,27 @@ fn parse_outdated(stdout: &str) -> Vec<Upgrade> {
         .collect()
 }
 
+/// gem's stderr from its first `ERROR:` line, without Ruby backtrace frames. gem prints load
+/// warnings first, often hundreds of lines. A native build failure puts its compiler output
+/// and log path after a blank line, and a later gem can fail on its own, so the rest stays.
+/// Without an `ERROR:` line, all of it.
+fn gem_error(stderr: &str) -> String {
+    let Some(start) = stderr.lines().position(|l| l.starts_with("ERROR:")) else {
+        return stderr.trim().to_string();
+    };
+    stderr
+        .lines()
+        .skip(start)
+        .filter(|l| {
+            let l = l.trim_start();
+            !((l.starts_with('/') || l.starts_with("<internal:")) && l.contains(":in "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
+}
+
 pub struct GemManager;
 
 impl GemManager {
@@ -43,7 +64,10 @@ impl GemManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("gem command failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "gem command failed: {}",
+                gem_error(&stderr)
+            ));
         }
 
         Ok(String::from_utf8(output.stdout)?)
@@ -126,7 +150,14 @@ impl PackageManager for GemManager {
         // Without GEM_HOME, --user-install avoids needing sudo for a system Ruby
         // --conservative skips gems present only as dependencies, which the listing omits
         // --remote stops gem from installing a matching *.gem file instead of the registry gem
-        let mut args = vec!["install", pkg_spec.as_str(), "--conservative", "--remote"];
+        // --no-document skips RubyGems' rdoc hook, which crashes when two rdoc versions load
+        let mut args = vec![
+            "install",
+            pkg_spec.as_str(),
+            "--conservative",
+            "--remote",
+            "--no-document",
+        ];
         args.extend(Self::user_install_flag());
         self.run_gem(&args).await?;
         Ok(())
@@ -166,14 +197,14 @@ impl PackageManager for GemManager {
         let output = command("gem")?
             .arg("update")
             .args(names)
-            .arg("--remote")
+            .args(["--remote", "--no-document"])
             .args(Self::user_install_flag())
             .output()
             .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("gem update failed: {}", stderr));
+            return Err(anyhow::anyhow!("gem update failed: {}", gem_error(&stderr)));
         }
 
         Ok(())
@@ -242,6 +273,28 @@ impl PackageManager for GemManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gem_error_skips_warnings_and_the_backtrace() {
+        let stderr = "warning: already initialized constant RDoc::VERSION\n\
+                      Ignoring json-3.0.2 because its extensions are not built.\n\
+                      ERROR:  While executing gem ... (ArgumentError)\n    \
+                      wrong number of arguments (ArgumentError)\n\n    \
+                      caller: rdoc/markup/to_joined_paragraph.rb:13\n        \
+                      /opt/rdoc/markup/formatter.rb:46:in 'RDoc::Markup::Formatter#initialize'\n        \
+                      <internal:kernel>:9:in 'block'\n";
+        assert_eq!(
+            gem_error(stderr),
+            "ERROR:  While executing gem ... (ArgumentError)\n    wrong number of arguments (ArgumentError)\n\n    caller: rdoc/markup/to_joined_paragraph.rb:13"
+        );
+        // A native build failure keeps its output after the blank line, and a later error
+        let build = "WARN: ERROR: in a warning\nERROR:  Error installing pg:\n\tERROR: Failed to build gem native extension.\n\n    /opt/ruby/bin/ruby extconf.rb\nchecking for pg_config... no\nResults logged to /x/gem_make.out\nERROR:  rake: download failed\n";
+        assert_eq!(
+            gem_error(build),
+            "ERROR:  Error installing pg:\n\tERROR: Failed to build gem native extension.\n\n    /opt/ruby/bin/ruby extconf.rb\nchecking for pg_config... no\nResults logged to /x/gem_make.out\nERROR:  rake: download failed"
+        );
+        assert_eq!(gem_error("  plain failure \n"), "plain failure");
+    }
 
     #[test]
     fn outdated_lines_yield_latest_versions() {
