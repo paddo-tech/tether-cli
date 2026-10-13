@@ -18,17 +18,26 @@ fn parse_outdated(stdout: &str) -> Vec<Upgrade> {
         .collect()
 }
 
-/// The `ERROR:` block of gem's stderr, up to the blank line before its backtrace. gem prints
-/// load warnings first, often hundreds of lines. Without an `ERROR:` line, all of it.
+/// Each `ERROR:` block of gem's stderr, up to the blank line before its backtrace. gem prints
+/// load warnings first, often hundreds of lines, and one block per failed gem. Without an
+/// `ERROR:` line, all of it.
 fn gem_error(stderr: &str) -> String {
-    let Some(start) = stderr.find("ERROR:") else {
+    let mut block = Vec::new();
+    let mut in_block = false;
+    for line in stderr.lines() {
+        if line.starts_with("ERROR:") {
+            in_block = true;
+        } else if line.trim().is_empty() {
+            in_block = false;
+        }
+        if in_block {
+            block.push(line);
+        }
+    }
+    if block.is_empty() {
         return stderr.trim().to_string();
-    };
-    stderr[start..]
-        .lines()
-        .take_while(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    }
+    block.join("\n")
 }
 
 pub struct GemManager;
@@ -56,7 +65,10 @@ impl GemManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("gem command failed: {}", stderr));
+            return Err(anyhow::anyhow!(
+                "gem command failed: {}",
+                gem_error(&stderr)
+            ));
         }
 
         Ok(String::from_utf8(output.stdout)?)
@@ -273,6 +285,10 @@ mod tests {
         assert_eq!(
             gem_error(stderr),
             "ERROR:  While executing gem ... (ArgumentError)\n    wrong number of arguments (ArgumentError)"
+        );
+        assert_eq!(
+            gem_error("WARN: ERROR: in a warning\nERROR:  a\n\n  trace\nERROR:  b\n"),
+            "ERROR:  a\nERROR:  b"
         );
         assert_eq!(gem_error("  plain failure \n"), "plain failure");
     }
