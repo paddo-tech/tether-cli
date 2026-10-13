@@ -18,26 +18,25 @@ fn parse_outdated(stdout: &str) -> Vec<Upgrade> {
         .collect()
 }
 
-/// Each `ERROR:` block of gem's stderr, up to the blank line before its backtrace. gem prints
-/// load warnings first, often hundreds of lines, and one block per failed gem. Without an
-/// `ERROR:` line, all of it.
+/// gem's stderr from its first `ERROR:` line, without Ruby backtrace frames. gem prints load
+/// warnings first, often hundreds of lines. A native build failure puts its compiler output
+/// and log path after a blank line, and a later gem can fail on its own, so the rest stays.
+/// Without an `ERROR:` line, all of it.
 fn gem_error(stderr: &str) -> String {
-    let mut block = Vec::new();
-    let mut in_block = false;
-    for line in stderr.lines() {
-        if line.starts_with("ERROR:") {
-            in_block = true;
-        } else if line.trim().is_empty() {
-            in_block = false;
-        }
-        if in_block {
-            block.push(line);
-        }
-    }
-    if block.is_empty() {
+    let Some(start) = stderr.lines().position(|l| l.starts_with("ERROR:")) else {
         return stderr.trim().to_string();
-    }
-    block.join("\n")
+    };
+    stderr
+        .lines()
+        .skip(start)
+        .filter(|l| {
+            let l = l.trim_start();
+            !((l.starts_with('/') || l.starts_with("<internal:")) && l.contains(":in "))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string()
 }
 
 pub struct GemManager;
@@ -281,14 +280,18 @@ mod tests {
                       Ignoring json-3.0.2 because its extensions are not built.\n\
                       ERROR:  While executing gem ... (ArgumentError)\n    \
                       wrong number of arguments (ArgumentError)\n\n    \
-                      caller: rdoc/markup/to_joined_paragraph.rb:13\n";
+                      caller: rdoc/markup/to_joined_paragraph.rb:13\n        \
+                      /opt/rdoc/markup/formatter.rb:46:in 'RDoc::Markup::Formatter#initialize'\n        \
+                      <internal:kernel>:9:in 'block'\n";
         assert_eq!(
             gem_error(stderr),
-            "ERROR:  While executing gem ... (ArgumentError)\n    wrong number of arguments (ArgumentError)"
+            "ERROR:  While executing gem ... (ArgumentError)\n    wrong number of arguments (ArgumentError)\n\n    caller: rdoc/markup/to_joined_paragraph.rb:13"
         );
+        // A native build failure keeps its output after the blank line, and a later error
+        let build = "WARN: ERROR: in a warning\nERROR:  Error installing pg:\n\tERROR: Failed to build gem native extension.\n\n    /opt/ruby/bin/ruby extconf.rb\nchecking for pg_config... no\nResults logged to /x/gem_make.out\nERROR:  rake: download failed\n";
         assert_eq!(
-            gem_error("WARN: ERROR: in a warning\nERROR:  a\n\n  trace\nERROR:  b\n"),
-            "ERROR:  a\nERROR:  b"
+            gem_error(build),
+            "ERROR:  Error installing pg:\n\tERROR: Failed to build gem native extension.\n\n    /opt/ruby/bin/ruby extconf.rb\nchecking for pg_config... no\nResults logged to /x/gem_make.out\nERROR:  rake: download failed"
         );
         assert_eq!(gem_error("  plain failure \n"), "plain failure");
     }
