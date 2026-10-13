@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-13
+
+### Fixed
+
+- `tether upgrade` and the daily upgrade no longer fail for gem when more than one rdoc version is installed. RubyGems ran its documentation hook after each gem, and the hook crashed with `ArgumentError`. Tether now runs `gem install` and `gem update` with `--no-document`, so the hook does not run
+- A failed gem command now shows gem's errors without the load warnings before them and without the Ruby backtrace. The output of a native extension build and the path of its log stay
+
 ## [2.0.0] - 2026-10-12
 
 The first stable 2.0 release. It has the same code as 2.0.0-beta.10. The beta entries below list each change.
