@@ -4,6 +4,7 @@ use super::components::confirm::Confirm;
 use super::components::file_import::FileImport;
 use super::components::files::{self, FilesTabState};
 use super::components::log_view::LogView;
+use super::components::machine_picker::MachinePicker;
 use super::components::machines::MachinesTabState;
 use super::components::package_profiles::PackageProfiles;
 use super::components::packages::{self, PackagesTabState};
@@ -105,6 +106,7 @@ pub enum Overlay {
     PkgImport(PkgImport),
     ProfilePicker(ProfilePicker),
     PackageProfiles(PackageProfiles),
+    MachinePicker(MachinePicker),
     Palette(Palette),
     Log(LogView),
     BackupPicker(BackupPicker),
@@ -187,6 +189,31 @@ pub struct App {
     pub local_packages: Option<(chrono::DateTime<chrono::Utc>, PackageLists)>,
     /// Animation clock origin.
     started: Instant,
+}
+
+/// The results that trusted records report for commands this machine sent, with the name
+/// of the machine that ran each.
+pub fn command_results(state: &DashboardState) -> Vec<(String, crate::sync::state::CommandResult)> {
+    let Some(own) = &state.own_fingerprint else {
+        return Vec::new();
+    };
+    state
+        .machines
+        .iter()
+        .filter(|m| {
+            state.record_status.iter().any(|(id, status)| {
+                *id == m.machine_id && *status == crate::sync::signing::RecordStatus::Trusted
+            })
+        })
+        .flat_map(|m| {
+            let label = super::components::machines::display_name(m);
+            m.commands_applied
+                .get(own)
+                .into_iter()
+                .flatten()
+                .map(move |r| (label.clone(), r.clone()))
+        })
+        .collect()
 }
 
 impl App {
@@ -398,8 +425,27 @@ impl App {
         }
     }
 
+    /// A toast for each result of a command this machine sent that `seen` did not have.
+    pub fn toast_new_results(&mut self, seen: &[(String, crate::sync::state::CommandResult)]) {
+        for (label, result) in command_results(&self.state) {
+            if seen.iter().any(|(l, r)| *l == label && r.seq == result.seq) {
+                continue;
+            }
+            let text = format!("{}: {} {}", label, result.action, result.status.label());
+            match &result.error {
+                Some(error) => self.flash_error(format!("{}: {}", text, error)),
+                None if result.status == crate::sync::state::CommandStatus::Applied => {
+                    self.flash_success(text)
+                }
+                None => self.flash_info(text),
+            }
+        }
+    }
+
     pub fn reload_state(&mut self) {
+        let seen = command_results(&self.state);
         self.state = DashboardState::load();
+        self.toast_new_results(&seen);
         self.show_local_packages();
         self.files.deleted = repo::load_deleted_files(&self.state);
         files::refresh_expanded(self);

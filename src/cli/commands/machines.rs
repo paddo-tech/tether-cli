@@ -834,36 +834,12 @@ pub async fn profile_set_on(profile: &str, on: &[String]) -> Result<()> {
 /// Sign `action` for each machine `on` names, then commit and push it. Each machine runs
 /// it on its next sync.
 pub async fn send(on: &[String], action: Action) -> Result<()> {
-    let config = Config::load()?;
-    if !config.has_personal_features() {
-        anyhow::bail!("Fleet commands are not available in team-only mode");
-    }
     let sync_path = SyncEngine::sync_path()?;
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
-    let git = GitBackend::open(&sync_path)?;
     Output::info("Pulling latest changes...");
-    git.pull()?;
-    let this = SyncState::load()?.machine_id;
-    let mut targets = fleet_targets(&sync_path, &this, on)?;
-    // A machine trusts its own key already
-    if let Action::Trust { machine, .. } = &action {
-        targets.retain(|t| t != machine);
-        if targets.is_empty() {
-            anyhow::bail!("Name machines other than {} itself", machine);
-        }
-    }
-    let key = signing::load_or_create(&this)?;
-    let sent = crate::sync::commands::send(&sync_path, &this, &key, &targets, &action)?;
-    git.commit(
-        &format!("Send fleet command: {}", action.describe()),
-        &crate::sync::local_hostname(),
-    )?;
-    if let Err(e) = git.push() {
-        anyhow::bail!(
-            "Saved the command, but the push failed: {}. The next sync pushes it",
-            e
-        );
-    }
+    let sent = crate::sync::commands::deliver(&sync_path, &action, |sync_path, this| {
+        fleet_targets(sync_path, this, on)
+    })?;
     Output::success(&format!(
         "Sent '{}' to {}. Each machine runs it on its next sync. See the result with 'tether \
          machines show <machine>'",
@@ -879,33 +855,22 @@ pub async fn send(on: &[String], action: Action) -> Result<()> {
 /// The machine ids `on` names: trusted machines whose Tether runs fleet commands. 'all'
 /// names every such machine except this one, and skips the others with a warning.
 fn fleet_targets(sync_path: &Path, this: &str, on: &[String]) -> Result<Vec<String>> {
-    let statuses = signing::record_statuses(sync_path, this)?;
-    let machines = MachineState::list_all(sync_path)?;
-    let trusted = |id: &str| {
-        statuses
-            .iter()
-            .any(|(i, status, _)| i == id && *status == signing::RecordStatus::Trusted)
-    };
-    let version = |m: &MachineState| {
-        if m.cli_version.is_empty() {
-            "1.x".to_string()
-        } else {
-            m.cli_version.clone()
-        }
-    };
     if on.iter().any(|n| n == "all") {
+        let statuses = signing::record_statuses(sync_path, this)?;
         let mut targets = Vec::new();
-        for m in machines
-            .iter()
-            .filter(|m| m.machine_id != this && trusted(&m.machine_id))
-        {
+        for m in MachineState::list_all(sync_path)?.iter().filter(|m| {
+            m.machine_id != this
+                && statuses.iter().any(|(i, status, _)| {
+                    *i == m.machine_id && *status == signing::RecordStatus::Trusted
+                })
+        }) {
             if m.runs_commands {
                 targets.push(m.machine_id.clone());
             } else {
                 Output::warning(&format!(
                     "Skipping {}: Tether {} cannot run fleet commands",
                     m.machine_id,
-                    version(m)
+                    crate::sync::commands::tether_version(m)
                 ));
             }
         }
@@ -923,27 +888,11 @@ fn fleet_targets(sync_path: &Path, this: &str, on: &[String]) -> Result<Vec<Stri
         if id == this {
             anyhow::bail!("{} is this machine. Run the command without --on", name);
         }
-        if !trusted(&id) {
-            anyhow::bail!(
-                "Machine {} is not trusted. Trust it first: tether machines trust {}",
-                id,
-                id
-            );
-        }
-        let Some(record) = machines.iter().find(|m| m.machine_id == id) else {
-            anyhow::bail!("Machine {} has no machine record", id);
-        };
-        if !record.runs_commands {
-            anyhow::bail!(
-                "Machine {} runs Tether {}, which cannot run fleet commands. Upgrade it first",
-                id,
-                version(record)
-            );
-        }
         if !targets.contains(&id) {
             targets.push(id);
         }
     }
+    crate::sync::commands::check_targets(sync_path, this, &targets)?;
     Ok(targets)
 }
 

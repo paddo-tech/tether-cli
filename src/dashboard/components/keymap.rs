@@ -276,7 +276,7 @@ const MACHINES: &[Binding] = &[
         &[Char('p')],
         "p",
         "profile",
-        "Set this machine's profile (its own card only)",
+        "Set the machine's profile; another machine gets it by signed command",
         2,
     ),
     b(
@@ -286,6 +286,7 @@ const MACHINES: &[Binding] = &[
         "Trust the machine's key (asks)",
         4,
     ),
+    FLEET_TRUST,
     b(
         &[Char('x')],
         "x",
@@ -293,6 +294,76 @@ const MACHINES: &[Binding] = &[
         "Untrust the machine's key (asks)",
         6,
     ),
+    b(
+        &[Char('D')],
+        "D",
+        "remove old id",
+        "Remove an old id of this machine (asks)",
+        8,
+    ),
+];
+
+const FLEET_TRUST: Binding = b(
+    &[Char('A')],
+    "A",
+    "trust everywhere",
+    "Trust the machine's key here and on every machine that runs commands (asks)",
+    5,
+);
+
+/// Keys while another machine's details are open. They act on that machine.
+const MACHINE_DETAIL: &[Binding] = &[
+    b(&[Enter, Esc], "Enter Esc", "close", "Close the details", 1),
+    b(
+        &[Char('j'), Char('k'), Down, Up],
+        "j/k ↑↓",
+        "move",
+        "Move in the list of commands and packages",
+        0,
+    ),
+    b(
+        &[Char('h'), Char('l'), Left, Right],
+        "h/l ←→",
+        "machine",
+        "Open the details of the previous or next machine",
+        0,
+    ),
+    b(
+        &[Char('x')],
+        "x",
+        "uninstall",
+        "Uninstall the package on that machine (asks)",
+        2,
+    ),
+    b(
+        &[Char('i')],
+        "i",
+        "install",
+        "Install a package on that machine",
+        3,
+    ),
+    b(
+        &[Char('p')],
+        "p",
+        "profile",
+        "Set that machine's profile",
+        4,
+    ),
+    b(
+        &[Char('c')],
+        "c",
+        "cancel",
+        "Cancel a pending command this machine sent (asks)",
+        5,
+    ),
+    b(
+        &[Char('a')],
+        "a",
+        "trust",
+        "Trust the machine's key here (asks)",
+        7,
+    ),
+    FLEET_TRUST,
     b(
         &[Char('D')],
         "D",
@@ -395,6 +466,9 @@ pub fn active(app: &App) -> (&'static str, &'static [Binding]) {
             None => {}
         }
     }
+    if app.active_tab == Tab::Machines && super::machines::open_detail(app).is_some() {
+        return ("Machine details", MACHINE_DETAIL);
+    }
     (app.active_tab.title(), tab(app.active_tab))
 }
 
@@ -404,12 +478,12 @@ mod tests {
 
     #[test]
     fn every_footer_binding_has_a_hint_and_a_key() {
-        for bindings in
-            Tab::all()
-                .iter()
-                .map(|t| tab(*t))
-                .chain([GLOBAL, CONFIG_LIST, DOTFILE_LIST])
-        {
+        for bindings in Tab::all().iter().map(|t| tab(*t)).chain([
+            GLOBAL,
+            CONFIG_LIST,
+            DOTFILE_LIST,
+            MACHINE_DETAIL,
+        ]) {
             for binding in bindings {
                 assert!(!binding.help.is_empty());
                 if binding.prio > 0 {

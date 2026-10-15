@@ -1,8 +1,11 @@
+use super::machines::{presence, FleetTarget, Presence};
 use super::{centered, clamp_cursor, files, manager_label, popup, security};
+use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, DaemonOp, Hit, Job, Overlay};
 use crate::dashboard::config_edit;
 use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
+use crate::sync::commands::Action;
 use crate::sync::membership::Edit;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
@@ -145,6 +148,10 @@ pub enum Confirm {
         /// A sync ignores the machine's record, as replayed or failing its signature
         ignored: Option<crate::sync::signing::RecordStatus>,
         item: Option<Box<crate::packages::inbox::InboxItem>>,
+        /// Machines that also get this trust, as a fleet command
+        fleet: Vec<FleetTarget>,
+        /// This machine trusts the key already, so only the fleet command is new
+        trusted_here: bool,
         arming: Arming,
     },
     /// Remove an item from a Config list, by value.
@@ -158,6 +165,21 @@ pub enum Confirm {
     },
     /// Stop the daemon, which syncs this machine every few minutes.
     StopDaemon {
+        arming: Arming,
+    },
+    /// Send a signed fleet command to `targets`. With `local`, also make the change here.
+    Fleet {
+        action: Action,
+        local: bool,
+        targets: Vec<FleetTarget>,
+        arming: Arming,
+    },
+    /// Delete a fleet command this machine sent, before its target runs it.
+    CancelCommand {
+        target: FleetTarget,
+        seq: u64,
+        /// The command as `machines show` prints it
+        action: String,
         arming: Arming,
     },
     /// Stop trusting a machine's key.
@@ -214,6 +236,8 @@ impl Confirm {
             | Confirm::Reject { arming, .. }
             | Confirm::Trust { arming, .. }
             | Confirm::Untrust { arming, .. }
+            | Confirm::Fleet { arming, .. }
+            | Confirm::CancelCommand { arming, .. }
             | Confirm::StopDaemon { arming }
             | Confirm::RemoveListItem { arming, .. } => arming,
         }
@@ -287,29 +311,45 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
     match confirm {
         Confirm::Uninstall {
             manager_key, name, ..
+        } => uninstall_cmd(app, manager_key, name),
+        Confirm::Fleet {
+            action,
+            local,
+            targets,
+            ..
         } => {
-            // Without the members, Tether cannot tell whether this profile must leave
-            if let Some(error) = app.state.membership_error.clone() {
-                app.flash_error(error);
-                return None;
-            }
-            // Other member profiles keep the package; this profile leaves it, unless the
-            // members changed since the confirm showed them
-            let leave = app.state.membership.as_ref().and_then(|m| {
-                let members = m.members(&manager_key, &name);
-                (members.contains(&m.profile) && members.len() > 1).then(|| Edit {
-                    remove: BTreeSet::from([m.profile.clone()]),
-                    seen: Some(members.clone()),
-                    ..Edit::default()
-                })
-            });
-            app.uninstalling = Some((manager_key.clone(), name.clone()));
-            Some(Cmd::Uninstall {
-                manager_key,
-                name,
-                leave,
+            let then = if local {
+                let cmd = match &action {
+                    Action::Uninstall { manager, name } => {
+                        uninstall_cmd(app, manager.clone(), name.clone())
+                    }
+                    Action::Install { manager, name } => {
+                        app.start_install(manager.clone(), name.clone(), true)
+                    }
+                    Action::Profile { .. } | Action::Trust { .. } => None,
+                };
+                // When this machine cannot start its part, no machine gets the change
+                Some(Box::new(cmd?))
+            } else {
+                None
+            };
+            Some(Cmd::Fleet {
+                action,
+                targets: targets.iter().map(FleetTarget::pair).collect(),
+                then,
             })
         }
+        Confirm::CancelCommand {
+            target,
+            seq,
+            action,
+            ..
+        } => Some(Cmd::CancelCommand {
+            target: target.id,
+            label: target.label,
+            seq,
+            action,
+        }),
         Confirm::Restore {
             repo_path,
             dotfile,
@@ -387,6 +427,22 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
             label,
             fingerprint,
             item,
+            fleet,
+            trusted_here,
+            ..
+        } if !fleet.is_empty() => Some(Cmd::TrustFleet {
+            item,
+            trusted_here,
+            machine_id,
+            fingerprint,
+            label,
+            targets: fleet.iter().map(FleetTarget::pair).collect(),
+        }),
+        Confirm::Trust {
+            machine_id,
+            label,
+            fingerprint,
+            item,
             ..
         } => Some(match item {
             Some(item) => Cmd::TrustKey { item, label },
@@ -408,6 +464,63 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
     }
 }
 
+/// Uninstall a package here, as the Packages tab does. Other member profiles keep the
+/// package; this profile leaves it, unless the members changed since the confirm showed them.
+fn uninstall_cmd(app: &mut App, manager_key: String, name: String) -> Option<Cmd> {
+    // Without the members, Tether cannot tell whether this profile must leave
+    if let Some(error) = app.state.membership_error.clone() {
+        app.flash_error(error);
+        return None;
+    }
+    let leave = app.state.membership.as_ref().and_then(|m| {
+        let members = m.members(&manager_key, &name);
+        (members.contains(&m.profile) && members.len() > 1).then(|| Edit {
+            remove: BTreeSet::from([m.profile.clone()]),
+            seen: Some(members.clone()),
+            ..Edit::default()
+        })
+    });
+    app.uninstalling = Some((manager_key.clone(), name.clone()));
+    Some(Cmd::Uninstall {
+        manager_key,
+        name,
+        leave,
+    })
+}
+
+/// When this machine's profile leaves the package on an uninstall here: the profile, and
+/// the other member profiles, which keep it.
+fn leaving(app: &App, manager_key: &str, name: &str) -> Option<(String, String)> {
+    app.state.membership.as_ref().and_then(|m| {
+        let mut members = m.members(manager_key, name);
+        (members.remove(&m.profile) && !members.is_empty()).then(|| {
+            (
+                m.profile.clone(),
+                members.into_iter().collect::<Vec<_>>().join(", "),
+            )
+        })
+    })
+}
+
+/// One line per target: its name, its last sync, and a note when it may not sync soon.
+fn target_lines(targets: &[FleetTarget]) -> Vec<String> {
+    let now = chrono::Utc::now();
+    targets
+        .iter()
+        .map(|t| {
+            let note = match presence(now.signed_duration_since(t.last_sync)) {
+                Presence::Online => "",
+                Presence::Idle => "  · may be off",
+                Presence::Stale => "  · may not sync before the command expires",
+            };
+            format!("{}  synced {}{}", t.label, relative_time(t.last_sync), note)
+        })
+        .collect()
+}
+
+const FLEET_DELAY: &str = "Each machine runs it on its next sync: within 5 minutes when it \
+                           is online. The command expires in 7 days.";
+
 pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
     let t = &app.theme;
     let now = Instant::now();
@@ -417,16 +530,7 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
         Confirm::Uninstall {
             manager_key, name, ..
         } => {
-            let leaving = app.state.membership.as_ref().and_then(|m| {
-                let mut members = m.members(manager_key, name);
-                (members.remove(&m.profile) && !members.is_empty()).then(|| {
-                    (
-                        m.profile.clone(),
-                        members.into_iter().collect::<Vec<_>>().join(", "),
-                    )
-                })
-            });
-            let question = match leaving {
+            let question = match leaving(app, manager_key, name) {
                 None => format!("Uninstall {} ({})?", name, manager_label(manager_key)),
                 // Machines that have the package keep it; only new installs stop
                 Some((profile, keep)) => format!(
@@ -617,6 +721,8 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             fingerprint,
             changed,
             ignored,
+            fleet,
+            trusted_here,
             ..
         } => {
             let mut msg = String::new();
@@ -635,12 +741,31 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
             }
             msg.push_str(
                 "Compare this fingerprint with the one 'tether machines show' shows on that \
-                 machine. Trust the key? Package changes it signs then install without approval.",
+                 machine. ",
             );
-            let lines = [
+            msg.push_str(match (fleet.is_empty(), trusted_here) {
+                (true, _) => {
+                    "Trust the key? Package changes it signs then install without approval."
+                }
+                (false, true) => {
+                    "This machine trusts the key. Send the trust to the machines below? Each \
+                     trusts it on its next sync, and package changes it signs then install \
+                     there without approval."
+                }
+                (false, false) => {
+                    "Trust the key here and on the machines below? Each trusts it on its next \
+                     sync, and package changes it signs then install without approval."
+                }
+            });
+            let mut lines = vec![
                 format!("machine  {}", machine_label(label, machine_id)),
                 format!("key      {}", fingerprint),
             ];
+            lines.extend(
+                target_lines(fleet)
+                    .into_iter()
+                    .map(|l| format!("send to  {}", l)),
+            );
             render_list_popup(
                 f,
                 app,
@@ -657,6 +782,69 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                 },
             )
         }
+        Confirm::Fleet {
+            action,
+            local,
+            targets,
+            ..
+        } => {
+            let (title, what, color) = match action {
+                Action::Uninstall { manager, name } => (
+                    "Uninstall",
+                    format!("Uninstall {} ({})", name, manager_label(manager)),
+                    t.error,
+                ),
+                Action::Install { manager, name } => (
+                    "Install",
+                    format!("Install {} ({})", name, manager_label(manager)),
+                    t.ok,
+                ),
+                Action::Profile { profile } => (
+                    "Set profile",
+                    format!("Set the profile to {}", profile),
+                    t.warn,
+                ),
+                Action::Trust { .. } => ("Trust", action.describe(), t.warn),
+            };
+            let mut msg = if *local {
+                format!("{} here now, and on the machines below? ", what)
+            } else {
+                format!("{} on the machines below? ", what)
+            };
+            msg.push_str(FLEET_DELAY);
+            if let (true, Action::Uninstall { manager, name }) = (*local, action) {
+                if let Some((profile, keep)) = leaving(app, manager, name) {
+                    msg.push_str(&format!(
+                        " Here, profile {} leaves the package; profiles {} keep it.",
+                        profile, keep
+                    ));
+                }
+            }
+            let lines = target_lines(targets);
+            render_list_popup(
+                f,
+                app,
+                wait,
+                title,
+                &msg,
+                &lines,
+                0,
+                &std::cell::Cell::new(lines.len()),
+                color,
+            )
+        }
+        Confirm::CancelCommand { target, action, .. } => render_popup(
+            f,
+            app,
+            wait,
+            "Cancel command",
+            &format!(
+                "Cancel '{}' for {}? Tether deletes the command and pushes. If {} pulled it \
+                 already, it still runs it, and its details then show the result.",
+                action, target.label, target.label
+            ),
+            t.warn,
+        ),
         Confirm::Untrust {
             machine_id,
             label,

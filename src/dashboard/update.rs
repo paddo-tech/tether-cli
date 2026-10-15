@@ -1,8 +1,8 @@
 use super::app::{Action, App, DaemonOp, Hit, InstallOp, Job, Overlay, Tab};
 use super::components::palette::{self, Palette, Target};
 use super::components::{
-    backup_picker, config, confirm, file_import, files, log_view, machines, overview,
-    package_profiles, packages, pkg_import, profile_picker, security,
+    backup_picker, config, confirm, file_import, files, log_view, machine_picker, machines,
+    overview, package_profiles, packages, pkg_import, profile_picker, security,
 };
 use super::msg::{Cmd, KeyOutcome, Msg};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -148,6 +148,22 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
             }
             None
         }
+        Msg::FleetSent { result, then } => {
+            app.reload_state();
+            match result {
+                Ok(msg) => app.flash_success(msg),
+                Err(e) => app.flash_error(e),
+            }
+            then.map(|cmd| *cmd)
+        }
+        Msg::CommandCancelled(result) => {
+            app.reload_state();
+            match result {
+                Ok(msg) => app.flash_info(msg),
+                Err(e) => app.flash_error(format!("cancel failed: {}", e)),
+            }
+            None
+        }
         Msg::MachineRemoved { machine_id, result } => match result {
             Ok(untrusted) => {
                 app.reload_state();
@@ -228,6 +244,7 @@ fn on_key(app: &mut App, key: KeyEvent) -> Option<Cmd> {
             Overlay::PkgImport(p) => pkg_import::handle_key(app, p, key),
             Overlay::ProfilePicker(p) => profile_picker::handle_key(app, p, key),
             Overlay::PackageProfiles(p) => package_profiles::handle_key(app, p, key),
+            Overlay::MachinePicker(p) => machine_picker::handle_key(app, p, key),
             Overlay::Log(l) => log_view::handle_key(app, l, key),
             Overlay::BackupPicker(p) => backup_picker::handle_key(app, p, key),
             Overlay::Palette(p) => match palette::handle_key(app, p, key) {
@@ -460,7 +477,15 @@ fn click_row(app: &mut App, i: usize) -> Option<Cmd> {
         Tab::Overview => return None,
         Tab::Files => &mut app.files.cursor,
         Tab::Packages => &mut app.packages.cursor,
-        Tab::Machines => &mut app.machines.cursor,
+        Tab::Machines => {
+            // Open details follow the card the user clicks
+            if app.machines.expanded.is_some() && app.machines.cursor != i {
+                app.machines.cursor = i;
+                machines::show_details_of_cursor(app);
+                return None;
+            }
+            &mut app.machines.cursor
+        }
         Tab::Security => &mut app.security.cursor,
         Tab::Config => {
             // A click mid-edit would move the edit to another field.
@@ -488,6 +513,7 @@ fn click_item(app: &mut App, i: usize) -> Option<Cmd> {
         Overlay::PkgImport(p) if p.confirm.is_none() => &mut p.cursor,
         Overlay::ProfilePicker(p) => &mut p.cursor,
         Overlay::PackageProfiles(p) => &mut p.cursor,
+        Overlay::MachinePicker(p) => &mut p.cursor,
         Overlay::BackupPicker(p) => &mut p.cursor,
         _ => return None,
     };
@@ -829,6 +855,19 @@ mod tests {
                 field.key
             );
         }
+        // Another machine's details, with keys of their own
+        let detail_fixture = || {
+            let mut app = machines_app();
+            app.machines.cursor = 1;
+            app.machines.expanded = Some("laptop".into());
+            app
+        };
+        let (_, bindings) = keymap::active(&detail_fixture());
+        assert_eq!(
+            handled(detail_fixture, tab_key, KeyModifiers::NONE),
+            listed(bindings, false),
+            "machine details"
+        );
         assert_eq!(
             handled(app, global_key, KeyModifiers::NONE),
             listed(keymap::GLOBAL, false)
@@ -1676,6 +1715,7 @@ mod tests {
                 .collect(),
             cursor: 0,
             confirm: Some(("npm".into(), "left-pad".into())),
+            target: None,
         }));
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal
@@ -2200,27 +2240,392 @@ mod tests {
         app
     }
 
-    #[test]
-    fn profile_is_set_only_on_this_machines_card() {
+    /// `machines_app`, where this machine trusts the records of every machine in `ids`, and
+    /// each runs fleet commands and lists npm package zx. Profiles dev and server exist.
+    fn fleet_app(ids: &[&str]) -> App {
+        use crate::sync::signing::RecordStatus;
         let mut app = machines_app();
+        for id in ids {
+            if !app.state.machines.iter().any(|m| m.machine_id == *id) {
+                app.state.machines.push(crate::sync::MachineState {
+                    hostname: id.to_string(),
+                    ..crate::sync::MachineState::new(id)
+                });
+            }
+            let m = app
+                .state
+                .machines
+                .iter_mut()
+                .find(|m| m.machine_id == *id)
+                .unwrap();
+            m.runs_commands = true;
+            m.cli_version = "2.1.0".into();
+            m.last_sync = chrono::Utc::now();
+            m.packages.insert("npm".into(), vec!["zx".into()]);
+            app.state
+                .record_status
+                .push((id.to_string(), RecordStatus::Trusted));
+        }
         let mut config = crate::config::Config::default();
-        config
-            .profiles
-            .insert("dev".into(), crate::config::ProfileConfig::default());
+        for name in ["dev", "server"] {
+            config
+                .profiles
+                .insert(name.to_string(), crate::config::ProfileConfig::default());
+        }
         app.state.config = Some(config);
+        app
+    }
+
+    fn fleet_confirm(app: &App) -> Option<(crate::sync::commands::Action, bool, Vec<String>)> {
+        match app.overlays.last() {
+            Some(Overlay::Confirm(Confirm::Fleet {
+                action,
+                local,
+                targets,
+                ..
+            })) => Some((
+                action.clone(),
+                *local,
+                targets.iter().map(|t| t.id.clone()).collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn profile_of_another_machine_goes_by_signed_command() {
+        use crate::sync::commands::Action;
+        let mut app = fleet_app(&[]);
+        // laptop's record is not trusted, so it gets no command
         key(&mut app, KeyCode::Char('l'));
         key(&mut app, KeyCode::Char('p'));
         assert!(app.overlays.is_empty());
         assert_eq!(
             last_toast(&app),
-            Some((ToastKind::Info, "Set the profile of laptop on that machine"))
+            Some((
+                ToastKind::Error,
+                "Machine laptop is not trusted. Trust it first: tether machines trust laptop"
+            ))
         );
+
+        let mut app = fleet_app(&["laptop"]);
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Char('p'));
+        let Some(Overlay::ProfilePicker(picker)) = app.overlays.last() else {
+            panic!("expected the profile picker");
+        };
+        assert_eq!(
+            picker.target.as_ref().map(|t| t.id.as_str()),
+            Some("laptop")
+        );
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            fleet_confirm(&app),
+            Some((
+                Action::Profile {
+                    profile: "server".into()
+                },
+                false,
+                vec!["laptop".into()]
+            ))
+        );
+        let Some(Cmd::Fleet { targets, then, .. }) = armed_key(&mut app, KeyCode::Char('y')) else {
+            panic!("expected a fleet command");
+        };
+        assert_eq!(targets, vec![("laptop".to_string(), "laptop".to_string())]);
+        assert!(then.is_none());
+
+        // This machine's own card keeps the local picker
         key(&mut app, KeyCode::Char('h'));
         key(&mut app, KeyCode::Char('p'));
+        let Some(Overlay::ProfilePicker(picker)) = app.overlays.last() else {
+            panic!("expected the profile picker");
+        };
+        assert!(picker.target.is_none());
+    }
+
+    #[test]
+    fn another_machines_details_uninstall_and_install_there() {
+        use crate::dashboard::components::keymap;
+        use crate::sync::commands::Action;
+        let mut app = fleet_app(&["laptop"]);
+        app.state.machines[0]
+            .packages
+            .insert("brew_formulae".into(), vec!["ripgrep".into()]);
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(keymap::active(&app).0, "Machine details");
+
+        // The first row is the npm header, so x names what to select
+        key(&mut app, KeyCode::Char('x'));
+        assert!(app.overlays.is_empty());
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('x'));
+        assert_eq!(
+            fleet_confirm(&app),
+            Some((
+                Action::Uninstall {
+                    manager: "npm".into(),
+                    name: "zx".into()
+                },
+                false,
+                vec!["laptop".into()]
+            ))
+        );
+        assert!(matches!(
+            armed_key(&mut app, KeyCode::Char('y')),
+            Some(Cmd::Fleet { then: None, .. })
+        ));
+
+        // i offers what other machines have and laptop lacks
+        key(&mut app, KeyCode::Char('i'));
+        let Some(Overlay::PkgImport(picker)) = app.overlays.last() else {
+            panic!("expected the install picker");
+        };
+        let offered: Vec<&str> = picker.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(offered, ["ripgrep"]);
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            fleet_confirm(&app),
+            Some((
+                Action::Install {
+                    manager: "brew_formulae".into(),
+                    name: "ripgrep".into()
+                },
+                false,
+                vec!["laptop".into()]
+            ))
+        );
+    }
+
+    #[test]
+    fn machines_that_cannot_run_commands_get_none() {
+        let mut app = fleet_app(&["laptop"]);
+        app.state.machines[1].runs_commands = false;
+        app.state.machines[1].cli_version = String::new();
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(app.overlays.is_empty());
+        assert_eq!(
+            last_toast(&app),
+            Some((
+                ToastKind::Error,
+                "Machine laptop runs Tether 1.x, which cannot run fleet commands. Upgrade it first"
+            ))
+        );
+    }
+
+    #[test]
+    fn details_move_to_the_next_card_and_close() {
+        let mut app = fleet_app(&["laptop", "studio"]);
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.machines.expanded.as_deref(), Some("studio"));
+        assert_eq!(app.machines.detail_cursor, 0);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.machines.expanded.is_none());
+    }
+
+    #[test]
+    fn cancel_asks_only_for_commands_this_machine_sent() {
+        use crate::sync::commands::{Action, Command, Pending};
+        let mut app = fleet_app(&["laptop"]);
+        let pending = |signer: &str, seq: u64| Pending {
+            command: Command {
+                target: "laptop".into(),
+                signer: signer.into(),
+                seq,
+                expires_at: chrono::Utc::now() + chrono::Duration::days(7),
+                action: Action::Uninstall {
+                    manager: "npm".into(),
+                    name: "zx".into(),
+                },
+            },
+            verified: true,
+        };
+        app.state.pending_commands =
+            vec![("laptop".into(), vec![pending("other", 3), pending("me", 7)])];
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Char('c'));
+        assert_eq!(
+            last_toast(&app),
+            Some((ToastKind::Info, "Only other can cancel this command"))
+        );
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('c'));
         assert!(matches!(
             app.overlays.last(),
-            Some(Overlay::ProfilePicker(_))
+            Some(Overlay::Confirm(Confirm::CancelCommand { seq: 7, .. }))
         ));
+        let Some(Cmd::CancelCommand { target, seq, .. }) = armed_key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected a cancel");
+        };
+        assert_eq!((target.as_str(), seq), ("laptop", 7));
+    }
+
+    #[test]
+    fn trust_everywhere_sends_the_key_to_every_machine_that_runs_commands() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = fleet_app(&["laptop", "studio"]);
+        app.state.machines.push(crate::sync::MachineState {
+            hostname: "mini".into(),
+            ..crate::sync::MachineState::new("mini")
+        });
+        app.state.inbox.items.push(InboxItem {
+            kind: Kind::TrustMachine {
+                public_key: String::new(),
+                fingerprint: "SHA256:mini".into(),
+            },
+            manager: "machine".into(),
+            name: "mini".into(),
+            version: None,
+            tap: None,
+            source_machine: Some("mini".into()),
+            commit: None,
+            signer: None,
+            reasons: Vec::new(),
+            advisories: Vec::new(),
+            first_seen: chrono::Utc::now(),
+        });
+        app.machines.cursor = 3;
+        key(&mut app, KeyCode::Char('A'));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal
+            .draw(|f| crate::dashboard::view::view(f, &app))
+            .unwrap();
+        let text = screen(&terminal);
+        assert!(text.contains("key      SHA256:mini"));
+        assert!(text.contains("send to  laptop"));
+        let Some(Cmd::TrustFleet {
+            item,
+            trusted_here,
+            targets,
+            ..
+        }) = armed_key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected a fleet trust");
+        };
+        assert!(item.is_some() && !trusted_here);
+        let ids: Vec<&str> = targets.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["laptop", "studio"]);
+
+        // A key trusted here already goes only to the others
+        app.machines.cursor = 1;
+        key(&mut app, KeyCode::Char('A'));
+        let Some(Cmd::TrustFleet {
+            trusted_here,
+            targets,
+            ..
+        }) = armed_key(&mut app, KeyCode::Char('y'))
+        else {
+            panic!("expected a fleet trust");
+        };
+        assert!(trusted_here);
+        assert_eq!(targets, vec![("studio".to_string(), "studio".to_string())]);
+    }
+
+    #[test]
+    fn new_command_results_toast_once() {
+        use crate::sync::state::{CommandResult, CommandStatus};
+        let mut app = fleet_app(&["laptop"]);
+        app.state.own_fingerprint = Some("SHA256:me".into());
+        let seen = crate::dashboard::app::command_results(&app.state);
+        app.state.machines[1].commands_applied.insert(
+            "SHA256:me".into(),
+            vec![CommandResult {
+                seq: 4,
+                action: "uninstall npm:zx from me".into(),
+                status: CommandStatus::Failed,
+                error: Some("not installed".into()),
+                at: chrono::Utc::now(),
+            }],
+        );
+        app.toast_new_results(&seen);
+        assert_eq!(
+            last_toast(&app),
+            Some((
+                ToastKind::Error,
+                "laptop: uninstall npm:zx from me failed: not installed"
+            ))
+        );
+        let count = app.toasts.len();
+        let seen = crate::dashboard::app::command_results(&app.state);
+        app.toast_new_results(&seen);
+        assert_eq!(app.toasts.len(), count);
+    }
+
+    #[test]
+    fn packages_x_asks_where_only_when_another_machine_can_take_it() {
+        use crate::sync::commands::Action;
+        let mut app = packages_app();
+        let row = |app: &App| {
+            packages::build_rows(&app.state, &app.packages)
+                .iter()
+                .position(|r| matches!(r, packages::PkgRow::Package { .. }))
+                .unwrap()
+        };
+        key(&mut app, KeyCode::Enter);
+        app.packages.cursor = row(&app);
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::Uninstall { .. }))
+        ));
+        app.overlays.clear();
+
+        app.state.machines.push(crate::sync::MachineState {
+            hostname: "laptop".into(),
+            runs_commands: true,
+            last_sync: chrono::Utc::now(),
+            packages: HashMap::from([("npm".to_string(), vec!["zx".to_string()])]),
+            ..crate::sync::MachineState::new("laptop")
+        });
+        app.state
+            .record_status
+            .push(("laptop".into(), crate::sync::signing::RecordStatus::Trusted));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::MachinePicker(_))
+        ));
+        // Only this machine checked: the question as before
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.overlays.last(),
+            Some(Overlay::Confirm(Confirm::Uninstall { .. }))
+        ));
+        app.overlays.clear();
+
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            fleet_confirm(&app),
+            Some((
+                Action::Uninstall {
+                    manager: "npm".into(),
+                    name: "zx".into()
+                },
+                true,
+                vec!["laptop".into()]
+            ))
+        );
+        let Some(Cmd::Fleet { then, .. }) = armed_key(&mut app, KeyCode::Char('y')) else {
+            panic!("expected a fleet command");
+        };
+        assert!(matches!(then.as_deref(), Some(Cmd::Uninstall { .. })));
+        assert_eq!(
+            app.uninstalling,
+            Some(("npm".to_string(), "zx".to_string()))
+        );
     }
 
     #[test]

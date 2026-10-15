@@ -9,7 +9,7 @@ use crate::cli::Output;
 use crate::config::Config;
 use crate::sync::signing::{self, TrustStore};
 use crate::sync::state::{valid_machine_id, CommandResult, CommandStatus};
-use crate::sync::{MachineState, SyncState};
+use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -473,6 +473,153 @@ pub fn send(
     }
     seqs.save()?;
     Ok(sent)
+}
+
+/// The Tether version a record names, or 1.x for a record without one.
+pub fn tether_version(record: &MachineState) -> String {
+    if record.cli_version.is_empty() {
+        "1.x".to_string()
+    } else {
+        record.cli_version.clone()
+    }
+}
+
+/// Why this machine cannot send fleet commands to `id`, or `None` when it can. `record` is
+/// the target's record, and `trusted` whether it verifies with the key this machine trusts.
+pub fn refusal(
+    this: &str,
+    id: &str,
+    record: Option<&MachineState>,
+    trusted: bool,
+) -> Option<String> {
+    if id == this {
+        return Some(format!("{} is this machine", id));
+    }
+    if !trusted {
+        return Some(format!(
+            "Machine {} is not trusted. Trust it first: tether machines trust {}",
+            id, id
+        ));
+    }
+    let Some(record) = record else {
+        return Some(format!("Machine {} has no machine record", id));
+    };
+    (!record.runs_commands).then(|| {
+        format!(
+            "Machine {} runs Tether {}, which cannot run fleet commands. Upgrade it first",
+            id,
+            tether_version(record)
+        )
+    })
+}
+
+/// Fail on the first of `ids` that cannot run fleet commands from this machine.
+pub fn check_targets(sync_path: &Path, this: &str, ids: &[String]) -> Result<()> {
+    let statuses = signing::record_statuses(sync_path, this)?;
+    let records = MachineState::list_all(sync_path)?;
+    for id in ids {
+        let trusted = statuses
+            .iter()
+            .any(|(i, status, _)| i == id && *status == signing::RecordStatus::Trusted);
+        let record = records.iter().find(|m| m.machine_id == *id);
+        if let Some(why) = refusal(this, id, record, trusted) {
+            bail!(why);
+        }
+    }
+    Ok(())
+}
+
+/// Pull, sign `action` for the machines that `pick` names from the pulled repo and this
+/// machine's id, then commit and push. The caller holds the sync lock.
+pub fn deliver(
+    sync_path: &Path,
+    action: &Action,
+    pick: impl FnOnce(&Path, &str) -> Result<Vec<String>>,
+) -> Result<Vec<(String, u64)>> {
+    if !Config::load()?.has_personal_features() {
+        bail!("Fleet commands are not available in team-only mode");
+    }
+    let git = GitBackend::open(sync_path)?;
+    git.pull()?;
+    let this = SyncState::load()?.machine_id;
+    let mut targets = pick(sync_path, &this)?;
+    // A machine trusts its own key already
+    if let Action::Trust { machine, .. } = action {
+        targets.retain(|t| t != machine);
+        if targets.is_empty() {
+            bail!("Name machines other than {} itself", machine);
+        }
+    }
+    let key = signing::load_or_create(&this)?;
+    let sent = send(sync_path, &this, &key, &targets, action)?;
+    git.commit(
+        &format!("Send fleet command: {}", action.describe()),
+        &crate::sync::local_hostname(),
+    )?;
+    if let Err(e) = git.push() {
+        bail!(
+            "Saved the command, but the push failed: {}. The next sync pushes it",
+            e
+        );
+    }
+    Ok(sent)
+}
+
+/// What a cancel found in the pulled repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cancelled {
+    /// The command was deleted and the deletion pushed
+    Deleted,
+    /// The target's trusted record reports the command already
+    Reported(CommandStatus),
+    /// The command is no longer in the repo
+    Gone,
+}
+
+/// Delete a command this machine sent to `target`, then commit and push, unless the target's
+/// trusted record reports it already. A target that pulled the command before the push may
+/// still run it; its record then reports it. The caller holds the sync lock.
+pub fn cancel(sync_path: &Path, target: &str, seq: u64) -> Result<Cancelled> {
+    let git = GitBackend::open(sync_path)?;
+    git.pull()?;
+    let this = SyncState::load()?.machine_id;
+    let own =
+        signing::own_fingerprint().ok_or_else(|| anyhow!("This machine has no signing key"))?;
+    // A record that does not verify could claim a result to keep the command alive
+    let trusted = signing::record_statuses(sync_path, &this)?
+        .iter()
+        .any(|(id, status, _)| id == target && *status == signing::RecordStatus::Trusted);
+    if trusted {
+        let reported = MachineState::list_all(sync_path)?
+            .into_iter()
+            .find(|m| m.machine_id == target)
+            .and_then(|m| m.commands_applied.get(&own).cloned())
+            .and_then(|results| results.into_iter().find(|r| r.seq == seq));
+        if let Some(result) = reported {
+            return Ok(Cancelled::Reported(result.status));
+        }
+    }
+    let path = command_path(sync_path, target, &this, seq);
+    if !path.exists() {
+        return Ok(Cancelled::Gone);
+    }
+    let action = read(&path, target, None).map(|(c, _)| c.action.describe());
+    std::fs::remove_file(&path)?;
+    let _ = std::fs::remove_file(sig_path(&path));
+    git.commit(
+        &format!(
+            "Cancel fleet command: {}",
+            action.unwrap_or_else(|_| format!("#{}", seq))
+        ),
+        &crate::sync::local_hostname(),
+    )?;
+    if let Err(e) = git.push() {
+        bail!(
+            "Deleted the command here, but the push failed: {}. The next sync pushes it",
+            e
+        );
+    }
+    Ok(Cancelled::Deleted)
 }
 
 /// A command still in the repo, as `machines show` lists it.

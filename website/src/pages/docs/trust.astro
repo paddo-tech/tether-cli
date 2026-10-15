@@ -56,6 +56,7 @@ tether machines trust new-laptop --fingerprint SHA256:... --on all`} />
       <li><code>tether machines show &lt;MACHINE&gt;</code> lists the commands that wait for that machine, and the results it reported: applied, failed or expired. The daemon on the target shows a notification when it runs commands</li>
       <li>Team and collab repos never carry commands</li>
     </ul>
+    <p>The dashboard sends the same commands. On the Machines tab, open another machine's details. They list its pending commands, its results and its packages. Press <code>x</code> to uninstall the selected package there, <code>i</code> to install one, <code>p</code> to set its profile, or <code>c</code> to cancel a pending command. Press <code>A</code> on a card to trust that machine's key here and on every machine that runs commands. On the Packages tab, <code>x</code> and <code>i</code> ask which machines when other machines can take the change. Each question names the machines and warns when one has not synced for a day.</p>
 
     <h2>Protection against changed records</h2>
     <ul>

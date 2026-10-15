@@ -26,8 +26,8 @@ pub struct DashboardState {
     pub membership_error: Option<String>,
     /// This machine's signing key fingerprint, from the key file
     pub own_fingerprint: Option<String>,
-    /// Fleet commands that wait in the repo, as (target machine id, count)
-    pub pending_commands: Vec<(String, usize)>,
+    /// Fleet commands that wait in the repo, by target machine id
+    pub pending_commands: Vec<(String, Vec<crate::sync::commands::Pending>)>,
 }
 
 impl DashboardState {
@@ -65,10 +65,10 @@ impl DashboardState {
                     .map(|m| {
                         (
                             m.machine_id.clone(),
-                            crate::sync::commands::pending(p, m, &store).len(),
+                            crate::sync::commands::pending(p, m, &store),
                         )
                     })
-                    .filter(|(_, n)| *n > 0)
+                    .filter(|(_, pending)| !pending.is_empty())
                     .collect()
             })
             .unwrap_or_default();
