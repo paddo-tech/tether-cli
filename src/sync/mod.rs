@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod commands;
 pub mod config_merge;
 pub mod conflict;
 pub mod discovery;
@@ -17,7 +18,7 @@ pub use backup::{
     prune_old_backups, restore_dotfile_backup, restore_file,
 };
 pub use conflict::{
-    detect_conflict, notify_conflicts, notify_deferred_casks, notify_inbox,
+    detect_conflict, notify_commands, notify_conflicts, notify_deferred_casks, notify_inbox,
     notify_membership_error, notify_signature_failed, ConflictResolution, ConflictState,
     FileConflict, PendingConflict,
 };

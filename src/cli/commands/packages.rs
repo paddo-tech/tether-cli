@@ -427,6 +427,24 @@ pub async fn install(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send a signed command that installs or uninstalls a package on the machines `on` names.
+pub async fn send(id: &str, on: &[String], uninstall: bool) -> Result<()> {
+    let (manager, name) = split_id(id)?;
+    if uninstall && manager == "brew_taps" {
+        anyhow::bail!(
+            "Tether does not remove taps. Run 'brew untap {}' on each machine that has it",
+            name
+        );
+    }
+    let (manager, name) = (manager.to_string(), name.to_string());
+    let action = if uninstall {
+        crate::sync::commands::Action::Uninstall { manager, name }
+    } else {
+        crate::sync::commands::Action::Install { manager, name }
+    };
+    super::machines::send(on, action).await
+}
+
 pub async fn remove(id: &str) -> Result<()> {
     let (manager, name) = split_id(id)?;
     if manager == "brew_taps" {

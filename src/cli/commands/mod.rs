@@ -239,6 +239,10 @@ pub enum PackagesAction {
     Install {
         /// Package as manager:name, such as npm:typescript or cask:zoom
         id: String,
+        /// Send a signed command instead: these machines install it on their next sync,
+        /// with the same checks. Machine ids or hostnames, separated by commas, or 'all'
+        #[arg(long, value_delimiter = ',', value_name = "MACHINES")]
+        on: Vec<String>,
     },
     /// Add profiles to a package's members, so machines in those profiles install it
     Share {
@@ -263,6 +267,11 @@ pub enum PackagesAction {
     Uninstall {
         /// Package as manager:name, such as npm:typescript or cask:zoom
         id: Option<String>,
+        /// Send a signed command instead: these machines uninstall it on their next sync and
+        /// stop installing it. Profiles do not change. Machine ids or hostnames, separated by
+        /// commas, or 'all'
+        #[arg(long, value_delimiter = ',', value_name = "MACHINES", requires = "id")]
+        on: Vec<String>,
     },
 }
 
@@ -353,6 +362,10 @@ pub enum MachineAction {
             value_name = "SHA256:..."
         )]
         fingerprint_flag: Option<String>,
+        /// Send a signed command instead: these machines trust the key on their next sync.
+        /// Needs the fingerprint. Machine ids or hostnames, separated by commas, or 'all'
+        #[arg(long, value_delimiter = ',', value_name = "MACHINES")]
+        on: Vec<String>,
     },
     /// Stop trusting a machine's signing key
     Untrust {
@@ -368,10 +381,14 @@ pub enum MachineAction {
 
 #[derive(Subcommand)]
 pub enum MachineProfileAction {
-    /// Assign a profile to this machine. Each machine sets only its own profile
+    /// Assign a profile to this machine, or with --on, to other machines by signed command
     Set {
         /// Profile name (must exist in config)
         profile: String,
+        /// Send a signed command instead: these machines take the profile on their next
+        /// sync. Machine ids or hostnames, separated by commas, or 'all'
+        #[arg(long, value_delimiter = ',', value_name = "MACHINES")]
+        on: Vec<String>,
     },
     /// Remove profile assignment from this machine
     Unset,
@@ -817,13 +834,23 @@ impl Cli {
                     machine,
                     fingerprint,
                     fingerprint_flag,
+                    on,
                 } => {
                     let fingerprint = fingerprint.as_deref().or(fingerprint_flag.as_deref());
-                    machines::trust(machine, fingerprint).await
+                    if on.is_empty() {
+                        machines::trust(machine, fingerprint).await
+                    } else {
+                        machines::trust_on(machine, fingerprint, on).await
+                    }
                 }
                 MachineAction::Untrust { machine } => machines::untrust(machine).await,
                 MachineAction::Profile { action } => match action {
-                    MachineProfileAction::Set { profile } => machines::profile_set(profile).await,
+                    MachineProfileAction::Set { profile, on } if on.is_empty() => {
+                        machines::profile_set(profile).await
+                    }
+                    MachineProfileAction::Set { profile, on } => {
+                        machines::profile_set_on(profile, on).await
+                    }
                     MachineProfileAction::Unset => machines::profile_unset().await,
                     MachineProfileAction::Create {
                         name,
@@ -974,11 +1001,19 @@ impl Cli {
                     expected,
                     expect,
                 }) => packages::reject(id, expected.as_deref().or(expect.as_deref())).await,
-                Some(PackagesAction::Install { id }) => packages::install(id).await,
+                Some(PackagesAction::Install { id, on }) if on.is_empty() => {
+                    packages::install(id).await
+                }
+                Some(PackagesAction::Install { id, on }) => packages::send(id, on, false).await,
                 Some(PackagesAction::Share { id, to }) => packages::share(id, to),
                 Some(PackagesAction::Unshare { id, from }) => packages::unshare(id, from),
-                Some(PackagesAction::Uninstall { id: Some(id) }) => packages::remove(id).await,
-                Some(PackagesAction::Uninstall { id: None }) => packages::pick_uninstall().await,
+                Some(PackagesAction::Uninstall { id: Some(id), on }) if !on.is_empty() => {
+                    packages::send(id, on, true).await
+                }
+                Some(PackagesAction::Uninstall { id: Some(id), .. }) => packages::remove(id).await,
+                Some(PackagesAction::Uninstall { id: None, .. }) => {
+                    packages::pick_uninstall().await
+                }
             },
             Commands::Restore { action } => match action {
                 RestoreAction::List => restore::list_cmd().await,

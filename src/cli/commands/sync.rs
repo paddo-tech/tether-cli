@@ -118,7 +118,13 @@ pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
     }
 
     let mut state = SyncState::load()?;
-    adopt_remote(&mut config, &git, &sync_path, &home, &mut state, dry_run).await?;
+    for result in adopt_remote(&mut config, &git, &sync_path, &home, &mut state, dry_run).await? {
+        let line = format!("Fleet command {}: {}", result.status.label(), result.action);
+        match &result.error {
+            Some(error) => Output::warning(&format!("{}: {}", line, error)),
+            None => Output::info(&line),
+        }
+    }
 
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
@@ -442,8 +448,9 @@ pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
 }
 
 /// The steps after the pull that a sync in a terminal and a daemon sync share: take the
-/// synced config before anything reads it, and assign the default profile. A dry run pulls
-/// nothing, so it merges nothing.
+/// synced config before anything reads it, assign the default profile, and run the fleet
+/// commands for this machine. Returns the command results. A dry run pulls nothing, so it
+/// merges and runs nothing.
 pub async fn adopt_remote(
     config: &mut Config,
     git: &GitBackend,
@@ -451,7 +458,7 @@ pub async fn adopt_remote(
     home: &Path,
     state: &mut SyncState,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<Vec<crate::sync::state::CommandResult>> {
     if config.security.encrypt_dotfiles && !dry_run {
         if let Some(new_config) = sync_tether_config(sync_path, home, state)? {
             warn_changed_profile(config, &new_config, &state.machine_id);
@@ -473,7 +480,13 @@ pub async fn adopt_remote(
             config.save()?;
         }
     }
-    Ok(())
+
+    if dry_run {
+        return Ok(Vec::new());
+    }
+    let results = crate::sync::commands::apply_incoming(config, sync_path, state).await?;
+    crate::sync::commands::prune_sent(sync_path, &state.machine_id)?;
+    Ok(results)
 }
 
 /// Sync secrets from collab repos to local projects
@@ -2207,6 +2220,7 @@ pub async fn build_machine_state(
     machine_state.os_version = crate::sync::state::local_os_version();
     machine_state.os = std::env::consts::OS.to_string();
     machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
+    machine_state.runs_commands = true;
 
     // Collect file hashes
     machine_state.files.clear();

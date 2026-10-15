@@ -273,7 +273,7 @@ impl DaemonServer {
         }
 
         let mut state = SyncState::load()?;
-        crate::cli::commands::sync::adopt_remote(
+        let results = crate::cli::commands::sync::adopt_remote(
             &mut config,
             &git,
             &sync_path,
@@ -282,6 +282,21 @@ impl DaemonServer {
             false,
         )
         .await?;
+        for result in &results {
+            log::info!(
+                "Fleet command {}: {}{}",
+                result.status.label(),
+                result.action,
+                result
+                    .error
+                    .as_deref()
+                    .map(|e| format!(": {}", e))
+                    .unwrap_or_default()
+            );
+        }
+        if !results.is_empty() {
+            crate::sync::notify_commands(&results).ok();
+        }
 
         let machine_state_for_decrypt =
             crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();

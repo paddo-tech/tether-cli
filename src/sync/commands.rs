@@ -1,0 +1,742 @@
+//! Signed fleet commands: one machine asks another to change itself, such as to uninstall a
+//! package. A command is `commands/<target>/<signer>-<seq>.toml` in the personal sync repo,
+//! with a `.sig` beside it. The target runs it on its next sync when the signer's key is the
+//! key it trusts for that signer, the sequence number is new for that key, and the command
+//! has not expired. Trusting a machine already lets its signed record install packages here,
+//! so trust also grants commands. Team and collab repos never read `commands/`.
+
+use crate::cli::Output;
+use crate::config::Config;
+use crate::sync::signing::{self, TrustStore};
+use crate::sync::state::{valid_machine_id, CommandResult, CommandStatus};
+use crate::sync::{MachineState, SyncState};
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// A namespace of its own, so no record or commit signature passes as a command signature.
+const COMMAND_NAMESPACE: &str = "tether-command";
+pub const EXPIRY_DAYS: i64 = 7;
+/// Larger files are not commands Tether wrote, and are not read.
+const MAX_COMMAND_BYTES: u64 = 16 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum Action {
+    /// Uninstall a package, and record the removal so syncs stop installing it
+    Uninstall { manager: String, name: String },
+    /// Install a package through the gates of a manual install
+    Install { manager: String, name: String },
+    /// Assign the target's profile
+    Profile { profile: String },
+    /// Trust the key that signs `machine`'s record, when its fingerprint matches
+    Trust {
+        machine: String,
+        fingerprint: String,
+    },
+}
+
+impl Action {
+    pub fn describe(&self) -> String {
+        match self {
+            Action::Uninstall { manager, name } => format!("uninstall {}:{}", manager, name),
+            Action::Install { manager, name } => format!("install {}:{}", manager, name),
+            Action::Profile { profile } => format!("set profile {}", profile),
+            Action::Trust {
+                machine,
+                fingerprint,
+            } => format!("trust {} {}", machine, fingerprint),
+        }
+    }
+
+    /// Fields a command file must hold, so a target never acts on a name a package manager
+    /// or the trust store would refuse.
+    fn check(&self) -> Result<()> {
+        match self {
+            Action::Uninstall { manager, name } | Action::Install { manager, name } => {
+                if !crate::packages::MANAGER_KEYS.contains(&manager.as_str()) {
+                    bail!("unknown package manager {}", manager);
+                }
+                if !MachineState::is_safe_package_name(name) || name.starts_with('-') {
+                    bail!("invalid package name {}", name);
+                }
+            }
+            Action::Profile { profile } => {
+                if !Config::is_safe_profile_name(profile) {
+                    bail!("invalid profile name {}", profile);
+                }
+            }
+            Action::Trust { machine, .. } => {
+                if !valid_machine_id(machine) {
+                    bail!("invalid machine id {}", machine);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Command {
+    pub target: String,
+    pub signer: String,
+    pub seq: u64,
+    pub expires_at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub action: Action,
+}
+
+/// What a command signature covers. The body hash binds the action; the other fields are
+/// also in the body and in the file path, and a target checks that all three agree.
+fn message(command: &Command, body: &[u8]) -> Vec<u8> {
+    format!(
+        "tether-command-v1\n{}\n{}\n{}\n{}\n{}\n",
+        command.target,
+        command.signer,
+        command.seq,
+        command.expires_at.timestamp(),
+        crate::sha256_hex(body)
+    )
+    .into_bytes()
+}
+
+fn commands_dir(sync_path: &Path) -> PathBuf {
+    sync_path.join("commands")
+}
+
+fn command_path(sync_path: &Path, target: &str, signer: &str, seq: u64) -> PathBuf {
+    commands_dir(sync_path)
+        .join(target)
+        .join(format!("{}-{}.toml", signer, seq))
+}
+
+fn sig_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".sig");
+    PathBuf::from(name)
+}
+
+/// The signer and sequence number in a command file name, `<signer>-<seq>.toml`.
+fn parse_file_name(name: &str) -> Option<(&str, u64)> {
+    let (signer, seq) = name.strip_suffix(".toml")?.rsplit_once('-')?;
+    if !valid_machine_id(signer) || !seq.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((signer, seq.parse().ok()?))
+}
+
+/// Write `command` and its signature into the sync repo.
+fn write(sync_path: &Path, command: &Command, key: &PrivateKey) -> Result<PathBuf> {
+    let body = toml::to_string(command)?;
+    let signature = key
+        .sign(
+            COMMAND_NAMESPACE,
+            HashAlg::Sha512,
+            &message(command, body.as_bytes()),
+        )?
+        .to_pem(LineEnding::LF)?;
+    let path = command_path(sync_path, &command.target, &command.signer, command.seq);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    crate::sync::atomic_write(&path, body.as_bytes())?;
+    crate::sync::atomic_write(&sig_path(&path), signature.as_bytes())?;
+    Ok(path)
+}
+
+/// A command file as it is in the repo. `verified` is true when `key` signed it.
+fn read(path: &Path, target: &str, key: Option<&PublicKey>) -> Result<(Command, bool)> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("invalid file name"))?;
+    let (signer, seq) = parse_file_name(name).ok_or_else(|| anyhow!("invalid file name"))?;
+    if std::fs::metadata(path)?.len() > MAX_COMMAND_BYTES {
+        bail!("file too large");
+    }
+    let body = std::fs::read(path)?;
+    let command: Command = toml::from_str(std::str::from_utf8(&body)?)?;
+    if command.target != target || command.signer != signer || command.seq != seq {
+        bail!("its fields do not match its path");
+    }
+    command.action.check()?;
+    let verified = key.is_some_and(|key| {
+        std::fs::read_to_string(sig_path(path))
+            .ok()
+            .and_then(|pem| SshSig::from_pem(pem).ok())
+            .is_some_and(|sig| {
+                key.algorithm() == Algorithm::Ed25519
+                    && key
+                        .verify(COMMAND_NAMESPACE, &message(&command, &body), &sig)
+                        .is_ok()
+            })
+    });
+    Ok((command, verified))
+}
+
+/// Command files in `commands/<target>/`, sorted by signer and sequence number.
+fn files_for(sync_path: &Path, target: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(commands_dir(sync_path).join(target)) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            let (signer, seq) = parse_file_name(&name)?;
+            Some((signer.to_string(), seq, e.path()))
+        })
+        .collect();
+    files.sort();
+    files.into_iter().map(|(_, _, path)| path).collect()
+}
+
+/// Sequence numbers in `~/.tether/command_seqs.json`, never synced: the last number this
+/// machine sent, and the newest number it accepted from each signer key.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Seqs {
+    #[serde(default)]
+    sent: u64,
+    #[serde(default)]
+    accepted: BTreeMap<String, u64>,
+}
+
+impl Seqs {
+    fn path() -> Result<PathBuf> {
+        Ok(crate::home_dir()?.join(".tether").join("command_seqs.json"))
+    }
+
+    pub fn load() -> Result<Self> {
+        let path = Self::path()?;
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        serde_json::from_slice(&std::fs::read(&path)?)
+            .with_context(|| format!("Invalid command sequence file {}", path.display()))
+    }
+
+    pub fn save(&self) -> Result<()> {
+        crate::sync::atomic_write(&Self::path()?, &serde_json::to_vec_pretty(self)?)
+    }
+}
+
+/// A command this machine may run, with the fingerprint of the key that signed it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Incoming {
+    pub command: Command,
+    pub fingerprint: String,
+}
+
+/// The commands for `this_machine` that a trusted key signed and that `seqs` has not
+/// accepted yet, in order. Files that do not verify are skipped with one warning each.
+pub fn incoming(
+    sync_path: &Path,
+    this_machine: &str,
+    store: &TrustStore,
+    seqs: &Seqs,
+) -> Vec<Incoming> {
+    let mut found = Vec::new();
+    for path in files_for(sync_path, this_machine) {
+        let shown = path
+            .strip_prefix(sync_path)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        let signer = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_file_name)
+            .map(|(signer, _)| signer.to_string())
+            .unwrap_or_default();
+        if signer == this_machine {
+            continue;
+        }
+        let key = store.key_for(&signer);
+        let (command, verified) = match read(&path, this_machine, key) {
+            Ok(read) => read,
+            Err(e) => {
+                warn_once(&shown, &format!("Ignoring {}: {}", shown, e));
+                continue;
+            }
+        };
+        let Some(key) = key else {
+            warn_once(
+                &shown,
+                &format!(
+                    "Ignoring {}: this machine does not trust {}. Trust it to run its commands",
+                    shown, signer
+                ),
+            );
+            continue;
+        };
+        if !verified {
+            warn_once(
+                &shown,
+                &format!(
+                    "Ignoring {}: its signature is not from the key trusted for {}",
+                    shown, signer
+                ),
+            );
+            continue;
+        }
+        let fingerprint = signing::fingerprint(key);
+        if seqs
+            .accepted
+            .get(&fingerprint)
+            .is_some_and(|&last| command.seq <= last)
+        {
+            continue;
+        }
+        found.push(Incoming {
+            command,
+            fingerprint,
+        });
+    }
+    found
+}
+
+fn warn_once(key: &str, message: &str) {
+    if crate::packages::policy::first_warning(&format!("command {}", key)) {
+        Output::warning(message);
+    }
+}
+
+/// Run the commands for this machine, after the config merge and before the sync reads
+/// this machine's packages or profile. Each command's number is saved before it runs, so a
+/// crash never runs it twice. Results go into this machine's local record; the sync signs
+/// and pushes it. The caller holds the sync lock.
+pub async fn apply_incoming(
+    config: &mut Config,
+    sync_path: &Path,
+    state: &mut SyncState,
+) -> Result<Vec<CommandResult>> {
+    let this_machine = state.machine_id.clone();
+    let store = TrustStore::load()?;
+    let mut seqs = Seqs::load()?;
+    let mut results = Vec::new();
+    for incoming in incoming(sync_path, &this_machine, &store, &seqs) {
+        let command = &incoming.command;
+        seqs.accepted
+            .insert(incoming.fingerprint.clone(), command.seq);
+        seqs.save()?;
+        let outcome = if command.expires_at <= Utc::now() {
+            Err(None)
+        } else {
+            run(&command.action, config, sync_path, state)
+                .await
+                .map_err(Some)
+        };
+        let (status, error) = match outcome {
+            Ok(()) => (CommandStatus::Applied, None),
+            Err(None) => (CommandStatus::Expired, None),
+            Err(Some(e)) => (CommandStatus::Failed, Some(e.to_string())),
+        };
+        let result = CommandResult {
+            seq: command.seq,
+            action: format!("{} from {}", command.action.describe(), command.signer),
+            status,
+            error,
+            at: Utc::now(),
+        };
+        let mut record = signing::own_record(sync_path, &this_machine)?
+            .unwrap_or_else(|| MachineState::new(&this_machine));
+        let list = record
+            .commands_applied
+            .entry(incoming.fingerprint.clone())
+            .or_default();
+        list.push(result.clone());
+        let extra = list.len().saturating_sub(MachineState::MAX_COMMAND_RESULTS);
+        list.drain(..extra);
+        signing::save_local_record(&record)?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+async fn run(
+    action: &Action,
+    config: &mut Config,
+    sync_path: &Path,
+    state: &mut SyncState,
+) -> Result<()> {
+    let this_machine = state.machine_id.clone();
+    match action {
+        Action::Uninstall { manager, name } => {
+            if manager == "brew_taps" {
+                bail!("Tether does not remove taps");
+            }
+            if crate::packages::installed_here(manager, name).await? {
+                crate::packages::uninstall(manager, name).await?;
+            }
+            // The removal stops syncs from installing it again, also when it was not here
+            let mut record = signing::own_record(sync_path, &this_machine)?
+                .unwrap_or_else(|| MachineState::new(&this_machine));
+            let name = name.clone();
+            record.add_removals(manager, &[&name]);
+            signing::save_local_record(&record)?;
+            let id = crate::sync::membership::canonical_id(manager, &name);
+            state.install_failures.retain(|key, _| {
+                key.split_once(':').is_none_or(|(m, n)| {
+                    m != manager || crate::sync::membership::canonical_id(m, n) != id
+                })
+            });
+            Ok(())
+        }
+        Action::Install { manager, name } => {
+            if crate::packages::installed_here(manager, name).await? {
+                return Ok(());
+            }
+            // An install that OSV could not check fails, as no one is here to decide
+            let checked = crate::packages::inbox::check_manual_install(manager, name, true).await?;
+            crate::packages::inbox::install_from_machine(manager, name, checked, false).await
+        }
+        Action::Profile { profile } => {
+            if !config.profiles.contains_key(profile) && profile != crate::config::DEFAULT_PROFILE {
+                bail!("No profile {}", profile);
+            }
+            config
+                .machine_profiles
+                .insert(this_machine, profile.clone());
+            config.save()
+        }
+        Action::Trust {
+            machine,
+            fingerprint,
+        } => {
+            if *machine == this_machine {
+                bail!("A machine does not trust its own key by command");
+            }
+            crate::packages::inbox::trust_machine(sync_path, machine, fingerprint)?;
+            Ok(())
+        }
+    }
+}
+
+/// The next sequence number for this machine's key: past the local count, every command
+/// file this machine still has in the repo, and every result a target reported, so a lost
+/// local count never reuses a number that a target already accepted.
+fn next_seq(sync_path: &Path, signer: &str, fingerprint: &str, seqs: &Seqs) -> u64 {
+    let in_files = std::fs::read_dir(commands_dir(sync_path))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|target| files_for(sync_path, &target.file_name().to_string_lossy()))
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_string();
+            let (s, seq) = parse_file_name(&name)?;
+            (s == signer).then_some(seq)
+        })
+        .max()
+        .unwrap_or(0);
+    let in_results = MachineState::list_all(sync_path)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|m| m.commands_applied.get(fingerprint))
+        .flatten()
+        .map(|r| r.seq)
+        .max()
+        .unwrap_or(0);
+    seqs.sent.max(in_files).max(in_results) + 1
+}
+
+/// Sign `action` for each target and write it into the sync repo. The caller holds the sync
+/// lock, then commits and pushes. Returns each target with its command's number.
+pub fn send(
+    sync_path: &Path,
+    signer: &str,
+    key: &PrivateKey,
+    targets: &[String],
+    action: &Action,
+) -> Result<Vec<(String, u64)>> {
+    action.check()?;
+    let mut seqs = Seqs::load()?;
+    let first = next_seq(
+        sync_path,
+        signer,
+        &signing::fingerprint(key.public_key()),
+        &seqs,
+    );
+    let expires_at = Utc::now() + Duration::days(EXPIRY_DAYS);
+    let mut sent = Vec::new();
+    for (seq, target) in (first..).zip(targets) {
+        let command = Command {
+            target: target.clone(),
+            signer: signer.to_string(),
+            seq,
+            expires_at,
+            action: action.clone(),
+        };
+        write(sync_path, &command, key)?;
+        sent.push((target.clone(), seq));
+        seqs.sent = seq;
+    }
+    seqs.save()?;
+    Ok(sent)
+}
+
+/// A command still in the repo, as `machines show` lists it.
+#[derive(Debug, Clone)]
+pub struct Pending {
+    pub command: Command,
+    /// Whether the key this machine trusts for the signer signed it
+    pub verified: bool,
+}
+
+/// The commands for `target` that wait in the repo: newer than the latest result `target`
+/// reported for their signer key, as this machine reads that key.
+pub fn pending(sync_path: &Path, target: &MachineState, store: &TrustStore) -> Vec<Pending> {
+    files_for(sync_path, &target.machine_id)
+        .into_iter()
+        .filter_map(|path| {
+            let signer = parse_file_name(path.file_name()?.to_str()?)?.0.to_string();
+            let key = store.key_for(&signer);
+            let (command, verified) = read(&path, &target.machine_id, key).ok()?;
+            let done = key
+                .and_then(|k| target.commands_applied.get(&signing::fingerprint(k)))
+                .and_then(|results| results.iter().map(|r| r.seq).max())
+                .is_some_and(|last| command.seq <= last);
+            (!done).then_some(Pending { command, verified })
+        })
+        .collect()
+}
+
+/// Delete the commands this machine sent once their target's trusted record shows a result
+/// at or past their number, or once they expired. A target runs its commands in order, so a
+/// lower number it skipped never runs. Also removes command folders that end up empty.
+pub fn prune_sent(sync_path: &Path, this_machine: &str) -> Result<()> {
+    let Some(own) = signing::own_fingerprint() else {
+        return Ok(());
+    };
+    let dir = commands_dir(sync_path);
+    if !dir.exists() {
+        return Ok(());
+    }
+    let statuses = signing::record_statuses(sync_path, this_machine)?;
+    let records = MachineState::list_all(sync_path)?;
+    let reported = |target: &str| -> Option<u64> {
+        let trusted = statuses
+            .iter()
+            .any(|(id, status, _)| id == target && *status == signing::RecordStatus::Trusted);
+        if !trusted {
+            return None;
+        }
+        records
+            .iter()
+            .find(|m| m.machine_id == target)?
+            .commands_applied
+            .get(&own)?
+            .iter()
+            .map(|r| r.seq)
+            .max()
+    };
+    for target in std::fs::read_dir(&dir)?.flatten() {
+        let target_id = target.file_name().to_string_lossy().to_string();
+        let last = reported(&target_id);
+        for path in files_for(sync_path, &target_id) {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some((signer, seq)) = parse_file_name(name) else {
+                continue;
+            };
+            if signer != this_machine {
+                continue;
+            }
+            let expired = read(&path, &target_id, None)
+                .map(|(c, _)| c.expires_at <= Utc::now())
+                .unwrap_or(true);
+            if expired || last.is_some_and(|last| seq <= last) {
+                std::fs::remove_file(&path)?;
+                let _ = std::fs::remove_file(sig_path(&path));
+            }
+        }
+        // Not a race: git keeps no empty folders, so one left here is only local
+        if std::fs::read_dir(target.path()).is_ok_and(|mut d| d.next().is_none()) {
+            std::fs::remove_dir(target.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ssh_key::rand_core::OsRng;
+
+    fn key() -> PrivateKey {
+        PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap()
+    }
+
+    fn command(target: &str, signer: &str, seq: u64) -> Command {
+        Command {
+            target: target.to_string(),
+            signer: signer.to_string(),
+            seq,
+            expires_at: Utc::now() + Duration::days(1),
+            action: Action::Uninstall {
+                manager: "npm".to_string(),
+                name: "typescript".to_string(),
+            },
+        }
+    }
+
+    fn store(id: &str, key: &PrivateKey) -> TrustStore {
+        let mut store = TrustStore::default();
+        store.trust(id, key.public_key()).unwrap();
+        store
+    }
+
+    #[test]
+    fn a_trusted_signed_command_is_incoming_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        write(dir.path(), &command("mini", "laptop", 1), &laptop).unwrap();
+        let store = store("laptop", &laptop);
+        let mut seqs = Seqs::default();
+        let found = incoming(dir.path(), "mini", &store, &seqs);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].command.seq, 1);
+        assert_eq!(found[0].command.action, command("mini", "laptop", 1).action);
+        seqs.accepted
+            .insert(found[0].fingerprint.clone(), found[0].command.seq);
+        // The same file again is a replay
+        assert!(incoming(dir.path(), "mini", &store, &seqs).is_empty());
+    }
+
+    #[test]
+    fn a_lower_number_after_a_higher_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        let store = store("laptop", &laptop);
+        let mut seqs = Seqs::default();
+        seqs.accepted
+            .insert(signing::fingerprint(laptop.public_key()), 5);
+        write(dir.path(), &command("mini", "laptop", 4), &laptop).unwrap();
+        write(dir.path(), &command("mini", "laptop", 5), &laptop).unwrap();
+        write(dir.path(), &command("mini", "laptop", 6), &laptop).unwrap();
+        let found = incoming(dir.path(), "mini", &store, &seqs);
+        assert_eq!(found.iter().map(|i| i.command.seq).collect::<Vec<_>>(), [6]);
+    }
+
+    #[test]
+    fn an_untrusted_or_other_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        let intruder = key();
+        write(dir.path(), &command("mini", "laptop", 1), &intruder).unwrap();
+        assert!(incoming(
+            dir.path(),
+            "mini",
+            &store("laptop", &laptop),
+            &Seqs::default()
+        )
+        .is_empty());
+        // No key trusted for the signer at all
+        assert!(incoming(dir.path(), "mini", &TrustStore::default(), &Seqs::default()).is_empty());
+    }
+
+    #[test]
+    fn a_command_for_another_machine_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        let path = write(dir.path(), &command("studio", "laptop", 1), &laptop).unwrap();
+        // Copied into this machine's folder, the signed target still names the other one
+        let moved = command_path(dir.path(), "mini", "laptop", 1);
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::copy(&path, &moved).unwrap();
+        std::fs::copy(sig_path(&path), sig_path(&moved)).unwrap();
+        assert!(incoming(
+            dir.path(),
+            "mini",
+            &store("laptop", &laptop),
+            &Seqs::default()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn an_edited_command_fails_its_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        let path = write(dir.path(), &command("mini", "laptop", 1), &laptop).unwrap();
+        let body = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("typescript", "left-pad");
+        std::fs::write(&path, body).unwrap();
+        assert!(incoming(
+            dir.path(),
+            "mini",
+            &store("laptop", &laptop),
+            &Seqs::default()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_later_expiry_fails_the_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        let mut old = command("mini", "laptop", 1);
+        old.expires_at = Utc::now() - Duration::days(1);
+        let path = write(dir.path(), &old, &laptop).unwrap();
+        let (read_back, verified) = read(&path, "mini", Some(laptop.public_key())).unwrap();
+        assert!(verified);
+        assert!(read_back.expires_at <= Utc::now());
+        let renewed = Command {
+            expires_at: Utc::now() + Duration::days(30),
+            ..old
+        };
+        std::fs::write(&path, toml::to_string(&renewed).unwrap()).unwrap();
+        assert!(!read(&path, "mini", Some(laptop.public_key())).unwrap().1);
+    }
+
+    #[test]
+    fn unsafe_package_names_never_parse_as_commands() {
+        let bad = Action::Install {
+            manager: "npm".to_string(),
+            name: "--registry=evil".to_string(),
+        };
+        assert!(bad.check().is_err());
+        let unknown = Action::Uninstall {
+            manager: "apt".to_string(),
+            name: "curl".to_string(),
+        };
+        assert!(unknown.check().is_err());
+    }
+
+    #[test]
+    fn file_names_parse_with_dashes_in_the_signer() {
+        assert_eq!(
+            parse_file_name("mac-mini-2-12.toml"),
+            Some(("mac-mini-2", 12))
+        );
+        assert_eq!(parse_file_name("laptop-x.toml"), None);
+        assert_eq!(parse_file_name("laptop-1.toml.sig"), None);
+    }
+
+    #[test]
+    fn next_number_passes_files_and_reported_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let laptop = key();
+        write(dir.path(), &command("mini", "laptop", 7), &laptop).unwrap();
+        let seqs = Seqs {
+            sent: 3,
+            ..Seqs::default()
+        };
+        assert_eq!(next_seq(dir.path(), "laptop", "SHA256:x", &seqs), 8);
+        let mut record = MachineState::new("studio");
+        record.commands_applied.insert(
+            "SHA256:x".to_string(),
+            vec![CommandResult {
+                seq: 20,
+                action: "x".to_string(),
+                status: CommandStatus::Applied,
+                error: None,
+                at: Utc::now(),
+            }],
+        );
+        record.save_to_repo(dir.path()).unwrap();
+        assert_eq!(next_seq(dir.path(), "laptop", "SHA256:x", &seqs), 21);
+    }
+}

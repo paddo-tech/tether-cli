@@ -2,6 +2,7 @@ use crate::cli::output::Colorize;
 use crate::cli::{Output, Prompt};
 use crate::config::Config;
 use crate::packages::inbox;
+use crate::sync::commands::Action;
 use crate::sync::signing;
 use crate::sync::state::valid_machine_id;
 use crate::sync::{GitBackend, MachineState, SyncEngine, SyncState};
@@ -327,6 +328,7 @@ pub async fn show(name: Option<&str>) -> Result<()> {
         ),
     );
     Output::key_value("Dotfiles", &record.dotfiles.len().to_string());
+    print_commands(&sync_path, record)?;
     println!();
     if id == this {
         Output::dim(
@@ -336,6 +338,51 @@ pub async fn show(name: Option<&str>) -> Result<()> {
         Output::dim(&format!(
             "After you compare the fingerprint on that machine: tether machines trust {} --fingerprint {}",
             id, fp
+        ));
+    }
+    Ok(())
+}
+
+/// The fleet commands that wait for `record`'s machine, and the results it reported, newest
+/// first. A signer key this machine does not trust shows as its fingerprint.
+fn print_commands(sync_path: &Path, record: &MachineState) -> Result<()> {
+    let store = signing::TrustStore::load()?;
+    let pending = crate::sync::commands::pending(sync_path, record, &store);
+    if pending.is_empty() && record.commands_applied.is_empty() {
+        return Ok(());
+    }
+    println!();
+    Output::subheader("Fleet commands");
+    for p in &pending {
+        Output::list_item(&format!(
+            "pending: {} from {} (#{}, expires {}){}",
+            p.command.action.describe(),
+            p.command.signer,
+            p.command.seq,
+            p.command
+                .expires_at
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M"),
+            if p.verified {
+                ""
+            } else {
+                " - not signed by a key this machine trusts"
+            }
+        ));
+    }
+    let mut results: Vec<_> = record.commands_applied.values().flatten().collect();
+    results.sort_by_key(|r| std::cmp::Reverse(r.at));
+    for r in results {
+        Output::list_item(&format!(
+            "{}: {} (#{}, {}){}",
+            r.status.label(),
+            r.action,
+            r.seq,
+            r.at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+            r.error
+                .as_deref()
+                .map(|e| format!(": {}", e))
+                .unwrap_or_default()
         ));
     }
     Ok(())
@@ -724,6 +771,180 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
         trusted.machine_id, trusted.fingerprint
     ));
     Ok(())
+}
+
+/// Send a signed command that makes the machines `on` names trust `name`'s key. The
+/// fingerprint is required: no one on those machines compares it.
+pub async fn trust_on(name: &str, fingerprint: Option<&str>, on: &[String]) -> Result<()> {
+    let sync_path = SyncEngine::sync_path()?;
+    let machine = resolve_for_trust(&sync_path, name)?;
+    let Some(current) = inbox::signing_fingerprint(&sync_path, &machine) else {
+        anyhow::bail!(
+            "Machine {} has no signed machine record. Run 'tether sync' on that machine first",
+            machine
+        );
+    };
+    let Some(fingerprint) = fingerprint else {
+        anyhow::bail!(
+            "Run 'tether machines show {}' on that machine and compare the key, then run \
+             'tether machines trust {} --fingerprint {} --on {}'",
+            machine,
+            machine,
+            current,
+            on.join(",")
+        );
+    };
+    if fingerprint != current {
+        anyhow::bail!(
+            "Machine {} signs with key {}, not {}",
+            machine,
+            current,
+            fingerprint
+        );
+    }
+    send(
+        on,
+        Action::Trust {
+            fingerprint: fingerprint.to_string(),
+            machine,
+        },
+    )
+    .await
+}
+
+/// Send a signed command that assigns `profile` to the machines `on` names.
+pub async fn profile_set_on(profile: &str, on: &[String]) -> Result<()> {
+    let config = Config::load()?;
+    if !config.profiles.contains_key(profile) && profile != crate::config::DEFAULT_PROFILE {
+        anyhow::bail!(
+            "Profile '{}' not found. Create it first: tether machines profile create {}",
+            profile,
+            profile
+        );
+    }
+    send(
+        on,
+        Action::Profile {
+            profile: profile.to_string(),
+        },
+    )
+    .await
+}
+
+/// Sign `action` for each machine `on` names, then commit and push it. Each machine runs
+/// it on its next sync.
+pub async fn send(on: &[String], action: Action) -> Result<()> {
+    let config = Config::load()?;
+    if !config.has_personal_features() {
+        anyhow::bail!("Fleet commands are not available in team-only mode");
+    }
+    let sync_path = SyncEngine::sync_path()?;
+    let _sync_lock = crate::sync::acquire_sync_lock(true)?;
+    let git = GitBackend::open(&sync_path)?;
+    Output::info("Pulling latest changes...");
+    git.pull()?;
+    let this = SyncState::load()?.machine_id;
+    let mut targets = fleet_targets(&sync_path, &this, on)?;
+    // A machine trusts its own key already
+    if let Action::Trust { machine, .. } = &action {
+        targets.retain(|t| t != machine);
+        if targets.is_empty() {
+            anyhow::bail!("Name machines other than {} itself", machine);
+        }
+    }
+    let key = signing::load_or_create(&this)?;
+    let sent = crate::sync::commands::send(&sync_path, &this, &key, &targets, &action)?;
+    git.commit(
+        &format!("Send fleet command: {}", action.describe()),
+        &crate::sync::local_hostname(),
+    )?;
+    if let Err(e) = git.push() {
+        anyhow::bail!(
+            "Saved the command, but the push failed: {}. The next sync pushes it",
+            e
+        );
+    }
+    Output::success(&format!(
+        "Sent '{}' to {}. Each machine runs it on its next sync. See the result with 'tether \
+         machines show <machine>'",
+        action.describe(),
+        sent.iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    Ok(())
+}
+
+/// The machine ids `on` names: trusted machines whose Tether runs fleet commands. 'all'
+/// names every such machine except this one, and skips the others with a warning.
+fn fleet_targets(sync_path: &Path, this: &str, on: &[String]) -> Result<Vec<String>> {
+    let statuses = signing::record_statuses(sync_path, this)?;
+    let machines = MachineState::list_all(sync_path)?;
+    let trusted = |id: &str| {
+        statuses
+            .iter()
+            .any(|(i, status, _)| i == id && *status == signing::RecordStatus::Trusted)
+    };
+    let version = |m: &MachineState| {
+        if m.cli_version.is_empty() {
+            "1.x".to_string()
+        } else {
+            m.cli_version.clone()
+        }
+    };
+    if on.iter().any(|n| n == "all") {
+        let mut targets = Vec::new();
+        for m in machines
+            .iter()
+            .filter(|m| m.machine_id != this && trusted(&m.machine_id))
+        {
+            if m.runs_commands {
+                targets.push(m.machine_id.clone());
+            } else {
+                Output::warning(&format!(
+                    "Skipping {}: Tether {} cannot run fleet commands",
+                    m.machine_id,
+                    version(m)
+                ));
+            }
+        }
+        if targets.is_empty() {
+            anyhow::bail!(
+                "No trusted machine runs fleet commands. Upgrade Tether on the other machines \
+                 and trust them first"
+            );
+        }
+        return Ok(targets);
+    }
+    let mut targets: Vec<String> = Vec::new();
+    for name in on {
+        let id = resolve(sync_path, name)?;
+        if id == this {
+            anyhow::bail!("{} is this machine. Run the command without --on", name);
+        }
+        if !trusted(&id) {
+            anyhow::bail!(
+                "Machine {} is not trusted. Trust it first: tether machines trust {}",
+                id,
+                id
+            );
+        }
+        let Some(record) = machines.iter().find(|m| m.machine_id == id) else {
+            anyhow::bail!("Machine {} has no machine record", id);
+        };
+        if !record.runs_commands {
+            anyhow::bail!(
+                "Machine {} runs Tether {}, which cannot run fleet commands. Upgrade it first",
+                id,
+                version(record)
+            );
+        }
+        if !targets.contains(&id) {
+            targets.push(id);
+        }
+    }
+    Ok(targets)
 }
 
 pub async fn untrust(name: &str) -> Result<()> {

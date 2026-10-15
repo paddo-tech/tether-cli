@@ -575,6 +575,7 @@ mod tests {
             membership: None,
             membership_error: None,
             own_fingerprint: None,
+            pending_commands: Vec::new(),
         };
         let mut app = App::new(state, HashMap::new());
         // Tests never read this user's daemon log

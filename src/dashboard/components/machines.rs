@@ -631,6 +631,18 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
         kv("Last sync", relative_time(m.last_sync)),
         kv("Files", m.files.len().to_string()),
     ];
+    let pending = app
+        .state
+        .pending_commands
+        .iter()
+        .find(|(id, _)| *id == m.machine_id)
+        .map_or(0, |(_, n)| *n);
+    if pending > 0 {
+        lines.push(kv(
+            "Commands",
+            format!("{} pending (tether machines show)", pending),
+        ));
+    }
     let mut managers: Vec<_> = m.packages.iter().collect();
     managers.sort_by(|a, b| a.0.cmp(b.0));
     for (key, pkgs) in managers {

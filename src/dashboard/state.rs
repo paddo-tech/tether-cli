@@ -26,6 +26,8 @@ pub struct DashboardState {
     pub membership_error: Option<String>,
     /// This machine's signing key fingerprint, from the key file
     pub own_fingerprint: Option<String>,
+    /// Fleet commands that wait in the repo, as (target machine id, count)
+    pub pending_commands: Vec<(String, usize)>,
 }
 
 impl DashboardState {
@@ -53,6 +55,22 @@ impl DashboardState {
         let old_builds = sync_state
             .as_ref()
             .map(|s| signing::old_builds(&machines, &s.machine_id))
+            .unwrap_or_default();
+        let store = signing::TrustStore::load().unwrap_or_default();
+        let pending_commands = sync_path
+            .as_ref()
+            .map(|p| {
+                machines
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.machine_id.clone(),
+                            crate::sync::commands::pending(p, m, &store).len(),
+                        )
+                    })
+                    .filter(|(_, n)| *n > 0)
+                    .collect()
+            })
             .unwrap_or_default();
         let record_status: Vec<(String, signing::RecordStatus)> = statuses
             .into_iter()
@@ -123,6 +141,7 @@ impl DashboardState {
             membership,
             membership_error,
             own_fingerprint: signing::own_fingerprint(),
+            pending_commands,
         }
     }
 
