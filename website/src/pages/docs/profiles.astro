@@ -21,7 +21,7 @@ tether machines profile list
 tether machines profile edit work`} />
     <ul>
       <li>In a terminal, <code>profile create</code> asks about each dotfile, folder and package manager. <code>-y</code> takes every default. <code>--from</code> copies a profile without questions. <code>--managers</code> sets its package managers</li>
-      <li>Each machine sets only its own profile with <code>profile set</code></li>
+      <li>A machine sets its own profile with <code>profile set</code>. To set another machine's profile, add <code>--on &lt;MACHINE&gt;</code>. That machine takes the profile on its next sync. See <a href="/docs/trust#fleet-commands">Fleet commands</a></li>
       <li>In a terminal, a sync offers dotfiles from other profiles that yours does not have</li>
     </ul>
 
