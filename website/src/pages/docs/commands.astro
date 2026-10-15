@@ -116,7 +116,7 @@ tether packages reject <ID> [--expect <VERSION|TAP|KEY>]`} />
       <li><code>--dry-run</code> lists what an upgrade would change, and which packages stay because the release-age limit allows only an older version</li>
       <li>An upgrade never downgrades a package. It installs only a target newer than the installed version, at that exact version</li>
       <li>Tether checks each npm, pnpm, bun, uv and gem target against OSV. A target with a <code>MAL-</code> advisory waits in the Inbox, and the installed version stays</li>
-      <li>Tether asks before it upgrades a manager that cannot enforce the release-age limit. Without a terminal, or with <code>-y</code>, it skips that manager</li>
+      <li>Tether asks before it upgrades an older npm, pnpm or bun that cannot enforce the release-age limit. Without a terminal, or with <code>-y</code>, it skips that manager. gem does not ask: Tether picks each gem's release from its RubyGems publish time</li>
       <li>Homebrew upgrades include only outdated packages from trusted taps. Tether does not run <code>brew update</code></li>
     </ul>
 

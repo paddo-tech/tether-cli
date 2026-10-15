@@ -33,7 +33,7 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
       <li>Tether holds such a package only when the release is too new ("too new") or the registry check fails ("age not checked"). A "too new" hold ends when the release is old enough</li>
       <li>When a trusted record names a release that is newer than the limit, and the manager rejects it, Tether holds the newest release older than the limit as "pinned too new"</li>
       <li>A running process, such as the daemon, asks the registry about a package once per day. Each CLI command asks again</li>
-      <li>The daemon does not auto-upgrade a manager that cannot enforce the limit. <code>tether upgrade</code> asks first</li>
+      <li>The daemon does not auto-upgrade a manager that cannot enforce the limit. <code>tether upgrade</code> asks first, except for gem, whose upgrades install the release Tether checked</li>
     </ul>
 
     <h2 id="osv">OSV checks</h2>
@@ -62,7 +62,7 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
     <ul>
       <li>Every package manager runs in the empty directory <code>~/.tether/run</code>, not in your current directory</li>
       <li>Tether rejects names and versions that a manager reads as a local file, such as <code>.tgz</code>, <code>.gem</code>, <code>.whl</code> or a Homebrew <code>.rb</code> file</li>
-      <li><code>gem install</code> and <code>gem update</code> use <code>--remote</code>, and <code>--no-document</code>, so RubyGems runs no documentation hook</li>
+      <li><code>gem install</code> uses <code>--remote</code>, and <code>--no-document</code>, so RubyGems runs no documentation hook</li>
       <li>To hold packages from trusted machines too, set <code>packages.auto_install_from_trusted = false</code></li>
     </ul>
   </section>
