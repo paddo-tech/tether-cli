@@ -117,30 +117,8 @@ pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
         }
     }
 
-    // Always sync tether config first (hardcoded, not dependent on config)
-    // This ensures config changes from other machines are applied before using config
     let mut state = SyncState::load()?;
-    if config.security.encrypt_dotfiles && !dry_run {
-        if let Some(new_config) = sync_tether_config(&sync_path, &home, &mut state)? {
-            warn_changed_profile(&config, &new_config, &state.machine_id);
-            config = new_config;
-        }
-    }
-
-    if !git.has_unpushed_commits() {
-        state.discard_unpushed();
-    }
-
-    // Auto-assign machine to default profile on first run after v2 migration
-    if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
-        config.machine_profiles.insert(
-            state.machine_id.clone(),
-            crate::config::DEFAULT_PROFILE.to_string(),
-        );
-        if !dry_run {
-            config.save()?;
-        }
-    }
+    adopt_remote(&mut config, &git, &sync_path, &home, &mut state, dry_run).await?;
 
     // Load machine state early to get ignored lists for decrypt phase
     let machine_state_for_decrypt =
@@ -460,6 +438,41 @@ pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
     state.mark_synced();
     state.save()?;
     Output::success("Synced");
+    Ok(())
+}
+
+/// The steps after the pull that a sync in a terminal and a daemon sync share: take the
+/// synced config before anything reads it, and assign the default profile. A dry run pulls
+/// nothing, so it merges nothing.
+pub async fn adopt_remote(
+    config: &mut Config,
+    git: &GitBackend,
+    sync_path: &Path,
+    home: &Path,
+    state: &mut SyncState,
+    dry_run: bool,
+) -> Result<()> {
+    if config.security.encrypt_dotfiles && !dry_run {
+        if let Some(new_config) = sync_tether_config(sync_path, home, state)? {
+            warn_changed_profile(config, &new_config, &state.machine_id);
+            *config = new_config;
+        }
+    }
+
+    if !git.has_unpushed_commits() {
+        state.discard_unpushed();
+    }
+
+    // Auto-assign machine to default profile on first run after v2 migration
+    if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
+        config.machine_profiles.insert(
+            state.machine_id.clone(),
+            crate::config::DEFAULT_PROFILE.to_string(),
+        );
+        if !dry_run {
+            config.save()?;
+        }
+    }
     Ok(())
 }
 

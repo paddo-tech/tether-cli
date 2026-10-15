@@ -272,34 +272,16 @@ impl DaemonServer {
             }
         }
 
-        // Load state and machine state
         let mut state = SyncState::load()?;
-
-        // Import remote config before using it
-        if config.security.encrypt_dotfiles {
-            if let Some(new_config) =
-                crate::cli::commands::sync::sync_tether_config(&sync_path, &home, &mut state)?
-            {
-                crate::cli::commands::sync::warn_changed_profile(
-                    &config,
-                    &new_config,
-                    &state.machine_id,
-                );
-                config = new_config;
-            }
-        }
-        if !git.has_unpushed_commits() {
-            state.discard_unpushed();
-        }
-
-        // Auto-assign machine to default profile on first run after v2 migration
-        if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
-            config.machine_profiles.insert(
-                state.machine_id.clone(),
-                crate::config::DEFAULT_PROFILE.to_string(),
-            );
-            let _ = config.save();
-        }
+        crate::cli::commands::sync::adopt_remote(
+            &mut config,
+            &git,
+            &sync_path,
+            &home,
+            &mut state,
+            false,
+        )
+        .await?;
 
         let machine_state_for_decrypt =
             crate::sync::signing::own_record(&sync_path, &state.machine_id)?.unwrap_or_default();
