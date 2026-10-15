@@ -777,6 +777,9 @@ pub async fn trust(name: &str, fingerprint: Option<&str>) -> Result<()> {
 /// fingerprint is required: no one on those machines compares it.
 pub async fn trust_on(name: &str, fingerprint: Option<&str>, on: &[String]) -> Result<()> {
     let sync_path = SyncEngine::sync_path()?;
+    // A new machine's first record may be only on the remote
+    crate::sync::acquire_sync_lock(true)
+        .and_then(|_sync_lock| crate::sync::GitBackend::open(&sync_path)?.pull())?;
     let machine = resolve_for_trust(&sync_path, name)?;
     let Some(current) = inbox::signing_fingerprint(&sync_path, &machine) else {
         anyhow::bail!(

@@ -57,6 +57,7 @@ tether machines trust new-laptop --fingerprint SHA256:... --on all`} />
       <li>Team and collab repos never carry commands</li>
     </ul>
     <p>The dashboard sends the same commands. On the Machines tab, open another machine's details. They list its pending commands, its results and its packages. Press <code>x</code> to uninstall the selected package there, <code>i</code> to install one, <code>p</code> to set its profile, or <code>c</code> to cancel a pending command. Press <code>A</code> on a card to trust that machine's key here and on every machine that runs commands. On the Packages tab, <code>x</code> and <code>i</code> ask which machines when other machines can take the change. Each question names the machines and warns when one has not synced for a day.</p>
+    <p>A cancel can come too late. A machine that pulled the command before the cancel still runs it. Anyone who can push to the sync repo can also restore a cancelled command until it expires, because its signature stays valid.</p>
 
     <h2>Protection against changed records</h2>
     <ul>

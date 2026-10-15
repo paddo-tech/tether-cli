@@ -191,9 +191,11 @@ pub struct App {
     started: Instant,
 }
 
-/// The results that trusted records report for commands this machine sent, with the name
-/// of the machine that ran each.
-pub fn command_results(state: &DashboardState) -> Vec<(String, crate::sync::state::CommandResult)> {
+/// The results that trusted records report for commands this machine sent, with the id and
+/// the name of the machine that ran each.
+pub fn command_results(
+    state: &DashboardState,
+) -> Vec<(String, String, crate::sync::state::CommandResult)> {
     let Some(own) = &state.own_fingerprint else {
         return Vec::new();
     };
@@ -211,7 +213,7 @@ pub fn command_results(state: &DashboardState) -> Vec<(String, crate::sync::stat
                 .get(own)
                 .into_iter()
                 .flatten()
-                .map(move |r| (label.clone(), r.clone()))
+                .map(move |r| (m.machine_id.clone(), label.clone(), r.clone()))
         })
         .collect()
 }
@@ -426,9 +428,13 @@ impl App {
     }
 
     /// A toast for each result of a command this machine sent that `seen` did not have.
-    pub fn toast_new_results(&mut self, seen: &[(String, crate::sync::state::CommandResult)]) {
-        for (label, result) in command_results(&self.state) {
-            if seen.iter().any(|(l, r)| *l == label && r.seq == result.seq) {
+    pub fn toast_new_results(
+        &mut self,
+        seen: &[(String, String, crate::sync::state::CommandResult)],
+    ) {
+        // By machine id, so a renamed machine does not show its old results again
+        for (id, label, result) in command_results(&self.state) {
+            if seen.iter().any(|(i, _, r)| *i == id && r.seq == result.seq) {
                 continue;
             }
             let text = format!("{}: {} {}", label, result.action, result.status.label());

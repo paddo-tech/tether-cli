@@ -123,6 +123,20 @@ async fn signed_commands() {
     let show = c.tether_ok("machines show b").await.text();
     assert!(show.contains("pending: uninstall npm:gamma"), "{show}");
 
+    // A profile that the signer's config defines but has not pushed yet: the command waits on
+    // b, then runs once a's sync exports the config
+    a.tether_ok("machines profile create web --from dev -y")
+        .await;
+    a.tether_ok("machines profile set web --on b").await;
+    let out = b.tether_ok("sync").await.text();
+    assert!(out.contains("does not have yet"), "{out}");
+    a.tether_ok("sync").await;
+    let out = b.tether_ok("sync").await.text();
+    assert!(
+        out.contains("Fleet command applied: set profile web"),
+        "{out}"
+    );
+
     // The signer refuses a Tether that cannot run commands, and a 1.x machine it cannot trust
     let out = a.tether("packages uninstall npm:alpha --on older").await;
     assert_eq!(out.code, 1, "{}", out.text());

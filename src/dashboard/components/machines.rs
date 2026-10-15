@@ -308,12 +308,17 @@ fn open_remote_import(app: &mut App) {
             if manager_key == "brew_taps" {
                 continue;
             }
-            let has = m
+            let has: std::collections::HashSet<String> = m
                 .packages
                 .get(manager_key)
-                .map(|p| p.as_slice())
-                .unwrap_or_default();
-            for name in packages.iter().filter(|n| !has.contains(n)) {
+                .into_iter()
+                .flatten()
+                .map(|n| crate::sync::membership::canonical_id(manager_key, n))
+                .collect();
+            for name in packages
+                .iter()
+                .filter(|n| !has.contains(&crate::sync::membership::canonical_id(manager_key, n)))
+            {
                 sources
                     .entry((manager_key.clone(), name.clone()))
                     .or_default()

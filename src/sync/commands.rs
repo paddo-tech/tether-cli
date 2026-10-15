@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A namespace of its own, so no record or commit signature passes as a command signature.
@@ -122,10 +122,12 @@ fn sig_path(path: &Path) -> PathBuf {
 /// The signer and sequence number in a command file name, `<signer>-<seq>.toml`.
 fn parse_file_name(name: &str) -> Option<(&str, u64)> {
     let (signer, seq) = name.strip_suffix(".toml")?.rsplit_once('-')?;
-    if !valid_machine_id(signer) || !seq.bytes().all(|b| b.is_ascii_digit()) {
+    let parsed: u64 = seq.parse().ok()?;
+    // One number has one file name, so a copy under `a-07.toml` cannot run `a-7.toml` again
+    if !valid_machine_id(signer) || parsed.to_string() != seq {
         return None;
     }
-    Some((signer, seq.parse().ok()?))
+    Some((signer, parsed))
 }
 
 /// Write `command` and its signature into the sync repo.
@@ -314,9 +316,48 @@ pub async fn apply_incoming(
     let this_machine = state.machine_id.clone();
     let store = TrustStore::load()?;
     let mut seqs = Seqs::load()?;
+    // A lost command_seqs.json never replays a command that this machine's record reports
+    if let Some(record) = signing::own_record(sync_path, &this_machine)? {
+        for (fingerprint, reported) in &record.commands_applied {
+            if let Some(last) = reported.iter().map(|r| r.seq).max() {
+                let accepted = seqs.accepted.entry(fingerprint.clone()).or_default();
+                *accepted = (*accepted).max(last);
+            }
+        }
+    }
     let mut results = Vec::new();
+    let mut waiting: HashSet<String> = HashSet::new();
     for incoming in incoming(sync_path, &this_machine, &store, &seqs) {
         let command = &incoming.command;
+        // An earlier command in this batch can replace the signer's key
+        let still_trusted = TrustStore::load()?
+            .key_for(&command.signer)
+            .is_some_and(|key| signing::fingerprint(key) == incoming.fingerprint);
+        let seen = seqs
+            .accepted
+            .get(&incoming.fingerprint)
+            .is_some_and(|&last| command.seq <= last);
+        if !still_trusted || seen || waiting.contains(&incoming.fingerprint) {
+            continue;
+        }
+        // The signer's config, which defines the profile, can arrive after its command. The
+        // command and the later ones from that key wait, so they still run in order.
+        if let Action::Profile { profile } = &command.action {
+            if command.expires_at > Utc::now()
+                && profile != crate::config::DEFAULT_PROFILE
+                && !config.profiles.contains_key(profile)
+            {
+                warn_once(
+                    &format!("profile {} {}", incoming.fingerprint, command.seq),
+                    &format!(
+                        "A command from {} sets profile {}, which the synced config does not have yet. It waits for a later sync",
+                        command.signer, profile
+                    ),
+                );
+                waiting.insert(incoming.fingerprint.clone());
+                continue;
+            }
+        }
         seqs.accepted
             .insert(incoming.fingerprint.clone(), command.seq);
         seqs.save()?;
@@ -348,6 +389,18 @@ pub async fn apply_incoming(
         list.push(result.clone());
         let extra = list.len().saturating_sub(MachineState::MAX_COMMAND_RESULTS);
         list.drain(..extra);
+        // A record over the signer limit fails validation, so the stalest signer key goes
+        while record.commands_applied.len() > MachineState::MAX_COMMAND_SIGNERS {
+            let Some(stalest) = record
+                .commands_applied
+                .iter()
+                .min_by_key(|(_, list)| list.iter().map(|r| r.at).max())
+                .map(|(fingerprint, _)| fingerprint.clone())
+            else {
+                break;
+            };
+            record.commands_applied.remove(&stalest);
+        }
         signing::save_local_record(&record)?;
         results.push(result);
     }
@@ -540,6 +593,10 @@ pub fn deliver(
         bail!("Fleet commands are not available in team-only mode");
     }
     let git = GitBackend::open(sync_path)?;
+    // The commit takes every change in the repo, so other changes would ship as the command
+    if git.has_changes()? {
+        bail!("The sync repo has uncommitted changes. Run 'tether sync' first");
+    }
     git.pull()?;
     let this = SyncState::load()?.machine_id;
     let mut targets = pick(sync_path, &this)?;
@@ -860,6 +917,9 @@ mod tests {
         );
         assert_eq!(parse_file_name("laptop-x.toml"), None);
         assert_eq!(parse_file_name("laptop-1.toml.sig"), None);
+        // A second name for the same number would let a copy run again
+        assert_eq!(parse_file_name("laptop-07.toml"), None);
+        assert_eq!(parse_file_name("laptop-+7.toml"), None);
     }
 
     #[test]

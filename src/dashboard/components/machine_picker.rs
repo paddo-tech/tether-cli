@@ -31,7 +31,9 @@ pub struct MachinePicker {
 /// return false, and the caller acts on this machine alone, as before fleet commands.
 /// An uninstall offers the machines that list the package, an install those that lack it.
 pub fn open(app: &mut App, uninstall: bool, manager_key: &str, name: &str) -> bool {
+    use crate::sync::membership::canonical_id;
     let this = app.machine_id().to_string();
+    let id = canonical_id(manager_key, name);
     let others: Vec<Choice> = app
         .state
         .machines
@@ -41,7 +43,7 @@ pub fn open(app: &mut App, uninstall: bool, manager_key: &str, name: &str) -> bo
             let listed = m
                 .packages
                 .get(manager_key)
-                .is_some_and(|p| p.iter().any(|n| n == name));
+                .is_some_and(|p| p.iter().any(|n| canonical_id(manager_key, n) == id));
             listed == uninstall
         })
         .map(|m| Choice {

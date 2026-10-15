@@ -297,7 +297,7 @@ impl MachineState {
     const MAX_PACKAGES_PER_MANAGER: usize = 10_000;
     const MAX_FILES: usize = 50_000;
     pub const MAX_COMMAND_RESULTS: usize = 10;
-    const MAX_COMMAND_SIGNERS: usize = 64;
+    pub const MAX_COMMAND_SIGNERS: usize = 64;
     const MAX_COMMAND_TEXT: usize = 500;
 
     /// Validate package name is safe for shell usage

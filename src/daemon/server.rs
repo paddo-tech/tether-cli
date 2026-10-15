@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::packages::{
-    BrewManager, BunManager, Cooldown, GemManager, NpmManager, PackageManager, PnpmManager,
-    UvManager,
+    BrewManager, BunManager, GemManager, NpmManager, PackageManager, PnpmManager, UvManager,
 };
 use crate::sync::{import_packages, notify_inbox, GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
@@ -698,7 +697,7 @@ impl DaemonServer {
                 continue;
             }
             // Unattended upgrades must honour the release-age cooldown or not run
-            if manager.cooldown().await == Cooldown::Unsupported {
+            if !manager.upgrades_hold_release_age().await {
                 if crate::packages::policy::first_warning(&format!(
                     "auto-upgrade {}",
                     manager.name()

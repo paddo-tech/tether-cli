@@ -185,6 +185,10 @@ impl PackageManager for GemManager {
         }
     }
 
+    async fn upgrades_hold_release_age(&self) -> bool {
+        true
+    }
+
     async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
         // Each gem installs at its planned target, which may be older than the newest release
         let specs: Vec<String> = planned
