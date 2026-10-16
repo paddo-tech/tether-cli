@@ -859,14 +859,12 @@ pub async fn send(on: &[String], action: Action) -> Result<()> {
 /// names every such machine except this one, and skips the others with a warning.
 fn fleet_targets(sync_path: &Path, this: &str, on: &[String]) -> Result<Vec<String>> {
     if on.iter().any(|n| n == "all") {
-        let statuses = signing::record_statuses(sync_path, this)?;
+        let trusted = crate::sync::commands::trusted_ids(sync_path, this)?;
         let mut targets = Vec::new();
-        for m in MachineState::list_all(sync_path)?.iter().filter(|m| {
-            m.machine_id != this
-                && statuses.iter().any(|(i, status, _)| {
-                    *i == m.machine_id && *status == signing::RecordStatus::Trusted
-                })
-        }) {
+        for m in MachineState::list_all(sync_path)?
+            .iter()
+            .filter(|m| m.machine_id != this && trusted.contains(&m.machine_id))
+        {
             if m.runs_commands {
                 targets.push(m.machine_id.clone());
             } else {

@@ -157,7 +157,10 @@ fn write(sync_path: &Path, command: &Command, key: &PrivateKey) -> Result<PathBu
     }
     std::fs::create_dir_all(path.parent().unwrap())?;
     crate::sync::atomic_write(&path, body.as_bytes())?;
-    crate::sync::atomic_write(&sig_path(&path), signature.as_bytes())?;
+    if let Err(e) = crate::sync::atomic_write(&sig_path(&path), signature.as_bytes()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
     Ok(path)
 }
 
@@ -545,17 +548,13 @@ pub fn send(
 ) -> Result<Vec<(String, u64)>> {
     action.check()?;
     let mut seqs = Seqs::load()?;
-    let trusted: Vec<String> = signing::record_statuses(sync_path, signer)?
-        .into_iter()
-        .filter(|(_, status, _)| *status == signing::RecordStatus::Trusted)
-        .map(|(id, _, _)| id)
-        .collect();
+    let trusted = trusted_ids(sync_path, signer)?;
     let first = next_seq(sync_path, signer, key.public_key(), &trusted, &seqs)?;
     if first.checked_add(targets.len() as u64).is_none() {
         bail!("This machine has no fleet command numbers left");
     }
     let expires_at = Utc::now() + Duration::days(EXPIRY_DAYS);
-    let mut sent = Vec::new();
+    let mut sent: Vec<(String, u64)> = Vec::new();
     for (seq, target) in (first..).zip(targets) {
         let command = Command {
             target: target.clone(),
@@ -564,7 +563,15 @@ pub fn send(
             expires_at,
             action: action.clone(),
         };
-        write(sync_path, &command, key)?;
+        // A failed send leaves no command behind, or the next sync would push part of it
+        if let Err(e) = write(sync_path, &command, key) {
+            for (target, seq) in &sent {
+                let path = command_path(sync_path, target, signer, *seq);
+                let _ = std::fs::remove_file(sig_path(&path));
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e);
+        }
         sent.push((target.clone(), seq));
         seqs.sent = seq;
     }
@@ -610,16 +617,22 @@ pub fn refusal(
     })
 }
 
+/// The ids of the machines whose records verify with the key this machine trusts.
+pub fn trusted_ids(sync_path: &Path, this: &str) -> Result<Vec<String>> {
+    Ok(signing::record_statuses(sync_path, this)?
+        .into_iter()
+        .filter(|(_, status, _)| *status == signing::RecordStatus::Trusted)
+        .map(|(id, _, _)| id)
+        .collect())
+}
+
 /// Fail on the first of `ids` that cannot run fleet commands from this machine.
 pub fn check_targets(sync_path: &Path, this: &str, ids: &[String]) -> Result<()> {
-    let statuses = signing::record_statuses(sync_path, this)?;
+    let trusted = trusted_ids(sync_path, this)?;
     let records = MachineState::list_all(sync_path)?;
     for id in ids {
-        let trusted = statuses
-            .iter()
-            .any(|(i, status, _)| i == id && *status == signing::RecordStatus::Trusted);
         let record = records.iter().find(|m| m.machine_id == *id);
-        if let Some(why) = refusal(this, id, record, trusted) {
+        if let Some(why) = refusal(this, id, record, trusted.contains(id)) {
             bail!(why);
         }
     }
@@ -691,10 +704,7 @@ pub fn cancel(sync_path: &Path, target: &str, seq: u64) -> Result<Cancelled> {
     let own =
         signing::own_fingerprint().ok_or_else(|| anyhow!("This machine has no signing key"))?;
     // A record that does not verify could claim a result to keep the command alive
-    let trusted = signing::record_statuses(sync_path, &this)?
-        .iter()
-        .any(|(id, status, _)| id == target && *status == signing::RecordStatus::Trusted);
-    if trusted {
+    if trusted_ids(sync_path, &this)?.iter().any(|id| id == target) {
         let reported = MachineState::list_all(sync_path)?
             .into_iter()
             .find(|m| m.machine_id == target)
@@ -761,16 +771,14 @@ pub fn prune_sent(sync_path: &Path, this_machine: &str) -> Result<()> {
         return Ok(());
     };
     let dir = commands_dir(sync_path);
-    if !dir.exists() {
+    // A repo writer can commit symlinks, and a delete through one lands outside the repo
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
         return Ok(());
     }
-    let statuses = signing::record_statuses(sync_path, this_machine)?;
+    let trusted = trusted_ids(sync_path, this_machine)?;
     let records = MachineState::list_all(sync_path)?;
     let reported = |target: &str| -> Option<u64> {
-        let trusted = statuses
-            .iter()
-            .any(|(id, status, _)| id == target && *status == signing::RecordStatus::Trusted);
-        if !trusted {
+        if !trusted.iter().any(|id| id == target) {
             return None;
         }
         records
@@ -783,6 +791,9 @@ pub fn prune_sent(sync_path: &Path, this_machine: &str) -> Result<()> {
             .max()
     };
     for target in std::fs::read_dir(&dir)?.flatten() {
+        if !target.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
         let target_id = target.file_name().to_string_lossy().to_string();
         let last = reported(&target_id);
         for path in files_for(sync_path, &target_id) {

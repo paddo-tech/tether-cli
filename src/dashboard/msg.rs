@@ -125,7 +125,7 @@ pub enum Cmd {
         digest: String,
     },
     /// Sign `action` for each target, as (machine id, name), then commit and push. `then`
-    /// runs after it, also when the send fails.
+    /// runs after a send; after a failed send, it only stops the tracking it started.
     Fleet {
         action: crate::sync::commands::Action,
         targets: Vec<(String, String)>,

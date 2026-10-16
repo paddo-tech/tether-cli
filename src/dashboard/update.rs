@@ -155,8 +155,18 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
                     app.flash_success(msg);
                     then.map(|cmd| *cmd)
                 }
-                // The confirm promised one change on every machine, so none happens here
+                // The confirm promised one change on every machine, so none happens here, and
+                // the local part that the confirm started tracking stops
                 Err(e) => {
+                    match then.map(|cmd| *cmd) {
+                        Some(Cmd::Uninstall { .. }) => app.uninstalling = None,
+                        Some(Cmd::Install { op, .. })
+                            if app.installing.as_ref().map(|i| i.id) == Some(op.id) =>
+                        {
+                            app.installing = None
+                        }
+                        _ => {}
+                    }
                     app.flash_error(e);
                     None
                 }
