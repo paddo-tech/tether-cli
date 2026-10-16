@@ -471,7 +471,10 @@ pub async fn remove(id: &str) -> Result<()> {
     // No sync may save the record between the uninstall and the profile save
     let _lock = crate::sync::acquire_sync_lock(true)?;
     // The profile leaves the package only once it is gone here
-    if crate::packages::uninstall(manager, name).await? {
+    let mut state = crate::sync::SyncState::load()?;
+    let only_stopped = crate::packages::uninstall(manager, name, &mut state).await?;
+    state.save()?;
+    if only_stopped {
         Output::success(&format!(
             "{} failed to install here, so this machine no longer installs it",
             id

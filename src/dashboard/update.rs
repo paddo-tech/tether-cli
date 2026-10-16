@@ -497,7 +497,7 @@ fn click_row(app: &mut App, i: usize) -> Option<Cmd> {
             // Open details follow the card the user clicks
             if app.machines.expanded.is_some() && app.machines.cursor != i {
                 app.machines.cursor = i;
-                machines::show_details_of_cursor(app);
+                super::components::machine_detail::show_details_of_cursor(app);
                 return None;
             }
             &mut app.machines.cursor

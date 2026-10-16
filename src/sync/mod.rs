@@ -44,6 +44,13 @@ use std::path::{Path, PathBuf};
 
 pub const CURRENT_SYNC_FORMAT_VERSION: u32 = 1;
 
+/// The synced config.toml in the sync repo: its path, then the legacy path of a repo that
+/// has not moved it yet.
+pub const SYNCED_CONFIG: [&str; 2] = [
+    "configs/tether/config.toml.enc",
+    "dotfiles/tether/config.toml.enc",
+];
+
 /// Map a dotfile path to its repo-relative path in the sync repo (flat layout, legacy).
 /// e.g., ".zshrc" -> "dotfiles/zshrc.enc" (encrypted) or "dotfiles/.zshrc" (plain)
 pub fn dotfile_to_repo_path(dotfile: &str, encrypted: bool) -> String {

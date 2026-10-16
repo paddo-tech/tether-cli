@@ -14,7 +14,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey, SshSig};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// A namespace of its own, so no record or commit signature passes as a command signature.
@@ -113,6 +113,22 @@ fn command_path(sync_path: &Path, target: &str, signer: &str, seq: u64) -> PathB
         .join(format!("{}-{}.toml", signer, seq))
 }
 
+/// `commands/<target>`, when it and `commands/` are real directories; `create` makes them
+/// first. A repo writer can commit symlinks, and access through one lands outside the repo.
+fn target_dir(sync_path: &Path, target: &str, create: bool) -> Option<PathBuf> {
+    let commands = commands_dir(sync_path);
+    let dir = commands.join(target);
+    for d in [&commands, &dir] {
+        if create {
+            let _ = std::fs::create_dir(d);
+        }
+        if !std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
 fn sig_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(".sig");
@@ -141,21 +157,14 @@ fn write(sync_path: &Path, command: &Command, key: &PrivateKey) -> Result<PathBu
         )?
         .to_pem(LineEnding::LF)?;
     let path = command_path(sync_path, &command.target, &command.signer, command.seq);
-    // A repo writer can commit symlinks, and a write through one lands outside the repo
-    for dir in [
-        commands_dir(sync_path),
-        path.parent().unwrap().to_path_buf(),
-    ] {
-        if std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.is_dir()) {
-            bail!("{} is not a directory", dir.display());
-        }
+    if target_dir(sync_path, &command.target, true).is_none() {
+        bail!("{} is not a directory", path.parent().unwrap().display());
     }
     for file in [path.clone(), sig_path(&path)] {
         if std::fs::symlink_metadata(&file).is_ok() {
             bail!("{} exists already", file.display());
         }
     }
-    std::fs::create_dir_all(path.parent().unwrap())?;
     crate::sync::atomic_write(&path, body.as_bytes())?;
     if let Err(e) = crate::sync::atomic_write(&sig_path(&path), signature.as_bytes()) {
         let _ = std::fs::remove_file(&path);
@@ -206,7 +215,7 @@ fn read(path: &Path, target: &str, key: Option<&PublicKey>) -> Result<(Command, 
 
 /// Command files in `commands/<target>/`, sorted by signer and sequence number.
 fn files_for(sync_path: &Path, target: &str) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(commands_dir(sync_path).join(target)) else {
+    let Some(Ok(entries)) = target_dir(sync_path, target, false).map(std::fs::read_dir) else {
         return Vec::new();
     };
     let mut files: Vec<(String, u64, PathBuf)> = entries
@@ -353,7 +362,6 @@ pub async fn apply_incoming(
         }
     }
     let mut results = Vec::new();
-    let mut waiting: HashSet<String> = HashSet::new();
     for incoming in incoming(sync_path, &this_machine, &store, &seqs) {
         let command = &incoming.command;
         // An earlier command in this batch can replace the signer's key
@@ -364,26 +372,8 @@ pub async fn apply_incoming(
             .accepted
             .get(&incoming.fingerprint)
             .is_some_and(|&last| command.seq <= last);
-        if !still_trusted || seen || waiting.contains(&incoming.fingerprint) {
+        if !still_trusted || seen {
             continue;
-        }
-        // The signer's config, which defines the profile, can arrive after its command. The
-        // command and the later ones from that key wait, so they still run in order.
-        if let Action::Profile { profile } = &command.action {
-            if command.expires_at > Utc::now()
-                && profile != crate::config::DEFAULT_PROFILE
-                && !config.profiles.contains_key(profile)
-            {
-                warn_once(
-                    &format!("profile {} {}", incoming.fingerprint, command.seq),
-                    &format!(
-                        "A command from {} sets profile {}, which the synced config does not have yet. It waits for a later sync",
-                        command.signer, profile
-                    ),
-                );
-                waiting.insert(incoming.fingerprint.clone());
-                continue;
-            }
         }
         seqs.accepted
             .insert(incoming.fingerprint.clone(), command.seq);
@@ -447,21 +437,10 @@ async fn run(
                 bail!("Tether does not remove taps");
             }
             if crate::packages::installed_here(manager, name).await? {
-                crate::packages::uninstall(manager, name).await?;
+                crate::packages::uninstall(manager, name, state).await?;
             }
             // The removal stops syncs from installing it again, also when it was not here
-            let mut record = signing::own_record(sync_path, &this_machine)?
-                .unwrap_or_else(|| MachineState::new(&this_machine));
-            let name = name.clone();
-            record.add_removals(manager, &[&name]);
-            signing::save_local_record(&record)?;
-            let id = crate::sync::membership::canonical_id(manager, &name);
-            state.install_failures.retain(|key, _| {
-                key.split_once(':').is_none_or(|(m, n)| {
-                    m != manager || crate::sync::membership::canonical_id(m, n) != id
-                })
-            });
-            Ok(())
+            crate::packages::stop_installing(manager, name, state)
         }
         Action::Install { manager, name } => {
             if crate::packages::installed_here(manager, name).await? {
@@ -555,6 +534,7 @@ pub fn send(
     }
     let expires_at = Utc::now() + Duration::days(EXPIRY_DAYS);
     let mut sent: Vec<(String, u64)> = Vec::new();
+    let mut written: Vec<PathBuf> = Vec::new();
     for (seq, target) in (first..).zip(targets) {
         let command = Command {
             target: target.clone(),
@@ -564,28 +544,21 @@ pub fn send(
             action: action.clone(),
         };
         // A failed send leaves no command behind, or the next sync would push part of it
-        if let Err(e) = write(sync_path, &command, key) {
-            for (target, seq) in &sent {
-                let path = command_path(sync_path, target, signer, *seq);
-                let _ = std::fs::remove_file(sig_path(&path));
-                let _ = std::fs::remove_file(path);
+        match write(sync_path, &command, key) {
+            Ok(path) => written.push(path),
+            Err(e) => {
+                for path in &written {
+                    let _ = std::fs::remove_file(sig_path(path));
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(e);
             }
-            return Err(e);
         }
         sent.push((target.clone(), seq));
         seqs.sent = seq;
     }
     seqs.save()?;
     Ok(sent)
-}
-
-/// The Tether version a record names, or 1.x for a record without one.
-pub fn tether_version(record: &MachineState) -> String {
-    if record.cli_version.is_empty() {
-        "1.x".to_string()
-    } else {
-        record.cli_version.clone()
-    }
 }
 
 /// Why this machine cannot send fleet commands to `id`, or `None` when it can. `record` is
@@ -609,10 +582,13 @@ pub fn refusal(
         return Some(format!("Machine {} has no machine record", id));
     };
     (!record.runs_commands).then(|| {
+        let version = match record.cli_version.as_str() {
+            "" => "1.x",
+            v => v,
+        };
         format!(
             "Machine {} runs Tether {}, which cannot run fleet commands. Upgrade it first",
-            id,
-            tether_version(record)
+            id, version
         )
     })
 }
@@ -655,6 +631,9 @@ pub fn deliver(
         bail!("The sync repo has uncommitted changes. Run 'tether sync' first");
     }
     git.pull()?;
+    if let Action::Profile { profile } = action {
+        check_profile_pushed(&git, profile)?;
+    }
     let this = SyncState::load()?.machine_id;
     let mut targets = pick(sync_path, &this)?;
     // A machine trusts its own key already
@@ -677,6 +656,34 @@ pub fn deliver(
         );
     }
     Ok(sent)
+}
+
+/// A target reads profiles from the synced config at origin/main, so a profile that only
+/// this machine's config defines yet would fail there. Without a synced config, each
+/// machine keeps its own profiles and the target decides.
+fn check_profile_pushed(git: &GitBackend, profile: &str) -> Result<()> {
+    if profile == crate::config::DEFAULT_PROFILE {
+        return Ok(());
+    }
+    let Some(encrypted) = crate::sync::SYNCED_CONFIG
+        .iter()
+        .find_map(|path| git.show_pushed(path).ok())
+    else {
+        return Ok(());
+    };
+    let plain = crate::security::decrypt(&encrypted, &crate::security::get_encryption_key()?)?;
+    let synced: toml::Value = toml::from_str(std::str::from_utf8(&plain)?)?;
+    if synced
+        .get("profiles")
+        .and_then(|p| p.get(profile))
+        .is_none()
+    {
+        bail!(
+            "The synced config does not have profile {} yet. Run 'tether sync' first, then send the command again",
+            profile
+        );
+    }
+    Ok(())
 }
 
 /// What a cancel found in the pulled repo.
@@ -715,7 +722,7 @@ pub fn cancel(sync_path: &Path, target: &str, seq: u64) -> Result<Cancelled> {
         }
     }
     let path = command_path(sync_path, target, &this, seq);
-    if !path.exists() {
+    if target_dir(sync_path, target, false).is_none() || !path.exists() {
         return Ok(Cancelled::Gone);
     }
     let action = read(&path, target, None).map(|(c, _)| c.action.describe());
@@ -770,11 +777,9 @@ pub fn prune_sent(sync_path: &Path, this_machine: &str) -> Result<()> {
     let Some(own) = signing::own_fingerprint() else {
         return Ok(());
     };
-    let dir = commands_dir(sync_path);
-    // A repo writer can commit symlinks, and a delete through one lands outside the repo
-    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+    let Ok(entries) = std::fs::read_dir(commands_dir(sync_path)) else {
         return Ok(());
-    }
+    };
     let trusted = trusted_ids(sync_path, this_machine)?;
     let records = MachineState::list_all(sync_path)?;
     let reported = |target: &str| -> Option<u64> {
@@ -790,11 +795,11 @@ pub fn prune_sent(sync_path: &Path, this_machine: &str) -> Result<()> {
             .map(|r| r.seq)
             .max()
     };
-    for target in std::fs::read_dir(&dir)?.flatten() {
-        if !target.file_type().is_ok_and(|t| t.is_dir()) {
+    for entry in entries.flatten() {
+        let target_id = entry.file_name().to_string_lossy().to_string();
+        let Some(dir) = target_dir(sync_path, &target_id, false) else {
             continue;
-        }
-        let target_id = target.file_name().to_string_lossy().to_string();
+        };
         let last = reported(&target_id);
         for path in files_for(sync_path, &target_id) {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -815,8 +820,8 @@ pub fn prune_sent(sync_path: &Path, this_machine: &str) -> Result<()> {
             }
         }
         // Not a race: git keeps no empty folders, so one left here is only local
-        if std::fs::read_dir(target.path()).is_ok_and(|mut d| d.next().is_none()) {
-            std::fs::remove_dir(target.path())?;
+        if std::fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_none()) {
+            std::fs::remove_dir(&dir)?;
         }
     }
     Ok(())

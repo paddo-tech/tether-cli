@@ -53,6 +53,7 @@ tether machines trust new-laptop --fingerprint SHA256:... --on all`} />
       <li><code>uninstall --on</code> uninstalls the package on those machines and stops their syncs from installing it again. Profiles do not change</li>
       <li><code>machines trust --on</code> needs the fingerprint. Compare it on the new machine first. With it, you trust a new machine on all your machines from one machine</li>
       <li>Tether refuses a machine that it does not trust, and a machine on 2.0.1 or earlier, which cannot run commands</li>
+      <li><code>machines profile set --on</code> refuses a profile that you created here but did not sync yet. Run <code>tether sync</code> first</li>
       <li><code>tether machines show &lt;MACHINE&gt;</code> lists the commands that wait for that machine, and the results it reported: applied, failed or expired. The daemon on the target shows a notification when it runs commands</li>
       <li>Team and collab repos never carry commands</li>
     </ul>

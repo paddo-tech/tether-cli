@@ -466,7 +466,7 @@ pub fn active(app: &App) -> (&'static str, &'static [Binding]) {
             None => {}
         }
     }
-    if app.active_tab == Tab::Machines && super::machines::open_detail(app).is_some() {
+    if app.active_tab == Tab::Machines && super::machine_detail::open_detail(app).is_some() {
         return ("Machine details", MACHINE_DETAIL);
     }
     (app.active_tab.title(), tab(app.active_tab))

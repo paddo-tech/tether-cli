@@ -865,14 +865,9 @@ fn fleet_targets(sync_path: &Path, this: &str, on: &[String]) -> Result<Vec<Stri
             .iter()
             .filter(|m| m.machine_id != this && trusted.contains(&m.machine_id))
         {
-            if m.runs_commands {
-                targets.push(m.machine_id.clone());
-            } else {
-                Output::warning(&format!(
-                    "Skipping {}: Tether {} cannot run fleet commands",
-                    m.machine_id,
-                    crate::sync::commands::tether_version(m)
-                ));
+            match crate::sync::commands::refusal(this, &m.machine_id, Some(m), true) {
+                None => targets.push(m.machine_id.clone()),
+                Some(why) => Output::warning(&format!("Skipping {}: {}", m.machine_id, why)),
             }
         }
         if targets.is_empty() {

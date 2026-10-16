@@ -54,7 +54,12 @@ impl Runtime {
                             Err(e) => return Msg::UninstallDone(Err(e.to_string())),
                         };
                         // The profile leaves the package only once it is gone here
-                        if let Err(e) = crate::packages::uninstall(&manager_key, &name).await {
+                        let uninstalled = async {
+                            let mut state = crate::sync::SyncState::load()?;
+                            crate::packages::uninstall(&manager_key, &name, &mut state).await?;
+                            state.save()
+                        };
+                        if let Err(e) = uninstalled.await {
                             return Msg::UninstallDone(Err(e.to_string()));
                         }
                         let not_saved = leave

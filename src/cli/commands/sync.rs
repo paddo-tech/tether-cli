@@ -1596,8 +1596,7 @@ pub fn sync_tether_config(
 
 /// The synced config.toml, at its legacy path in a repo that has not moved it yet.
 fn synced_config_path(sync_path: &Path) -> PathBuf {
-    let new_path = sync_path.join(format!("configs/{}.enc", TETHER_CONFIG_REL));
-    let legacy_path = sync_path.join("dotfiles/tether/config.toml.enc");
+    let [new_path, legacy_path] = crate::sync::SYNCED_CONFIG.map(|p| sync_path.join(p));
     if new_path.exists() {
         new_path
     } else {
@@ -1800,10 +1799,7 @@ pub fn promote_config_base(
     };
     let pushed = GitBackend::open(sync_path)
         .ok()
-        .and_then(|git| {
-            git.show_pushed(&format!("configs/{}.enc", TETHER_CONFIG_REL))
-                .ok()
-        })
+        .and_then(|git| git.show_pushed(crate::sync::SYNCED_CONFIG[0]).ok())
         .and_then(|enc| crate::security::decrypt(&enc, &key).ok());
     if pushed.as_deref() == Some(&pending[..]) {
         std::fs::rename(&pending_path, config_base_path(home))?;
