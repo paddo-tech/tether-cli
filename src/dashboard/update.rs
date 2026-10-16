@@ -151,10 +151,16 @@ fn apply(app: &mut App, msg: Msg) -> Option<Cmd> {
         Msg::FleetSent { result, then } => {
             app.reload_state();
             match result {
-                Ok(msg) => app.flash_success(msg),
-                Err(e) => app.flash_error(e),
+                Ok(msg) => {
+                    app.flash_success(msg);
+                    then.map(|cmd| *cmd)
+                }
+                // The confirm promised one change on every machine, so none happens here
+                Err(e) => {
+                    app.flash_error(e);
+                    None
+                }
             }
-            then.map(|cmd| *cmd)
         }
         Msg::CommandCancelled(result) => {
             app.reload_state();

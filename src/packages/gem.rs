@@ -205,7 +205,8 @@ impl PackageManager for GemManager {
         let output = command("gem")?
             .arg("install")
             .args(&specs)
-            .args(["--remote", "--no-document"])
+            // By default gem also upgrades dependencies that already fit, past the plan
+            .args(["--remote", "--no-document", "--minimal-deps"])
             .args(Self::user_install_flag())
             .output()
             .await?;

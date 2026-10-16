@@ -54,8 +54,8 @@ pub enum Msg {
     /// A machine key was trusted or untrusted, or an item rejected: the toast text, or the
     /// error.
     InboxDone(Result<String, String>),
-    /// A fleet command was sent and pushed: the toast text, or the error. `then` runs next,
-    /// such as the same change on this machine.
+    /// A fleet command was sent and pushed: the toast text, or the error. `then` runs next
+    /// only after a send, such as the same change on this machine.
     FleetSent {
         result: Result<String, String>,
         then: Option<Box<Cmd>>,
