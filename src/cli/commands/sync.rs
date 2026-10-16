@@ -484,8 +484,17 @@ pub async fn adopt_remote(
     if dry_run {
         return Ok(Vec::new());
     }
-    let results = crate::sync::commands::apply_incoming(config, sync_path, state).await?;
-    crate::sync::commands::prune_sent(sync_path, &state.machine_id)?;
+    // Fleet commands never block the rest of the sync; a failed step runs no more of them
+    let results = match crate::sync::commands::apply_incoming(config, sync_path, state).await {
+        Ok(results) => results,
+        Err(e) => {
+            Output::warning(&format!("Fleet commands did not run: {}", e));
+            Vec::new()
+        }
+    };
+    if let Err(e) = crate::sync::commands::prune_sent(sync_path, &state.machine_id) {
+        Output::warning(&format!("Could not delete fleet commands that ran: {}", e));
+    }
     Ok(results)
 }
 

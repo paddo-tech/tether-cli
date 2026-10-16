@@ -141,10 +141,37 @@ fn write(sync_path: &Path, command: &Command, key: &PrivateKey) -> Result<PathBu
         )?
         .to_pem(LineEnding::LF)?;
     let path = command_path(sync_path, &command.target, &command.signer, command.seq);
+    // A repo writer can commit symlinks, and a write through one lands outside the repo
+    for dir in [
+        commands_dir(sync_path),
+        path.parent().unwrap().to_path_buf(),
+    ] {
+        if std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.is_dir()) {
+            bail!("{} is not a directory", dir.display());
+        }
+    }
+    for file in [path.clone(), sig_path(&path)] {
+        if std::fs::symlink_metadata(&file).is_ok() {
+            bail!("{} exists already", file.display());
+        }
+    }
     std::fs::create_dir_all(path.parent().unwrap())?;
     crate::sync::atomic_write(&path, body.as_bytes())?;
     crate::sync::atomic_write(&sig_path(&path), signature.as_bytes())?;
     Ok(path)
+}
+
+/// A file of at most `MAX_COMMAND_BYTES`. A repo writer can commit a symlink, so a link to a
+/// device or a pipe is never followed.
+fn read_small(path: &Path) -> Result<Vec<u8>> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_file() {
+        bail!("not a regular file");
+    }
+    if meta.len() > MAX_COMMAND_BYTES {
+        bail!("file too large");
+    }
+    Ok(std::fs::read(path)?)
 }
 
 /// A command file as it is in the repo. `verified` is true when `key` signed it.
@@ -154,17 +181,14 @@ fn read(path: &Path, target: &str, key: Option<&PublicKey>) -> Result<(Command, 
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow!("invalid file name"))?;
     let (signer, seq) = parse_file_name(name).ok_or_else(|| anyhow!("invalid file name"))?;
-    if std::fs::metadata(path)?.len() > MAX_COMMAND_BYTES {
-        bail!("file too large");
-    }
-    let body = std::fs::read(path)?;
+    let body = read_small(path)?;
     let command: Command = toml::from_str(std::str::from_utf8(&body)?)?;
     if command.target != target || command.signer != signer || command.seq != seq {
         bail!("its fields do not match its path");
     }
     command.action.check()?;
     let verified = key.is_some_and(|key| {
-        std::fs::read_to_string(sig_path(path))
+        read_small(&sig_path(path))
             .ok()
             .and_then(|pem| SshSig::from_pem(pem).ok())
             .is_some_and(|sig| {
@@ -467,30 +491,47 @@ async fn run(
 }
 
 /// The next sequence number for this machine's key: past the local count, every command
-/// file this machine still has in the repo, and every result a target reported, so a lost
-/// local count never reuses a number that a target already accepted.
-fn next_seq(sync_path: &Path, signer: &str, fingerprint: &str, seqs: &Seqs) -> u64 {
+/// file this key signed in the repo, and every result that a trusted record in `trusted`
+/// reported, so a lost local count never reuses a number that a target already accepted.
+/// Unsigned files and untrusted records do not count, so a repo writer cannot exhaust the
+/// numbers.
+fn next_seq(
+    sync_path: &Path,
+    signer: &str,
+    key: &PublicKey,
+    trusted: &[String],
+    seqs: &Seqs,
+) -> Result<u64> {
+    let fingerprint = signing::fingerprint(key);
     let in_files = std::fs::read_dir(commands_dir(sync_path))
         .into_iter()
         .flatten()
         .flatten()
-        .flat_map(|target| files_for(sync_path, &target.file_name().to_string_lossy()))
-        .filter_map(|path| {
-            let name = path.file_name()?.to_str()?.to_string();
-            let (s, seq) = parse_file_name(&name)?;
-            (s == signer).then_some(seq)
+        .flat_map(|target| {
+            let target = target.file_name().to_string_lossy().to_string();
+            files_for(sync_path, &target)
+                .into_iter()
+                .filter_map(move |path| {
+                    let (command, verified) = read(&path, &target, Some(key)).ok()?;
+                    (verified && command.signer == signer).then_some(command.seq)
+                })
         })
         .max()
         .unwrap_or(0);
     let in_results = MachineState::list_all(sync_path)
         .unwrap_or_default()
         .iter()
-        .filter_map(|m| m.commands_applied.get(fingerprint))
+        .filter(|m| trusted.contains(&m.machine_id))
+        .filter_map(|m| m.commands_applied.get(&fingerprint))
         .flatten()
         .map(|r| r.seq)
         .max()
         .unwrap_or(0);
-    seqs.sent.max(in_files).max(in_results) + 1
+    seqs.sent
+        .max(in_files)
+        .max(in_results)
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("This machine has no fleet command numbers left"))
 }
 
 /// Sign `action` for each target and write it into the sync repo. The caller holds the sync
@@ -504,12 +545,15 @@ pub fn send(
 ) -> Result<Vec<(String, u64)>> {
     action.check()?;
     let mut seqs = Seqs::load()?;
-    let first = next_seq(
-        sync_path,
-        signer,
-        &signing::fingerprint(key.public_key()),
-        &seqs,
-    );
+    let trusted: Vec<String> = signing::record_statuses(sync_path, signer)?
+        .into_iter()
+        .filter(|(_, status, _)| *status == signing::RecordStatus::Trusted)
+        .map(|(id, _, _)| id)
+        .collect();
+    let first = next_seq(sync_path, signer, key.public_key(), &trusted, &seqs)?;
+    if first.checked_add(targets.len() as u64).is_none() {
+        bail!("This machine has no fleet command numbers left");
+    }
     let expires_at = Utc::now() + Duration::days(EXPIRY_DAYS);
     let mut sent = Vec::new();
     for (seq, target) in (first..).zip(targets) {
@@ -638,6 +682,10 @@ pub enum Cancelled {
 /// still run it; its record then reports it. The caller holds the sync lock.
 pub fn cancel(sync_path: &Path, target: &str, seq: u64) -> Result<Cancelled> {
     let git = GitBackend::open(sync_path)?;
+    // The commit takes every change in the repo, so other changes would ship as the cancel
+    if git.has_changes()? {
+        bail!("The sync repo has uncommitted changes. Run 'tether sync' first");
+    }
     git.pull()?;
     let this = SyncState::load()?.machine_id;
     let own =
@@ -791,6 +839,27 @@ mod tests {
         store
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_write_never_follows_a_planted_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("signing_key");
+        std::fs::write(&outside, "secret").unwrap();
+        let repo = dir.path().join("sync");
+        let target = repo.join("commands").join("mini");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&outside, target.join("laptop-1.toml.sig")).unwrap();
+        assert!(write(&repo, &command("mini", "laptop", 1), &key()).is_err());
+
+        let linked = dir.path().join("linked");
+        std::fs::create_dir_all(repo.join("commands")).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&linked, repo.join("commands").join("studio")).unwrap();
+        assert!(write(&repo, &command("studio", "laptop", 1), &key()).is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
+        assert_eq!(std::fs::read_dir(&linked).unwrap().count(), 0);
+    }
+
     #[test]
     fn a_trusted_signed_command_is_incoming_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -895,6 +964,16 @@ mod tests {
         assert!(!read(&path, "mini", Some(laptop.public_key())).unwrap().1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_command_file_is_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = command_path(dir.path(), "mini", "laptop", 1);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+        assert!(read(&path, "mini", None).is_err());
+    }
+
     #[test]
     fn unsafe_package_names_never_parse_as_commands() {
         let bad = Action::Install {
@@ -931,10 +1010,21 @@ mod tests {
             sent: 3,
             ..Seqs::default()
         };
-        assert_eq!(next_seq(dir.path(), "laptop", "SHA256:x", &seqs), 8);
+        let public = laptop.public_key();
+        let trusted = ["studio".to_string()];
+        assert_eq!(
+            next_seq(dir.path(), "laptop", public, &trusted, &seqs).unwrap(),
+            8
+        );
+        // A file that this key did not sign does not count
+        write(dir.path(), &command("mini", "laptop", u64::MAX), &key()).unwrap();
+        assert_eq!(
+            next_seq(dir.path(), "laptop", public, &trusted, &seqs).unwrap(),
+            8
+        );
         let mut record = MachineState::new("studio");
         record.commands_applied.insert(
-            "SHA256:x".to_string(),
+            signing::fingerprint(public),
             vec![CommandResult {
                 seq: 20,
                 action: "x".to_string(),
@@ -944,6 +1034,14 @@ mod tests {
             }],
         );
         record.save_to_repo(dir.path()).unwrap();
-        assert_eq!(next_seq(dir.path(), "laptop", "SHA256:x", &seqs), 21);
+        assert_eq!(
+            next_seq(dir.path(), "laptop", public, &trusted, &seqs).unwrap(),
+            21
+        );
+        // A record that this machine does not trust does not count
+        assert_eq!(
+            next_seq(dir.path(), "laptop", public, &[], &seqs).unwrap(),
+            8
+        );
     }
 }

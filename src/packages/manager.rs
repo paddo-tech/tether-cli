@@ -245,7 +245,8 @@ pub trait PackageManager: Send + Sync {
     /// Flags that enforce `packages.min_release_age_days` with the installed tool version
     async fn cooldown(&self) -> Cooldown;
 
-    /// Whether `upgrade_candidates` holds to `packages.min_release_age_days`
+    /// Whether `upgrade_candidates` holds its targets to `packages.min_release_age_days`.
+    /// New dependencies of a target can still be newer when `cooldown` is `Unsupported`.
     async fn upgrades_hold_release_age(&self) -> bool {
         self.cooldown().await != Cooldown::Unsupported
     }
