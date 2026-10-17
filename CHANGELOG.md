@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-17
+
+### Added
+
+- Signed fleet commands. One machine can change another: `packages uninstall`, `packages install`, `machines profile set` and `machines trust` take `--on <machines|all>`. The command waits in the sync repo with an ed25519 signature. The target runs it on its next sync, only when it trusts the signer's key, the command is new and it has not expired (7 days). The target reports the result in its signed record, and `machines show` lists pending and finished commands
+- `machines trust <machine> --fingerprint <fp> --on all` trusts a new machine on every other machine in one step
+- Dashboard: another machine's details list its pending commands, results and packages. There `x` uninstalls a package, `i` installs one, `p` sets the profile and `c` cancels a pending command. `A` on a card trusts a machine here and on every machine that runs commands. On the Packages tab, `x` and `i` ask which machines
+- Each machine runs fleet commands only after it upgrades to 2.1.0. The signer refuses older machines
+
+### Changed
+
+- `tether upgrade` no longer asks before it upgrades gem. Tether picks each gem's target from the RubyGems publish dates, so the target respects `packages.min_release_age_days`, and gem keeps dependencies that already fit (`--minimal-deps`). A new dependency of a gem still installs at its newest release, so the daily upgrade still skips gem
+
+### Fixed
+
+- A fallback release that a trusted machine's signed record lists now installs without approval on the other machines. Before, each machine queued the same release in its own inbox
+
 ## [2.0.1] - 2026-10-13
 
 ### Fixed
