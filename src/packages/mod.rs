@@ -126,20 +126,35 @@ pub fn stop_installing(
     name: &str,
     state: &mut crate::sync::SyncState,
 ) -> anyhow::Result<()> {
-    let failed = failure_key(manager_key, name, state);
-    // A failure is keyed by the manifest's name, which can carry a tap
-    let recorded = failed
-        .as_deref()
-        .and_then(|key| key.split_once(':'))
-        .map_or(name, |(_, recorded)| recorded)
-        .to_string();
+    let id = crate::sync::membership::canonical_id(manager_key, name);
+    let failed: Vec<String> = state
+        .install_failures
+        .keys()
+        .filter(|key| {
+            key.split_once(':').is_some_and(|(manager, recorded)| {
+                manager == manager_key
+                    && crate::sync::membership::canonical_id(manager, recorded) == id
+            })
+        })
+        .cloned()
+        .collect();
+    // The import compares exact names, and a failure is keyed by the manifest's name,
+    // which can carry a tap, so both names are removals
+    let mut names = vec![name.to_string()];
+    for key in &failed {
+        let recorded = key.split_once(':').map_or(name, |(_, recorded)| recorded);
+        if !names.iter().any(|n| n == recorded) {
+            names.push(recorded.to_string());
+        }
+    }
     let sync_path = crate::sync::SyncEngine::sync_path()?;
     // Without a record, the next sync builds one on this record's removals
     let mut record = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
         .unwrap_or_else(|| crate::sync::MachineState::new(&state.machine_id));
-    record.add_removals(manager_key, &[&recorded]);
+    let names: Vec<&String> = names.iter().collect();
+    record.add_removals(manager_key, &names);
     crate::sync::signing::save_local_record(&record)?;
-    if let Some(key) = failed {
+    for key in failed {
         state.install_failures.remove(&key);
     }
     Ok(())
