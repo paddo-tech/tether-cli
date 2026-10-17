@@ -22,7 +22,13 @@ macOS and Linux, with Homebrew:
 brew tap paddo-tech/tap && brew install tether-cli
 ```
 
-Linux without Homebrew: download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` and its `.sha256` file from the [latest release](https://github.com/paddo-tech/tether-cli/releases/latest). See [Install](https://tether-cli.com/docs/install).
+Or with the install script, on macOS and Linux:
+
+```bash
+curl -fsSL https://tether-cli.com/install.sh | sh
+```
+
+Linux without Homebrew or the script: download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` and its `.sha256` file from the [latest release](https://github.com/paddo-tech/tether-cli/releases/latest). See [Install](https://tether-cli.com/docs/install).
 
 ## Quick start
 

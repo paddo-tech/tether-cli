@@ -3,11 +3,20 @@ import DocsLayout from '../../layouts/DocsLayout.astro';
 import Code from '../../components/Code.astro';
 ---
 
-<DocsLayout title="Install — Tether CLI" description="Install Tether on macOS or Linux with Homebrew, a static Linux release download, or from source.">
+<DocsLayout title="Install — Tether CLI" description="Install Tether on macOS or Linux with the install script, Homebrew, mise, a static Linux release download, or from source.">
   <section>
     <p class="eyebrow">GET STARTED</p>
     <h1>Install Tether</h1>
     <p>Tether runs on macOS and on x86_64 and aarch64 Linux. Install it on each machine you want to sync.</p>
+
+    <h2>Install script (macOS and Linux)</h2>
+    <Code code="curl -fsSL https://tether-cli.com/install.sh | sh" />
+    <p>The script finds the build for your system, checks its <code>.sha256</code> file and installs <code>tether</code> to <code>~/.local/bin</code>. Run it again to upgrade. The daemon restarts by itself when its binary changes. The script warns when the daemon or your <code>PATH</code> uses another <code>tether</code>.</p>
+    <ul>
+      <li><code>TETHER_INSTALL_DIR</code> sets another directory</li>
+      <li><code>TETHER_VERSION</code> installs one release, such as <code>2.1.0</code></li>
+    </ul>
+    <Code code="curl -fsSL https://tether-cli.com/install.sh | TETHER_VERSION=2.1.0 sh" />
 
     <h2>Homebrew (macOS and Linux)</h2>
     <Code code={`brew tap paddo-tech/tap
@@ -29,6 +38,10 @@ sha256sum -c "tether-$target.tar.gz.sha256"
 tar -xzf "tether-$target.tar.gz"
 install -D -m 755 tether ~/.local/bin/tether`} />
     <p>Each tarball holds only the <code>tether</code> binary. The <code>latest</code> URL gets the newest release.</p>
+
+    <h2>mise</h2>
+    <Code code="mise use -g github:paddo-tech/tether-cli" />
+    <p>mise gets the release builds from GitHub. It lists a new release only after its version cache updates, so for a release from the last hours, name the version: <code>github:paddo-tech/tether-cli@2.1.0</code>.</p>
 
     <h2>From source</h2>
     <p>You need Rust 1.91 or later.</p>

@@ -28,6 +28,8 @@ import Code from '../../components/Code.astro';
     <p>On the other machine, trust it with the fingerprint you read:</p>
     <Code code="tether machines trust <id> --fingerprint SHA256:..." />
     <p>Read the fingerprint on the machine itself. Do not copy it from the sync repo. Tether trusts the key only when the fingerprint matches. See <a href="/docs/trust">Machine trust</a>.</p>
+    <p>With more machines, trust a new machine on all of them from one machine that they already trust:</p>
+    <Code code="tether machines trust <id> --fingerprint SHA256:... --on all" />
 
     <h2>4. Sync and review the Inbox</h2>
     <Code code={`tether sync

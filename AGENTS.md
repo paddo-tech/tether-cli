@@ -181,7 +181,7 @@ Homebrew tap: `paddo-tech/homebrew-tap`
 3. Commit: `git commit -am "chore: release vX.Y.Z"`
 4. Push to main - CI creates tag, builds, signs, notarizes, and updates Homebrew formula
 
-The `build` job (self-hosted macOS) signs and notarizes the macOS binaries, creates the tag and the release. The `linux` job then builds static musl binaries for x86_64 and aarch64 in a `rust:1` container and uploads them to the same release. The `homebrew` job waits for both and writes the formula from the release checksums. Each target ships as `tether-<target>.tar.gz` with a `.sha256` file. To move the Linux builds to a self-hosted runner, change the `runner` values in the `linux` matrix. The runner needs Docker.
+The `build` job (self-hosted macOS) signs and notarizes the macOS binaries, creates the tag and the release. The `linux` job then builds static musl binaries for x86_64 and aarch64 in a `rust:1` container and uploads them to the same release. The `homebrew` job waits for both, writes the formula from the release checksums, then marks a stable release latest. The `build` job creates it with `make_latest: false`, so `releases/latest/download` never names a release without its Linux builds. Each target ships as `tether-<target>.tar.gz` with a `.sha256` file. To move the Linux builds to a self-hosted runner, change the `runner` values in the `linux` matrix. The runner needs Docker.
 
 **Do NOT create tags manually** - the release workflow handles tagging.
 
@@ -198,4 +198,4 @@ brew tap paddo-tech/tap
 brew install tether-cli
 ```
 
-Homebrew on Linux uses the same commands. Without Homebrew, Linux users download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` from the GitHub release and put `tether` on `PATH`. The binaries are static and need no particular glibc.
+Homebrew on Linux uses the same commands. Without Homebrew: `curl -fsSL https://tether-cli.com/install.sh | sh` (`website/public/install.sh`, served by the website deploy; plain `sh`, so `set -eu`). It installs the release build for the OS and CPU to `~/.local/bin`, checks the `.sha256`, runs the new binary before the rename, and refuses a symlinked `tether`. It does not restart the daemon, which exits when its binary changes (systemd and launchd start it again); it warns when the unit or plist names another binary, or another `tether` comes first on `PATH`. It reads `TETHER_INSTALL_DIR` and `TETHER_VERSION`. mise: `mise use -g github:paddo-tech/tether-cli`. Or download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` from the GitHub release and put `tether` on `PATH`. The binaries are static and need no particular glibc.
