@@ -1,5 +1,6 @@
 use super::command;
 use super::policy::PackagePolicy;
+use super::resolve::resolve_version;
 use super::{
     validate_name, validate_version, Cooldown, Ecosystem, PackageInfo, PackageManager, Upgrade,
 };
@@ -184,36 +185,62 @@ impl PackageManager for GemManager {
         }
     }
 
+    async fn upgrades_hold_release_age(&self) -> bool {
+        true
+    }
+
     async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
-        let names: Vec<&str> = planned
+        // Each gem installs at its planned target, which may be older than the newest release
+        let specs: Vec<String> = planned
             .iter()
-            .map(|u| u.name.as_str())
-            .filter(|name| validate_name(Ecosystem::Gem, name).is_ok())
+            .filter(|u| {
+                validate_name(Ecosystem::Gem, &u.name).is_ok()
+                    && validate_version(Ecosystem::Gem, &u.target).is_ok()
+            })
+            .map(|u| format!("{}:{}", u.name, u.target))
             .collect();
-        // Without names gem updates every gem, unplanned and unchecked by OSV
-        if names.is_empty() {
+        if specs.is_empty() {
             return Ok(());
         }
         let output = command("gem")?
-            .arg("update")
-            .args(names)
-            .args(["--remote", "--no-document"])
+            .arg("install")
+            .args(&specs)
+            // By default gem also upgrades dependencies that already fit, past the plan
+            .args(["--remote", "--no-document", "--minimal-deps"])
             .args(Self::user_install_flag())
             .output()
             .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("gem update failed: {}", gem_error(&stderr)));
+            return Err(anyhow::anyhow!(
+                "gem install failed: {}",
+                gem_error(&stderr)
+            ));
         }
 
         Ok(())
     }
 
+    /// With a release-age limit, the target is the newest release that RubyGems published
+    /// before the limit, because gem itself cannot hold to it.
     async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
-        Ok(parse_outdated(
-            &self.run_gem(&["outdated", "--remote"]).await?,
-        ))
+        let outdated = parse_outdated(&self.run_gem(&["outdated", "--remote"]).await?);
+        let min_age = self.policy().min_release_age_days;
+        if min_age == 0 {
+            return Ok(outdated);
+        }
+        let mut candidates = Vec::new();
+        // One gem that fails its check is skipped, so the others still upgrade
+        for u in outdated {
+            match resolve_version("gem", Ecosystem::Gem, &u.name, min_age).await {
+                Ok(target) => candidates.push(Upgrade::new(&u.name, u.current.as_deref(), &target)),
+                Err(e) => {
+                    crate::cli::Output::warning(&format!("gem: could not check {}: {}", u.name, e))
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     async fn uninstall(&self, package: &str) -> Result<()> {

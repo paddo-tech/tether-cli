@@ -61,9 +61,10 @@ tether daemon uninstall`} />
 tether machines show [MACHINE]
 tether machines rename <NEW>
 tether machines remove <MACHINE>
-tether machines trust <MACHINE> [--fingerprint SHA256:...]
+tether machines trust <MACHINE> [--fingerprint SHA256:...] [--on <MACHINES|all>]
 tether machines untrust <MACHINE>
-tether machines profile <set|unset|create|edit|list>`} />
+tether machines profile <set|unset|create|edit|list>
+tether machines profile set <PROFILE> [--on <MACHINES|all>]`} />
     <ul>
       <li><code>list</code>: every machine with its profile, version, last sync, key fingerprint and trust. It marks machines on 1.x, and records that may be an old id of this machine</li>
       <li><code>show [MACHINE]</code>: one machine's profile, versions, record status, full key fingerprint and trust. Without a machine, it shows this machine</li>
@@ -71,7 +72,8 @@ tether machines profile <set|unset|create|edit|list>`} />
       <li><code>remove &lt;MACHINE&gt;</code>: remove a machine record, and its trusted key on this machine. With <code>-y</code>, Tether removes it without a question and prints what it removed</li>
       <li><code>trust &lt;MACHINE&gt; --fingerprint SHA256:...</code>: trust a machine's signing key if its fingerprint matches. Without a fingerprint, Tether shows the current one and asks, in a terminal only. When the signed record is missing, it pulls the sync repo first</li>
       <li><code>untrust &lt;MACHINE&gt;</code>: stop trusting a machine's signing key</li>
-      <li><code>profile set &lt;PROFILE&gt;</code>: assign a profile to this machine. Each machine sets only its own profile</li>
+      <li><code>profile set &lt;PROFILE&gt;</code>: assign a profile to this machine</li>
+      <li><code>--on &lt;MACHINES|all&gt;</code> on <code>trust</code> and <code>profile set</code>: send a signed command, so those machines do it on their next sync. See <a href="/docs/trust#fleet-commands">Fleet commands</a></li>
       <li><code>profile unset</code>: remove the profile assignment of this machine</li>
       <li><code>profile create &lt;PROFILE&gt; [--from &lt;PROFILE&gt;] [--managers &lt;LIST&gt;]</code>: create a profile. See <a href="/docs/profiles">Profiles</a></li>
       <li><code>profile edit &lt;PROFILE&gt;</code>: edit a profile</li>
@@ -81,10 +83,10 @@ tether machines profile <set|unset|create|edit|list>`} />
     <h3 id="cmd-packages">tether packages</h3>
     <p>List, install, share and uninstall packages, and decide on the Inbox.</p>
     <Code code={`tether packages list [--json] [--other-profiles]
-tether packages install <ID>
+tether packages install <ID> [--on <MACHINES|all>]
 tether packages share <ID> --to <PROFILES>
 tether packages unshare <ID> --from <PROFILES>
-tether packages uninstall [ID]                    # alias: remove
+tether packages uninstall [ID] [--on <MACHINES|all>]   # alias: remove
 tether packages inbox [--json]
 tether packages approve <ID> [--expect <VERSION|TAP|KEY>] [--allow-signature-failed]
 tether packages approve --all [--from <MACHINE>]
@@ -96,6 +98,7 @@ tether packages reject <ID> [--expect <VERSION|TAP|KEY>]`} />
       <li><code>share &lt;ID&gt; --to &lt;PROFILES&gt;</code>: add profiles to the package, so machines in those profiles install it. Separate profiles with commas</li>
       <li><code>unshare &lt;ID&gt; --from &lt;PROFILES&gt;</code>: take profiles off the package. Nothing is uninstalled</li>
       <li><code>uninstall [ID]</code>: uninstall the package here. When other profiles share the package, take this machine's profile off it. For a package that failed to install, it stops the retries on this machine. Without a package, pick packages in a terminal</li>
+      <li><code>install --on</code> and <code>uninstall --on</code>: send a signed command, so those machines install or uninstall the package on their next sync. See <a href="/docs/trust#fleet-commands">Fleet commands</a></li>
       <li><code>inbox</code>: list the packages, taps and machine keys that wait for your approval, grouped by source machine and reason</li>
       <li><code>approve &lt;ID&gt;</code>: install the package, or trust the machine key. <code>machine:&lt;id&gt;</code> works as <code>tether machines trust &lt;id&gt;</code></li>
       <li><code>approve --all [--from &lt;MACHINE&gt;]</code>: approve every package in the Inbox, or every package from one machine. It lists the packages and asks first. Without a terminal, it needs <code>-y</code>. It leaves machine keys, malicious packages, packages whose record fails its signature, and packages without a version or tap to name</li>
@@ -113,7 +116,7 @@ tether packages reject <ID> [--expect <VERSION|TAP|KEY>]`} />
       <li><code>--dry-run</code> lists what an upgrade would change, and which packages stay because the release-age limit allows only an older version</li>
       <li>An upgrade never downgrades a package. It installs only a target newer than the installed version, at that exact version</li>
       <li>Tether checks each npm, pnpm, bun, uv and gem target against OSV. A target with a <code>MAL-</code> advisory waits in the Inbox, and the installed version stays</li>
-      <li>Tether asks before it upgrades a manager that cannot enforce the release-age limit. Without a terminal, or with <code>-y</code>, it skips that manager</li>
+      <li>Tether asks before it upgrades an older npm, pnpm or bun that cannot enforce the release-age limit. Without a terminal, or with <code>-y</code>, it skips that manager. gem does not ask: Tether picks each gem's release from its RubyGems publish time</li>
       <li>Homebrew upgrades include only outdated packages from trusted taps. Tether does not run <code>brew update</code></li>
     </ul>
 

@@ -103,7 +103,7 @@ fn confirm_uninstall(app: &mut App) {
         app.flash_error(error);
     } else if manager_key == "brew_taps" {
         app.flash_info("Tether does not uninstall taps");
-    } else {
+    } else if !super::machine_picker::open(app, true, manager_key, name) {
         app.overlays.push(Overlay::Confirm(Confirm::Uninstall {
             manager_key: manager_key.clone(),
             name: name.clone(),
@@ -235,6 +235,7 @@ pub fn open_import(app: &mut App) {
             items,
             cursor: 0,
             confirm: None,
+            target: None,
         }));
     }
 }

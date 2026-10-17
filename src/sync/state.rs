@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +151,42 @@ pub struct MachineState {
     /// machine can refuse an older signed record that someone replays from git history.
     #[serde(default)]
     pub generation: u64,
+    /// This build runs fleet commands, so other machines may send it some
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub runs_commands: bool,
+    /// The latest fleet command results, per signer key fingerprint, oldest first
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands_applied: BTreeMap<String, Vec<CommandResult>>,
+}
+
+/// How this machine handled one fleet command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandResult {
+    pub seq: u64,
+    /// The command as `machines show` prints it, such as `uninstall npm:typescript`
+    pub action: String,
+    pub status: CommandStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandStatus {
+    Applied,
+    Failed,
+    Expired,
+}
+
+impl CommandStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            CommandStatus::Applied => "applied",
+            CommandStatus::Failed => "failed",
+            CommandStatus::Expired => "expired",
+        }
+    }
 }
 
 impl Default for MachineState {
@@ -167,6 +203,12 @@ pub fn valid_machine_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn truncate_chars(text: &mut String, max: usize) {
+    if let Some((end, _)) = text.char_indices().nth(max) {
+        text.truncate(end);
+    }
 }
 
 pub fn local_hostname() -> String {
@@ -246,15 +288,20 @@ impl MachineState {
             checkouts: HashMap::new(),
             profile: None,
             generation: 0,
+            runs_commands: false,
+            commands_applied: BTreeMap::new(),
         }
     }
 
     /// Maximum allowed items in deserialized collections (DoS protection)
     const MAX_PACKAGES_PER_MANAGER: usize = 10_000;
     const MAX_FILES: usize = 50_000;
+    pub const MAX_COMMAND_RESULTS: usize = 10;
+    pub const MAX_COMMAND_SIGNERS: usize = 64;
+    const MAX_COMMAND_TEXT: usize = 500;
 
     /// Validate package name is safe for shell usage
-    fn is_safe_package_name(name: &str) -> bool {
+    pub(crate) fn is_safe_package_name(name: &str) -> bool {
         // Reject empty, too long, or names with shell metacharacters
         !name.is_empty()
             && name.len() <= 256
@@ -282,6 +329,23 @@ impl MachineState {
             }
             // Filter out unsafe package names
             packages.retain(|p| Self::is_safe_package_name(p));
+        }
+
+        if self.commands_applied.len() > Self::MAX_COMMAND_SIGNERS {
+            anyhow::bail!(
+                "Machine state contains too many command signers ({})",
+                self.commands_applied.len()
+            );
+        }
+        for results in self.commands_applied.values_mut() {
+            let extra = results.len().saturating_sub(Self::MAX_COMMAND_RESULTS);
+            results.drain(..extra);
+            for result in results.iter_mut() {
+                truncate_chars(&mut result.action, Self::MAX_COMMAND_TEXT);
+                if let Some(error) = &mut result.error {
+                    truncate_chars(error, Self::MAX_COMMAND_TEXT);
+                }
+            }
         }
 
         // Validate removed_packages

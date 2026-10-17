@@ -1,16 +1,17 @@
 use super::confirm::Confirm;
+use super::machine_detail::{detail_key, open_detail, open_remote_profile, render_detail};
 use super::profile_picker::ProfilePicker;
 use super::{clamp_cursor, manager_label, panel, row, security::pill, truncate};
 use crate::cli::output::relative_time;
 use crate::dashboard::app::{App, Hit, Overlay};
 use crate::dashboard::msg::KeyOutcome;
-use crate::packages::inbox::{Kind, Reason};
+use crate::packages::inbox::{InboxItem, Kind, Reason};
 use crate::sync::signing::RecordStatus;
 use crate::sync::MachineState;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph},
 };
 
 const CARD_MIN_W: u16 = 46;
@@ -22,6 +23,50 @@ pub struct MachinesTabState {
     /// Index into `state.machines`.
     pub cursor: usize,
     pub expanded: Option<String>,
+    /// Row in the open details of another machine: its commands, then its packages.
+    pub detail_cursor: usize,
+}
+
+/// A machine that a fleet command goes to, as a confirm shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FleetTarget {
+    pub id: String,
+    pub label: String,
+    pub last_sync: chrono::DateTime<chrono::Utc>,
+}
+
+impl FleetTarget {
+    pub fn of(m: &MachineState) -> Self {
+        Self {
+            id: m.machine_id.clone(),
+            label: display_name(m),
+            last_sync: m.last_sync,
+        }
+    }
+
+    pub fn pair(&self) -> (String, String) {
+        (self.id.clone(), self.label.clone())
+    }
+}
+
+/// Why this machine cannot send fleet commands to `m`, as the CLI refuses it.
+pub fn command_refusal(app: &App, m: &MachineState) -> Option<String> {
+    let trusted = app
+        .state
+        .record_status
+        .iter()
+        .any(|(id, status)| *id == m.machine_id && *status == RecordStatus::Trusted);
+    crate::sync::commands::refusal(app.machine_id(), &m.machine_id, Some(m), trusted)
+}
+
+/// The other machines that run fleet commands from this machine, except `except`.
+pub fn fleet_targets(app: &App, except: &str) -> Vec<FleetTarget> {
+    app.state
+        .machines
+        .iter()
+        .filter(|m| m.machine_id != except && command_refusal(app, m).is_none())
+        .map(FleetTarget::of)
+        .collect()
 }
 
 /// How recently a machine checked in.
@@ -51,6 +96,9 @@ pub fn grid_cols(width: u16) -> usize {
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
+    if open_detail(app).is_some() {
+        return detail_key(app, key);
+    }
     let len = app.state.machines.len();
     let cols = grid_cols(app.viewport.width.saturating_sub(2));
     let c = &mut app.machines.cursor;
@@ -60,15 +108,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
         KeyCode::Char('p') => {
             clamp_cursor(&mut app.machines.cursor, len);
             match app.state.machines.get(app.machines.cursor) {
-                // A machine sets only its own profile
                 Some(m) if m.machine_id != app.machine_id() => {
-                    let name = display_name(m);
-                    app.flash_info(format!("Set the profile of {} on that machine", name));
+                    let m = m.clone();
+                    open_remote_profile(app, &m);
                 }
                 _ => open_profile_picker(app),
             }
         }
         KeyCode::Char('a') => confirm_trust(app),
+        KeyCode::Char('A') => confirm_trust_fleet(app),
         KeyCode::Char('x') => confirm_untrust(app),
         KeyCode::Char('D') => {
             clamp_cursor(&mut app.machines.cursor, len);
@@ -107,6 +155,7 @@ fn toggle_expand(app: &mut App) {
         app.machines.expanded = None;
     } else {
         app.machines.expanded = Some(m.machine_id.clone());
+        app.machines.detail_cursor = 0;
     }
 }
 
@@ -122,56 +171,117 @@ fn other_machine(app: &mut App, this: &str) -> Option<(String, String)> {
     Some(found)
 }
 
-/// Ask before trusting the key that signs the selected machine's record, with its full
-/// fingerprint. An Inbox item for that key is answered as the Security tab answers it.
-fn confirm_trust(app: &mut App) {
-    let Some((id, label)) = other_machine(app, "This machine trusts its own key") else {
-        return;
-    };
+/// The machine that trust keys act on: the one whose details are open, else the card at
+/// the cursor. `None`, with `this` as a toast, when it is this machine.
+fn trust_subject(app: &mut App, this: &str) -> Option<(String, String)> {
+    if let Some(m) = open_detail(app) {
+        return Some((m.machine_id.clone(), display_name(m)));
+    }
+    other_machine(app, this)
+}
+
+/// The key to trust for a machine: the one an Inbox item asks for, the one this machine
+/// trusts already, or the one that signs its record now.
+enum TrustKey {
+    Asked(Box<InboxItem>),
+    Trusted(String),
+    Signing(String),
+}
+
+fn trust_key(app: &App, id: &str) -> Option<TrustKey> {
     let pending = app
         .state
         .inbox
         .items
         .iter()
         .find(|i| i.name == id && matches!(i.kind, Kind::TrustMachine { .. }));
-    let confirm = match pending {
-        Some(item) => {
-            let Kind::TrustMachine { fingerprint, .. } = &item.kind else {
-                return;
+    if let Some(item) = pending {
+        return Some(TrustKey::Asked(Box::new(item.clone())));
+    }
+    if let Some(k) = app.state.trusted.iter().find(|k| k.machine_id == id) {
+        return Some(TrustKey::Trusted(k.fingerprint.clone()));
+    }
+    crate::sync::SyncEngine::sync_path()
+        .ok()
+        .and_then(|p| crate::packages::inbox::signing_fingerprint(&p, id))
+        .map(TrustKey::Signing)
+}
+
+/// A trust confirm for `key`, sent also to `fleet`. An Inbox item for the key is answered
+/// as the Security tab answers it.
+fn trust_confirm(
+    app: &App,
+    id: String,
+    label: String,
+    key: TrustKey,
+    fleet: Vec<FleetTarget>,
+) -> Confirm {
+    let (fingerprint, changed, item, trusted_here) = match key {
+        TrustKey::Asked(item) => {
+            let fingerprint = match &item.kind {
+                Kind::TrustMachine { fingerprint, .. } => fingerprint.clone(),
+                Kind::Package => String::new(),
             };
-            Confirm::Trust {
-                ignored: ignored_record(app, &id),
-                machine_id: id,
-                label,
-                fingerprint: fingerprint.clone(),
-                changed: item.reasons.contains(&Reason::KeyChanged),
-                item: Some(Box::new(item.clone())),
-                arming: Default::default(),
-            }
+            let changed = item.reasons.contains(&Reason::KeyChanged);
+            (fingerprint, changed, Some(item), false)
         }
-        None if app.state.trusted.iter().any(|k| k.machine_id == id) => {
-            app.flash_info(format!("{} is trusted already", label));
-            return;
-        }
-        None => {
-            let fingerprint = crate::sync::SyncEngine::sync_path()
-                .ok()
-                .and_then(|p| crate::packages::inbox::signing_fingerprint(&p, &id));
-            let Some(fingerprint) = fingerprint else {
-                app.flash_info(format!("{} has no signed machine record", label));
-                return;
-            };
-            Confirm::Trust {
-                ignored: ignored_record(app, &id),
-                machine_id: id,
-                label,
-                fingerprint,
-                changed: false,
-                item: None,
-                arming: Default::default(),
-            }
-        }
+        TrustKey::Trusted(fingerprint) => (fingerprint, false, None, true),
+        TrustKey::Signing(fingerprint) => (fingerprint, false, None, false),
     };
+    Confirm::Trust {
+        ignored: ignored_record(app, &id),
+        machine_id: id,
+        label,
+        fingerprint,
+        changed,
+        item,
+        fleet,
+        trusted_here,
+        arming: Default::default(),
+    }
+}
+
+/// Ask before trusting the key that signs the selected machine's record, with its full
+/// fingerprint.
+pub fn confirm_trust(app: &mut App) {
+    let Some((id, label)) = trust_subject(app, "This machine trusts its own key") else {
+        return;
+    };
+    match trust_key(app, &id) {
+        Some(TrustKey::Trusted(_)) => app.flash_info(format!("{} is trusted already", label)),
+        None => app.flash_info(format!("{} has no signed machine record", label)),
+        Some(key) => {
+            let confirm = trust_confirm(app, id, label, key, Vec::new());
+            app.overlays.push(Overlay::Confirm(confirm));
+        }
+    }
+}
+
+/// Ask before trusting the selected machine's key here, unless this machine trusts it
+/// already, and on every other machine that runs fleet commands.
+pub fn confirm_trust_fleet(app: &mut App) {
+    let Some((id, label)) = trust_subject(app, "This machine trusts its own key") else {
+        return;
+    };
+    let Some(key) = trust_key(app, &id) else {
+        app.flash_info(format!("{} has no signed machine record", label));
+        return;
+    };
+    let fleet = fleet_targets(app, &id);
+    if fleet.is_empty() {
+        app.flash_info(match key {
+            TrustKey::Trusted(_) => format!(
+                "{} is trusted here already, and no other machine runs fleet commands",
+                label
+            ),
+            _ => format!(
+                "No other machine runs fleet commands. Press a to trust {} here",
+                label
+            ),
+        });
+        return;
+    }
+    let confirm = trust_confirm(app, id, label, key, fleet);
     app.overlays.push(Overlay::Confirm(confirm));
 }
 
@@ -219,8 +329,11 @@ pub fn open_profile_picker(app: &mut App) {
         .and_then(|p| names.iter().position(|n| *n == p.as_str()))
         .unwrap_or(0);
     let options = names.iter().map(|s| s.to_string()).collect();
-    app.overlays
-        .push(Overlay::ProfilePicker(ProfilePicker { options, cursor }));
+    app.overlays.push(Overlay::ProfilePicker(ProfilePicker {
+        options,
+        cursor,
+        target: None,
+    }));
 }
 
 /// Ask before removing a record that looks like an old id of this machine. Other records
@@ -279,7 +392,7 @@ pub fn display_name(m: &MachineState) -> String {
     }
 }
 
-fn profile_of(app: &App, m: &MachineState) -> String {
+pub fn profile_of(app: &App, m: &MachineState) -> String {
     m.profile
         .clone()
         .or_else(|| {
@@ -432,6 +545,11 @@ fn card(
         first.push(pill("on 1.x", t.warn, t));
         first.push(Span::raw(" "));
     }
+    let pending = pending_count(app, &m.machine_id);
+    if pending > 0 {
+        first.push(pill(&format!("{} pending", pending), t.info, t));
+        first.push(Span::raw(" "));
+    }
     first.push(Span::styled(
         os,
         Style::default().fg(if m.os_version.is_empty() {
@@ -522,9 +640,18 @@ fn card(
     }
 }
 
+/// Fleet commands that wait in the repo for a machine.
+fn pending_count(app: &App, machine_id: &str) -> usize {
+    app.state
+        .pending_commands
+        .iter()
+        .find(|(id, _)| id == machine_id)
+        .map_or(0, |(_, p)| p.len())
+}
+
 /// How this machine treats the machine's signing key: a word, its color, and the key's
 /// fingerprint when known.
-fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String>) {
+pub fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String>) {
     let t = &app.theme;
     let trusted = app
         .state
@@ -559,97 +686,6 @@ fn key_state(app: &App, m: &MachineState) -> (&'static str, Color, Option<String
             None => ("not trusted", t.dim, None),
         },
     }
-}
-
-fn render_detail(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
-    let t = &app.theme;
-    let block = panel(format!(" {} ", display_name(m)), true, t);
-    let mut inner = block.inner(area);
-    f.render_widget(block, area);
-    let note = if is_old_id(app, &m.machine_id) {
-        Some(format!(
-            "May be an old id of this machine. Tether guesses: it matches this hostname, comes \
-             from an old build and has not synced for over {} days. Check that no other machine \
-             uses this hostname. Its packages still count for every machine. Press D to remove it.",
-            crate::sync::state::OLD_ID_SILENT_DAYS
-        ))
-    } else if is_old_build(app, &m.machine_id) {
-        Some(format!(
-            "This machine is {}.",
-            crate::sync::signing::OLD_BUILD_NOTE
-        ))
-    } else {
-        None
-    };
-    if let Some(note) = note {
-        // A blank line under the note, which word wrap may take
-        let h = (note.chars().count().div_ceil(inner.width.max(1) as usize) as u16 + 1)
-            .min(inner.height);
-        f.render_widget(
-            Paragraph::new(Span::styled(note, Style::default().fg(t.warn)))
-                .wrap(Wrap { trim: true }),
-            Rect { height: h, ..inner },
-        );
-        inner.y += h;
-        inner.height -= h;
-    }
-    let kv = |k: &str, v: String| {
-        Line::from(vec![
-            Span::styled(format!("{:<14}", k), Style::default().fg(t.dim)),
-            Span::styled(v, Style::default().fg(t.text)),
-        ])
-    };
-
-    // The whole fingerprint, so it can be compared with the one that machine shows
-    let (word, color, fingerprint) = key_state(app, m);
-    let mut key = vec![
-        Span::styled(format!("{:<14}", "Key"), Style::default().fg(t.dim)),
-        Span::styled(word, Style::default().fg(color)),
-    ];
-    if let Some(fp) = fingerprint {
-        key.push(Span::raw("  "));
-        key.push(Span::styled(fp, Style::default().fg(t.hash)));
-    }
-    let key = Line::from(key);
-    let key_h = (key.width().div_ceil(inner.width.max(1) as usize) as u16 + 1).min(inner.height);
-    f.render_widget(
-        Paragraph::new(key).wrap(Wrap { trim: false }),
-        Rect {
-            height: key_h,
-            ..inner
-        },
-    );
-    inner.y += key_h;
-    inner.height -= key_h;
-
-    let [info, dots] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .spacing(2)
-        .areas(inner);
-    let mut lines = vec![
-        kv("Hostname", m.hostname.clone()),
-        kv("Machine ID", m.machine_id.clone()),
-        kv("Last sync", relative_time(m.last_sync)),
-        kv("Files", m.files.len().to_string()),
-    ];
-    let mut managers: Vec<_> = m.packages.iter().collect();
-    managers.sort_by(|a, b| a.0.cmp(b.0));
-    for (key, pkgs) in managers {
-        lines.push(kv(manager_label(key), pkgs.len().to_string()));
-    }
-    f.render_widget(Paragraph::new(lines), info);
-
-    let mut spans = vec![Span::styled(
-        format!("Dotfiles ({})  ", m.dotfiles.len()),
-        Style::default().fg(t.accent).bold(),
-    )];
-    for d in &m.dotfiles {
-        spans.push(Span::styled(d.as_str(), Style::default().fg(t.muted)));
-        spans.push(Span::styled("  ", Style::default()));
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).wrap(Wrap { trim: true }),
-        dots,
-    );
 }
 
 /// Machine list for the Overview tab: presence dot, name, last seen.

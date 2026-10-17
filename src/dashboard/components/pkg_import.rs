@@ -1,3 +1,5 @@
+use super::confirm::Confirm;
+use super::machines::FleetTarget;
 use super::{backdrop, confirm, cursor_down, manager_label, picker as picker_popup};
 use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::msg::Cmd;
@@ -16,6 +18,8 @@ pub struct PkgImport {
     pub cursor: usize,
     /// (manager_key, name) awaiting install confirmation.
     pub confirm: Option<(String, String)>,
+    /// The machine the install is for, by fleet command. `None` is this machine
+    pub target: Option<FleetTarget>,
 }
 
 impl PkgImport {
@@ -51,7 +55,32 @@ pub fn handle_key(app: &mut App, mut picker: PkgImport, key: KeyEvent) -> Option
             KeyCode::Char('k') | KeyCode::Up => picker.cursor = picker.cursor.saturating_sub(1),
             KeyCode::Enter if picker.cursor < picker.items.len() && app.running.is_none() => {
                 let item = &picker.items[picker.cursor];
-                picker.confirm = Some((item.manager_key.clone(), item.name.clone()));
+                let (manager_key, name) = (item.manager_key.clone(), item.name.clone());
+                match picker.target.clone() {
+                    Some(target) => {
+                        app.overlays.push(Overlay::PkgImport(picker));
+                        app.overlays.push(Overlay::Confirm(Confirm::Fleet {
+                            action: crate::sync::commands::Action::Install {
+                                manager: manager_key,
+                                name,
+                            },
+                            local: false,
+                            targets: vec![target],
+                            arming: Default::default(),
+                        }));
+                        return None;
+                    }
+                    None => {
+                        app.overlays.push(Overlay::PkgImport(picker));
+                        // Other machines that lack the package can get it too
+                        if !super::machine_picker::open(app, false, &manager_key, &name) {
+                            if let Some(Overlay::PkgImport(p)) = app.overlays.last_mut() {
+                                p.confirm = Some((manager_key, name));
+                            }
+                        }
+                        return None;
+                    }
+                }
             }
             _ => {}
         }
@@ -94,10 +123,14 @@ pub fn render(f: &mut Frame, app: &App, picker: &PkgImport) {
             )
         })
         .collect();
+    let title = match &picker.target {
+        Some(target) => format!("Install on {}", target.label),
+        None => "Install from another machine".to_string(),
+    };
     picker_popup(
         f,
         app,
-        "Install from another machine",
+        &title,
         rows,
         picker.cursor,
         &[("⏎", "install"), ("esc", "close")],

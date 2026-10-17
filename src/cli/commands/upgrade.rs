@@ -2,7 +2,7 @@ use crate::cli::output::Output;
 use crate::cli::prompts::Prompt;
 use crate::packages::{
     brew::BrewManager, bun::BunManager, gem::GemManager, manager::PackageManager, npm::NpmManager,
-    pnpm::PnpmManager, uv::UvManager, Cooldown, PackageInfo,
+    pnpm::PnpmManager, uv::UvManager, PackageInfo,
 };
 use crate::packages::{install_upgrades, Upgrade};
 use crate::sync::SyncState;
@@ -56,7 +56,7 @@ pub async fn run(dry_run: bool) -> Result<()> {
         if packages.is_empty() {
             continue;
         }
-        if manager.cooldown().await == Cooldown::Unsupported
+        if !manager.upgrades_hold_release_age().await
             && !confirm_without_cooldown(manager.name(), dry_run)?
         {
             Output::warning(&format!("Skipped {}", manager.name()));

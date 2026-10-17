@@ -75,6 +75,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
                     fingerprint: fingerprint.clone(),
                     changed: item.reasons.contains(&Reason::KeyChanged),
                     item: Some(Box::new(item)),
+                    fleet: Vec::new(),
+                    trusted_here: false,
                     arming: Default::default(),
                 }));
                 None

@@ -272,33 +272,30 @@ impl DaemonServer {
             }
         }
 
-        // Load state and machine state
         let mut state = SyncState::load()?;
-
-        // Import remote config before using it
-        if config.security.encrypt_dotfiles {
-            if let Some(new_config) =
-                crate::cli::commands::sync::sync_tether_config(&sync_path, &home, &mut state)?
-            {
-                crate::cli::commands::sync::warn_changed_profile(
-                    &config,
-                    &new_config,
-                    &state.machine_id,
-                );
-                config = new_config;
-            }
-        }
-        if !git.has_unpushed_commits() {
-            state.discard_unpushed();
-        }
-
-        // Auto-assign machine to default profile on first run after v2 migration
-        if !config.profiles.is_empty() && !config.machine_profiles.contains_key(&state.machine_id) {
-            config.machine_profiles.insert(
-                state.machine_id.clone(),
-                crate::config::DEFAULT_PROFILE.to_string(),
+        let results = crate::sync::steps::adopt_remote(
+            &mut config,
+            &git,
+            &sync_path,
+            &home,
+            &mut state,
+            false,
+        )
+        .await?;
+        for result in &results {
+            log::info!(
+                "Fleet command {}: {}{}",
+                result.status.label(),
+                result.action,
+                result
+                    .error
+                    .as_deref()
+                    .map(|e| format!(": {}", e))
+                    .unwrap_or_default()
             );
-            let _ = config.save();
+        }
+        if !results.is_empty() {
+            crate::sync::notify_commands(&results).ok();
         }
 
         let machine_state_for_decrypt =
@@ -306,7 +303,7 @@ impl DaemonServer {
 
         // Apply remote changes (dotfiles, config dirs, project configs)
         if config.security.encrypt_dotfiles {
-            crate::cli::commands::sync::decrypt_from_repo(
+            crate::sync::steps::decrypt_from_repo(
                 &config,
                 &sync_path,
                 &home,
@@ -416,7 +413,7 @@ impl DaemonServer {
 
             // Sync global config directories
             if !config.effective_dirs(&daemon_machine_id).is_empty() {
-                crate::cli::commands::sync::sync_directories(
+                crate::sync::steps::sync_directories(
                     &config,
                     &daemon_machine_id,
                     &mut state,
@@ -428,22 +425,20 @@ impl DaemonServer {
 
             // Sync project-local configs
             if config.project_configs.enabled {
-                crate::cli::commands::sync::sync_project_configs(
+                crate::sync::steps::sync_project_configs(
                     &config, &mut state, &sync_path, &home, false,
                 )?;
             }
         } // end personal_dotfiles feature block
 
         // Sync team project secrets
-        if let Err(e) =
-            crate::cli::commands::sync::sync_team_project_secrets(&config, &home, &mut state)
-        {
+        if let Err(e) = crate::sync::steps::sync_team_project_secrets(&config, &home, &mut state) {
             log::warn!("Failed to sync team project secrets: {}", e);
         }
 
         // Build machine state (packages, dotfiles, project configs, checkouts)
         let mut machine_state =
-            crate::cli::commands::sync::build_machine_state(&config, &state, &sync_path).await?;
+            crate::sync::steps::build_machine_state(&config, &state, &sync_path).await?;
 
         // Import packages (daemon mode: defer casks that need password)
         if config.features.personal_packages {
@@ -487,8 +482,7 @@ impl DaemonServer {
 
             // Rebuild machine state after import to capture newly installed packages
             machine_state =
-                crate::cli::commands::sync::build_machine_state(&config, &state, &sync_path)
-                    .await?;
+                crate::sync::steps::build_machine_state(&config, &state, &sync_path).await?;
         }
 
         // Export package manifests using union of all machine states
@@ -502,7 +496,7 @@ impl DaemonServer {
 
         // Export tether config to sync repo
         if config.security.encrypt_dotfiles {
-            crate::cli::commands::sync::export_tether_config(&sync_path, &home)?;
+            crate::sync::steps::export_tether_config(&sync_path, &home)?;
         }
 
         // Commit and push if changes made
@@ -518,7 +512,7 @@ impl DaemonServer {
         } else {
             log::debug!("No changes to sync");
         }
-        crate::cli::commands::sync::promote_config_base(
+        crate::sync::steps::promote_config_base(
             &sync_path,
             &home,
             &mut state,
@@ -573,9 +567,7 @@ impl DaemonServer {
 
         // Sync collab secrets
         if config.features.collab_secrets {
-            if let Err(e) =
-                crate::cli::commands::sync::sync_collab_secrets(&config, &home, &mut state)
-            {
+            if let Err(e) = crate::sync::steps::sync_collab_secrets(&config, &home, &mut state) {
                 log::warn!("Failed to sync collab secrets: {}", e);
             }
         }
@@ -635,9 +627,7 @@ impl DaemonServer {
         // Sync team project secrets
         let home = crate::home_dir()?;
         let mut state = SyncState::load()?;
-        if let Err(e) =
-            crate::cli::commands::sync::sync_team_project_secrets(config, &home, &mut state)
-        {
+        if let Err(e) = crate::sync::steps::sync_team_project_secrets(config, &home, &mut state) {
             log::warn!("Failed to sync team project secrets: {}", e);
         }
         state.save()?;
@@ -700,7 +690,8 @@ impl DaemonServer {
             if !enabled || !manager.is_available().await {
                 continue;
             }
-            // Unattended upgrades must honour the release-age cooldown or not run
+            // Unattended upgrades must honour the release-age cooldown or not run. Gem holds
+            // only its targets to it, not the new dependencies they bring
             if manager.cooldown().await == Cooldown::Unsupported {
                 if crate::packages::policy::first_warning(&format!(
                     "auto-upgrade {}",

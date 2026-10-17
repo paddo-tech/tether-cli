@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod commands;
 pub mod config_merge;
 pub mod conflict;
 pub mod discovery;
@@ -10,6 +11,7 @@ pub mod merge;
 pub mod packages;
 pub mod signing;
 pub mod state;
+pub mod steps;
 pub mod team;
 
 pub use backup::{
@@ -17,7 +19,7 @@ pub use backup::{
     prune_old_backups, restore_dotfile_backup, restore_file,
 };
 pub use conflict::{
-    detect_conflict, notify_conflicts, notify_deferred_casks, notify_inbox,
+    detect_conflict, notify_commands, notify_conflicts, notify_deferred_casks, notify_inbox,
     notify_membership_error, notify_signature_failed, ConflictResolution, ConflictState,
     FileConflict, PendingConflict,
 };
@@ -42,6 +44,13 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 pub const CURRENT_SYNC_FORMAT_VERSION: u32 = 1;
+
+/// The synced config.toml in the sync repo: its path, then the legacy path of a repo that
+/// has not moved it yet.
+pub const SYNCED_CONFIG: [&str; 2] = [
+    "configs/tether/config.toml.enc",
+    "dotfiles/tether/config.toml.enc",
+];
 
 /// Map a dotfile path to its repo-relative path in the sync repo (flat layout, legacy).
 /// e.g., ".zshrc" -> "dotfiles/zshrc.enc" (encrypted) or "dotfiles/.zshrc" (plain)

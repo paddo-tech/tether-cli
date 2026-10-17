@@ -16,6 +16,8 @@ use testcontainers::{
 /// The 1.x releases a mixed fleet runs, built from their tags.
 pub const OLD: [&str; 3] = ["v1.11.10", "v1.12.0", "v1.13.1"];
 pub const HEAD: &str = "head";
+/// The last release before fleet commands: its records do not say it runs them.
+pub const PRE_COMMANDS: &str = "v2.0.1";
 pub const INIT_SCRIPT: &str = "/e2e/init.exp";
 
 pub fn root() -> PathBuf {
@@ -68,6 +70,7 @@ pub fn enabled(test: &str) -> bool {
     BUILT.get_or_init(|| {
         let mut refs: Vec<String> = OLD.iter().map(|s| s.to_string()).collect();
         refs.push(flap_ref());
+        refs.push(PRE_COMMANDS.to_string());
         let status = Command::new(root().join("tests/e2e/images.sh"))
             .args(&refs)
             .current_dir(root())

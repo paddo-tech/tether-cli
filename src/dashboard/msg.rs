@@ -54,6 +54,14 @@ pub enum Msg {
     /// A machine key was trusted or untrusted, or an item rejected: the toast text, or the
     /// error.
     InboxDone(Result<String, String>),
+    /// A fleet command was sent and pushed: the toast text, or the error. `then` runs next
+    /// only after a send, such as the same change on this machine.
+    FleetSent {
+        result: Result<String, String>,
+        then: Option<Box<Cmd>>,
+    },
+    /// A fleet command was cancelled, or found already run: the toast text, or the error.
+    CommandCancelled(Result<String, String>),
     /// Another machine's record was removed and committed, and whether this machine
     /// untrusted its key, or the error.
     MachineRemoved {
@@ -115,6 +123,30 @@ pub enum Cmd {
     RemoveMachine {
         machine_id: String,
         digest: String,
+    },
+    /// Sign `action` for each target, as (machine id, name), then commit and push. `then`
+    /// runs after a send; after a failed send, it only stops the tracking it started.
+    Fleet {
+        action: crate::sync::commands::Action,
+        targets: Vec<(String, String)>,
+        then: Option<Box<Cmd>>,
+    },
+    /// Trust a machine's key here unless `trusted_here`, then send the same trust to each
+    /// target, as (machine id, name). `item` is the Inbox item that asks for the key.
+    TrustFleet {
+        item: Option<Box<InboxItem>>,
+        trusted_here: bool,
+        machine_id: String,
+        fingerprint: String,
+        label: String,
+        targets: Vec<(String, String)>,
+    },
+    /// Delete a fleet command this machine sent to `target`, unless it ran already.
+    CancelCommand {
+        target: String,
+        label: String,
+        seq: u64,
+        action: String,
     },
     /// Count sync commits per day; `git log` over the sync repo is too slow for the UI thread.
     LoadActivity,

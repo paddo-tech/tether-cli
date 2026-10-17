@@ -28,6 +28,7 @@ import Code from '../../components/Code.astro';
 ├── signing_key              # This machine's SSH signing key (mode 0600)
 ├── trusted_keys             # Machine keys this machine trusts (never synced)
 ├── record_generations.json  # Newest record accepted per key (never synced)
+├── command_seqs.json        # Fleet command numbers sent and accepted (never synced)
 ├── machine.json             # This machine's last record (never synced)
 ├── inbox.json               # The Inbox (never synced)
 ├── inbox.lock               # Lock for Inbox and trust list changes
@@ -50,10 +51,12 @@ import Code from '../../components/Code.astro';
 ├── projects/               # Project configs and secrets
 ├── manifests/              # Package names per manager, and the Brewfile
 ├── packages/profiles.toml  # The profiles of each package
+├── commands/<target>/      # Signed fleet commands (<signer>-<n>.toml and .sig)
 └── machines/               # Machine records (<id>.json) and signatures (<id>.json.sig)`} />
     <ul>
       <li>Manifests list package names only, one per line, as 1.x reads them. Versions come from the signed machine records</li>
       <li><code>packages/profiles.toml</code> maps <code>"manager:name"</code> to profile names. 1.x does not read it. See <a href="/docs/profiles#package-profiles">Packages per profile</a></li>
+      <li><code>commands/</code> holds commands that one machine signed for another. The signer deletes each one after the target reports it. 1.x does not read it. See <a href="/docs/trust#fleet-commands">Fleet commands</a></li>
       <li>Each record in <code>machines/</code> lists the machine's packages, versions, profile and OS. Its signature decides trust. See <a href="/docs/trust">Machine trust</a></li>
     </ul>
 

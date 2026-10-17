@@ -39,6 +39,27 @@ tether packages approve machine:work-laptop --expect SHA256:...`} />
     <p>To stop trusting a machine:</p>
     <Code code="tether machines untrust work-laptop" />
 
+    <h2 id="fleet-commands">Fleet commands</h2>
+    <p>From one machine, you can change your other machines. Add <code>--on</code> with machine ids or hostnames, separated by commas, or <code>all</code>:</p>
+    <Code code={`tether packages uninstall npm:typescript --on mini,studio
+tether packages install brew:ripgrep --on mini
+tether machines profile set server --on mini
+tether machines trust new-laptop --fingerprint SHA256:... --on all`} />
+    <ul>
+      <li>Tether signs the command with this machine's key and pushes it to the personal sync repo. Each machine runs it on its next sync</li>
+      <li>A machine runs a command only when it trusts the key that signed it. Trust already lets a machine's record install packages on your other machines, so trust also lets it send commands</li>
+      <li>Each command has a number and expires after 7 days. A machine never runs a command twice, and does not run an expired command</li>
+      <li><code>install</code> runs the same checks as <code>tether packages install</code>. A malicious package, a rejected one or one that waits in the Inbox does not install</li>
+      <li><code>uninstall --on</code> uninstalls the package on those machines and stops their syncs from installing it again. Profiles do not change</li>
+      <li><code>machines trust --on</code> needs the fingerprint. Compare it on the new machine first. With it, you trust a new machine on all your machines from one machine</li>
+      <li>Tether refuses a machine that it does not trust, and a machine on 2.0.1 or earlier, which cannot run commands</li>
+      <li><code>machines profile set --on</code> refuses a profile that you created here but did not sync yet. Run <code>tether sync</code> first</li>
+      <li><code>tether machines show &lt;MACHINE&gt;</code> lists the commands that wait for that machine, and the results it reported: applied, failed or expired. The daemon on the target shows a notification when it runs commands</li>
+      <li>Team and collab repos never carry commands</li>
+    </ul>
+    <p>The dashboard sends the same commands. On the Machines tab, open another machine's details. They list its pending commands, its results and its packages. Press <code>x</code> to uninstall the selected package there, <code>i</code> to install one, <code>p</code> to set its profile, or <code>c</code> to cancel a pending command. Press <code>A</code> on a card to trust that machine's key here and on every machine that runs commands. On the Packages tab, <code>x</code> and <code>i</code> ask which machines when other machines can take the change. Each question names the machines and warns when one has not synced for a day.</p>
+    <p>A cancel can come too late. A machine that pulled the command before the cancel still runs it. Anyone who can push to the sync repo can also restore a cancelled command until it expires, because its signature stays valid.</p>
+
     <h2>Protection against changed records</h2>
     <ul>
       <li><strong>Changed key</strong>: when a trusted machine signs with a different key, Tether warns you and holds the new key in the Inbox as "key changed". It does not trust that record until you approve the new key</li>

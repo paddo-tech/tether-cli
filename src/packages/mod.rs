@@ -95,33 +95,19 @@ pub fn manager_for_key(key: &str) -> Option<Box<dyn PackageManager>> {
 }
 
 /// Uninstall a package by its machine-state key, such as `brew_casks` or `npm`. A synced
-/// package whose install failed here is not installed, so it becomes a removal in this
-/// machine's local record instead, and the sync stops installing it. The next sync signs and
-/// publishes that record; writing the repo copy now would block the profile save that
-/// follows. Returns true for such a package, which this only stops installing. The caller
-/// holds the sync lock.
-pub async fn uninstall(manager_key: &str, name: &str) -> anyhow::Result<bool> {
-    let mut state = crate::sync::SyncState::load()?;
-    // A failure is keyed by the manifest's name, which can carry a tap
-    let id = crate::sync::membership::canonical_id(manager_key, name);
-    let failed = state.install_failures.keys().find_map(|key| {
-        let (manager, recorded) = key.split_once(':')?;
-        (manager == manager_key && crate::sync::membership::canonical_id(manager, recorded) == id)
-            .then(|| (key.clone(), recorded.to_string()))
-    });
-    if let Some((key, recorded)) = failed {
-        // A failure stays until the next sync, also when the user installed it since
-        if !installed_here(manager_key, name).await? {
-            let sync_path = crate::sync::SyncEngine::sync_path()?;
-            // Without a record, the next sync builds one on this record's removals
-            let mut record = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
-                .unwrap_or_else(|| crate::sync::MachineState::new(&state.machine_id));
-            record.add_removals(manager_key, &[&recorded]);
-            crate::sync::signing::save_local_record(&record)?;
-            state.install_failures.remove(&key);
-            state.save()?;
-            return Ok(true);
-        }
+/// package whose install failed here is not installed, so it only stops installing (see
+/// [`stop_installing`]). Returns true for such a package. The caller holds the sync lock
+/// and saves `state`.
+pub async fn uninstall(
+    manager_key: &str,
+    name: &str,
+    state: &mut crate::sync::SyncState,
+) -> anyhow::Result<bool> {
+    // A failure stays until the next sync, also when the user installed it since
+    if failure_key(manager_key, name, state).is_some() && !installed_here(manager_key, name).await?
+    {
+        stop_installing(manager_key, name, state)?;
+        return Ok(true);
     }
     let manager: Box<dyn PackageManager> = match manager_key {
         "brew_formulae" | "brew_casks" => Box::new(BrewManager),
@@ -130,6 +116,62 @@ pub async fn uninstall(manager_key: &str, name: &str) -> anyhow::Result<bool> {
     };
     manager.uninstall(name).await?;
     Ok(false)
+}
+
+/// Record a removal of the package in this machine's local record and drop its install
+/// failure, so syncs stop installing it. The next sync signs and publishes that record;
+/// writing the repo copy now would block a profile save that follows.
+pub fn stop_installing(
+    manager_key: &str,
+    name: &str,
+    state: &mut crate::sync::SyncState,
+) -> anyhow::Result<()> {
+    let id = crate::sync::membership::canonical_id(manager_key, name);
+    let failed: Vec<String> = state
+        .install_failures
+        .keys()
+        .filter(|key| {
+            key.split_once(':').is_some_and(|(manager, recorded)| {
+                manager == manager_key
+                    && crate::sync::membership::canonical_id(manager, recorded) == id
+            })
+        })
+        .cloned()
+        .collect();
+    // The import compares exact names, and a failure is keyed by the manifest's name,
+    // which can carry a tap, so both names are removals
+    let mut names = vec![name.to_string()];
+    for key in &failed {
+        let recorded = key.split_once(':').map_or(name, |(_, recorded)| recorded);
+        if !names.iter().any(|n| n == recorded) {
+            names.push(recorded.to_string());
+        }
+    }
+    let sync_path = crate::sync::SyncEngine::sync_path()?;
+    // Without a record, the next sync builds one on this record's removals
+    let mut record = crate::sync::signing::own_record(&sync_path, &state.machine_id)?
+        .unwrap_or_else(|| crate::sync::MachineState::new(&state.machine_id));
+    let names: Vec<&String> = names.iter().collect();
+    record.add_removals(manager_key, &names);
+    crate::sync::signing::save_local_record(&record)?;
+    for key in failed {
+        state.install_failures.remove(&key);
+    }
+    Ok(())
+}
+
+fn failure_key(manager_key: &str, name: &str, state: &crate::sync::SyncState) -> Option<String> {
+    let id = crate::sync::membership::canonical_id(manager_key, name);
+    state
+        .install_failures
+        .keys()
+        .find(|key| {
+            key.split_once(':').is_some_and(|(manager, recorded)| {
+                manager == manager_key
+                    && crate::sync::membership::canonical_id(manager, recorded) == id
+            })
+        })
+        .cloned()
 }
 
 /// Whether the manager lists the package as installed now. This machine's record lists it

@@ -427,6 +427,21 @@ pub fn notify_membership_error() -> Result<()> {
     )
 }
 
+/// One notification per sync that ran fleet commands
+pub fn notify_commands(results: &[crate::sync::state::CommandResult]) -> Result<()> {
+    let failed = results
+        .iter()
+        .filter(|r| r.status != crate::sync::state::CommandStatus::Applied)
+        .count();
+    let actions: Vec<&str> = results.iter().map(|r| r.action.as_str()).collect();
+    let title = if failed == 0 {
+        "Fleet commands ran".to_string()
+    } else {
+        format!("{} of {} fleet commands did not run", failed, results.len())
+    };
+    notify(&title, &actions.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

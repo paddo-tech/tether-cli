@@ -8,7 +8,7 @@ use std::future::Future;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Days of history in the Overview activity chart.
 const ACTIVITY_DAYS: usize = 90;
@@ -54,7 +54,12 @@ impl Runtime {
                             Err(e) => return Msg::UninstallDone(Err(e.to_string())),
                         };
                         // The profile leaves the package only once it is gone here
-                        if let Err(e) = crate::packages::uninstall(&manager_key, &name).await {
+                        let uninstalled = async {
+                            let mut state = crate::sync::SyncState::load()?;
+                            crate::packages::uninstall(&manager_key, &name, &mut state).await?;
+                            state.save()
+                        };
+                        if let Err(e) = uninstalled.await {
                             return Msg::UninstallDone(Err(e.to_string()));
                         }
                         let not_saved = leave
@@ -227,6 +232,99 @@ impl Runtime {
                         )
                     },
                     |e| Some(Msg::InboxDone(Err(e))),
+                );
+            }
+            Cmd::Fleet {
+                action,
+                targets,
+                then,
+            } => {
+                // `then` reaches the UI also when the task fails, so a local part never hangs
+                let then = Arc::new(Mutex::new(then));
+                let failed_then = then.clone();
+                self.spawn(
+                    async move {
+                        let result = send_fleet(&action, &targets)
+                            .map(|()| {
+                                format!(
+                                    "Sent '{}' to {}. Each runs it on its next sync",
+                                    action.describe(),
+                                    names(&targets)
+                                )
+                            })
+                            .map_err(|e| e.to_string());
+                        let then = then.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        Msg::FleetSent { result, then }
+                    },
+                    move |e| {
+                        let then = failed_then.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        Some(Msg::FleetSent {
+                            result: Err(e),
+                            then,
+                        })
+                    },
+                );
+            }
+            Cmd::TrustFleet {
+                item,
+                trusted_here,
+                machine_id,
+                fingerprint,
+                label,
+                targets,
+            } => {
+                self.spawn(
+                    async move {
+                        let result = trust_fleet(
+                            item,
+                            trusted_here,
+                            &machine_id,
+                            &fingerprint,
+                            &label,
+                            &targets,
+                        );
+                        Msg::FleetSent { result, then: None }
+                    },
+                    |e| {
+                        Some(Msg::FleetSent {
+                            result: Err(e),
+                            then: None,
+                        })
+                    },
+                );
+            }
+            Cmd::CancelCommand {
+                target,
+                label,
+                seq,
+                action,
+            } => {
+                self.spawn(
+                    async move {
+                        use crate::sync::commands::Cancelled;
+                        let result = crate::sync::SyncEngine::sync_path()
+                            .and_then(|sync_path| {
+                                let _sync_lock = crate::sync::acquire_sync_lock(false)?;
+                                crate::sync::commands::cancel(&sync_path, &target, seq)
+                            })
+                            .map(|found| match found {
+                                Cancelled::Deleted => {
+                                    format!("Cancelled '{}' for {}", action, label)
+                                }
+                                Cancelled::Reported(status) => format!(
+                                    "{} handled '{}' already: {}",
+                                    label,
+                                    action,
+                                    status.label()
+                                ),
+                                Cancelled::Gone => {
+                                    format!("'{}' for {} is no longer pending", action, label)
+                                }
+                            })
+                            .map_err(|e| e.to_string());
+                        Msg::CommandCancelled(result)
+                    },
+                    |e| Some(Msg::CommandCancelled(Err(e))),
                 );
             }
             Cmd::RemoveMachine { machine_id, digest } => {
@@ -416,6 +514,74 @@ impl Runtime {
                 let _ = tx.send(msg);
             }
         });
+    }
+}
+
+/// The names of fleet targets, for a toast.
+fn names(targets: &[(String, String)]) -> String {
+    targets
+        .iter()
+        .map(|(_, label)| label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Send `action` to `targets` as `tether machines ... --on` does. The dashboard does not
+/// wait for a running sync.
+fn send_fleet(
+    action: &crate::sync::commands::Action,
+    targets: &[(String, String)],
+) -> anyhow::Result<()> {
+    let sync_path = crate::sync::SyncEngine::sync_path()?;
+    let _sync_lock = crate::sync::acquire_sync_lock(false)?;
+    let ids: Vec<String> = targets.iter().map(|(id, _)| id.clone()).collect();
+    crate::sync::commands::deliver(&sync_path, action, |sync_path, this| {
+        crate::sync::commands::check_targets(sync_path, this, &ids)?;
+        Ok(ids)
+    })?;
+    Ok(())
+}
+
+/// Trust a machine's key here, as the Machines tab's `a` does, then send the trust to
+/// `targets`.
+fn trust_fleet(
+    item: Option<Box<InboxItem>>,
+    trusted_here: bool,
+    machine_id: &str,
+    fingerprint: &str,
+    label: &str,
+    targets: &[(String, String)],
+) -> Result<String, String> {
+    if !trusted_here {
+        match item {
+            Some(item) => crate::packages::inbox::approve(&item).map(|_| ()),
+            None => crate::sync::SyncEngine::sync_path().and_then(|sync_path| {
+                crate::packages::inbox::trust_machine(&sync_path, machine_id, fingerprint)
+                    .map(|_| ())
+            }),
+        }
+        .map_err(|e| format!("trusting {} failed: {}", label, e))?;
+    }
+    let action = crate::sync::commands::Action::Trust {
+        machine: machine_id.to_string(),
+        fingerprint: fingerprint.to_string(),
+    };
+    match send_fleet(&action, targets) {
+        Ok(()) if trusted_here => Ok(format!(
+            "Sent the trust of {} to {}. Each trusts it on its next sync",
+            label,
+            names(targets)
+        )),
+        Ok(()) => Ok(format!(
+            "Trusted {} here and sent the trust to {}. Each trusts it on its next sync",
+            label,
+            names(targets)
+        )),
+        Err(e) if trusted_here => Err(format!("sending the trust failed: {}", e)),
+        Err(e) => Err(format!(
+            "Trusted {} here, but sending the trust failed: {}",
+            label, e
+        )),
     }
 }
 
