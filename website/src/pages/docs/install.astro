@@ -11,7 +11,7 @@ import Code from '../../components/Code.astro';
 
     <h2>Install script (macOS and Linux)</h2>
     <Code code="curl -fsSL https://tether-cli.com/install.sh | sh" />
-    <p>The script finds the build for your system, checks its <code>.sha256</code> file and installs <code>tether</code> to <code>~/.local/bin</code>. Run it again to upgrade. If the systemd user service runs, the script restarts it.</p>
+    <p>The script finds the build for your system, checks its <code>.sha256</code> file and installs <code>tether</code> to <code>~/.local/bin</code>. Run it again to upgrade. The daemon restarts by itself when its binary changes. The script warns when the daemon or your <code>PATH</code> uses another <code>tether</code>.</p>
     <ul>
       <li><code>TETHER_INSTALL_DIR</code> sets another directory</li>
       <li><code>TETHER_VERSION</code> installs one release, such as <code>2.1.0</code></li>
