@@ -1412,8 +1412,9 @@ async fn fallback(
     Ok(decided)
 }
 
-/// Never install a release no trusted record lists without the user's approval of that
-/// exact release. A malicious release is held, and approval cannot install it.
+/// A fallback release installs when the user approved that exact release or a trusted
+/// record lists it, as any other package. A malicious release is held, and approval cannot
+/// install it.
 fn fallback_decision(
     def: &PackageManagerDef,
     trust: &Trust,
@@ -1430,7 +1431,11 @@ fn fallback_decision(
         anyhow::bail!("the inbox holds {} {} as malicious", name, version);
     }
     let malicious = advisories.iter().any(|id| osv::is_malicious(id));
-    if !malicious && trust.inbox.is_approved(key, name, Some(&version), None) {
+    let checks = Checks {
+        malicious,
+        ..trust.checks(key, name, Some(&version), None)
+    };
+    if inbox::reasons(checks).is_empty() {
         if !advisories.is_empty() {
             Output::warning(&format!(
                 "{} {} has known vulnerabilities: {}",
@@ -2448,6 +2453,35 @@ mod tests {
         trust.inbox.items.clear();
         trust.inbox.rejected.push(decision("1.5.0"));
         assert!(decide(&trust, &[]).is_err());
+    }
+
+    #[test]
+    fn a_fallback_release_a_trusted_record_lists_needs_no_approval() {
+        let (tmp, me, t, store) = two_machines();
+        let path = tmp.path();
+        record_on(path, "t", std::env::consts::OS, ("example", "1.5.0"), &t);
+        let trust = trust_as(path, "me", &me, &store);
+        let npm = &SIMPLE_MANAGERS[0];
+        let decide = |version: &str, advisories: &[&str]| {
+            fallback_decision(
+                npm,
+                &trust,
+                "example",
+                version.to_string(),
+                advisories.iter().map(|a| a.to_string()).collect(),
+                Reason::OtherOsVersion,
+            )
+            .unwrap()
+        };
+
+        assert!(matches!(decide("1.5.0", &[]), Fallback::Installed(v) if v == "1.5.0"));
+        // The record covers only the release it lists
+        assert!(matches!(decide("1.4.0", &[]), Fallback::Held(_)));
+        // A trusted record never installs a malicious release
+        assert!(matches!(
+            decide("1.5.0", &["MAL-2026-1"]),
+            Fallback::Held(_)
+        ));
     }
 
     #[test]
