@@ -198,4 +198,4 @@ brew tap paddo-tech/tap
 brew install tether-cli
 ```
 
-Homebrew on Linux uses the same commands. Without Homebrew, Linux users download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` from the GitHub release and put `tether` on `PATH`. The binaries are static and need no particular glibc.
+Homebrew on Linux uses the same commands. Without Homebrew: `curl -fsSL https://tether-cli.com/install.sh | sh` (`website/public/install.sh`, served by the website deploy; plain `sh`, so `set -eu`). It installs the release build for the OS and CPU to `~/.local/bin`, checks the `.sha256` and restarts an active systemd user service; it reads `TETHER_INSTALL_DIR` and `TETHER_VERSION`. mise: `mise use -g github:paddo-tech/tether-cli`. Or download `tether-x86_64-unknown-linux-musl.tar.gz` or `tether-aarch64-unknown-linux-musl.tar.gz` from the GitHub release and put `tether` on `PATH`. The binaries are static and need no particular glibc.
