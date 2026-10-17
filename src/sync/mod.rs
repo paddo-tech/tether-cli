@@ -11,6 +11,7 @@ pub mod merge;
 pub mod packages;
 pub mod signing;
 pub mod state;
+pub mod steps;
 pub mod team;
 
 pub use backup::{
