@@ -549,7 +549,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The profiles a package belongs to, one pill each, or "this profile only".
+/// The profiles a package belongs to, one pill each, "this profile only" or "no profile".
 fn members_line<'a>(
     membership: &crate::sync::membership::Membership,
     manager_key: &str,
@@ -557,7 +557,10 @@ fn members_line<'a>(
     t: &crate::dashboard::theme::Theme,
 ) -> Line<'a> {
     let members = membership.members(manager_key, name);
-    if members.len() == 1 && members.contains(&membership.profile) {
+    if members.is_empty() && membership.has_entry(manager_key, name) {
+        return Line::from(Span::styled("no profile", Style::default().fg(t.dim)));
+    }
+    if members.is_empty() || (members.len() == 1 && members.contains(&membership.profile)) {
         return Line::from(Span::styled(
             "this profile only",
             Style::default().fg(t.dim),

@@ -59,30 +59,37 @@ pub struct Edit {
     /// The members the user saw when they chose the edit. When set, a save refuses if the
     /// members changed since, so the user decides again
     pub seen: Option<BTreeSet<String>>,
+    /// Change nothing when the edit would leave no member
+    pub keep_last: bool,
 }
 
 impl Edit {
     /// The members after the edit.
     pub fn apply(&self, members: &BTreeSet<String>) -> BTreeSet<String> {
-        members
+        let after: BTreeSet<String> = members
             .iter()
             .chain(&self.add)
             .filter(|p| !self.remove.contains(*p))
             .cloned()
-            .collect()
+            .collect();
+        if self.keep_last && after.is_empty() {
+            members.clone()
+        } else {
+            after
+        }
     }
 }
 
-/// Apply `edit` to one package's members and push it. Returns the new members, or None
-/// when the edit would leave the package with no member: removing the last profile is a
-/// plain uninstall. An edit that changes nothing writes nothing. The caller holds the sync
-/// lock, so no sync commits in the repo meanwhile.
+/// Apply `edit` to one package's members and push it. Returns the new members. An empty
+/// entry is authoritative too: no machine installs the package from another machine. An
+/// edit that changes nothing writes nothing. The caller holds the sync lock, so no sync
+/// commits in the repo meanwhile.
 pub fn save_edit(
     config: &Config,
     manager: &str,
     name: &str,
     edit: &Edit,
-) -> Result<Option<BTreeSet<String>>> {
+) -> Result<BTreeSet<String>> {
     let sync_path = SyncEngine::sync_path()?;
     let machine_id = SyncState::load()?.machine_id;
     save_members(&sync_path, &canonical_id(manager, name), edit, |table| {
@@ -100,7 +107,7 @@ fn save_members(
     id: &str,
     edit: &Edit,
     members_now: impl Fn(&Table) -> Result<BTreeSet<String>>,
-) -> Result<Option<BTreeSet<String>>> {
+) -> Result<BTreeSet<String>> {
     let repo = GitBackend::open(sync_path)?;
     // Each attempt resets to the remote branch, which must drop only this edit's commit
     if repo.has_changes()? || repo.has_unpushed_commits() {
@@ -122,11 +129,8 @@ fn save_members(
             );
         }
         let members = edit.apply(&current);
-        if members.is_empty() {
-            return Ok(None);
-        }
         if members == current {
-            return Ok(Some(members));
+            return Ok(members);
         }
         let previous = match std::fs::read_to_string(&path) {
             Ok(text) => Some(text),
@@ -145,7 +149,7 @@ fn save_members(
         let committed = written.is_ok();
         let pushed = written.and_then(|()| repo.push_once());
         let Err(e) = pushed else {
-            return Ok(Some(members));
+            return Ok(members);
         };
         // A failed attempt leaves the repo as the remote has it, so a sync never pushes it
         repo.reset_to_remote()?;
@@ -336,6 +340,12 @@ impl Membership {
             .unwrap_or_default()
     }
 
+    /// Whether the table has an entry for the package. Empty members with an entry mean no
+    /// profile; without one, no record lists the package yet.
+    pub fn has_entry(&self, manager: &str, name: &str) -> bool {
+        self.explicit.contains_key(&key(manager, name))
+    }
+
     /// Whether this machine installs the package from other machines. A package this
     /// machine lists always counts.
     pub fn includes(&self, manager: &str, name: &str) -> bool {
@@ -523,6 +533,24 @@ mod tests {
         assert!(leave("dev")
             .apply(&on_mac1.members("brew_casks", "zoom"))
             .is_empty());
+        // `packages remove` keeps the last member
+        let keep = Edit {
+            keep_last: true,
+            ..leave("dev")
+        };
+        assert_eq!(
+            keep.apply(&on_mac1.members("brew_casks", "zoom")),
+            set(&["dev"])
+        );
+
+        // An empty entry is no profile, not a missing entry
+        let mut t = Table::new();
+        entry(&mut t, "brew_casks:zoom", set(&[]));
+        let on_mac2 = Membership::new(&c, &t, &mac2, &[(&mac1, true), (&server, true)]);
+        assert!(on_mac2.members("brew_casks", "zoom").is_empty());
+        assert!(on_mac2.has_entry("brew_casks", "zoom"));
+        assert!(!on_mac2.includes("brew_casks", "zoom"));
+        assert!(!on_mac1.has_entry("brew_casks", "zoom"));
     }
 
     #[test]
@@ -782,10 +810,20 @@ mod tests {
         save_members(&b, "npm:b", &share(&["server"]), listed("npm:b")).unwrap();
         save_members(&b, "npm:a", &share(&["mini"]), listed("npm:a")).unwrap();
         let saved = save_members(&a, "npm:a", &share(&["server"]), listed("npm:a")).unwrap();
-        assert_eq!(saved, Some(set(&["dev", "mini", "server"])));
+        assert_eq!(saved, set(&["dev", "mini", "server"]));
         let table = read_entries(&a);
         assert_eq!(table["npm:a"], vec!["dev", "mini", "server"]);
         assert_eq!(table["npm:b"], vec!["dev", "server"]);
+
+        // Removing the last profiles writes an empty entry, which no profile installs
+        let none = Edit {
+            remove: set(&["dev", "server"]),
+            ..Edit::default()
+        };
+        assert!(save_members(&a, "npm:b", &none, listed("npm:b"))
+            .unwrap()
+            .is_empty());
+        assert!(read_entries(&a)["npm:b"].is_empty());
         let repo = GitBackend::open(&a).unwrap();
         assert!(!repo.has_changes().unwrap() && !repo.has_unpushed_commits());
 
@@ -815,7 +853,7 @@ mod tests {
         };
         let before = head();
         let saved = save_members(&a, "npm:a", &share(&["dev"]), listed("npm:a")).unwrap();
-        assert_eq!(saved, Some(set(&["dev", "mini", "server"])));
+        assert_eq!(saved, set(&["dev", "mini", "server"]));
         assert_eq!(head(), before);
 
         // A save never commits changes it did not make
@@ -837,7 +875,7 @@ mod tests {
                 .unwrap();
             let _ = std::fs::remove_file(&attempts);
         };
-        let rejected = |result: Result<Option<BTreeSet<String>>>| {
+        let rejected = |result: Result<BTreeSet<String>>| {
             let error = format!("{:#}", result.unwrap_err());
             assert!(error.contains("pre-receive hook declined"), "{error}");
             let tried = std::fs::read_to_string(&attempts).unwrap();
