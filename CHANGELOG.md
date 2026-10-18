@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-18
+
+### Added
+
+- An install script for machines without Homebrew: `curl -fsSL https://tether-cli.com/install.sh | sh`. It installs the release build for the OS and CPU to `~/.local/bin` and checks its `.sha256`. Running it again upgrades. `TETHER_INSTALL_DIR` sets another directory, and `TETHER_VERSION` pins a release
+- `packages unshare --from` can take a package's last profile. The `packages/profiles.toml` entry becomes `[]`, and no machine installs the package from another machine. Each machine keeps its copy. The dashboard profile checklist accepts an empty selection. `packages list`, the dashboard and the sync notice show such a package as "no profile"
+
+### Fixed
+
+- Uninstalling a brew formula now removes every installed version. Before, brew removed only the linked version, so the machine record still listed the formula. A pinned formula now uninstalls too. A formula that is not installed is an error
+- `packages remove` stays a plain uninstall when this machine's profile is the last member, also when another machine took a profile out since the last sync
+
 ## [2.1.0] - 2026-10-17
 
 ### Added
