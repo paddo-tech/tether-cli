@@ -110,7 +110,11 @@ pub async fn uninstall(
         return Ok(true);
     }
     let manager: Box<dyn PackageManager> = match manager_key {
-        "brew_formulae" | "brew_casks" => Box::new(BrewManager),
+        "brew_formulae" => {
+            BrewManager.uninstall_formula(name).await?;
+            return Ok(false);
+        }
+        "brew_casks" => Box::new(BrewManager),
         _ => manager_for_key(manager_key)
             .ok_or_else(|| anyhow::anyhow!("Unknown manager: {}", manager_key))?,
     };

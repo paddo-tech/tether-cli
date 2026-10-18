@@ -268,7 +268,11 @@ fn excluded_notice(scope: &Membership) -> Option<String> {
     let mut profiles: HashMap<String, usize> = HashMap::new();
     for (manager, name) in &excluded {
         *managers.entry(manager).or_default() += 1;
-        for profile in scope.members(manager, name) {
+        let members = scope.members(manager, name);
+        if members.is_empty() {
+            *profiles.entry("no profile".to_string()).or_default() += 1;
+        }
+        for profile in members {
             *profiles.entry(profile).or_default() += 1;
         }
     }
@@ -2001,6 +2005,15 @@ mod tests {
 
         let alone = Membership::new(&config, &Default::default(), &me, &[]);
         assert_eq!(excluded_notice(&alone), None);
+
+        let mut table = crate::sync::membership::Table::new();
+        table.insert("npm:only-dev".into(), Vec::new());
+        let scope = Membership::new(&config, &table, &me, &[(&dev, true), (&laptop, true)]);
+        let notice = excluded_notice(&scope).unwrap();
+        assert!(
+            notice.contains("By profile: dev 201, laptop 1, no profile 1."),
+            "{notice}"
+        );
     }
 
     #[test]

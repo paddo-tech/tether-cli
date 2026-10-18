@@ -811,6 +811,24 @@ impl BrewManager {
         Ok(())
     }
 
+    /// Uninstall a formula. Without `--force`, brew removes only the linked keg, and
+    /// `brew list` still lists the formula while an older keg stays.
+    pub async fn uninstall_formula(&self, formula: &str) -> Result<()> {
+        validate_name(Ecosystem::Brew, formula)?;
+        // `--force` also hides a name brew cannot find, so the Cellar decides
+        let cellar = PathBuf::from(self.run_brew(&["--cellar"]).await?.trim());
+        let rack = cellar.join(normalize_formula_name(formula));
+        if !rack.exists() {
+            anyhow::bail!("{} is not installed", formula);
+        }
+        self.run_brew(&["uninstall", "--formula", "--force", formula])
+            .await?;
+        if rack.exists() {
+            anyhow::bail!("brew uninstall left {} installed", formula);
+        }
+        Ok(())
+    }
+
     /// Install a single cask.
     /// Returns Ok(true) if installed, Ok(false) if needs password (flagged for manual sync).
     pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {

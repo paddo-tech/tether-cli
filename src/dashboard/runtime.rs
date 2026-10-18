@@ -84,14 +84,13 @@ impl Runtime {
                     async move {
                         Msg::ProfilesSaved(save_profiles(&manager_key, &name, &edit).map(
                             |members| {
+                                if members.is_empty() {
+                                    return format!("{} belongs to no profile", name);
+                                }
                                 format!(
                                     "{} profiles: {}",
                                     name,
-                                    members
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
+                                    members.into_iter().collect::<Vec<_>>().join(", ")
                                 )
                             },
                         ))
@@ -714,7 +713,7 @@ fn save_profiles(
     manager_key: &str,
     name: &str,
     edit: &crate::sync::membership::Edit,
-) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+) -> Result<std::collections::BTreeSet<String>, String> {
     crate::config::Config::load()
         .and_then(|config| {
             // The dashboard owns the terminal, so it cannot wait for a sync with a prompt
@@ -739,13 +738,13 @@ fn leave_profile(
 
 /// A save that keeps a profile the edit removes did not apply it, so it is an error.
 fn check_left(
-    saved: Option<std::collections::BTreeSet<String>>,
+    saved: std::collections::BTreeSet<String>,
     edit: &crate::sync::membership::Edit,
 ) -> Result<(), String> {
-    match saved {
-        Some(members) if members.is_disjoint(&edit.remove) => Ok(()),
-        Some(_) => Err("this profile is still a member".to_string()),
-        None => Err("the package would have no profile left".to_string()),
+    if saved.is_disjoint(&edit.remove) {
+        Ok(())
+    } else {
+        Err("this profile is still a member".to_string())
     }
 }
 
@@ -799,8 +798,8 @@ mod tests {
             remove: set(&["dev"]),
             ..Edit::default()
         };
-        assert!(check_left(Some(set(&["server"])), &edit).is_ok());
-        assert!(check_left(Some(set(&["dev", "server"])), &edit).is_err());
-        assert!(check_left(None, &edit).is_err());
+        assert!(check_left(set(&["server"]), &edit).is_ok());
+        assert!(check_left(set(&[]), &edit).is_ok());
+        assert!(check_left(set(&["dev", "server"]), &edit).is_err());
     }
 }

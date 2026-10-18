@@ -54,23 +54,20 @@ pub fn handle_key(app: &mut App, mut picker: PackageProfiles, key: KeyEvent) -> 
             }
         }
         KeyCode::Enter => {
-            if picker.checked.is_empty() {
-                app.flash_error("A package needs one profile at least. Uninstall it instead");
-            } else {
-                let edit = Edit {
-                    add: picker.checked.difference(&picker.base).cloned().collect(),
-                    remove: picker.base.difference(&picker.checked).cloned().collect(),
-                    seen: Some(picker.base),
-                };
-                if edit.add.is_empty() && edit.remove.is_empty() {
-                    return None;
-                }
-                return Some(Cmd::SaveProfiles {
-                    manager_key: picker.manager_key,
-                    name: picker.name,
-                    edit,
-                });
+            let edit = Edit {
+                add: picker.checked.difference(&picker.base).cloned().collect(),
+                remove: picker.base.difference(&picker.checked).cloned().collect(),
+                seen: Some(picker.base),
+                ..Edit::default()
+            };
+            if edit.add.is_empty() && edit.remove.is_empty() {
+                return None;
             }
+            return Some(Cmd::SaveProfiles {
+                manager_key: picker.manager_key,
+                name: picker.name,
+                edit,
+            });
         }
         _ => {}
     }

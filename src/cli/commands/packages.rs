@@ -149,7 +149,12 @@ fn list_other_profiles(json: bool) -> Result<()> {
             Output::section(m);
             manager = m;
         }
-        Output::list_item(&format!("{}  ({})", name, profiles.join(", ")));
+        let profiles = if profiles.is_empty() {
+            "no profile".to_string()
+        } else {
+            profiles.join(", ")
+        };
+        Output::list_item(&format!("{}  ({})", name, profiles));
     }
     println!();
     Output::dim(&format!(
@@ -168,7 +173,7 @@ fn list_json(installed: &[Installed], membership: Option<&Membership>) -> serde_
             g.packages.iter().map(move |p| {
                 let profiles: Vec<String> = membership.map_or_else(Vec::new, |m| {
                     let members = m.members(g.key, &p.name);
-                    if members.is_empty() {
+                    if members.is_empty() && !m.has_entry(g.key, &p.name) {
                         vec![m.profile.clone()]
                     } else {
                         members.into_iter().collect()
@@ -282,7 +287,9 @@ fn print_install_failures() {
 /// joins this machine's profile on the next sync.
 pub fn members_label(membership: &Membership, manager: &str, name: &str) -> String {
     let members = membership.members(manager, name);
-    if members.is_empty() || (members.len() == 1 && members.contains(&membership.profile)) {
+    if members.is_empty() && membership.has_entry(manager, name) {
+        "no profile".to_string()
+    } else if members.is_empty() || (members.len() == 1 && members.contains(&membership.profile)) {
         "this profile only".to_string()
     } else {
         members.into_iter().collect::<Vec<_>>().join(", ")
@@ -326,7 +333,7 @@ pub fn share(id: &str, to: &[String]) -> Result<()> {
         ..Edit::default()
     };
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
-    let members = membership::save_edit(&config, manager, name, &edit)?.unwrap_or_default();
+    let members = membership::save_edit(&config, manager, name, &edit)?;
     Output::success(&format!(
         "{} now belongs to: {}. Machines in these profiles install it on their next sync",
         membership::canonical_id(manager, name),
@@ -340,6 +347,9 @@ pub fn unshare(id: &str, from: &[String]) -> Result<()> {
     let config = crate::config::Config::load()?;
     let members = Membership::load_current(&config)?.members(manager, name);
     if let Some(other) = from.iter().find(|p| !members.contains(p.as_str())) {
+        if members.is_empty() {
+            anyhow::bail!("{} does not belong to profile {} or any other", id, other);
+        }
         anyhow::bail!(
             "{} does not belong to profile {}. Its profiles: {}",
             id,
@@ -352,14 +362,15 @@ pub fn unshare(id: &str, from: &[String]) -> Result<()> {
         ..Edit::default()
     };
     let _sync_lock = crate::sync::acquire_sync_lock(true)?;
-    let Some(members) = membership::save_edit(&config, manager, name, &edit)? else {
-        anyhow::bail!(
-            "A package keeps at least one profile. To drop {} everywhere, run 'tether packages \
-             uninstall {}' on a machine of each profile",
-            id,
-            id
-        );
-    };
+    let members = membership::save_edit(&config, manager, name, &edit)?;
+    if members.is_empty() {
+        Output::success(&format!(
+            "{} now belongs to no profile. No machine installs it from another machine, but \
+             each keeps any copy it has",
+            membership::canonical_id(manager, name)
+        ));
+        return Ok(());
+    }
     Output::success(&format!(
         "{} now belongs to: {}. Machines in {} stop installing it, but keep any copy they have",
         membership::canonical_id(manager, name),
@@ -483,22 +494,24 @@ pub async fn remove(id: &str) -> Result<()> {
         Output::success(&format!("Uninstalled {}", id));
     }
     let members = membership.members(manager, name);
-    if !members.contains(&membership.profile) || members.len() == 1 {
+    if !members.contains(&membership.profile) {
         return Ok(());
     }
+    // The last member stays, so this is a plain uninstall. The remote decides which is last
     let edit = Edit {
         remove: [membership.profile.clone()].into(),
+        keep_last: true,
         ..Edit::default()
     };
     match membership::save_edit(&config, manager, name, &edit) {
-        Ok(Some(keep)) => Output::info(&format!(
+        Ok(keep) if keep.contains(&membership.profile) => {}
+        Ok(keep) => Output::info(&format!(
             "Other machines in profile {} no longer install {}, but keep any copy they have. \
              Profiles {} keep it",
             membership.profile,
             id,
             keep.into_iter().collect::<Vec<_>>().join(", ")
         )),
-        Ok(None) => {}
         Err(e) => anyhow::bail!(
             "Uninstalled {}, but saving its profiles failed: {}. Other machines in profile {} \
              still install it",
