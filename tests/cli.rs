@@ -38,6 +38,24 @@ fn fails(home: &Path, args: &[&str], message: &str) {
 }
 
 #[test]
+fn remote_resolve_names_a_file_a_side_and_machines() {
+    let h = home();
+    tether(h.path())
+        .args(["resolve", "--on", "b"])
+        .assert()
+        .code(2);
+    tether(h.path())
+        .args(["resolve", ".zshrc", "--on", "b"])
+        .assert()
+        .code(2);
+    fails(
+        h.path(),
+        &["resolve", ".zshrc", "--keep", "remote", "--on", "all"],
+        "Name the machines",
+    );
+}
+
+#[test]
 fn config_errors_exit_1() {
     let h = home();
     fails(h.path(), &["config", "get", "nope.nope"], "not found");

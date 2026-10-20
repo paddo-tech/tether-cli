@@ -37,6 +37,12 @@ pub enum Action {
         machine: String,
         fingerprint: String,
     },
+    /// Keep one side of the target's pending conflict on a dotfile. Either side is a copy
+    /// the fleet already has, so the command brings no new content
+    Resolve {
+        file: String,
+        keep: crate::sync::Keep,
+    },
 }
 
 impl Action {
@@ -49,6 +55,7 @@ impl Action {
                 machine,
                 fingerprint,
             } => format!("trust {} {}", machine, fingerprint),
+            Action::Resolve { file, keep } => format!("resolve {} keep {}", file, keep.as_str()),
         }
     }
 
@@ -72,6 +79,11 @@ impl Action {
             Action::Trust { machine, .. } => {
                 if !valid_machine_id(machine) {
                     bail!("invalid machine id {}", machine);
+                }
+            }
+            Action::Resolve { file, .. } => {
+                if !MachineState::is_safe_conflict_path(file) {
+                    bail!("invalid file {}", file);
                 }
             }
         }
@@ -381,9 +393,7 @@ pub async fn apply_incoming(
         let outcome = if command.expires_at <= Utc::now() {
             Err(None)
         } else {
-            run(&command.action, config, sync_path, state)
-                .await
-                .map_err(Some)
+            run(command, config, sync_path, state).await.map_err(Some)
         };
         let (status, error) = match outcome {
             Ok(()) => (CommandStatus::Applied, None),
@@ -425,13 +435,13 @@ pub async fn apply_incoming(
 }
 
 async fn run(
-    action: &Action,
+    command: &Command,
     config: &mut Config,
     sync_path: &Path,
     state: &mut SyncState,
 ) -> Result<()> {
     let this_machine = state.machine_id.clone();
-    match action {
+    match &command.action {
         Action::Uninstall { manager, name } => {
             if manager == "brew_taps" {
                 bail!("Tether does not remove taps");
@@ -468,6 +478,10 @@ async fn run(
             }
             crate::packages::inbox::trust_machine(sync_path, machine, fingerprint)?;
             Ok(())
+        }
+        Action::Resolve { file, keep } => {
+            let signed_at = command.expires_at - Duration::days(EXPIRY_DAYS);
+            crate::sync::conflict::keep_side(config, sync_path, state, file, *keep, signed_at)
         }
     }
 }
@@ -643,6 +657,9 @@ pub fn deliver(
             bail!("Name machines other than {} itself", machine);
         }
     }
+    if let Action::Resolve { file, .. } = action {
+        check_conflict_reported(sync_path, &targets, file)?;
+    }
     let key = signing::load_or_create(&this)?;
     let sent = send(sync_path, &this, &key, &targets, action)?;
     git.commit(
@@ -656,6 +673,32 @@ pub fn deliver(
         );
     }
     Ok(sent)
+}
+
+/// Each target's record must report the conflict on `file`. An older target would ignore
+/// the command, and the target refuses a file it has no conflict on anyway.
+fn check_conflict_reported(sync_path: &Path, targets: &[String], file: &str) -> Result<()> {
+    let records = MachineState::list_all(sync_path)?;
+    for target in targets {
+        let record = records.iter().find(|m| m.machine_id == *target);
+        match record {
+            Some(r) if !r.resolves_conflicts => bail!(
+                "Machine {} runs Tether {}, which cannot resolve conflicts by command. Upgrade \
+                 it first",
+                target,
+                r.cli_version
+            ),
+            Some(r) if r.conflicts.iter().any(|c| c == file) => {}
+            _ => bail!(
+                "Machine {} reports no conflict on {}. See its conflicts with 'tether machines \
+                 show {}'",
+                target,
+                file,
+                target
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// A target reads profiles from the synced config at origin/main, so a profile that only
@@ -1002,6 +1045,33 @@ mod tests {
             name: "curl".to_string(),
         };
         assert!(unknown.check().is_err());
+        for file in [
+            "/etc/passwd",
+            "../.ssh/id_ed25519",
+            "~/.zshrc",
+            ".tether/signing_key",
+        ] {
+            let resolve = Action::Resolve {
+                file: file.to_string(),
+                keep: crate::sync::Keep::Remote,
+            };
+            assert!(resolve.check().is_err(), "{file}");
+        }
+        let resolve = Action::Resolve {
+            file: ".config/git/config".to_string(),
+            keep: crate::sync::Keep::Local,
+        };
+        assert!(resolve.check().is_ok());
+        let body = toml::to_string(&Command {
+            target: "b".to_string(),
+            signer: "a".to_string(),
+            seq: 1,
+            expires_at: Utc::now(),
+            action: resolve.clone(),
+        })
+        .unwrap();
+        assert!(body.contains("action = \"resolve\"") && body.contains("keep = \"local\""));
+        assert_eq!(toml::from_str::<Command>(&body).unwrap().action, resolve);
     }
 
     #[test]

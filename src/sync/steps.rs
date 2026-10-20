@@ -340,7 +340,7 @@ fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
 /// Back up an existing dotfile (if present), ensure parent dir exists,
 /// write the decrypted content, and preserve the executable bit from the
 /// encrypted source file.
-fn backup_and_write_dotfile(
+pub(crate) fn backup_and_write_dotfile(
     backup_dir: &mut Option<PathBuf>,
     file: &str,
     local_file: &Path,
@@ -405,7 +405,7 @@ fn warn_tether_config_dir(path: &str) {
 }
 
 /// Whether the dotfile entry `pattern` covers `file`. Either may start with `~/`.
-fn entry_matches(pattern: &str, file: &str) -> bool {
+pub(crate) fn entry_matches(pattern: &str, file: &str) -> bool {
     let pattern = pattern.trim_start_matches("~/");
     let file = file.trim_start_matches("~/");
     pattern == file
@@ -1660,6 +1660,14 @@ pub async fn build_machine_state(
     machine_state.os = std::env::consts::OS.to_string();
     machine_state.profile = config.machine_profiles.get(&state.machine_id).cloned();
     machine_state.runs_commands = true;
+    machine_state.resolves_conflicts = true;
+    machine_state.conflicts = crate::sync::ConflictState::load()
+        .unwrap_or_default()
+        .conflicts
+        .into_iter()
+        .map(|c| c.file_path)
+        .collect();
+    machine_state.conflicts.sort();
 
     // Collect file hashes
     machine_state.files.clear();

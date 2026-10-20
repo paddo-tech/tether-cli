@@ -157,6 +157,12 @@ pub struct MachineState {
     /// The latest fleet command results, per signer key fingerprint, oldest first
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commands_applied: BTreeMap<String, Vec<CommandResult>>,
+    /// This build runs `resolve` fleet commands
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolves_conflicts: bool,
+    /// Home-relative paths of this machine's pending dotfile conflicts, sorted
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
     /// This machine's Homebrew trust store. A machine that trusts this record approves the
     /// same taps, formulae and casks, unless it rejected them
     #[serde(default, skip_serializing_if = "BrewTrustEntries::is_empty")]
@@ -312,6 +318,8 @@ impl MachineState {
             generation: 0,
             runs_commands: false,
             commands_applied: BTreeMap::new(),
+            resolves_conflicts: false,
+            conflicts: Vec::new(),
             brew_trust: BrewTrustEntries::default(),
         }
     }
@@ -322,6 +330,15 @@ impl MachineState {
     pub const MAX_COMMAND_RESULTS: usize = 10;
     pub const MAX_COMMAND_SIGNERS: usize = 64;
     const MAX_COMMAND_TEXT: usize = 500;
+    const MAX_CONFLICTS: usize = 100;
+
+    /// A home-relative dotfile path, as conflicts.json holds it.
+    pub(crate) fn is_safe_conflict_path(path: &str) -> bool {
+        path.len() <= 1024
+            && !path.starts_with('~')
+            && !path.contains(['\n', '\r'])
+            && crate::config::is_safe_dotfile_path(path)
+    }
 
     /// Validate package name is safe for shell usage
     pub(crate) fn is_safe_package_name(name: &str) -> bool {
@@ -370,6 +387,9 @@ impl MachineState {
                 }
             }
         }
+
+        self.conflicts.retain(|c| Self::is_safe_conflict_path(c));
+        self.conflicts.truncate(Self::MAX_CONFLICTS);
 
         // Validate removed_packages
         for packages in self.removed_packages.values_mut() {
@@ -706,6 +726,12 @@ mod tests {
         assert_eq!(npm_pkgs.len(), 2);
         assert!(npm_pkgs.contains(&"safe-pkg".to_string()));
         assert!(npm_pkgs.contains(&"another-safe".to_string()));
+
+        state.conflicts = ["/etc/passwd", "../x", "~/.zshrc", ".config/a\nb", ".zshrc"]
+            .map(String::from)
+            .to_vec();
+        state.validate().unwrap();
+        assert_eq!(state.conflicts, vec![".zshrc"]);
     }
 
     #[test]

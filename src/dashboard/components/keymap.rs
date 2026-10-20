@@ -357,6 +357,20 @@ const MACHINE_DETAIL: &[Binding] = &[
         5,
     ),
     b(
+        &[Char('R')],
+        "R",
+        "keep synced",
+        "Resolve the conflict there with the synced copy (asks)",
+        0,
+    ),
+    b(
+        &[Char('L')],
+        "L",
+        "keep its copy",
+        "Resolve the conflict there with that machine's own file (asks)",
+        0,
+    ),
+    b(
         &[Char('a')],
         "a",
         "trust",

@@ -328,6 +328,19 @@ pub async fn show(name: Option<&str>) -> Result<()> {
         ),
     );
     Output::key_value("Dotfiles", &record.dotfiles.len().to_string());
+    if !record.conflicts.is_empty() {
+        println!();
+        Output::subheader("Conflicts");
+        for file in &record.conflicts {
+            Output::list_item(file);
+        }
+        if id != this {
+            Output::dim(&format!(
+                "Resolve one there with: tether resolve <file> --keep local|remote --on {}",
+                id
+            ));
+        }
+    }
     print_commands(&sync_path, record)?;
     println!();
     if id == this {
