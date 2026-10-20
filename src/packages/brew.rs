@@ -876,6 +876,14 @@ impl BrewManager {
         Ok(())
     }
 
+    /// Uninstall a cask. A plain `brew uninstall` takes the formula when a formula and a cask
+    /// share the name, such as azure-cli.
+    pub async fn uninstall_cask(&self, cask: &str) -> Result<()> {
+        validate_name(Ecosystem::Brew, cask)?;
+        self.run_brew(&["uninstall", "--cask", cask]).await?;
+        Ok(())
+    }
+
     /// Install a single cask.
     /// Returns Ok(true) if installed, Ok(false) if needs password (flagged for manual sync).
     pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {
