@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-20
+
+### Added
+
+- `init --profile <name>` assigns a profile from the synced config, and replaces the current assignment
+- Each machine record lists its machine's Homebrew trust store. A machine that trusts the record lets the same taps, formulae and casks pass the untrusted-tap check, unless it rejected them. Every other install check still applies. Trust adopted this way spreads one step: a record never lists entries its machine adopted
+- Before brew installs, one warning names the tapped taps that brew trusts nothing from
+
+### Changed
+
+- The sync that a re-init runs first imports no synced packages, so a machine that takes another profile does not install the old profile's packages first. Fleet commands still run
+- Casks install with `--adopt`, so an app that is already installed outside Homebrew, in the same version, becomes managed instead of failing
+
+### Fixed
+
+- A cask that Homebrew disabled is refused before brew runs, with the reason
+
 ## [2.2.0] - 2026-10-18
 
 ### Added
