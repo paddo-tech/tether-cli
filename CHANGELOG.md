@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-10-20
+
+### Fixed
+
+- Removing a cask now uninstalls the cask. Before, when a formula had the same name, such as azure-cli, `packages remove`, the dashboard and fleet `uninstall` commands removed the formula and left the cask installed
+
 ## [2.3.0] - 2026-10-20
 
 ### Added
