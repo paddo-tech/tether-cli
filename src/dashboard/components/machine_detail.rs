@@ -11,6 +11,7 @@ use crate::dashboard::app::{App, Overlay};
 use crate::dashboard::msg::KeyOutcome;
 use crate::sync::commands::{Action, Pending};
 use crate::sync::state::{CommandResult, CommandStatus};
+use crate::sync::Keep;
 use crate::sync::MachineState;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -29,22 +30,29 @@ pub fn open_detail(app: &App) -> Option<&MachineState> {
 
 /// One row of another machine's details.
 pub enum DetailRow {
+    Conflict(String),
     Pending(Pending),
     Result(CommandResult),
     Manager { key: String, count: usize },
     Package { manager_key: String, name: String },
 }
 
-/// The commands that wait for `m`, the results it reported, newest first, then its
-/// packages by manager.
+/// The conflicts `m` reports, the commands that wait for it, the results it reported,
+/// newest first, then its packages by manager.
 pub fn detail_rows(app: &App, m: &MachineState) -> Vec<DetailRow> {
-    let mut rows: Vec<DetailRow> = app
-        .state
-        .pending_commands
+    let mut rows: Vec<DetailRow> = m
+        .conflicts
         .iter()
-        .filter(|(id, _)| *id == m.machine_id)
-        .flat_map(|(_, pending)| pending.iter().cloned().map(DetailRow::Pending))
+        .cloned()
+        .map(DetailRow::Conflict)
         .collect();
+    rows.extend(
+        app.state
+            .pending_commands
+            .iter()
+            .filter(|(id, _)| *id == m.machine_id)
+            .flat_map(|(_, pending)| pending.iter().cloned().map(DetailRow::Pending)),
+    );
     let mut results: Vec<CommandResult> = m.commands_applied.values().flatten().cloned().collect();
     results.sort_by_key(|r| std::cmp::Reverse(r.at));
     rows.extend(results.into_iter().map(DetailRow::Result));
@@ -85,6 +93,8 @@ pub fn detail_key(app: &mut App, key: KeyEvent) -> KeyOutcome {
             }
         }
         KeyCode::Char('c') => confirm_cancel(app),
+        KeyCode::Char('R') => confirm_resolve(app, Keep::Remote),
+        KeyCode::Char('L') => confirm_resolve(app, Keep::Local),
         KeyCode::Char('a') => confirm_trust(app),
         KeyCode::Char('A') => confirm_trust_fleet(app),
         KeyCode::Char('D') => {
@@ -155,6 +165,37 @@ fn confirm_remote_uninstall(app: &mut App) {
         }
         Some(DetailRow::Pending(_)) => app.flash_info("Press c to cancel a pending command"),
         _ => app.flash_info(format!("Select a package to uninstall it on {}", label)),
+    }
+}
+
+/// Ask before sending a command that resolves the selected conflict on the machine whose
+/// details are open, keeping `keep`.
+fn confirm_resolve(app: &mut App, keep: Keep) {
+    let Some((m, row)) = detail_selection(app) else {
+        return;
+    };
+    let Some(DetailRow::Conflict(file)) = row else {
+        app.flash_info(format!(
+            "Select a conflict to resolve it on {}",
+            display_name(&m)
+        ));
+        return;
+    };
+    if let Some(why) = command_refusal(app, &m) {
+        app.flash_error(why);
+    } else if !m.resolves_conflicts {
+        app.flash_error(format!(
+            "{} runs Tether {}, which cannot resolve conflicts by command. Upgrade it first",
+            display_name(&m),
+            m.cli_version
+        ));
+    } else {
+        app.overlays.push(Overlay::Confirm(Confirm::Fleet {
+            action: Action::Resolve { file, keep },
+            local: false,
+            targets: vec![FleetTarget::of(&m)],
+            arming: Default::default(),
+        }));
     }
 }
 
@@ -392,6 +433,11 @@ fn render_detail_list(f: &mut Frame, area: Rect, app: &App, m: &MachineState) {
     let dim = |s: String| Span::styled(s, Style::default().fg(t.dim));
     for (i, r) in rows.iter().enumerate().skip(first).take(visible) {
         let line = match r {
+            DetailRow::Conflict(file) => Line::from(vec![
+                Span::styled("⚠ conflict  ", Style::default().fg(t.warn)),
+                Span::styled(file.clone(), Style::default().fg(t.text)),
+                dim("  R keeps the synced copy · L keeps its copy".to_string()),
+            ]),
             DetailRow::Pending(p) => {
                 let mut spans = vec![
                     Span::styled("◷ pending  ", Style::default().fg(t.info)),

@@ -1,10 +1,11 @@
 use crate::cli::output::Colorize;
 use crate::cli::Output;
 use crate::config::Config;
-use crate::sync::{ConflictResolution, ConflictState, FileConflict, SyncEngine};
+use crate::sync::{conflict, ConflictResolution, ConflictState, Keep, SyncEngine};
 use anyhow::Result;
 
-pub async fn run(file: Option<&str>) -> Result<()> {
+/// With `keep`, each conflict keeps that side without a diff or a prompt.
+pub async fn run(file: Option<&str>, keep: Option<Keep>) -> Result<()> {
     let config = Config::load()?;
 
     if !config.has_personal_features() {
@@ -28,14 +29,6 @@ pub async fn run(file: Option<&str>) -> Result<()> {
     let home = crate::home_dir()?;
     let sync_path = SyncEngine::sync_path()?;
     let machine_id = crate::sync::SyncState::load()?.machine_id;
-    let profile = config.profile_name(&machine_id);
-
-    // Get encryption key if needed
-    let key = if config.security.encrypt_dotfiles {
-        Some(crate::security::get_encryption_key()?)
-    } else {
-        None
-    };
 
     // Filter to specific file if provided
     let conflicts_to_resolve: Vec<_> = if let Some(file_filter) = file {
@@ -66,48 +59,19 @@ pub async fn run(file: Option<&str>) -> Result<()> {
     println!();
 
     let mut resolved = Vec::new();
+    let mut backup_dir = None;
     for pending in &conflicts_to_resolve {
-        // Load local and remote content
-        let local_path = home.join(&pending.file_path);
-        let local_content = if local_path.exists() {
-            std::fs::read(&local_path)?
-        } else {
-            Vec::new()
-        };
+        let (conflict, remote_file) =
+            conflict::load_conflict(&config, &sync_path, &machine_id, &pending.file_path)?;
 
-        // Get remote content
-        let shared = config.is_dotfile_shared(&machine_id, &pending.file_path);
-        let repo_rel = crate::sync::resolve_dotfile_repo_path(
-            &sync_path,
-            &pending.file_path,
-            config.security.encrypt_dotfiles,
-            profile,
-            shared,
-        );
-        let remote_file = sync_path.join(&repo_rel);
-        let remote_content = if remote_file.exists() {
-            let raw = std::fs::read(&remote_file)?;
-            if config.security.encrypt_dotfiles {
-                crate::security::decrypt(&raw, key.as_ref().unwrap())?
-            } else {
-                raw
+        let resolution = match keep {
+            Some(Keep::Local) => ConflictResolution::KeepLocal,
+            Some(Keep::Remote) => ConflictResolution::UseRemote,
+            None => {
+                conflict.show_diff()?;
+                conflict.prompt_resolution()?
             }
-        } else {
-            Vec::new()
         };
-
-        let conflict = FileConflict {
-            file_path: pending.file_path.clone(),
-            local_hash: crate::sha256_hex(&local_content),
-            last_synced_hash: None,
-            remote_hash: crate::sha256_hex(&remote_content),
-            local_content,
-            remote_content,
-        };
-
-        // Show diff and prompt for resolution
-        conflict.show_diff()?;
-        let resolution = conflict.prompt_resolution()?;
 
         match resolution {
             ConflictResolution::KeepLocal => {
@@ -115,7 +79,7 @@ pub async fn run(file: Option<&str>) -> Result<()> {
                 conflict_state.remove_conflict(&pending.file_path);
             }
             ConflictResolution::UseRemote => {
-                std::fs::write(&local_path, &conflict.remote_content)?;
+                conflict::apply_side(&mut backup_dir, &conflict, &remote_file, Keep::Remote)?;
                 Output::success(&format!("  {} (applied remote)", pending.file_path));
                 conflict_state.remove_conflict(&pending.file_path);
             }

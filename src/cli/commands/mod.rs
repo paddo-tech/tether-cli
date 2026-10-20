@@ -118,6 +118,18 @@ pub enum Commands {
     Resolve {
         /// Specific file to resolve (resolves all if not specified)
         file: Option<String>,
+        /// Keep this side without a diff or a prompt
+        #[arg(long, value_enum)]
+        keep: Option<crate::sync::Keep>,
+        /// Send a signed command instead: these machines keep that side of their conflict on
+        /// FILE on their next sync. Machine ids or hostnames, separated by commas
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "MACHINES",
+            requires_all = ["file", "keep"]
+        )]
+        on: Vec<String>,
     },
 
     /// Unlock encryption key with passphrase
@@ -972,7 +984,19 @@ impl Cli {
                     ProjectsAction::Migrate => team::projects_migrate(self.yes).await,
                 },
             },
-            Commands::Resolve { file } => resolve::run(file.as_deref()).await,
+            Commands::Resolve { file, keep, on } => match (file, keep) {
+                (Some(file), Some(keep)) if !on.is_empty() => {
+                    if on.iter().any(|n| n == "all") {
+                        anyhow::bail!("Name the machines: each has its own conflicts");
+                    }
+                    let action = crate::sync::commands::Action::Resolve {
+                        file: file.clone(),
+                        keep: *keep,
+                    };
+                    machines::send(on, action).await
+                }
+                _ => resolve::run(file.as_deref(), *keep).await,
+            },
             Commands::Unlock => unlock::run().await,
             Commands::Lock => unlock::lock().await,
             Commands::Upgrade { dry_run } => upgrade::run(*dry_run).await,

@@ -7,6 +7,7 @@ use crate::dashboard::msg::Cmd;
 use crate::dashboard::repo::RollbackPlan;
 use crate::sync::commands::Action;
 use crate::sync::membership::Edit;
+use crate::sync::Keep;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{prelude::*, widgets::*};
 use std::cell::Cell;
@@ -326,7 +327,7 @@ fn accept(app: &mut App, confirm: Confirm) -> Option<Cmd> {
                     Action::Install { manager, name } => {
                         app.start_install(manager.clone(), name.clone(), true)
                     }
-                    Action::Profile { .. } | Action::Trust { .. } => None,
+                    Action::Profile { .. } | Action::Trust { .. } | Action::Resolve { .. } => None,
                 };
                 // When this machine cannot start its part, no machine gets the change
                 Some(Box::new(cmd?))
@@ -805,6 +806,18 @@ pub fn render(f: &mut Frame, app: &App, confirm: &Confirm) {
                     t.warn,
                 ),
                 Action::Trust { .. } => ("Trust", action.describe(), t.warn),
+                Action::Resolve { file, keep } => (
+                    "Resolve",
+                    format!(
+                        "Resolve {} and keep {}",
+                        file,
+                        match keep {
+                            Keep::Remote => "the synced copy",
+                            Keep::Local => "each machine's own file",
+                        }
+                    ),
+                    t.warn,
+                ),
             };
             let mut msg = if *local {
                 format!("{} here now, and on the machines below? ", what)

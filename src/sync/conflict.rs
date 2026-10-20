@@ -313,6 +313,131 @@ impl ConflictState {
     }
 }
 
+/// The side of a conflict that `tether resolve --keep` and a fleet command keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Keep {
+    /// This machine's file
+    Local,
+    /// The synced copy
+    Remote,
+}
+
+impl Keep {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Keep::Local => "local",
+            Keep::Remote => "remote",
+        }
+    }
+}
+
+/// Both sides of the conflict on `file`, and the path of the synced copy in the repo.
+pub fn load_conflict(
+    config: &crate::config::Config,
+    sync_path: &Path,
+    machine_id: &str,
+    file: &str,
+) -> Result<(FileConflict, std::path::PathBuf)> {
+    let home = crate::home_dir()?;
+    let local_path = home.join(file);
+    // A symlinked dotfile could point into ~/.tether, which never syncs
+    if crate::config::TetherDir::new(&home).contains(&local_path) {
+        anyhow::bail!("{} is in Tether's own directory", file);
+    }
+    let local_content = if local_path.exists() {
+        std::fs::read(&local_path)?
+    } else {
+        Vec::new()
+    };
+    // As the sync, take the shared flag from the entry that covers the file, which can be a glob
+    let shared = config
+        .effective_dotfiles(machine_id)
+        .iter()
+        .find(|e| crate::sync::steps::entry_matches(e.path(), file))
+        .is_some_and(|e| config.is_dotfile_shared(machine_id, e.path()));
+    let repo_rel = crate::sync::resolve_dotfile_repo_path(
+        sync_path,
+        file,
+        config.security.encrypt_dotfiles,
+        config.profile_name(machine_id),
+        shared,
+    );
+    let remote_file = sync_path.join(&repo_rel);
+    let remote_content = if remote_file.exists() {
+        let raw = std::fs::read(&remote_file)?;
+        if config.security.encrypt_dotfiles {
+            crate::security::decrypt(&raw, &crate::security::get_encryption_key()?)?
+        } else {
+            raw
+        }
+    } else {
+        Vec::new()
+    };
+    let conflict = FileConflict {
+        file_path: file.to_string(),
+        local_hash: crate::sha256_hex(&local_content),
+        last_synced_hash: None,
+        remote_hash: crate::sha256_hex(&remote_content),
+        local_content,
+        remote_content,
+    };
+    Ok((conflict, remote_file))
+}
+
+/// Write the kept side. `Remote` backs up this machine's file first, as a sync does.
+pub fn apply_side(
+    backup_dir: &mut Option<std::path::PathBuf>,
+    conflict: &FileConflict,
+    remote_file: &Path,
+    keep: Keep,
+) -> Result<()> {
+    if keep == Keep::Local {
+        return Ok(());
+    }
+    if !remote_file.exists() {
+        anyhow::bail!("{} has no synced copy", conflict.file_path);
+    }
+    crate::sync::steps::backup_and_write_dotfile(
+        backup_dir,
+        &conflict.file_path,
+        &crate::home_dir()?.join(&conflict.file_path),
+        remote_file,
+        &conflict.remote_content,
+    )
+}
+
+/// Keep one side of the pending conflict on `file`, without a prompt, for a fleet command
+/// signed at `signed_at`. A conflict detected after that is not the one the signer saw. The
+/// baseline becomes the synced copy, so the next sync pushes a kept local file; it saves
+/// with the conflict, so a later failure of the sync cannot bring the conflict back. The
+/// caller holds the sync lock.
+pub fn keep_side(
+    config: &crate::config::Config,
+    sync_path: &Path,
+    state: &mut crate::sync::SyncState,
+    file: &str,
+    keep: Keep,
+    signed_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut conflicts = ConflictState::load()?;
+    let Some(pending) = conflicts.conflicts.iter().find(|c| c.file_path == file) else {
+        anyhow::bail!("No conflict found for '{}'", file);
+    };
+    if pending.detected_at > signed_at {
+        anyhow::bail!(
+            "The conflict on {} started after the command was sent. Send it again",
+            file
+        );
+    }
+    let (conflict, remote_file) = load_conflict(config, sync_path, &state.machine_id, file)?;
+    apply_side(&mut None, &conflict, &remote_file, keep)?;
+    conflicts.remove_conflict(file);
+    state.record_remote_file(file, conflict.remote_hash);
+    state.save()?;
+    conflicts.save()
+}
+
 /// Escape a string for safe use in AppleScript
 #[cfg(any(target_os = "macos", test))]
 fn escape_applescript(s: &str) -> String {

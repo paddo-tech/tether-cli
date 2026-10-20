@@ -113,6 +113,70 @@ async fn signed_commands() {
     );
     assert_eq!(b.installed("npm", "beta").await.as_deref(), Some("1.0.0"));
 
+    // b reports its conflict on .bashrc, and a resolves it there with the synced copy. b
+    // backs up its own file first
+    a.ok("echo 'export FROM=a' >> /root/.bashrc").await;
+    a.tether_ok("sync").await;
+    b.ok("echo 'export FROM=b' >> /root/.bashrc").await;
+    let out = b.tether_ok("sync").await.text();
+    assert!(out.contains(".bashrc (conflict - skipped)"), "{out}");
+    a.tether_ok("sync").await;
+    let show = a.tether_ok("machines show b").await.text();
+    assert!(
+        show.contains("Conflicts") && show.contains(".bashrc"),
+        "{show}"
+    );
+    let out = a.tether("resolve .zshrc --keep remote --on b").await;
+    assert_eq!(out.code, 1, "{}", out.text());
+    assert!(
+        out.text().contains("reports no conflict on .zshrc"),
+        "{}",
+        out.text()
+    );
+    let out = a
+        .tether_ok("resolve .bashrc --keep remote --on b")
+        .await
+        .text();
+    assert!(
+        out.contains("Sent 'resolve .bashrc keep remote' to"),
+        "{out}"
+    );
+    let out = b.tether_ok("sync").await.text();
+    assert!(
+        out.contains("Fleet command applied: resolve .bashrc keep remote from"),
+        "{out}"
+    );
+    let bashrc = b.read("/root/.bashrc").await;
+    assert!(
+        bashrc.contains("FROM=a") && !bashrc.contains("FROM=b"),
+        "{bashrc}"
+    );
+    assert!(!b
+        .read("/root/.tether/conflicts.json")
+        .await
+        .contains(".bashrc"));
+    let backup = b.ok("grep -rl FROM=b /root/.tether/backups").await.text();
+    assert!(backup.contains(".bashrc"), "b keeps a backup: {backup}");
+
+    // A second conflict keeps b's own file, and b's sync pushes it to a
+    a.ok("echo 'export AGAIN=a' >> /root/.bashrc").await;
+    a.tether_ok("sync").await;
+    b.ok("echo 'export AGAIN=b' >> /root/.bashrc").await;
+    b.tether_ok("sync").await;
+    a.tether_ok("sync").await;
+    a.tether_ok("resolve .bashrc --keep local --on b").await;
+    let out = b.tether_ok("sync").await.text();
+    assert!(
+        out.contains("Fleet command applied: resolve .bashrc keep local from"),
+        "{out}"
+    );
+    a.tether_ok("sync").await;
+    let bashrc = a.read("/root/.bashrc").await;
+    assert!(
+        bashrc.contains("AGAIN=b") && !bashrc.contains("AGAIN=a"),
+        "{bashrc}"
+    );
+
     // b does not trust c, so c's command waits and does not run
     c.tether_ok("sync").await;
     c.tether_ok("packages uninstall npm:gamma --on b").await;
@@ -165,4 +229,7 @@ async fn signed_commands() {
         out.contains("runs Tether 2.0.1, which cannot run fleet commands"),
         "{out}"
     );
+    let out = a.tether("resolve .bashrc --keep remote --on all").await;
+    assert_eq!(out.code, 1, "{}", out.text());
+    assert!(out.text().contains("Name the machines"), "{}", out.text());
 }

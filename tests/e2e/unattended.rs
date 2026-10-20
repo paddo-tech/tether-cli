@@ -55,4 +55,18 @@ async fn sync_without_a_terminal_skips_conflicts() {
         bashrc.contains("FROM=a") && !bashrc.contains("FROM=b"),
         "{bashrc}"
     );
+
+    // --keep resolves without a terminal, and shows no diff
+    let out = b.tether_ok("resolve .bashrc --keep remote").await.text();
+    assert!(out.contains(".bashrc (applied remote)"), "{out}");
+    assert!(!out.contains("+++ remote"), "{out}");
+    let bashrc = b.read("/root/.bashrc").await;
+    assert!(
+        bashrc.contains("FROM=a") && !bashrc.contains("FROM=b"),
+        "{bashrc}"
+    );
+    assert!(!b
+        .read("/root/.tether/conflicts.json")
+        .await
+        .contains(".bashrc"));
 }
