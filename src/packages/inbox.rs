@@ -1,6 +1,9 @@
-use super::{manager_for_key, osv, resolve, BrewManager, PackageInfo, PackageManager, Upgrade};
+use super::{
+    manager_for_key, osv, resolve, BrewManager, Ecosystem, PackageInfo, PackageManager, Upgrade,
+};
 use crate::cli::Output;
 use crate::sync::signing::{self, TrustStore};
+use crate::sync::state::BrewTrustEntries;
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -329,6 +332,15 @@ pub struct Inbox {
     /// rebuilds that list from what is installed.
     #[serde(default)]
     pub rejected: Vec<Decision>,
+    /// Homebrew trust taken from trusted machines' records at the last import. It lifts only
+    /// the untrusted-tap check, as `packages.brew.trusted_taps` does, so every other check
+    /// still holds the package
+    #[serde(default)]
+    pub adopted_brew_trust: BrewTrustEntries,
+    /// Every entry adopted so far. This machine's record leaves them out, so adopted trust
+    /// spreads only one step and stops when the source machine is no longer trusted
+    #[serde(default)]
+    pub ever_adopted_brew_trust: BrewTrustEntries,
 }
 
 impl Inbox {
@@ -451,6 +463,81 @@ impl Inbox {
         self.approved
             .iter()
             .filter_map(|d| Some((d.manager.as_str(), d.name.as_str(), d.tap.as_deref()?)))
+    }
+
+    /// Take the Homebrew trust stores of trusted machines' records as this machine's
+    /// `adopted_brew_trust`, which replaces the last set. An entry this machine rejected, in
+    /// any version, or whose tap it rejected, stays out. Returns the entries that are new.
+    pub fn adopt_brew_trust(&mut self, records: &[BrewTrustEntries]) -> Vec<String> {
+        let tap_rejected = |tap: &str| {
+            self.rejected
+                .iter()
+                .any(|d| d.manager == "brew_taps" && d.name.eq_ignore_ascii_case(tap))
+        };
+        // A decision may name a formula or cask qualified with its tap
+        let item_rejected = |manager: &str, entry: &str| {
+            let Some((tap, name)) = entry.rsplit_once('/') else {
+                return true;
+            };
+            tap_rejected(tap)
+                || self.rejected.iter().any(|d| {
+                    d.manager == manager
+                        && (d.name.eq_ignore_ascii_case(name) || d.name.eq_ignore_ascii_case(entry))
+                        && d.tap
+                            .as_deref()
+                            .is_some_and(|t| t.eq_ignore_ascii_case(tap))
+                })
+        };
+        let valid = |ecosystem: Ecosystem, entry: &String, parts: usize| {
+            entry.split('/').count() == parts && super::validate_name(ecosystem, entry).is_ok()
+        };
+        let mut adopted = BrewTrustEntries::default();
+        for record in records {
+            adopted.taps.extend(
+                record
+                    .taps
+                    .iter()
+                    .filter(|t| valid(Ecosystem::BrewTap, t, 2) && !tap_rejected(t))
+                    .map(|t| t.to_ascii_lowercase()),
+            );
+            for (manager, from, to) in [
+                ("brew_formulae", &record.formulae, &mut adopted.formulae),
+                ("brew_casks", &record.casks, &mut adopted.casks),
+            ] {
+                to.extend(
+                    from.iter()
+                        .filter(|n| valid(Ecosystem::Brew, n, 3) && !item_rejected(manager, n))
+                        .map(|n| n.to_ascii_lowercase()),
+                );
+            }
+        }
+        let mut new = Vec::new();
+        for (now, before, ever) in [
+            (
+                &mut adopted.taps,
+                &self.adopted_brew_trust.taps,
+                &mut self.ever_adopted_brew_trust.taps,
+            ),
+            (
+                &mut adopted.formulae,
+                &self.adopted_brew_trust.formulae,
+                &mut self.ever_adopted_brew_trust.formulae,
+            ),
+            (
+                &mut adopted.casks,
+                &self.adopted_brew_trust.casks,
+                &mut self.ever_adopted_brew_trust.casks,
+            ),
+        ] {
+            now.sort();
+            now.dedup();
+            new.extend(now.iter().filter(|n| !before.contains(n)).cloned());
+            ever.extend(now.iter().cloned());
+            ever.sort();
+            ever.dedup();
+        }
+        self.adopted_brew_trust = adopted;
+        new
     }
 
     /// Queue an item. Returns true when it is new, or replaces a pending item that asks for
@@ -1375,6 +1462,47 @@ mod tests {
         assert_eq!(inbox.find("pnpm:b").unwrap().id(), "pnpm:b");
         assert!(inbox.find("b").is_err());
         assert!(inbox.find("c").is_err());
+    }
+
+    #[test]
+    fn adopted_brew_trust_follows_trusted_records_and_skips_rejections() {
+        let mut inbox = Inbox::default();
+        let mut rejected = item("brew_formulae", "cirruslabs/cli/softnet");
+        rejected.tap = Some("cirruslabs/cli".to_string());
+        inbox.add(rejected);
+        inbox
+            .reject(&inbox.find("cirruslabs/cli/softnet").unwrap().clone())
+            .unwrap();
+        let mut tap = item("brew_taps", "evil/tap");
+        tap.version = None;
+        inbox.add(tap);
+        inbox
+            .reject(&inbox.find("evil/tap").unwrap().clone())
+            .unwrap();
+        let record = BrewTrustEntries {
+            taps: vec!["Stripe/stripe-cli".to_string(), "evil/tap".to_string()],
+            formulae: vec![
+                "cirruslabs/cli/tart".to_string(),
+                "cirruslabs/cli/softnet".to_string(),
+                "evil/tap/foo".to_string(),
+                "not-qualified".to_string(),
+                "-x/y/z".to_string(),
+            ],
+            casks: Vec::new(),
+        };
+        assert_eq!(
+            inbox.adopt_brew_trust(std::slice::from_ref(&record)),
+            ["stripe/stripe-cli", "cirruslabs/cli/tart"]
+        );
+        assert!(inbox.approved.is_empty());
+        assert!(inbox.adopt_brew_trust(&[record]).is_empty());
+        // A record that stops counting takes its entries out, but they stay known as adopted
+        assert!(inbox.adopt_brew_trust(&[]).is_empty());
+        assert!(inbox.adopted_brew_trust.is_empty());
+        assert_eq!(
+            inbox.ever_adopted_brew_trust.formulae,
+            ["cirruslabs/cli/tart"]
+        );
     }
 
     #[test]

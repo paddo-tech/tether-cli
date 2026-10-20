@@ -4,7 +4,12 @@ use crate::github::GitHubCli;
 use crate::sync::{GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
 
-pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result<()> {
+pub async fn run(
+    repo: Option<&str>,
+    profile: Option<&str>,
+    no_daemon: bool,
+    team_only: bool,
+) -> Result<()> {
     Output::header("Welcome to Tether!");
     Output::dim("Sync your dev environment across machines");
     println!();
@@ -16,7 +21,9 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
     if already_initialized {
         Output::info("Tether is already initialized");
 
-        // Sync first to ensure we don't lose any data (skip if no personal repo)
+        // Sync first to ensure we don't lose any data (skip if no personal repo). It imports
+        // no synced packages: the machine may be about to take another profile. Fleet commands
+        // still run
         let existing_config = Config::load().ok();
         let has_personal = existing_config
             .as_ref()
@@ -25,7 +32,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
         if has_personal {
             Output::info("Running sync to preserve your data...");
-            if let Err(e) = super::sync::run(false, false).await {
+            if let Err(e) = super::sync::run(false, false, false).await {
                 Output::warning(&format!("Sync failed: {}", e));
                 if !Prompt::confirm(
                     "Continue with reinit anyway? (may lose unsynced changes)",
@@ -61,6 +68,9 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
     let needs_personal_repo =
         config.features.personal_dotfiles || config.features.personal_packages;
+    if profile.is_some() && !needs_personal_repo {
+        anyhow::bail!("--profile needs personal dotfiles or packages");
+    }
 
     // Personal repo setup (if personal features enabled)
     if needs_personal_repo {
@@ -128,7 +138,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
     // Profile assignment
     if needs_personal_repo {
-        assign_profile_during_init(&mut config)?;
+        assign_profile_during_init(&mut config, profile)?;
     }
 
     config.save()?;
@@ -142,7 +152,7 @@ pub async fn run(repo: Option<&str>, no_daemon: bool, team_only: bool) -> Result
 
     // Initial sync (only if personal features enabled)
     if needs_personal_repo {
-        super::sync::run(false, false).await?;
+        super::sync::run(false, false, true).await?;
     }
 
     // Install daemon for auto-sync (unless opted out)
@@ -217,9 +227,26 @@ fn select_features(current: &FeaturesConfig) -> Result<FeaturesConfig> {
 }
 
 /// Assign a profile to the current machine during init.
-fn assign_profile_during_init(config: &mut Config) -> Result<()> {
+fn assign_profile_during_init(config: &mut Config, profile: Option<&str>) -> Result<()> {
     let state = SyncState::load()?;
     let machine_id = &state.machine_id;
+
+    if let Some(name) = profile {
+        if !config.profiles.contains_key(name) {
+            let mut names: Vec<&str> = config.profiles.keys().map(|s| s.as_str()).collect();
+            names.sort();
+            anyhow::bail!(
+                "Profile '{}' not found. Available profiles: {}",
+                name,
+                names.join(", ")
+            );
+        }
+        config
+            .machine_profiles
+            .insert(machine_id.clone(), name.to_string());
+        Output::success(&format!("Assigned profile '{}'", name));
+        return Ok(());
+    }
 
     // Already assigned
     if config.machine_profiles.contains_key(machine_id) {

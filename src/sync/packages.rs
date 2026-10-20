@@ -10,7 +10,7 @@ use crate::packages::{
 };
 use crate::sync::membership::{self, Membership};
 use crate::sync::signing::{self, Generations, RecordStatus, SignedRecord, TrustStore};
-use crate::sync::state::{InstallFailure, PackageState};
+use crate::sync::state::{BrewTrustEntries, InstallFailure, PackageState};
 use crate::sync::{GitBackend, MachineState, SyncState};
 use anyhow::Result;
 use ssh_key::PublicKey;
@@ -142,6 +142,7 @@ pub async fn import_packages(
     prune_failures(&mut state.install_failures, machine_state);
     let held_machines = inbox::queue_machine_keys(sync_path, mid)?;
     let trust = Trust::load(config, sync_path, mid)?;
+    adopt_brew_trust(&trust)?;
     outcome.signature_failed =
         new_signature_failures(&trust.provenance.failed, &mut state.warned_signatures);
     for id in &outcome.signature_failed {
@@ -576,6 +577,8 @@ struct Provenance {
     /// Id and SHA-256 of each other machine's record whose id has a trusted key, but no
     /// signature by that key verifies
     failed: Vec<(String, String)>,
+    /// The Homebrew trust stores of other machines' trusted records
+    brew_trust: Vec<BrewTrustEntries>,
     this_machine: String,
     sync_path: std::path::PathBuf,
 }
@@ -596,6 +599,7 @@ impl Provenance {
             HashSet::new(),
         );
         let mut failed = Vec::new();
+        let mut brew_trust = Vec::new();
         for r in &records {
             let id = &r.record.machine_id;
             let status = signing::record_status(r, this_machine, Some(own_key), store, generations);
@@ -626,6 +630,9 @@ impl Provenance {
             if own_record || trusted_record {
                 generations.accept(signer, r.record.generation, &r.digest);
             }
+            if trusted_record {
+                brew_trust.push(r.record.brew_trust.clone());
+            }
             if own_record || (trusted_record && same_os(&r.record)) {
                 native.extend(record_entries(&r.record));
             }
@@ -645,6 +652,7 @@ impl Provenance {
             untrusted,
             native,
             failed,
+            brew_trust,
             this_machine: this_machine.to_string(),
             sync_path: sync_path.to_path_buf(),
         }
@@ -916,6 +924,18 @@ async fn import_brew(
 
     let mut installed_any = false;
 
+    if !missing_formulae.is_empty() || !casks_to_try.is_empty() {
+        match brew.wholly_untrusted_taps(&policy).await {
+            Ok(taps) if !taps.is_empty() => Output::warning(&format!(
+                "Homebrew trusts nothing from {}, and warns about it before each install. \
+                 Trust what you use with 'brew trust', or untap the rest",
+                taps.join(", ")
+            )),
+            Ok(_) => {}
+            Err(e) => Output::warning(&format!("Cannot read Homebrew trust: {}", e)),
+        }
+    }
+
     // Install formulae via bundle (no password needed)
     if !missing_formulae.is_empty() {
         Output::info(&format!(
@@ -1015,6 +1035,20 @@ async fn import_brew(
     (flagged_casks, installed_any)
 }
 
+/// Trusting a machine trusts what it installed, so the taps and items in its Homebrew trust
+/// store pass the untrusted-tap check here too. They reach brew's own trust store before brew
+/// next runs.
+fn adopt_brew_trust(trust: &Trust) -> Result<()> {
+    let adopted = Inbox::update(|inbox| Ok(inbox.adopt_brew_trust(&trust.provenance.brew_trust)))?;
+    if !adopted.is_empty() {
+        Output::info(&format!(
+            "Trusting what trusted machines trust in Homebrew: {}",
+            adopted.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Keep the taps that are tapped already or may be tapped, and queue the rest. A tap is
 /// added only when a trusted record lists it, like a formula, and its tap policy allows it.
 fn gate_taps(
@@ -1085,7 +1119,9 @@ fn gate_brew_entry(
         return false;
     }
     let checks = Checks {
-        untrusted_tap: !tap.as_deref().is_some_and(|t| policy.tap_trusted(t)),
+        untrusted_tap: !tap
+            .as_deref()
+            .is_some_and(|t| policy.brew_allowed(manager, name, t)),
         ..trust.checks(manager, name, None, tap.as_deref())
     };
     let reasons = inbox::reasons(checks);
@@ -2669,6 +2705,39 @@ mod tests {
         trust.inbox.reject(&shown).unwrap();
         assert!(gate(&trust, "vendor/two").1.held.is_empty());
         assert!(gate(&trust, "vendor/one").0);
+    }
+
+    #[test]
+    fn adopted_brew_trust_lifts_only_the_tap_check() {
+        let (tmp, me, _, store) = two_machines();
+        let trust = trust_as(tmp.path(), "me", &me, &store);
+        let held = |approved_from_taps: Vec<(String, String, String)>| {
+            let policy = crate::packages::PackagePolicy {
+                min_release_age_days: 7,
+                allow_scripts: Vec::new(),
+                trusted_taps: Vec::new(),
+                approved_from_taps,
+            };
+            let mut gated = Gated::default();
+            let allowed = gate_brew_entry(
+                &policy,
+                &trust,
+                "brew_formulae",
+                "tart",
+                Some("cirruslabs/cli".to_string()),
+                &mut gated,
+            );
+            assert!(!allowed);
+            gated.held[0].reasons.clone()
+        };
+        assert!(held(Vec::new()).contains(&Reason::UntrustedTap));
+        // No trusted record lists it, so it still waits
+        let adopted = vec![(
+            "brew_formulae".to_string(),
+            "tart".to_string(),
+            "cirruslabs/cli".to_string(),
+        )];
+        assert_eq!(held(adopted), vec![Reason::Unsigned]);
     }
 
     #[test]

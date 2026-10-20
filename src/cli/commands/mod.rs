@@ -45,6 +45,11 @@ pub enum Commands {
         #[arg(long)]
         repo: Option<String>,
 
+        /// Profile for this machine. It must exist in the synced config. Replaces the current
+        /// assignment
+        #[arg(long)]
+        profile: Option<String>,
+
         /// Don't start the daemon automatically
         #[arg(long)]
         no_daemon: bool,
@@ -798,13 +803,14 @@ impl Cli {
             Commands::Dashboard => unreachable!(),
             Commands::Init {
                 repo,
+                profile,
                 no_daemon,
                 team_only,
-            } => init::run(repo.as_deref(), *no_daemon, *team_only).await,
+            } => init::run(repo.as_deref(), profile.as_deref(), *no_daemon, *team_only).await,
             Commands::Sync {
                 dry_run,
                 rediscover,
-            } => sync::run(*dry_run, *rediscover).await,
+            } => sync::run(*dry_run, *rediscover, true).await,
             Commands::Status { json } => status::run(*json).await,
             Commands::Diff { machine } => diff::run(machine.as_deref()).await,
             Commands::Daemon { action } => match action {

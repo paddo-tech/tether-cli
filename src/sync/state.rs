@@ -157,6 +157,28 @@ pub struct MachineState {
     /// The latest fleet command results, per signer key fingerprint, oldest first
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commands_applied: BTreeMap<String, Vec<CommandResult>>,
+    /// This machine's Homebrew trust store. A machine that trusts this record approves the
+    /// same taps, formulae and casks, unless it rejected them
+    #[serde(default, skip_serializing_if = "BrewTrustEntries::is_empty")]
+    pub brew_trust: BrewTrustEntries,
+}
+
+/// Entries of a Homebrew trust store, as `brew trust --json=v1` prints them: taps as
+/// `owner/repo`, formulae and casks as `owner/repo/name`, in lower case
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrewTrustEntries {
+    #[serde(default)]
+    pub taps: Vec<String>,
+    #[serde(default)]
+    pub formulae: Vec<String>,
+    #[serde(default)]
+    pub casks: Vec<String>,
+}
+
+impl BrewTrustEntries {
+    pub fn is_empty(&self) -> bool {
+        self.taps.is_empty() && self.formulae.is_empty() && self.casks.is_empty()
+    }
 }
 
 /// How this machine handled one fleet command.
@@ -290,6 +312,7 @@ impl MachineState {
             generation: 0,
             runs_commands: false,
             commands_applied: BTreeMap::new(),
+            brew_trust: BrewTrustEntries::default(),
         }
     }
 

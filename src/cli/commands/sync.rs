@@ -9,18 +9,19 @@ use crate::sync::{import_packages, sync_packages, GitBackend, SyncEngine, SyncSt
 use anyhow::Result;
 use std::path::Path;
 
-pub async fn run(dry_run: bool, rediscover: bool) -> Result<()> {
+/// `install` false skips the import of synced packages. Fleet commands still run.
+pub async fn run(dry_run: bool, rediscover: bool, install: bool) -> Result<()> {
     // Acquire sync lock, waiting for any running sync to finish
     let _sync_lock = if !dry_run {
         Some(crate::sync::acquire_sync_lock(true)?)
     } else {
         None
     };
-    run_locked(dry_run, rediscover).await
+    run_locked(dry_run, rediscover, install).await
 }
 
 /// A sync for a caller that already holds the sync lock, or a dry run.
-pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
+pub async fn run_locked(dry_run: bool, rediscover: bool, install: bool) -> Result<()> {
     if dry_run {
         Output::info("Dry-run mode");
     }
@@ -284,7 +285,7 @@ pub async fn run_locked(dry_run: bool, rediscover: bool) -> Result<()> {
 
     // Import packages from manifests (install missing packages, respecting removed_packages)
     // In a terminal: install deferred casks from daemon syncs
-    if config.features.personal_packages && !dry_run {
+    if config.features.personal_packages && !dry_run && install {
         let deferred_casks = state.deferred_casks.clone();
 
         let outcome = import_packages(

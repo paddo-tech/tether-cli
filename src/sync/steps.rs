@@ -1695,6 +1695,29 @@ pub async fn build_machine_state(
             if let Ok(taps) = brew.list_taps().await {
                 machine_state.packages.insert("brew_taps".to_string(), taps);
             }
+            // Trust adopted from other records stays out, so it never spreads further. brew
+            // trusts an item it installs by its full name, so items from an adopted tap stay
+            // out too. Without the inbox the record cannot tell, so it lists nothing
+            let adopted = crate::packages::inbox::Inbox::load().map(|i| i.ever_adopted_brew_trust);
+            let mut trust = brew.trust_store().await.ok().flatten().unwrap_or_default();
+            if let Ok(adopted) = adopted {
+                for (names, skip) in [
+                    (&mut trust.taps, &adopted.taps),
+                    (&mut trust.formulae, &adopted.formulae),
+                    (&mut trust.casks, &adopted.casks),
+                ] {
+                    names.retain(|n| {
+                        let n = n.to_ascii_lowercase();
+                        let tap = n.rsplit_once('/').map_or("", |(tap, _)| tap);
+                        !skip.contains(&n) && !adopted.taps.iter().any(|t| t == tap)
+                    });
+                    names.sort();
+                    names.dedup();
+                }
+                machine_state.brew_trust = trust;
+            } else {
+                machine_state.brew_trust = Default::default();
+            }
         }
     }
 
