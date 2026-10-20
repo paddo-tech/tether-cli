@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-10-21
+
+### Added
+
+- `tether resolve <file> --keep local|remote` resolves a conflict without a prompt and prints no diff, so it runs over SSH and without a terminal. `remote` backs up the local file first
+- `tether resolve <file> --keep local|remote --on <machines>` sends a signed fleet command: each machine keeps that side of its conflict on its next sync. A machine runs it only for a conflict it detected before the command was sent. Each machine runs these commands only after it upgrades to 2.4.0
+- `machines show` lists a machine's conflicts. In the dashboard, another machine's details list its conflicts, and `R` or `L` keeps the synced copy or that machine's own file
+
+### Fixed
+
+- `tether resolve` read the wrong synced copy for a file under a shared glob entry, such as `.config/foo/*`
+
 ## [2.3.1] - 2026-10-20
 
 ### Fixed
