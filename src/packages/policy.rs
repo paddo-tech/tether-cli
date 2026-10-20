@@ -58,6 +58,19 @@ impl PackagePolicy {
                 .approved_from_taps()
                 .map(|(m, n, t)| (m.to_string(), n.to_string(), t.to_string()))
                 .collect();
+            let adopted = &inbox.adopted_brew_trust;
+            policy.trusted_taps.extend(adopted.taps.iter().cloned());
+            for (manager, names) in [
+                ("brew_formulae", &adopted.formulae),
+                ("brew_casks", &adopted.casks),
+            ] {
+                policy
+                    .approved_from_taps
+                    .extend(names.iter().filter_map(|n| {
+                        let (tap, name) = n.rsplit_once('/')?;
+                        Some((manager.to_string(), name.to_string(), tap.to_string()))
+                    }));
+            }
         }
         policy
     }

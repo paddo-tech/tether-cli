@@ -154,7 +154,7 @@ pub async fn packages(manager: &str, commit: &str, yes: bool) -> Result<()> {
     }
 
     Output::success("Rollback applied; syncing...");
-    super::sync::run_locked(false, false).await?;
+    super::sync::run_locked(false, false, true).await?;
 
     if !failed.is_empty() {
         anyhow::bail!("{} package(s) failed: {}", failed.len(), failed.join(", "));

@@ -34,7 +34,7 @@ Never run Tether or a package manager against your own `~/.tether` or your own m
 
 | Command | Description |
 |---------|-------------|
-| `init` | Initialize Tether on this machine |
+| `init` | Initialize Tether on this machine (`--profile` assigns a profile from the synced config; a re-init syncs first without importing synced packages; fleet commands still run) |
 | `sync` | Manually trigger a sync (`--dry-run` changes nothing) |
 | `status` | Show current sync status, inbox and conflict counts (`--json`) |
 | `diff` | Show differences between machines |
@@ -111,7 +111,7 @@ Nothing in it syncs as a dotfile or a dir, in either direction. Paths compare af
 - `dotfiles/` - Dotfiles
 - `configs/` - App configs
 - `manifests/` - Package manifests: one package name per line, never a version, as 1.x reads them. Versions come only from signed machine records (`package_versions`). Pinned lines from pre-release 2.0 builds still parse, and the next write drops the version
-- `machines/` - Machine-specific state (`<id>.json`) and its signature (`<id>.json.sig`, sshsig, namespace `tether-machine`, over `tether-machine-v1\n<id>\n<sha256 of the json bytes>\n`). Only a record whose signature verifies against the trusted key for its id lets packages auto-install. Trust is transitive: a signed record lists the packages its machine installed, so trusting a machine trusts what it installed. A local rejection still blocks a package
+- `machines/` - Machine-specific state (`<id>.json`) and its signature (`<id>.json.sig`, sshsig, namespace `tether-machine`, over `tether-machine-v1\n<id>\n<sha256 of the json bytes>\n`). Only a record whose signature verifies against the trusted key for its id lets packages auto-install. Trust is transitive: a signed record lists the packages its machine installed, so trusting a machine trusts what it installed. A local rejection still blocks a package. A record also lists its machine's Homebrew trust store (`brew_trust`). Each import replaces `adopted_brew_trust` in `inbox.json` with the entries of the trusted records, less those whose tap or item this machine rejected in any version. Adopted entries lift only the untrusted-tap check, as `packages.brew.trusted_taps` does, and mirror into brew's trust store. A record leaves out every entry its machine ever adopted (`ever_adopted_brew_trust`), so adopted trust spreads one step. Untrusting the source machine drops its entries at the next import; brew's own trust store keeps them
 - `packages/profiles.toml` - Package membership: `[profiles]` maps `"manager:name"` to the profile names the package belongs to. Plain TOML, sorted, names only. 1.x never reads or writes it
 - `projects/` - Project secrets
 - `commands/<target>/<signer>-<seq>.toml` - Fleet commands, with a `.sig` beside each (see Fleet commands). 1.x never reads them

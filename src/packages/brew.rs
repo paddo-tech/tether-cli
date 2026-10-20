@@ -4,6 +4,7 @@ use super::policy::first_warning;
 use super::{
     validate_name, Cooldown, Ecosystem, PackageInfo, PackageManager, PackagePolicy, Upgrade,
 };
+use crate::sync::state::BrewTrustEntries as BrewTrust;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -151,22 +152,14 @@ struct BrewInfoEntry {
     revision: u32,
     /// Cask only
     version: Option<String>,
+    #[serde(default)]
+    disabled: bool,
+    disable_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct BrewVersions {
     stable: Option<String>,
-}
-
-/// Entries of brew's trust store, as `brew trust --json=v1` prints them
-#[derive(Debug, Deserialize)]
-struct BrewTrust {
-    #[serde(default)]
-    taps: Vec<String>,
-    #[serde(default)]
-    formulae: Vec<String>,
-    #[serde(default)]
-    casks: Vec<String>,
 }
 
 /// The taps Tether trusts and the items it approved that brew's trust store lacks.
@@ -198,6 +191,24 @@ fn missing_brew_trust(policy: &PackagePolicy, brew: &BrewTrust) -> BrewTrust {
         formulae: missing(approved("brew_formulae"), &brew.formulae),
         casks: missing(approved("brew_casks"), &brew.casks),
     }
+}
+
+/// Tapped taps that brew trusts nothing from. brew's preinstall check warns about each one
+/// before every install. Official `homebrew/*` taps need no entry.
+fn wholly_untrusted(taps: Vec<String>, store: &BrewTrust) -> Vec<String> {
+    taps.into_iter()
+        .filter(|tap| {
+            let tap = tap.to_ascii_lowercase();
+            let prefix = format!("{}/", tap);
+            !tap.starts_with("homebrew/")
+                && !store.taps.iter().any(|t| t.eq_ignore_ascii_case(&tap))
+                && !store
+                    .formulae
+                    .iter()
+                    .chain(&store.casks)
+                    .any(|n| n.to_ascii_lowercase().starts_with(&prefix))
+        })
+        .collect()
 }
 
 impl BrewInfoEntry {
@@ -549,8 +560,8 @@ impl BrewManager {
     }
 
     /// Validate a formula or cask and refuse ones from an untrusted tap, unless the user
-    /// approved this one from it.
-    async fn check_package(&self, name: &str, cask: bool) -> Result<()> {
+    /// approved this one from it. Returns its tap.
+    async fn check_package(&self, name: &str, cask: bool) -> Result<String> {
         validate_name(Ecosystem::Brew, name)?;
         let manager = if cask { "brew_casks" } else { "brew_formulae" };
         let policy = self.policy();
@@ -559,7 +570,7 @@ impl BrewManager {
                 if let Err(e) = self.mirror_trust(&policy).await {
                     crate::cli::Output::warning(&format!("Cannot update Homebrew trust: {}", e));
                 }
-                Ok(())
+                Ok(tap)
             }
             Some(tap) => anyhow::bail!("{} is from untrusted tap {}", name, tap),
             None => anyhow::bail!("cannot find the tap of {}", name),
@@ -608,6 +619,24 @@ impl BrewManager {
         } else {
             None
         }
+    }
+
+    /// Why Homebrew disabled a cask, when it did. brew refuses to install a disabled cask.
+    async fn cask_disabled(&self, cask: &str, tap: &str) -> Option<String> {
+        let qualified = qualified_name(cask, Some(tap));
+        let output = brew_without_installed_scan()
+            .ok()?
+            .args(["info", "--json=v2", "--cask", &qualified])
+            .output()
+            .await
+            .ok()?;
+        let info: BrewInfo = serde_json::from_slice(&output.stdout).ok()?;
+        let entry = info.casks.into_iter().next().filter(|c| c.disabled)?;
+        Some(
+            entry
+                .disable_reason
+                .unwrap_or_else(|| "no reason given".to_string()),
+        )
     }
 
     /// Validate and trust-filter a Brewfile before brew sees it. A tap in `local_taps` is
@@ -671,14 +700,10 @@ impl BrewManager {
     /// full name is on the command line. Synced Brewfiles use short names, so Tether copies
     /// its trusted taps and approved items there. A brew without `brew trust` has no check.
     async fn mirror_trust(&self, policy: &PackagePolicy) -> Result<()> {
-        let output = command("brew")?
-            .args(["trust", "--json=v1"])
-            .output()
-            .await?;
-        if !output.status.success() {
+        let Some(store) = self.trust_store().await? else {
             return Ok(());
-        }
-        let missing = missing_brew_trust(policy, &serde_json::from_slice(&output.stdout)?);
+        };
+        let missing = missing_brew_trust(policy, &store);
         for (flag, names) in [
             ("--tap", &missing.taps),
             ("--formula", &missing.formulae),
@@ -694,6 +719,28 @@ impl BrewManager {
             }
         }
         Ok(())
+    }
+
+    /// Copy Tether's trust into brew's trust store, then name the tapped taps brew still
+    /// trusts nothing from.
+    pub async fn wholly_untrusted_taps(&self, policy: &PackagePolicy) -> Result<Vec<String>> {
+        self.mirror_trust(policy).await?;
+        let Some(store) = self.trust_store().await? else {
+            return Ok(Vec::new());
+        };
+        Ok(wholly_untrusted(self.list_taps().await?, &store))
+    }
+
+    /// brew's trust store. `None` from a brew without `brew trust`.
+    pub async fn trust_store(&self) -> Result<Option<BrewTrust>> {
+        let output = command("brew")?
+            .args(["trust", "--json=v1"])
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_slice(&output.stdout)?))
     }
 
     async fn run_brew(&self, args: &[&str]) -> Result<String> {
@@ -834,9 +881,13 @@ impl BrewManager {
     pub async fn install_cask(&self, cask: &str, allow_interactive: bool) -> Result<bool> {
         use std::process::Stdio;
 
-        self.check_package(cask, true).await?;
+        let tap = self.check_package(cask, true).await?;
+        if let Some(reason) = self.cask_disabled(cask, &tap).await {
+            anyhow::bail!("Cask '{}' is disabled in Homebrew: {}", cask, reason);
+        }
         let mut cmd = command("brew")?;
-        cmd.args(["install", "--cask", cask])
+        // --adopt takes over an app installed outside Homebrew when it is the same version
+        cmd.args(["install", "--cask", "--adopt", cask])
             .env("NONINTERACTIVE", "1")
             .env("HOMEBREW_NO_AUTO_UPDATE", "1");
 
@@ -1426,6 +1477,23 @@ brew "git"
             Some("app")
         );
         assert_eq!(unavailable_name("Error: Cannot download"), None);
+    }
+
+    #[test]
+    fn wholly_untrusted_skips_official_and_partly_trusted_taps() {
+        let store: BrewTrust = serde_json::from_str(
+            r#"{"taps": ["stripe/stripe-cli"], "formulae": ["cirruslabs/cli/tart"], "casks": []}"#,
+        )
+        .unwrap();
+        let taps = [
+            "homebrew/core",
+            "Stripe/Stripe-cli",
+            "cirruslabs/cli",
+            "gromgit/fuse",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        assert_eq!(wholly_untrusted(taps, &store), ["gromgit/fuse"]);
     }
 
     #[test]
