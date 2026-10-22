@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-10-22
+
+### Fixed
+
+- `tether upgrade` said the release-age limit kept a Homebrew package at its version. Homebrew does no release-age check. The note now says that brew offers only an older version, as for openssl@3 3.5.9 against an installed 3.6.5
+
 ## [2.4.0] - 2026-10-21
 
 ### Added
