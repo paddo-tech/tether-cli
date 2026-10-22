@@ -82,6 +82,22 @@ impl Upgrade {
         }
     }
 
+    /// Why a downgrade target stays unused. brew offers only its current release, and other
+    /// managers offer the newest release the release-age limit allows.
+    pub fn downgrade_note(&self, ecosystem: Ecosystem) -> String {
+        let current = self.current.as_deref().unwrap_or("?");
+        match ecosystem {
+            Ecosystem::Brew | Ecosystem::BrewTap => format!(
+                "{} stays at {}: brew offers only {}, an older version",
+                self.name, current, self.target
+            ),
+            _ => format!(
+                "{} stays at {}: the release-age limit allows only {}",
+                self.name, current, self.target
+            ),
+        }
+    }
+
     /// One line on why a held package stays, or `None` when it is not held.
     pub fn hold_note(&self) -> Option<String> {
         let current = self.current.as_deref().unwrap_or("?");
@@ -164,11 +180,9 @@ pub async fn planned_upgrades(manager: &dyn PackageManager) -> Result<Vec<Upgrad
     }
     for upgrade in kept.iter().filter(|u| u.is_downgrade(manager.ecosystem())) {
         crate::cli::Output::warning(&format!(
-            "Kept {} {} at {}: the release-age limit allows only {}",
+            "{}: {}",
             manager.name(),
-            upgrade.name,
-            upgrade.current.as_deref().unwrap_or_default(),
-            upgrade.target
+            upgrade.downgrade_note(manager.ecosystem())
         ));
     }
     Ok(forward)

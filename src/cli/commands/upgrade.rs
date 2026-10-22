@@ -182,12 +182,7 @@ async fn show_plan(manager: &dyn PackageManager) -> Result<Vec<Upgrade>> {
         Output::list_item(&plan_line(u));
     }
     for u in &kept {
-        Output::list_item(&format!(
-            "{} stays at {}: the release-age limit allows only {}",
-            u.name,
-            u.current.as_deref().unwrap_or("?"),
-            u.target
-        ));
+        Output::list_item(&u.downgrade_note(ecosystem));
     }
     for note in &held {
         Output::list_item(note);
