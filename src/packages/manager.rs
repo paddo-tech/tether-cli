@@ -189,25 +189,44 @@ pub async fn planned_upgrades(manager: &dyn PackageManager) -> Result<Vec<Upgrad
 }
 
 /// Plan the upgrades and install them, as the daemon's daily update does. A failed plan
-/// upgrades nothing.
-pub async fn update_all(manager: &dyn PackageManager) -> Result<()> {
+/// upgrades nothing. Returns the names left because they need a password.
+pub async fn update_all(manager: &dyn PackageManager) -> Result<Vec<String>> {
     manager.refresh().await?;
     let planned = planned_upgrades(manager).await?;
     install_upgrades(manager, planned).await
 }
 
 /// Install exactly the planned upgrades, without the ones whose target OSV lists as
-/// malicious. Those go to the inbox and stay at their installed version.
-pub async fn install_upgrades(manager: &dyn PackageManager, planned: Vec<Upgrade>) -> Result<()> {
+/// malicious. Those go to the inbox and stay at their installed version. Returns the names
+/// left because they need a password.
+pub async fn install_upgrades(
+    manager: &dyn PackageManager,
+    planned: Vec<Upgrade>,
+) -> Result<Vec<String>> {
     let held = super::inbox::hold_malicious_upgrades(manager, &planned).await;
     let planned: Vec<Upgrade> = planned
         .into_iter()
         .filter(|u| !held.contains(&u.name))
         .collect();
     if planned.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     manager.upgrade(&planned).await
+}
+
+/// Packages installed before and after with a different version, as (name, before, after).
+pub fn changed_versions(
+    before: &[PackageInfo],
+    after: &[PackageInfo],
+) -> Vec<(String, String, String)> {
+    let version = |p: &PackageInfo| p.version.clone().unwrap_or_else(|| "?".to_string());
+    after
+        .iter()
+        .filter_map(|new| {
+            let old = before.iter().find(|p| p.name == new.name)?;
+            (old.version != new.version).then(|| (new.name.clone(), version(old), version(new)))
+        })
+        .collect()
 }
 
 /// Compare digit runs as numbers, so `rc.10` sorts after `rc.9`.
@@ -361,7 +380,8 @@ pub trait PackageManager: Send + Sync {
 
     /// Install exactly these upgrades, each at its target version. Callers pass a planned,
     /// non-empty list: an upgrade command without names would upgrade every package.
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()>;
+    /// Returns the names it left because they need a password, which only a terminal gives.
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>>;
 
     /// Installed package names, including those `list_installed` leaves out, such as
     /// dependencies. A synced name among them needs no install.
@@ -428,12 +448,12 @@ mod tests {
         async fn cooldown(&self) -> Cooldown {
             Cooldown::Off
         }
-        async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+        async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
             self.upgraded
                 .lock()
                 .unwrap()
                 .push(planned.iter().map(|u| u.name.clone()).collect());
-            Ok(())
+            Ok(Vec::new())
         }
         async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {
             self.candidates

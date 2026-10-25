@@ -317,6 +317,10 @@ pub struct GemConfig {
     // 1.x builds require this field when they read a synced config; remove in 3.0
     #[serde(default)]
     pub sync_versions: bool,
+    /// Let the daemon upgrade gems. Each target still waits out `min_release_age_days`, but
+    /// gem cannot hold the new dependencies a target brings to it
+    #[serde(default)]
+    pub auto_upgrade: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,6 +378,7 @@ fn default_gem_config() -> GemConfig {
     GemConfig {
         enabled: true,
         sync_versions: false,
+        auto_upgrade: false,
     }
 }
 

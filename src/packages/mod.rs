@@ -16,7 +16,8 @@ pub use brew::{normalize_formula_name, BrewManager, BrewfilePackages};
 pub use bun::BunManager;
 pub use gem::GemManager;
 pub use manager::{
-    install_upgrades, planned_upgrades, update_all, Hold, PackageInfo, PackageManager, Upgrade,
+    changed_versions, install_upgrades, planned_upgrades, update_all, Hold, PackageInfo,
+    PackageManager, Upgrade,
 };
 pub use npm::NpmManager;
 pub use pnpm::PnpmManager;

@@ -189,7 +189,7 @@ impl PackageManager for GemManager {
         true
     }
 
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
         // Each gem installs at its planned target, which may be older than the newest release
         let specs: Vec<String> = planned
             .iter()
@@ -200,7 +200,7 @@ impl PackageManager for GemManager {
             .map(|u| format!("{}:{}", u.name, u.target))
             .collect();
         if specs.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let output = command("gem")?
             .arg("install")
@@ -219,7 +219,7 @@ impl PackageManager for GemManager {
             ));
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// With a release-age limit, the target is the newest release that RubyGems published

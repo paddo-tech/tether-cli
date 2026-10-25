@@ -179,7 +179,7 @@ impl PackageManager for BunManager {
     /// `bun update -g` updates only the first package, so each planned target is added
     /// exactly. A plain `bun add -g name` would pick the newest mature release, which can
     /// be older than the installed one.
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
 
@@ -207,7 +207,7 @@ impl PackageManager for BunManager {
             }
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     async fn upgrade_candidates(&self) -> Result<Vec<Upgrade>> {

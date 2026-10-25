@@ -4,7 +4,7 @@ use crate::packages::{
     brew::BrewManager, bun::BunManager, gem::GemManager, manager::PackageManager, npm::NpmManager,
     pnpm::PnpmManager, uv::UvManager, PackageInfo,
 };
-use crate::packages::{install_upgrades, Upgrade};
+use crate::packages::{changed_versions, install_upgrades, Upgrade};
 use crate::sync::SyncState;
 use anyhow::Result;
 use chrono::Utc;
@@ -147,21 +147,6 @@ fn report_changes(before: &[PackageInfo], after: &[PackageInfo]) -> bool {
         Output::list_item(&format!("{} {} {} {}", name, old, Output::ARROW, new));
     }
     !changes.is_empty()
-}
-
-/// Packages installed before and after with a different version, as (name, before, after).
-fn changed_versions(
-    before: &[PackageInfo],
-    after: &[PackageInfo],
-) -> Vec<(String, String, String)> {
-    let version = |p: &PackageInfo| p.version.clone().unwrap_or_else(|| "?".to_string());
-    after
-        .iter()
-        .filter_map(|new| {
-            let old = before.iter().find(|p| p.name == new.name)?;
-            (old.version != new.version).then(|| (new.name.clone(), version(old), version(new)))
-        })
-        .collect()
 }
 
 /// Print what an upgrade of `manager` would change, and return the upgrades to install. A

@@ -675,7 +675,9 @@ impl DaemonServer {
             }
         };
         let config = Config::load()?;
-        let mut any_actual_updates = false;
+        let mut upgraded = Vec::new();
+        let mut need_password = Vec::new();
+        let mut any_failed = false;
 
         let managers: Vec<(Box<dyn PackageManager>, bool)> = vec![
             (Box::new(BrewManager::new()), config.packages.brew.enabled),
@@ -691,8 +693,10 @@ impl DaemonServer {
                 continue;
             }
             // Unattended upgrades must honour the release-age cooldown or not run. Gem holds
-            // only its targets to it, not the new dependencies they bring
-            if manager.cooldown().await == Cooldown::Unsupported {
+            // only its targets to it, not the new dependencies they bring, so it runs only
+            // when `packages.gem.auto_upgrade` accepts that
+            let accepted = manager.name() == "gem" && config.packages.gem.auto_upgrade;
+            if manager.cooldown().await == Cooldown::Unsupported && !accepted {
                 if crate::packages::policy::first_warning(&format!(
                     "auto-upgrade {}",
                     manager.name()
@@ -705,27 +709,64 @@ impl DaemonServer {
                 continue;
             }
             log::info!("Updating {} packages...", manager.name());
-            let hash_before = manager.compute_manifest_hash().await.ok();
-            if let Err(e) = crate::packages::update_all(manager.as_ref()).await {
-                log::error!("{} update failed: {}", manager.name(), e);
-            } else {
-                let hash_after = manager.compute_manifest_hash().await.ok();
-                if hash_before != hash_after {
-                    any_actual_updates = true;
+            let before = manager.installed_versions().await.unwrap_or_default();
+            match crate::packages::update_all(manager.as_ref()).await {
+                Ok(left) => need_password.extend(left),
+                Err(e) => {
+                    any_failed = true;
+                    log::error!("{} update failed: {}", manager.name(), e)
+                }
+            }
+            // A failed run can still have upgraded some packages
+            if let Ok(after) = manager.installed_versions().await {
+                for (name, old, new) in crate::packages::changed_versions(&before, &after) {
+                    log::info!("Upgraded {} {} {} -> {}", manager.name(), name, old, new);
+                    upgraded.push(name);
+                }
+            }
+            if manager.name() == "brew" {
+                match BrewManager::new().hold_untrusted_upgrade_taps().await {
+                    Ok(held) if !held.is_empty() => {
+                        let names: Vec<&str> = held.iter().map(|i| i.name.as_str()).collect();
+                        log::info!("Untrusted taps wait for approval: {}", names.join(", "));
+                        notify_inbox(&names).ok();
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::warn!("Could not queue untrusted taps: {}", e),
                 }
             }
         }
 
-        // Update state
+        if !upgraded.is_empty() {
+            crate::sync::notify_upgrades(&upgraded).ok();
+        }
+
         let mut state = SyncState::load()?;
         let now = chrono::Utc::now();
         state.last_upgrade = Some(now);
-        if any_actual_updates {
-            state.last_upgrade_with_updates = Some(now);
-            log::info!("Package updates complete (changes detected)");
+        if upgraded.is_empty() {
+            log::info!("Package updates complete (no upgrades)");
         } else {
-            log::info!("Package updates complete (no changes)");
+            state.last_upgrade_with_updates = Some(now);
+            log::info!("Package updates complete ({} upgraded)", upgraded.len());
         }
+        // A failed run does not report its password casks, so the earlier ones stay
+        if any_failed {
+            need_password.extend(state.password_upgrades.iter().cloned());
+        }
+        need_password.sort();
+        need_password.dedup();
+        if need_password
+            .iter()
+            .any(|n| !state.password_upgrades.contains(n))
+        {
+            let names: Vec<String> = need_password
+                .iter()
+                .map(|n| crate::packages::normalize_formula_name(n).to_string())
+                .collect();
+            crate::sync::notify_password_upgrades(&names).ok();
+        }
+        state.password_upgrades = need_password;
         state.save()?;
 
         Ok(())

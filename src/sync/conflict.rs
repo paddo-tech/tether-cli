@@ -536,6 +536,27 @@ pub fn notify_inbox(names: &[&str]) -> Result<()> {
     notify(&message, "Run 'tether packages inbox' to review")
 }
 
+/// Notify once per daily upgrade that installed new versions
+pub fn notify_upgrades(names: &[String]) -> Result<()> {
+    let title = match names {
+        [name] => format!("Upgraded {}", name),
+        _ => format!("Upgraded {} packages", names.len()),
+    };
+    notify(&title, &names.join(", "))
+}
+
+/// Notify that the daily upgrade left casks that need a password
+pub fn notify_password_upgrades(casks: &[String]) -> Result<()> {
+    notify(
+        &format!(
+            "{} need{} a password to upgrade",
+            casks.join(", "),
+            if casks.len() == 1 { "s" } else { "" }
+        ),
+        "Run 'tether upgrade' in a terminal",
+    )
+}
+
 /// Notify that trusted machines' records fail their signature
 pub fn notify_signature_failed(ids: &[String]) -> Result<()> {
     notify(

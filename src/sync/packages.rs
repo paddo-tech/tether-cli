@@ -359,12 +359,14 @@ fn report_held(items: &[InboxItem]) {
 
 /// Pending items for packages the user has since installed are settled.
 fn prune_inbox(machine_state: &MachineState) -> Result<()> {
+    let policy = PackagePolicy::load();
+    // A tapped tap still needs trust before its packages upgrade, so its item stays
     let installed = |manager: &str, name: &str| {
         machine_state.packages.get(manager).is_some_and(|names| {
             names.iter().any(|n| {
                 n == name || (manager.starts_with("brew_") && n == normalize_formula_name(name))
             })
-        })
+        }) && (manager != "brew_taps" || policy.tap_trusted(name))
     };
     let inbox = Inbox::load()?;
     if inbox.items.iter().any(|i| installed(&i.manager, &i.name)) {
@@ -3059,6 +3061,7 @@ mod tests {
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
+            password_upgrades: Vec::new(),
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
@@ -3091,6 +3094,7 @@ mod tests {
             last_upgrade_with_updates: None,
             deferred_casks: Vec::new(),
             deferred_casks_hash: None,
+            password_upgrades: Vec::new(),
             dismissed_imports: std::collections::HashSet::new(),
             install_failures: HashMap::new(),
             warned_signatures: Default::default(),
