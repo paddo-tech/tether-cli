@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-26
+
+### Added
+
+- The daemon's daily upgrade puts each untrusted Homebrew tap that installed packages come from in the Inbox. Approve the tap, and the next upgrade includes its packages
+- The daemon logs and notifies the versions it upgraded. It notifies when a new cask waits for a password; run `tether upgrade` in a terminal for it
+- `packages.gem.auto_upgrade` (default false) lets the daemon upgrade gem, although gem cannot hold new dependencies to the release-age limit
+
+### Changed
+
+- A formula or cask approved, or adopted from a trusted machine, from an untrusted tap now upgrades with the trusted ones. Tether also updates its tap. The approval covers later releases of that formula
+
+### Fixed
+
+- The upgrade check read Homebrew's package data, which brew refreshed only after 7 days, so a machine could stay a week behind. Tether now checks with `brew outdated`, which refreshes it
+- The upgrade check failed for every formula when Homebrew's trust store lacked an approved formula. Tether now copies its trust to Homebrew first
+
 ## [2.4.1] - 2026-10-22
 
 ### Fixed
