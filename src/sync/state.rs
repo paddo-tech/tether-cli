@@ -49,6 +49,13 @@ pub struct SyncState {
     /// once per copy
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_error: Option<String>,
+    /// Owner executable bit of each synced file at the last sync, keyed as `files`. A chmod
+    /// leaves the hash alone, so the bit merges against this
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub exec_bits: HashMap<String, bool>,
+    /// `exec_bits` at the last push, which `discard_unpushed` restores
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub pushed_exec_bits: HashMap<String, bool>,
 }
 
 /// A failed install of a synced package. A package that cannot install here, such as a
@@ -621,6 +628,8 @@ impl SyncState {
             membership_error: None,
             config_export_hash: None,
             config_error: None,
+            exec_bits: HashMap::new(),
+            pushed_exec_bits: HashMap::new(),
         }
     }
 
@@ -669,6 +678,7 @@ impl SyncState {
                 file.synced = true;
             }
         }
+        self.exec_bits = self.pushed_exec_bits.clone();
     }
 
     pub fn mark_synced(&mut self) {
@@ -677,6 +687,7 @@ impl SyncState {
             file.synced = true;
             file.pushed_hash = None;
         }
+        self.pushed_exec_bits = self.exec_bits.clone();
     }
 }
 
@@ -1198,6 +1209,16 @@ mod tests {
         state.mark_synced();
         state.discard_unpushed();
         assert_eq!(state.files[".zshrc"].hash, "base");
+    }
+
+    #[test]
+    fn test_discard_unpushed_restores_pushed_exec_bits() {
+        let mut state = SyncState::new();
+        state.exec_bits.insert(".x".into(), false);
+        state.mark_synced();
+        state.exec_bits.insert(".x".into(), true);
+        state.discard_unpushed();
+        assert_eq!(state.exec_bits.get(".x"), Some(&false));
     }
 
     #[test]

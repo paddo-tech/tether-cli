@@ -434,6 +434,10 @@ pub fn keep_side(
     apply_side(&mut None, &conflict, &remote_file, keep)?;
     conflicts.remove_conflict(file);
     state.record_remote_file(file, conflict.remote_hash);
+    #[cfg(unix)]
+    if keep == Keep::Remote {
+        crate::sync::steps::record_exec_bit(state, file, &crate::home_dir()?.join(file));
+    }
     state.save()?;
     conflicts.save()
 }
