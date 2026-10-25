@@ -313,78 +313,10 @@ impl DaemonServer {
             )?;
         }
 
-        // Now sync local changes to remote
-        let conflict_state = crate::sync::ConflictState::load().unwrap_or_default();
-
-        // Sync dotfiles to remote (only if feature enabled)
+        // Now sync local changes to remote (only if feature enabled)
         if config.features.personal_dotfiles {
             let daemon_machine_id = state.machine_id.clone();
-            let daemon_profile = config.profile_name(&daemon_machine_id).to_string();
-
-            for entry in config.effective_dotfiles(&daemon_machine_id) {
-                // Security: validate path to prevent traversal attacks
-                if !entry.is_safe_path() {
-                    log::warn!("Skipping unsafe dotfile path: {}", entry.path());
-                    continue;
-                }
-
-                let pattern = entry.path();
-                let shared = config.is_dotfile_shared(&daemon_machine_id, pattern);
-                let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
-
-                for file in expanded {
-                    // Skip files with conflicts (by expanded name)
-                    if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
-                        continue;
-                    }
-
-                    let source = home.join(&file);
-                    if source.exists() {
-                        if let Ok(content) = std::fs::read(&source) {
-                            let hash = crate::sha256_hex(&content);
-                            let file_changed = state
-                                .files
-                                .get(&file)
-                                .map(|f| f.hash != hash)
-                                .unwrap_or(true);
-
-                            if file_changed {
-                                log::info!("File changed: {}", file);
-
-                                if config.security.encrypt_dotfiles {
-                                    let key = crate::security::get_encryption_key()?;
-                                    let encrypted = crate::security::encrypt(&content, &key)?;
-                                    let repo_path = crate::sync::dotfile_to_repo_path_profiled(
-                                        &file,
-                                        true,
-                                        &daemon_profile,
-                                        shared,
-                                    );
-                                    let dest = sync_path.join(&repo_path);
-                                    if let Some(parent) = dest.parent() {
-                                        std::fs::create_dir_all(parent)?;
-                                    }
-                                    std::fs::write(&dest, encrypted)?;
-                                } else {
-                                    let repo_path = crate::sync::dotfile_to_repo_path_profiled(
-                                        &file,
-                                        false,
-                                        &daemon_profile,
-                                        shared,
-                                    );
-                                    let dest = sync_path.join(&repo_path);
-                                    if let Some(parent) = dest.parent() {
-                                        std::fs::create_dir_all(parent)?;
-                                    }
-                                    std::fs::write(&dest, &content)?;
-                                }
-
-                                state.update_file(&file, hash.clone());
-                            }
-                        }
-                    }
-                }
-            }
+            crate::sync::steps::upload_dotfiles(&config, &mut state, &sync_path, &home, false)?;
             // Auto-discover directories sourced from shell configs
             let effective = config.effective_dotfiles(&daemon_machine_id);
             let discovered = crate::sync::discover_sourced_dirs(&home, &effective);

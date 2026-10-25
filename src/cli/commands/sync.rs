@@ -2,8 +2,8 @@ use crate::cli::{Output, Progress, Prompt};
 use crate::config::Config;
 use crate::sync::steps::{
     adopt_remote, build_machine_state, decrypt_from_repo, export_tether_config,
-    preserve_executable_bit, promote_config_base, sync_collab_secrets, sync_directories,
-    sync_project_configs, sync_team_project_secrets,
+    promote_config_base, sync_collab_secrets, sync_directories, sync_project_configs,
+    sync_team_project_secrets, upload_dotfiles,
 };
 use crate::sync::{import_packages, sync_packages, GitBackend, SyncEngine, SyncState};
 use anyhow::Result;
@@ -148,90 +148,11 @@ pub async fn run_locked(dry_run: bool, rediscover: bool, install: bool) -> Resul
         }
     }
 
-    // A pending conflict keeps the remote file until 'tether resolve'
-    let conflict_state = crate::sync::ConflictState::load().unwrap_or_default();
-
     // Sync dotfiles (local → Git) - only if personal dotfiles enabled
     if config.features.personal_dotfiles {
         let machine_id = state.machine_id.clone();
-        let upload_profile = config.profile_name(&machine_id).to_string();
-
-        // Sync individual dotfiles (with glob expansion)
-        for entry in config.effective_dotfiles(&machine_id) {
-            // Validate path before expansion to prevent traversal attacks
-            if !entry.is_safe_path() {
-                Output::warning(&format!("Skipping unsafe dotfile path: {}", entry.path()));
-                continue;
-            }
-
-            let pattern = entry.path();
-            let shared = config.is_dotfile_shared(&machine_id, pattern);
-            let expanded = crate::sync::expand_dotfile_glob(pattern, &home);
-
-            for file in expanded {
-                if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
-                    continue;
-                }
-                if !dry_run {
-                    crate::sync::migrate_dotfile_shared_change(
-                        &sync_path,
-                        &file,
-                        config.security.encrypt_dotfiles,
-                        &upload_profile,
-                        shared,
-                    )?;
-                }
-
-                let source = home.join(&file);
-
-                if source.exists() {
-                    if let Ok(content) = std::fs::read(&source) {
-                        let hash = crate::sha256_hex(&content);
-
-                        let file_changed = state
-                            .files
-                            .get(&file)
-                            .map(|f| f.hash != hash)
-                            .unwrap_or(true);
-
-                        if file_changed && !dry_run {
-                            if config.security.encrypt_dotfiles {
-                                let key = crate::security::get_encryption_key()?;
-                                let encrypted_data = crate::security::encrypt(&content, &key)?;
-                                let repo_path = crate::sync::dotfile_to_repo_path_profiled(
-                                    &file,
-                                    true,
-                                    &upload_profile,
-                                    shared,
-                                );
-                                let dest = sync_path.join(&repo_path);
-                                if let Some(parent) = dest.parent() {
-                                    std::fs::create_dir_all(parent)?;
-                                }
-                                std::fs::write(&dest, encrypted_data)?;
-                                #[cfg(unix)]
-                                preserve_executable_bit(&source, &dest);
-                            } else {
-                                let repo_path = crate::sync::dotfile_to_repo_path_profiled(
-                                    &file,
-                                    false,
-                                    &upload_profile,
-                                    shared,
-                                );
-                                let dest = sync_path.join(&repo_path);
-                                if let Some(parent) = dest.parent() {
-                                    std::fs::create_dir_all(parent)?;
-                                }
-                                std::fs::write(&dest, &content)?;
-                                #[cfg(unix)]
-                                preserve_executable_bit(&source, &dest);
-                            }
-
-                            state.update_file(&file, hash.clone());
-                        }
-                    }
-                }
-            }
+        if !dry_run {
+            upload_dotfiles(&config, &mut state, &sync_path, &home, true)?;
         }
 
         // Auto-discover directories sourced from shell configs and add to config

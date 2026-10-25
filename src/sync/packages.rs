@@ -3066,6 +3066,8 @@ mod tests {
             membership_error: None,
             config_export_hash: None,
             config_error: None,
+            exec_bits: HashMap::new(),
+            pushed_exec_bits: HashMap::new(),
         };
 
         assert!(!state.packages.contains_key("brew"));
@@ -3098,6 +3100,8 @@ mod tests {
             membership_error: None,
             config_export_hash: None,
             config_error: None,
+            exec_bits: HashMap::new(),
+            pushed_exec_bits: HashMap::new(),
         };
 
         state.packages.insert(
