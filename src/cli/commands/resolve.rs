@@ -94,7 +94,11 @@ pub async fn run(file: Option<&str>, keep: Option<Keep>) -> Result<()> {
         if resolution != ConflictResolution::Skip {
             // Baseline on the remote so the next sync pushes the kept or merged
             // local file instead of detecting the same conflict again.
-            resolved.push((pending.file_path.clone(), conflict.remote_hash.clone()));
+            resolved.push((
+                pending.file_path.clone(),
+                conflict.remote_hash.clone(),
+                resolution == ConflictResolution::UseRemote,
+            ));
         }
 
         println!();
@@ -103,8 +107,12 @@ pub async fn run(file: Option<&str>, keep: Option<Keep>) -> Result<()> {
     conflict_state.save()?;
     // Reload after the prompts: package updates save state.json without the sync lock.
     let mut state = crate::sync::SyncState::load()?;
-    for (file, remote_hash) in resolved {
+    for (file, remote_hash, remote) in resolved {
         state.record_remote_file(&file, remote_hash);
+        #[cfg(unix)]
+        if remote {
+            crate::sync::steps::record_exec_bit(&mut state, &file, &home.join(&file));
+        }
     }
     state.save()?;
 
