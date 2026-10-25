@@ -33,7 +33,7 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
       <li>Tether holds such a package only when the release is too new ("too new") or the registry check fails ("age not checked"). A "too new" hold ends when the release is old enough</li>
       <li>When a trusted record names a release that is newer than the limit, and the manager rejects it, Tether holds the newest release older than the limit as "pinned too new"</li>
       <li>A running process, such as the daemon, asks the registry about a package once per day. Each CLI command asks again</li>
-      <li>The daemon does not auto-upgrade a manager that cannot enforce the limit. <code>tether upgrade</code> asks first, except for gem, whose upgrades install the release Tether checked. Dependencies that already fit stay as they are, but a gem's new dependencies install at their newest release, so the daemon does not upgrade gem</li>
+      <li>The daemon does not auto-upgrade a manager that cannot enforce the limit. <code>tether upgrade</code> asks first, except for gem, whose upgrades install the release Tether checked. Dependencies that already fit stay as they are, but a gem's new dependencies install at their newest release, so the daemon does not upgrade gem. Set <code>packages.gem.auto_upgrade = true</code> to let it upgrade gem anyway</li>
     </ul>
 
     <h2 id="osv">OSV checks</h2>
@@ -52,10 +52,11 @@ import PackageChecksDiagram from '../../components/PackageChecksDiagram.astro';
     <Code code={`tether config set packages.brew.trusted_taps '["oven-sh/bun"]'`} />
     <ul>
       <li>Tether finds the tap of a short name, such as <code>bun</code>, before it installs it</li>
-      <li>An approved formula or cask installs by its qualified name, such as <code>homebrew/core/wget</code>. Approving a formula from an untrusted tap does not trust the tap</li>
+      <li>An approved formula or cask installs by its qualified name, such as <code>homebrew/core/wget</code>. Approving a formula from an untrusted tap does not trust the tap. The approval covers the later releases of that formula, so the daily upgrade installs them without a question</li>
       <li>Homebrew 7 keeps its own trust store. Before each Homebrew install, Tether copies its trusted taps, the taps approved in the Inbox, and the formulae and casks approved from an untrusted tap there, with <code>brew trust</code></li>
       <li>Tether only adds entries to Homebrew's trust store. It never removes them. So Homebrew can still trust a tap that Tether does not trust</li>
-      <li>Upgrades include only outdated packages from trusted taps. Tether updates trusted taps with <code>git pull --ff-only</code>. It does not run <code>brew update</code>. Run it yourself to update Homebrew</li>
+      <li>Upgrades include only outdated packages from trusted taps, and the formulae and casks approved or adopted from an untrusted tap. Tether updates trusted taps, and the taps of approved or adopted items, with <code>git pull --ff-only</code>. It checks with <code>brew outdated</code>, which refreshes Homebrew's package data. It does not run <code>brew update</code>. Run it yourself to update Homebrew itself</li>
+      <li>The daily upgrade puts each untrusted tap that installed packages come from in the Inbox. Approve the tap, and the next upgrade includes its packages</li>
     </ul>
 
     <h2>Other safeguards</h2>

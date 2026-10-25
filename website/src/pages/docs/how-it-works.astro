@@ -37,6 +37,7 @@ import SyncDiagram from '../../components/SyncDiagram.astro';
     <ul>
       <li>Without a terminal, the git commands that reach the remote stop after 5 minutes. The next sync tries again</li>
       <li>An idle machine signs its record again once an hour, so other machines see that it runs</li>
+      <li>Once a day, the daemon upgrades outdated packages and sends one notification that names them. A cask that needs a password stays, and the daemon notifies when a new one waits. Run <code>tether upgrade</code> in a terminal for it</li>
       <li>On macOS, launchd runs the daemon. On Linux, a systemd user service runs it. See <a href="/docs/linux">Linux and systemd</a></li>
     </ul>
     <p>Control the daemon with <code>tether daemon</code>. See <a href="/docs/commands#cmd-daemon">Commands</a>.</p>

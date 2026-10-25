@@ -160,14 +160,14 @@ impl PackageManager for UvManager {
 
     /// Upgrades only the tools whose newest allowed release is newer than the installed one,
     /// since `uv tool upgrade --exclude-newer` can resolve an older release.
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
         let names: Vec<&str> = planned
             .iter()
             .map(|u| u.name.as_str())
             .filter(|name| validate_name(Ecosystem::Python, name).is_ok())
             .collect();
         if names.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let output = command("uv")?
             .args(["tool", "upgrade"])
@@ -181,7 +181,7 @@ impl PackageManager for UvManager {
             return Err(anyhow::anyhow!("uv tool upgrade failed: {}", stderr));
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// A tool the user pinned is held: uv lists its newer release, but never upgrades to it.

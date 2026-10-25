@@ -133,7 +133,7 @@ impl PackageManager for PnpmManager {
 
     /// Adds each planned target exactly. `pnpm update --latest` would pick the newest mature
     /// release, which can be older than the installed one.
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let version = policy::tool_version("pnpm").await;
@@ -188,7 +188,7 @@ impl PackageManager for PnpmManager {
             }
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// `pnpm add -g name@1.2.3` saves that exact version as the range, so `wanted` never

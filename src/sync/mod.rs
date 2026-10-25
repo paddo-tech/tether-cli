@@ -20,8 +20,8 @@ pub use backup::{
 };
 pub use conflict::{
     detect_conflict, notify_commands, notify_conflicts, notify_deferred_casks, notify_inbox,
-    notify_membership_error, notify_signature_failed, ConflictResolution, ConflictState,
-    FileConflict, Keep, PendingConflict,
+    notify_membership_error, notify_password_upgrades, notify_signature_failed, notify_upgrades,
+    ConflictResolution, ConflictState, FileConflict, Keep, PendingConflict,
 };
 pub use discovery::discover_sourced_dirs;
 pub use engine::SyncEngine;

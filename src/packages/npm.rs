@@ -179,7 +179,7 @@ impl PackageManager for NpmManager {
 
     /// Installs each planned target exactly. `npm update -g` would install `wanted`, which
     /// the release-age limit can set below the installed version.
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
         let cooldown = self.cooldown_args().await;
         let package_policy = self.policy();
         let major = self.version().await.map_or(0, |((major, _, _), _)| major);
@@ -234,7 +234,7 @@ impl PackageManager for NpmManager {
             }
         }
 
-        Ok(())
+        Ok(Vec::new())
     }
 
     /// npm applies the release-age limit to `wanted`. When one package has no release old

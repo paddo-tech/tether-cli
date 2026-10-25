@@ -162,6 +162,21 @@ struct BrewVersions {
     stable: Option<String>,
 }
 
+/// The fields Tether reads from `brew outdated --json=v2`. A formula's `name` is its full
+/// name, which carries the tap only outside homebrew/core; a cask's is its bare token.
+#[derive(Debug, Deserialize)]
+struct BrewOutdated {
+    #[serde(default)]
+    formulae: Vec<OutdatedEntry>,
+    #[serde(default)]
+    casks: Vec<OutdatedEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutdatedEntry {
+    name: String,
+}
+
 /// The taps Tether trusts and the items it approved that brew's trust store lacks.
 /// brew trusts `homebrew/*` without an entry and stores names in lower case.
 fn missing_brew_trust(policy: &PackagePolicy, brew: &BrewTrust) -> BrewTrust {
@@ -211,11 +226,33 @@ fn wholly_untrusted(taps: Vec<String>, store: &BrewTrust) -> Vec<String> {
         .collect()
 }
 
+/// The names in `asked` that `brew outdated` lists. A Cellar or Caskroom entry is unique by
+/// short name, and the outdated entry of a cask carries no tap.
+fn outdated_names(outdated: BrewOutdated, asked: &[String]) -> Vec<String> {
+    let found: Vec<String> = outdated
+        .formulae
+        .into_iter()
+        .chain(outdated.casks)
+        .map(|e| normalize_formula_name(&e.name).to_string())
+        .collect();
+    asked
+        .iter()
+        .filter(|n| found.iter().any(|f| f == normalize_formula_name(n)))
+        .cloned()
+        .collect()
+}
+
 impl BrewInfoEntry {
+    /// A cask's version, or a formula's newest keg. brew lists kegs in no promised order.
     fn installed_version(&self) -> Option<&str> {
         match &self.installed {
             serde_json::Value::String(v) => Some(v),
-            serde_json::Value::Array(kegs) => kegs.last()?.get("version")?.as_str(),
+            serde_json::Value::Array(kegs) => kegs
+                .iter()
+                .filter_map(|k| k.get("version")?.as_str())
+                .max_by(|a, b| {
+                    super::manager::compare_brew_versions(a, b).unwrap_or_else(|| a.cmp(b))
+                }),
             _ => None,
         }
     }
@@ -229,29 +266,31 @@ impl BrewInfoEntry {
     }
 }
 
-/// Outdated, unpinned formulae and casks from trusted taps, fully qualified, so an upgrade
-/// never pulls a new release from a tap the user has not trusted.
-fn trusted_upgrades(info: BrewInfo, policy: &PackagePolicy) -> (Vec<Upgrade>, Vec<Upgrade>) {
-    let pick = |entries: Vec<BrewInfoEntry>, cask: bool| {
-        entries
-            .into_iter()
-            .filter(|e| e.outdated && !e.pinned)
-            .filter_map(|e| {
-                let tap = e.tap.as_deref().filter(|tap| policy.tap_trusted(tap))?;
-                let name = format!("{}/{}", tap, normalize_formula_name(&e.full_name));
-                Some(Upgrade {
-                    cask,
-                    ..Upgrade::new(
-                        &name,
-                        e.installed_version(),
-                        e.target_version().as_deref().unwrap_or("newer"),
-                    )
-                })
+/// Outdated, unpinned packages that may install from the tap brew resolved them to, fully
+/// qualified. brew follows a tap migration, so the resolved tap, not the name asked
+/// about, decides. `manager` is `brew_formulae` or `brew_casks`.
+fn trusted_upgrades(info: BrewInfo, policy: &PackagePolicy, manager: &str) -> Vec<Upgrade> {
+    info.formulae
+        .into_iter()
+        .chain(info.casks)
+        .filter(|e| e.outdated && !e.pinned)
+        .filter_map(|e| {
+            let short = normalize_formula_name(&e.full_name);
+            let tap = e
+                .tap
+                .as_deref()
+                .filter(|tap| policy.brew_allowed(manager, short, tap))?;
+            Some(Upgrade {
+                cask: manager == "brew_casks",
+                ..Upgrade::new(
+                    &format!("{}/{}", tap, short),
+                    e.installed_version(),
+                    e.target_version().as_deref().unwrap_or("newer"),
+                )
             })
-            .filter(|u| validate_name(Ecosystem::Brew, &u.name).is_ok())
-            .collect()
-    };
-    (pick(info.formulae, false), pick(info.casks, true))
+        })
+        .filter(|u| validate_name(Ecosystem::Brew, &u.name).is_ok())
+        .collect()
 }
 
 /// A brew command that loads only the formulae and casks named on it. Without these, brew
@@ -352,19 +391,47 @@ fn keg_versions(root: &std::path::Path, suffix: &str) -> Vec<PackageInfo> {
     installed
 }
 
-/// Fully qualified `tap/name` of each installed package from a trusted tap. brew then
-/// loads only these, never a package from a tap the user has not trusted.
-fn trusted_names(installed: Vec<(String, Option<String>)>, policy: &PackagePolicy) -> Vec<String> {
+/// Fully qualified `tap/name` of each installed package that may install from its tap: a
+/// trusted tap, or an item approved or adopted from its tap. brew then loads only these,
+/// never another package from a tap the user has not trusted. `manager` is `brew_formulae`
+/// or `brew_casks`.
+fn trusted_names(
+    installed: Vec<(String, Option<String>)>,
+    policy: &PackagePolicy,
+    manager: &str,
+) -> Vec<String> {
     installed
         .into_iter()
         .filter_map(|(name, tap)| {
-            let tap = tap.filter(|tap| policy.tap_trusted(tap))?;
+            let tap = tap.filter(|tap| policy.brew_allowed(manager, &name, tap))?;
             let qualified = format!("{}/{}", tap, name);
             validate_name(Ecosystem::Brew, &qualified)
                 .is_ok()
                 .then_some(qualified)
         })
         .collect()
+}
+
+/// Taps of installed packages that may not install from them, sorted and without
+/// duplicates. Their upgrades wait until the user trusts the tap.
+fn untrusted_upgrade_taps(
+    formulae: Vec<(String, Option<String>)>,
+    casks: Vec<(String, Option<String>)>,
+    policy: &PackagePolicy,
+) -> Vec<String> {
+    let mut taps: Vec<String> = [("brew_formulae", formulae), ("brew_casks", casks)]
+        .into_iter()
+        .flat_map(|(manager, packages)| {
+            packages.into_iter().filter_map(move |(name, tap)| {
+                let tap = tap?;
+                (!policy.brew_allowed(manager, &name, &tap)).then_some(tap)
+            })
+        })
+        .filter(|tap| validate_name(Ecosystem::BrewTap, tap).is_ok())
+        .collect();
+    taps.sort();
+    taps.dedup();
+    taps
 }
 
 /// Tapped repositories under `taps_dir` as (`user/repo`, path).
@@ -754,31 +821,105 @@ impl BrewManager {
         Ok(String::from_utf8(output.stdout)?)
     }
 
-    /// Outdated formulae and casks from trusted taps, per kind (`--formula`, `--cask`). A
-    /// kind whose `brew info` failed carries the error, so the other kind still upgrades.
+    /// `brew info` on the outdated names, for the tap each one resolves to now. The API data
+    /// is fresh, because `brew outdated` refreshed it.
+    async fn resolve_upgrades(
+        &self,
+        kind: &str,
+        manager: &str,
+        names: &[String],
+        policy: &PackagePolicy,
+    ) -> Result<Vec<Upgrade>, String> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let output = brew_without_installed_scan()
+            .map_err(|e| e.to_string())?
+            .args(["info", "--json=v2", kind])
+            .args(names)
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "brew info {} failed: {}",
+                kind,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let info: BrewInfo = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        Ok(trusted_upgrades(info, policy, manager))
+    }
+
+    /// Queue a tap item for each tap that installed packages come from and that is not
+    /// trusted, so one approval lets the daily upgrade cover that tap. Returns the new items.
+    pub async fn hold_untrusted_upgrade_taps(&self) -> Result<Vec<InboxItem>> {
+        let cellar = PathBuf::from(self.run_brew(&["--cellar"]).await?.trim());
+        let caskroom = PathBuf::from(self.run_brew(&["--caskroom"]).await?.trim());
+        let repository = PathBuf::from(self.run_brew(&["--repository"]).await?.trim());
+        let tapped = installed_taps(&repository.join("Library/Taps"));
+        let taps = untrusted_upgrade_taps(
+            installed_formulae(&cellar),
+            installed_casks(&caskroom),
+            &self.policy(),
+        );
+        // A tap that is gone has nothing to upgrade, and no record lists it to keep the item
+        let items = taps
+            .into_iter()
+            .filter(|tap| tapped.iter().any(|(t, _)| t.eq_ignore_ascii_case(tap)))
+            .map(|tap| InboxItem {
+                kind: Kind::Package,
+                manager: "brew_taps".to_string(),
+                name: tap,
+                version: None,
+                tap: None,
+                source_machine: None,
+                commit: None,
+                signer: None,
+                reasons: vec![Reason::UntrustedTap],
+                advisories: Vec::new(),
+                first_seen: chrono::Utc::now(),
+            })
+            .collect();
+        inbox::add(items)
+    }
+
+    /// Outdated formulae and casks that may install from their tap, per kind (`--formula`,
+    /// `--cask`). A kind whose check failed carries the error, so the other kind still
+    /// upgrades.
     async fn trusted_outdated(
         &self,
         policy: &PackagePolicy,
     ) -> Result<Vec<(&'static str, Result<Vec<Upgrade>, String>)>> {
+        // brew refuses to load a formula or cask from a tap its own trust store lacks
+        if let Err(e) = self.mirror_trust(policy).await {
+            crate::cli::Output::warning(&format!("Cannot update Homebrew trust: {}", e));
+        }
         let cellar = PathBuf::from(self.run_brew(&["--cellar"]).await?.trim());
         let caskroom = PathBuf::from(self.run_brew(&["--caskroom"]).await?.trim());
         let installed = [
-            ("--formula", installed_formulae(&cellar)),
-            ("--cask", installed_casks(&caskroom)),
+            ("--formula", "brew_formulae", installed_formulae(&cellar)),
+            ("--cask", "brew_casks", installed_casks(&caskroom)),
         ];
         let mut outdated = Vec::new();
-        for (kind, installed) in installed {
-            let mut names = trusted_names(installed, policy);
+        for (kind, manager, installed) in installed {
+            let mut names = trusted_names(installed, policy, manager);
             while !names.is_empty() {
+                // `brew info` refreshes API data only when it is 7 days old; `outdated` does
+                // after HOMEBREW_API_AUTO_UPDATE_SECS. `outdated` exits 1 when a named package
+                // is outdated, so its JSON, not its exit code, tells success
                 let output = brew_without_installed_scan()?
-                    .args(["info", "--json=v2", kind])
+                    .args(["outdated", "--json=v2", kind])
                     .args(&names)
                     .output()
                     .await?;
-                if output.status.success() {
-                    let info: BrewInfo = serde_json::from_slice(&output.stdout)?;
-                    let (formulae, casks) = trusted_upgrades(info, policy);
-                    outdated.push((kind, Ok(formulae.into_iter().chain(casks).collect())));
+                if let Ok(found) = serde_json::from_slice::<BrewOutdated>(&output.stdout) {
+                    let candidates = outdated_names(found, &names);
+                    outdated.push((
+                        kind,
+                        self.resolve_upgrades(kind, manager, &candidates, policy)
+                            .await,
+                    ));
                     break;
                 }
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -802,7 +943,7 @@ impl BrewManager {
                     _ => {
                         outdated.push((
                             kind,
-                            Err(format!("brew info {} failed: {}", kind, stderr.trim())),
+                            Err(format!("brew outdated {} failed: {}", kind, stderr.trim())),
                         ));
                         break;
                     }
@@ -1130,12 +1271,17 @@ impl PackageManager for BrewManager {
     }
 
     /// `brew update` would load every installed formula and cask after it fetches the taps,
-    /// so git updates the trusted taps, and the outdated check refreshes the API data.
+    /// so git updates the trusted taps and the taps of approved or adopted items, and the
+    /// outdated check refreshes the API data. A pull runs no code from the tap.
     async fn refresh(&self) -> Result<()> {
         let policy = self.policy();
         let repository = PathBuf::from(self.run_brew(&["--repository"]).await?.trim());
         for tap in installed_taps(&repository.join("Library/Taps")) {
-            if !policy.tap_trusted(&tap.0) {
+            let has_item = policy
+                .approved_from_taps
+                .iter()
+                .any(|(_, _, t)| t.eq_ignore_ascii_case(&tap.0));
+            if !policy.tap_trusted(&tap.0) && !has_item {
                 continue;
             }
             let output = command("git")?
@@ -1156,7 +1302,7 @@ impl PackageManager for BrewManager {
         Ok(())
     }
 
-    async fn upgrade(&self, planned: &[Upgrade]) -> Result<()> {
+    async fn upgrade(&self, planned: &[Upgrade]) -> Result<Vec<String>> {
         let mut failures = Vec::new();
         let mut need_password = Vec::new();
         // One failed kind must not stop the other kind's upgrades
@@ -1207,7 +1353,7 @@ impl PackageManager for BrewManager {
         if !failures.is_empty() {
             return Err(anyhow::anyhow!(failures.join("; ")));
         }
-        Ok(())
+        Ok(need_password.into_iter().map(str::to_string).collect())
     }
 
     /// A kind whose check fails is skipped with a warning, so the other kind still upgrades.
@@ -1538,37 +1684,72 @@ brew "git"
     }
 
     #[test]
-    fn test_trusted_upgrades_skip_untrusted_taps() {
-        let policy = PackagePolicy {
-            min_release_age_days: 7,
-            allow_scripts: Vec::new(),
-            trusted_taps: vec!["oven-sh/bun".to_string()],
-            approved_from_taps: Vec::new(),
-        };
-        let info: BrewInfo = serde_json::from_str(
+    fn outdated_names_match_the_asked_names() {
+        let asked = [
+            "homebrew/core/wget".to_string(),
+            "oven-sh/bun/bun".to_string(),
+            "homebrew/core/jq".to_string(),
+            "homebrew/cask/iterm2".to_string(),
+        ];
+        let outdated: BrewOutdated = serde_json::from_str(
             r#"{
               "formulae": [
-                {"name": "wget", "full_name": "wget", "tap": "homebrew/core", "outdated": true, "pinned": false},
-                {"name": "bun", "full_name": "oven-sh/bun/bun", "tap": "oven-sh/bun", "outdated": true, "pinned": false},
-                {"name": "bd", "full_name": "evil/tap/bd", "tap": "evil/tap", "outdated": true, "pinned": false},
-                {"name": "node", "full_name": "node", "tap": "homebrew/core", "outdated": false, "pinned": false},
-                {"name": "jq", "full_name": "jq", "tap": "homebrew/core", "outdated": true, "pinned": true},
-                {"name": "local", "full_name": "local", "tap": null, "outdated": true, "pinned": false}
+                {"name": "wget", "installed_versions": ["1.25"], "current_version": "1.25_1", "pinned": false, "pinned_version": null},
+                {"name": "oven-sh/bun/bun", "installed_versions": ["1.4.2"], "current_version": "1.4.4", "pinned": false, "pinned_version": null}
               ],
               "casks": [
-                {"token": "iterm2", "full_token": "iterm2", "tap": "homebrew/cask", "outdated": true},
-                {"token": "app", "full_token": "evil/tap/app", "tap": "evil/tap", "outdated": true}
+                {"name": "iterm2", "installed_versions": ["3.5"], "current_version": "3.6", "pinned": false, "pinned_version": null}
               ]
             }"#,
         )
         .unwrap();
-        let (formulae, casks) = trusted_upgrades(info, &policy);
-        let names = |u: Vec<Upgrade>| u.into_iter().map(|u| u.name).collect::<Vec<_>>();
         assert_eq!(
-            names(formulae),
-            vec!["homebrew/core/wget", "oven-sh/bun/bun"]
+            outdated_names(outdated, &asked),
+            vec![
+                "homebrew/core/wget",
+                "oven-sh/bun/bun",
+                "homebrew/cask/iterm2"
+            ]
         );
-        assert_eq!(names(casks), vec!["homebrew/cask/iterm2"]);
+    }
+
+    #[test]
+    fn upgrades_check_the_tap_brew_resolved() {
+        let policy = PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["oven-sh/bun".to_string()],
+            approved_from_taps: vec![(
+                "brew_formulae".to_string(),
+                "bd".to_string(),
+                "evil/tap".to_string(),
+            )],
+        };
+        let info: BrewInfo = serde_json::from_str(
+            r#"{
+              "formulae": [
+                {"full_name": "wget", "tap": "homebrew/core", "outdated": true, "installed": [{"version": "1.25"}, {"version": "1.24"}], "versions": {"stable": "1.25"}, "revision": 1},
+                {"full_name": "oven-sh/bun/bun", "tap": "oven-sh/bun", "outdated": true, "installed": [{"version": "1.4.2"}], "versions": {"stable": "1.4.4"}},
+                {"full_name": "evil/tap/bd", "tap": "evil/tap", "outdated": true, "installed": [{"version": "0.1"}], "versions": {"stable": "0.2"}},
+                {"full_name": "moved/tap/tool", "tap": "moved/tap", "outdated": true, "installed": [{"version": "1"}], "versions": {"stable": "2"}},
+                {"full_name": "jq", "tap": "homebrew/core", "outdated": true, "pinned": true, "installed": [{"version": "1.7"}], "versions": {"stable": "1.8"}}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let got: Vec<_> = trusted_upgrades(info, &policy, "brew_formulae")
+            .into_iter()
+            .map(|u| (u.name, u.current, u.target))
+            .collect();
+        let row = |n: &str, c: &str, t: &str| (n.to_string(), Some(c.to_string()), t.to_string());
+        assert_eq!(
+            got,
+            vec![
+                row("homebrew/core/wget", "1.25", "1.25_1"),
+                row("oven-sh/bun/bun", "1.4.2", "1.4.4"),
+                row("evil/tap/bd", "0.1", "0.2"),
+            ]
+        );
     }
 
     #[test]
@@ -1605,10 +1786,54 @@ brew "git"
             approved_from_taps: Vec::new(),
         };
 
-        let formulae = trusted_names(installed_formulae(&dir.path().join("Cellar")), &policy);
+        let formulae = trusted_names(
+            installed_formulae(&dir.path().join("Cellar")),
+            &policy,
+            "brew_formulae",
+        );
         assert_eq!(formulae, vec!["oven-sh/bun/bun", "homebrew/core/wget"]);
-        let casks = trusted_names(installed_casks(&dir.path().join("Caskroom")), &policy);
+        let casks = trusted_names(
+            installed_casks(&dir.path().join("Caskroom")),
+            &policy,
+            "brew_casks",
+        );
         assert_eq!(casks, vec!["homebrew/cask/iterm2"]);
+    }
+
+    #[test]
+    fn an_approved_item_upgrades_and_its_tap_waits_only_for_the_rest() {
+        let installed = |names: &[(&str, Option<&str>)]| -> Vec<(String, Option<String>)> {
+            names
+                .iter()
+                .map(|(n, t)| (n.to_string(), t.map(str::to_string)))
+                .collect()
+        };
+        let formulae = installed(&[
+            ("bd", Some("evil/tap")),
+            ("bun", Some("oven-sh/bun")),
+            ("tf", Some("hashicorp/tap")),
+            ("wget", Some("homebrew/core")),
+        ]);
+        let casks = installed(&[("app", Some("evil/tap")), ("iterm2", Some("homebrew/cask"))]);
+        let policy = PackagePolicy {
+            min_release_age_days: 7,
+            allow_scripts: Vec::new(),
+            trusted_taps: vec!["oven-sh/bun".to_string()],
+            approved_from_taps: vec![(
+                "brew_formulae".to_string(),
+                "bd".to_string(),
+                "evil/tap".to_string(),
+            )],
+        };
+
+        assert_eq!(
+            trusted_names(formulae.clone(), &policy, "brew_formulae"),
+            vec!["evil/tap/bd", "oven-sh/bun/bun", "homebrew/core/wget"]
+        );
+        assert_eq!(
+            untrusted_upgrade_taps(formulae, casks, &policy),
+            vec!["evil/tap", "hashicorp/tap"]
+        );
     }
 
     #[test]
