@@ -484,15 +484,28 @@ fn drop_unavailable(names: &mut Vec<String>, unknown: &str) {
     }
 }
 
-/// The name in brew's `No available formula with the name "x"` error, or in its
-/// `Cask 'x' is unavailable` error.
+/// The name in brew's `No available formula with the name "x"` error, in its
+/// `Cask 'x' is unavailable`, `is unreadable` or `definition is invalid` error, or in its
+/// `x: <reason>` error for a formula whose Ruby does not load.
 fn unavailable_name(stderr: &str) -> Option<&str> {
     if let Some((_, rest)) = stderr.split_once("with the name \"") {
         return rest.split_once('"').map(|(name, _)| name);
     }
-    let (_, rest) = stderr.split_once("Cask '")?;
-    let (name, rest) = rest.split_once('\'')?;
-    rest.starts_with(" is unavailable").then_some(name)
+    stderr.lines().find_map(|line| {
+        if let Some((_, rest)) = line.split_once("Cask '") {
+            let (name, rest) = rest.split_once('\'')?;
+            return [
+                " is unavailable",
+                " is unreadable",
+                " definition is invalid",
+            ]
+            .iter()
+            .any(|reason| rest.starts_with(reason))
+            .then_some(name);
+        }
+        let (name, _) = line.strip_prefix("Error: ")?.split_once(": ")?;
+        (!name.contains(char::is_whitespace)).then_some(name)
+    })
 }
 
 /// The `user/repo` tap of a qualified `user/repo/name` formula or cask.
@@ -1630,7 +1643,14 @@ brew "git"
             unavailable_name("Error: Cask 'app' is unavailable: No Cask with this name exists."),
             Some("app")
         );
+        let stderr = "==> Downloading Homebrew API data\n\
+                      Error: cirruslabs/cli/softnet: Calling `depends_on :macos` is disabled!\n";
+        assert_eq!(unavailable_name(stderr), Some("cirruslabs/cli/softnet"));
+        let stderr = "Warning: Cask 'old' is deprecated!\n\
+                      Error: Cask 'tool' definition is invalid: bad stanza\n";
+        assert_eq!(unavailable_name(stderr), Some("tool"));
         assert_eq!(unavailable_name("Error: Cannot download"), None);
+        assert_eq!(unavailable_name("Error: Download failed: timeout"), None);
     }
 
     #[test]
