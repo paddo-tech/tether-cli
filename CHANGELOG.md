@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-10-29
+
+### Fixed
+
+- `tether upgrade` skips a formula or cask whose definition brew cannot load, with a warning, and checks the others. Before, one broken tap formula failed the upgrade check of every formula
+
 ## [2.5.0] - 2026-10-26
 
 ### Added
