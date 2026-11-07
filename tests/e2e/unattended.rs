@@ -1,6 +1,6 @@
 //! `tether sync` without a terminal, as from cron or ssh: it runs as the daemon does.
 
-use crate::harness::{enabled, Lab, HEAD};
+use crate::harness::{enabled, Lab, Machine, HEAD};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_without_a_terminal_skips_conflicts() {
@@ -69,4 +69,38 @@ async fn sync_without_a_terminal_skips_conflicts() {
         .read("/root/.tether/conflicts.json")
         .await
         .contains(".bashrc"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_bit_travels_both_ways() {
+    if !enabled("exec_bit_travels_both_ways") {
+        return;
+    }
+    let lab = Lab::new("exec_bit_travels_both_ways").await;
+    let a = lab.machine("a", &[HEAD]).await;
+    let b = lab.machine("b", &[HEAD]).await;
+    assert_eq!(a.init(&lab).await.code, 0, "init a");
+    assert_eq!(b.init(&lab).await.code, 0, "init b");
+    b.tether_ok("sync").await;
+    // A chmod leaves the content alone, and still reaches the other machine
+    a.ok("chmod 755 /root/.bashrc").await;
+    a.tether_ok("sync").await;
+    b.tether_ok("sync").await;
+    assert_eq!(mode(&b).await, "755", "b takes +x");
+
+    // The bit clears too, and a later sync does not bring it back
+    b.ok("chmod 644 /root/.bashrc").await;
+    b.tether_ok("sync").await;
+    a.tether_ok("sync").await;
+    assert_eq!(mode(&a).await, "644", "a takes -x");
+    b.tether_ok("sync").await;
+    assert_eq!(mode(&b).await, "644", "b keeps -x");
+}
+
+async fn mode(m: &Machine) -> String {
+    m.ok("stat -c %a /root/.bashrc")
+        .await
+        .stdout
+        .trim()
+        .to_string()
 }

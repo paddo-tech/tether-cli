@@ -316,19 +316,83 @@ pub fn sync_collab_secrets(config: &Config, home: &Path, state: &mut SyncState) 
     Ok(())
 }
 
-/// Copy owner executable bit from source to dest.
-/// Git tracks this bit, so it travels across machines via the sync repo.
+/// The owner executable bit of `path`, or of its target when it is a symlink
 #[cfg(unix)]
-pub fn preserve_executable_bit(source: &Path, dest: &Path) {
+pub(crate) fn exec_bit(path: &Path) -> Option<bool> {
     use std::os::unix::fs::PermissionsExt;
-    let is_exec = std::fs::metadata(source)
+    std::fs::metadata(path)
+        .ok()
         .map(|m| m.permissions().mode() & 0o100 != 0)
-        .unwrap_or(false);
-    if is_exec {
-        if let Ok(meta) = std::fs::metadata(dest) {
-            let mode = meta.permissions().mode() | 0o100;
-            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(mode));
+}
+
+/// Setting execute also gives it to each other class that can read.
+#[cfg(unix)]
+fn set_exec_bit(path: &Path, exec: bool) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    let mode = if exec {
+        mode | 0o100 | ((mode & 0o044) >> 2)
+    } else {
+        mode & !0o111
+    };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// Merge the executable bit of a local file and its repo copy against the bit at the last
+/// sync, as content merges against the last hash: the side that changed wins and both sides
+/// take it. Without a last bit, a bit on either side wins, because earlier releases set the
+/// repo bit only when the content changed. `local_before` and `repo_before` are each
+/// side's bit before this sync wrote content over it; `None` for a file the write made, which
+/// takes the other side's bit. A chmod that fails is a warning, so it never stops the sync.
+#[cfg(unix)]
+pub fn merge_exec_bit(
+    state: &mut SyncState,
+    key: &str,
+    local_before: Option<bool>,
+    repo_before: Option<bool>,
+    local: &Path,
+    repo: &Path,
+) {
+    let (l, r) = match (local_before, repo_before) {
+        (Some(l), Some(r)) => (l, r),
+        (Some(b), None) | (None, Some(b)) => (b, b),
+        (None, None) => return,
+    };
+    let exec = match state.exec_bits.get(key) {
+        Some(&last) if l != last => l,
+        Some(_) => r,
+        None => l || r,
+    };
+    for path in [local, repo] {
+        let Some(now) = exec_bit(path) else {
+            return;
+        };
+        if now != exec {
+            if let Err(e) = set_exec_bit(path, exec) {
+                Output::warning(&format!("  {} (cannot set its mode: {})", key, e));
+                return;
+            }
         }
+    }
+    state.exec_bits.insert(key.to_string(), exec);
+}
+
+/// `merge_exec_bit` for a sync that wrote neither side.
+#[cfg(unix)]
+pub fn merge_exec_bit_unwritten(state: &mut SyncState, key: &str, local: &Path, repo: &Path) {
+    if let (Some(l), Some(r)) = (exec_bit(local), exec_bit(repo)) {
+        merge_exec_bit(state, key, Some(l), Some(r), local, repo);
+    }
+}
+
+/// Record the bit that keeping the synced copy gave both sides, so a later chmod merges against
+/// it. Origin already holds that copy, so the bit counts as pushed and survives the discard of
+/// unpushed state at the next sync.
+#[cfg(unix)]
+pub fn record_exec_bit(state: &mut SyncState, key: &str, path: &Path) {
+    if let Some(exec) = exec_bit(path) {
+        state.exec_bits.insert(key.to_string(), exec);
+        state.pushed_exec_bits.insert(key.to_string(), exec);
     }
 }
 
@@ -337,8 +401,95 @@ fn write_decrypted(path: &Path, contents: &[u8]) -> Result<()> {
     crate::security::write_owner_only(path, contents)
 }
 
+/// Copy this machine's changed dotfiles into the sync repo and merge each one's executable
+/// bit. A file with a pending conflict keeps the synced copy until 'tether resolve'.
+/// `migrate_shared` moves a repo copy whose shared flag changed; the daemon leaves that to a
+/// manual sync, because profiles that disagree on the flag would delete each other's copy.
+pub fn upload_dotfiles(
+    config: &Config,
+    state: &mut SyncState,
+    sync_path: &Path,
+    home: &Path,
+    migrate_shared: bool,
+) -> Result<()> {
+    let conflict_state = crate::sync::ConflictState::load().unwrap_or_default();
+    let machine_id = state.machine_id.clone();
+    let profile = config.profile_name(&machine_id).to_string();
+    let encrypt = config.security.encrypt_dotfiles;
+
+    for entry in config.effective_dotfiles(&machine_id) {
+        // Validate path before expansion to prevent traversal attacks
+        if !entry.is_safe_path() {
+            Output::warning(&format!("Skipping unsafe dotfile path: {}", entry.path()));
+            continue;
+        }
+
+        let pattern = entry.path();
+        let shared = config.is_dotfile_shared(&machine_id, pattern);
+        for file in crate::sync::expand_dotfile_glob(pattern, home) {
+            if conflict_state.conflicts.iter().any(|c| c.file_path == file) {
+                continue;
+            }
+            if migrate_shared {
+                crate::sync::migrate_dotfile_shared_change(
+                    sync_path, &file, encrypt, &profile, shared,
+                )?;
+            }
+
+            let source = home.join(&file);
+            let Ok(content) = std::fs::read(&source) else {
+                continue;
+            };
+            let hash = crate::sha256_hex(&content);
+            let dest = sync_path.join(crate::sync::dotfile_to_repo_path_profiled(
+                &file, encrypt, &profile, shared,
+            ));
+
+            if state
+                .files
+                .get(&file)
+                .map(|f| f.hash != hash)
+                .unwrap_or(true)
+            {
+                log::info!("File changed: {}", file);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                #[cfg(unix)]
+                let repo_before = exec_bit(&dest);
+                write_repo_copy(&dest, &content, config)?;
+                #[cfg(unix)]
+                merge_exec_bit(state, &file, exec_bit(&source), repo_before, &source, &dest);
+                state.update_file(&file, hash);
+            } else {
+                #[cfg(unix)]
+                merge_exec_bit_unwritten(state, &file, &source, &dest);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn repo_copy(dest: &Path, config: &Config) -> PathBuf {
+    if config.security.encrypt_dotfiles {
+        PathBuf::from(format!("{}.enc", dest.display()))
+    } else {
+        dest.to_path_buf()
+    }
+}
+
+fn write_repo_copy(dest: &Path, content: &[u8], config: &Config) -> Result<()> {
+    if config.security.encrypt_dotfiles {
+        let key = crate::security::get_encryption_key()?;
+        std::fs::write(dest, crate::security::encrypt(content, &key)?)?;
+    } else {
+        std::fs::write(dest, content)?;
+    }
+    Ok(())
+}
+
 /// Back up an existing dotfile (if present), ensure parent dir exists,
-/// write the decrypted content, and preserve the executable bit from the
+/// write the decrypted content, and give it the executable bit of the
 /// encrypted source file.
 pub(crate) fn backup_and_write_dotfile(
     backup_dir: &mut Option<PathBuf>,
@@ -359,7 +510,13 @@ pub(crate) fn backup_and_write_dotfile(
     }
     write_decrypted(local_file, plaintext)?;
     #[cfg(unix)]
-    preserve_executable_bit(enc_file, local_file);
+    if let Some(exec) = exec_bit(enc_file) {
+        if exec_bit(local_file) != Some(exec) {
+            if let Err(e) = set_exec_bit(local_file, exec) {
+                Output::warning(&format!("  {} (cannot set its mode: {})", file, e));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -572,6 +729,8 @@ pub fn decrypt_from_repo(
                                                 &enc_file,
                                                 &plaintext,
                                             )?;
+                                            #[cfg(unix)]
+                                            record_exec_bit(state, &file, &local_file);
                                         }
                                         ConflictResolution::Merged => {
                                             conflict
@@ -598,6 +757,9 @@ pub fn decrypt_from_repo(
                         };
 
                         if should_write {
+                            // The first sync takes the remote file, and its bit with it
+                            #[cfg(unix)]
+                            let local_before = exec_bit(&local_file).filter(|_| !first_sync);
                             backup_and_write_dotfile(
                                 &mut backup_dir,
                                 &file,
@@ -605,6 +767,18 @@ pub fn decrypt_from_repo(
                                 &enc_file,
                                 &plaintext,
                             )?;
+                            #[cfg(unix)]
+                            merge_exec_bit(
+                                state,
+                                &file,
+                                local_before,
+                                exec_bit(&enc_file),
+                                &local_file,
+                                &enc_file,
+                            );
+                        } else {
+                            #[cfg(unix)]
+                            merge_exec_bit_unwritten(state, &file, &local_file, &enc_file);
                         }
                         conflict_state.remove_conflict(&file);
                     }
@@ -707,9 +881,26 @@ pub fn decrypt_from_repo(
                                     .map(|c| crate::sha256_hex(&c));
                                 let local_unchanged = local_hash.as_deref() == last_synced_hash;
                                 if local_unchanged && local_hash.as_ref() != Some(&remote_hash) {
+                                    #[cfg(unix)]
+                                    let local_before = exec_bit(&local_file);
                                     write_decrypted(&local_file, &plaintext)?;
                                     #[cfg(unix)]
-                                    preserve_executable_bit(file_path, &local_file);
+                                    merge_exec_bit(
+                                        state,
+                                        &state_key,
+                                        local_before,
+                                        exec_bit(file_path),
+                                        &local_file,
+                                        file_path,
+                                    );
+                                } else {
+                                    #[cfg(unix)]
+                                    merge_exec_bit_unwritten(
+                                        state,
+                                        &state_key,
+                                        &local_file,
+                                        file_path,
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -969,6 +1160,8 @@ fn decrypt_project_configs(
                                         )?;
                                     }
 
+                                    #[cfg(unix)]
+                                    let local_before = exec_bit(&canonical_path);
                                     crate::sync::atomic_write(&canonical_path, &plaintext)?;
                                     #[cfg(unix)]
                                     {
@@ -977,9 +1170,23 @@ fn decrypt_project_configs(
                                             &canonical_path,
                                             std::fs::Permissions::from_mode(0o600),
                                         )?;
+                                        merge_exec_bit(
+                                            state,
+                                            &state_key,
+                                            local_before,
+                                            exec_bit(enc_file),
+                                            &canonical_path,
+                                            enc_file,
+                                        );
                                     }
+                                } else {
                                     #[cfg(unix)]
-                                    preserve_executable_bit(enc_file, &canonical_path);
+                                    merge_exec_bit_unwritten(
+                                        state,
+                                        &state_key,
+                                        &canonical_path,
+                                        enc_file,
+                                    );
                                 }
                                 state.record_remote_file(&state_key, remote_hash);
                             }
@@ -1409,28 +1616,30 @@ pub fn sync_directories(
                     .map(|f| f.hash != hash)
                     .unwrap_or(true);
 
-                if file_changed && !dry_run {
+                if !dry_run {
                     let rel_path = expanded_path.strip_prefix(home).unwrap_or(&expanded_path);
-                    let dest = configs_dir.join(rel_path);
-
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-
-                    if config.security.encrypt_dotfiles {
-                        let key = crate::security::get_encryption_key()?;
-                        let encrypted = crate::security::encrypt(&content, &key)?;
-                        let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
-                        std::fs::write(&enc_dest, encrypted)?;
+                    let dest = repo_copy(&configs_dir.join(rel_path), config);
+                    if file_changed {
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
                         #[cfg(unix)]
-                        preserve_executable_bit(&expanded_path, &enc_dest);
+                        let repo_before = exec_bit(&dest);
+                        write_repo_copy(&dest, &content, config)?;
+                        #[cfg(unix)]
+                        merge_exec_bit(
+                            state,
+                            dir_path,
+                            exec_bit(&expanded_path),
+                            repo_before,
+                            &expanded_path,
+                            &dest,
+                        );
+                        state.update_file(dir_path, hash);
                     } else {
-                        std::fs::write(&dest, &content)?;
                         #[cfg(unix)]
-                        preserve_executable_bit(&expanded_path, &dest);
+                        merge_exec_bit_unwritten(state, dir_path, &expanded_path, &dest);
                     }
-
-                    state.update_file(dir_path, hash);
                 }
             }
         } else if expanded_path.is_dir() {
@@ -1463,27 +1672,29 @@ pub fn sync_directories(
                             .map(|f| f.hash != hash)
                             .unwrap_or(true);
 
-                        if file_changed && !dry_run {
-                            let dest = configs_dir.join(rel_to_home);
-
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-
-                            if config.security.encrypt_dotfiles {
-                                let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt(&content, &key)?;
-                                let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
-                                std::fs::write(&enc_dest, encrypted)?;
+                        if !dry_run {
+                            let dest = repo_copy(&configs_dir.join(rel_to_home), config);
+                            if file_changed {
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
                                 #[cfg(unix)]
-                                preserve_executable_bit(file_path, &enc_dest);
+                                let repo_before = exec_bit(&dest);
+                                write_repo_copy(&dest, &content, config)?;
+                                #[cfg(unix)]
+                                merge_exec_bit(
+                                    state,
+                                    &state_key,
+                                    exec_bit(file_path),
+                                    repo_before,
+                                    file_path,
+                                    &dest,
+                                );
+                                state.update_file(&state_key, hash);
                             } else {
-                                std::fs::write(&dest, &content)?;
                                 #[cfg(unix)]
-                                preserve_executable_bit(file_path, &dest);
+                                merge_exec_bit_unwritten(state, &state_key, file_path, &dest);
                             }
-
-                            state.update_file(&state_key, hash);
                         }
                     }
                 }
@@ -1611,27 +1822,32 @@ pub fn sync_project_configs(
                             .map(|f| f.hash != hash)
                             .unwrap_or(true);
 
-                        if file_changed && !dry_run {
-                            let dest = projects_dir.join(&normalized_url).join(rel_to_repo);
-
-                            if let Some(parent) = dest.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-
-                            if config.security.encrypt_dotfiles {
-                                let key = crate::security::get_encryption_key()?;
-                                let encrypted = crate::security::encrypt(&content, &key)?;
-                                let enc_dest = PathBuf::from(format!("{}.enc", dest.display()));
-                                std::fs::write(&enc_dest, encrypted)?;
+                        if !dry_run {
+                            let dest = repo_copy(
+                                &projects_dir.join(&normalized_url).join(rel_to_repo),
+                                config,
+                            );
+                            if file_changed {
+                                if let Some(parent) = dest.parent() {
+                                    std::fs::create_dir_all(parent)?;
+                                }
                                 #[cfg(unix)]
-                                preserve_executable_bit(file_path, &enc_dest);
+                                let repo_before = exec_bit(&dest);
+                                write_repo_copy(&dest, &content, config)?;
+                                #[cfg(unix)]
+                                merge_exec_bit(
+                                    state,
+                                    &state_key,
+                                    exec_bit(file_path),
+                                    repo_before,
+                                    file_path,
+                                    &dest,
+                                );
+                                state.update_file(&state_key, hash);
                             } else {
-                                std::fs::write(&dest, &content)?;
                                 #[cfg(unix)]
-                                preserve_executable_bit(file_path, &dest);
+                                merge_exec_bit_unwritten(state, &state_key, file_path, &dest);
                             }
-
-                            state.update_file(&state_key, hash);
                         }
                     }
                 }
@@ -2825,43 +3041,134 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn test_preserve_executable_bit() {
+    fn file_with_mode(dir: &Path, name: &str, mode: u32) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
 
-        let temp = TempDir::new().unwrap();
-        let source = temp.path().join("script.sh");
-        let dest = temp.path().join("script.sh.enc");
-
-        std::fs::write(&source, b"#!/bin/sh").unwrap();
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(&dest, b"encrypted").unwrap();
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-        preserve_executable_bit(&source, &dest);
-
-        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o744);
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_preserve_executable_bit_not_set() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn set_exec_bit_gives_execute_to_the_owner_and_each_class_that_reads() {
         let temp = TempDir::new().unwrap();
-        let source = temp.path().join("config");
-        let dest = temp.path().join("config.enc");
+        let private = file_with_mode(temp.path(), "a", 0o600);
+        let public = file_with_mode(temp.path(), "b", 0o644);
+        let unreadable = file_with_mode(temp.path(), "c", 0o200);
 
-        std::fs::write(&source, b"key=value").unwrap();
-        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
-        std::fs::write(&dest, b"encrypted").unwrap();
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_exec_bit(&private, true).unwrap();
+        set_exec_bit(&public, true).unwrap();
+        set_exec_bit(&unreadable, true).unwrap();
+        assert_eq!(mode(&private), 0o700);
+        assert_eq!(mode(&public), 0o755);
+        assert_eq!(mode(&unreadable), 0o300);
 
-        preserve_executable_bit(&source, &dest);
+        set_exec_bit(&public, false).unwrap();
+        assert_eq!(mode(&public), 0o644);
+    }
 
-        let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
+    #[cfg(unix)]
+    #[test]
+    fn merge_exec_bit_without_a_last_bit_keeps_a_bit_from_either_side() {
+        let temp = TempDir::new().unwrap();
+        let local = file_with_mode(temp.path(), "local", 0o600);
+        let repo = file_with_mode(temp.path(), "repo.enc", 0o755);
+        let mut state = new_state("m");
+
+        merge_exec_bit_unwritten(&mut state, ".x", &local, &repo);
+
+        assert_eq!(mode(&local), 0o700);
+        assert_eq!(mode(&repo), 0o755);
+        assert_eq!(state.exec_bits.get(".x"), Some(&true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_exec_bit_sends_a_local_chmod_minus_x() {
+        let temp = TempDir::new().unwrap();
+        let local = file_with_mode(temp.path(), "local", 0o600);
+        let repo = file_with_mode(temp.path(), "repo.enc", 0o755);
+        let mut state = new_state("m");
+        state.exec_bits.insert(".x".into(), true);
+
+        merge_exec_bit_unwritten(&mut state, ".x", &local, &repo);
+
+        assert_eq!(mode(&local), 0o600);
+        assert_eq!(mode(&repo), 0o644);
+        assert_eq!(state.exec_bits.get(".x"), Some(&false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_exec_bit_takes_a_chmod_from_the_repo() {
+        let temp = TempDir::new().unwrap();
+        let local = file_with_mode(temp.path(), "local", 0o700);
+        let repo = file_with_mode(temp.path(), "repo.enc", 0o644);
+        let mut state = new_state("m");
+        state.exec_bits.insert(".x".into(), true);
+
+        merge_exec_bit_unwritten(&mut state, ".x", &local, &repo);
+
+        assert_eq!(mode(&local), 0o600);
+        assert_eq!(state.exec_bits.get(".x"), Some(&false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_exec_bit_keeps_a_local_chmod_that_a_content_write_replaced() {
+        let temp = TempDir::new().unwrap();
+        // The write from the repo copy left the file 0600, after a local chmod +x
+        let local = file_with_mode(temp.path(), "local", 0o600);
+        let repo = file_with_mode(temp.path(), "repo.enc", 0o644);
+        let mut state = new_state("m");
+        state.exec_bits.insert(".x".into(), false);
+
+        merge_exec_bit(&mut state, ".x", Some(true), Some(false), &local, &repo);
+
+        assert_eq!(mode(&local), 0o700);
+        assert_eq!(mode(&repo), 0o755);
+        assert_eq!(state.exec_bits.get(".x"), Some(&true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_exec_bit_gives_a_new_file_the_other_side_bit() {
+        let temp = TempDir::new().unwrap();
+        let local = file_with_mode(temp.path(), "local", 0o755);
+        let repo = file_with_mode(temp.path(), "repo.enc", 0o644);
+        let mut state = new_state("m");
+        state.exec_bits.insert(".x".into(), false);
+
+        merge_exec_bit(&mut state, ".x", Some(true), None, &local, &repo);
+
+        assert_eq!(mode(&repo), 0o755);
+        assert_eq!(state.exec_bits.get(".x"), Some(&true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_exec_bit_follows_a_symlink_to_its_target() {
+        let temp = TempDir::new().unwrap();
+        let target = file_with_mode(temp.path(), "target", 0o600);
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let repo = file_with_mode(temp.path(), "repo.enc", 0o755);
+        let mut state = new_state("m");
+
+        merge_exec_bit_unwritten(&mut state, ".x", &link, &repo);
+
+        assert_eq!(mode(&target), 0o700);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
