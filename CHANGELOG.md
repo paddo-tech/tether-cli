@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-11-08
+
+### Fixed
+
+- A `chmod +x` or `chmod -x` on a synced file now reaches the other machines, also when the content did not change. Before, the executable bit travelled only with a content change, and only `+x` travelled. This applies to dotfiles, config dirs and project configs
+- The daemon now syncs the executable bit of dotfiles, as `tether sync` does
+
 ## [2.5.1] - 2026-10-29
 
 ### Fixed
